@@ -1,7 +1,7 @@
 """When a hook is registered, and what happens to a payload nobody awaits yet.
 
 A hook is registered (its ``hook_created`` written) at the run's next
-suspension, whatever the body is blocked on, not at the first ``await`` of the
+suspension or completion, not at the first ``await`` of the
 hook. That matches the JS SDK, and it means a token is claimed, and resumable
 from outside, as soon as the body has created the hook and yielded.
 
@@ -21,7 +21,7 @@ import pydantic
 import pytest
 
 from tests.payloads import PLAIN_ENCODER
-from vercel.workflow import Run
+from vercel.workflow import Run, WorkflowRunFailedError, start
 from vercel.workflow._internal import core, runtime, serialization as ser, world as w
 from vercel.workflow._internal.worlds import local as local_mod
 
@@ -99,6 +99,25 @@ async def recover_from_invalid_payload() -> bool:
     except pydantic.ValidationError:
         pass
     return (await approval).approved
+
+
+@registry.workflow
+async def unconsumed_hook(end: str, disposition: str) -> str:
+    hook = Approval.wait(token=TOKEN)
+    if disposition == "scope":
+        async with hook:
+            if end == "scoped_suspend":
+                await pending_step()
+            if end == "raise":
+                raise ValueError("body failed")
+    elif disposition == "dispose":
+        hook.dispose()
+        hook.dispose()
+    if end == "suspend":
+        await pending_step()
+    if end == "raise":
+        raise ValueError("body failed")
+    return "done"
 
 
 class RecordingLocalWorld(local_mod.LocalWorld):
@@ -272,6 +291,36 @@ async def test_dispose_discards_an_invalid_buffered_payload() -> None:
         await context.run_hook(correlation_id=hook_id)
 
 
+async def test_recorded_disposal_does_not_discard_unclaimed_payloads() -> None:
+    context = runtime.WorkflowOrchestratorContext(
+        [], run_id="wrun_test", seed="seed", started_at=0, registry=registry
+    )
+    hook_id = context.create_hook(TOKEN, Approval)._correlation_id
+    context.events.extend(
+        [
+            w.HookCreatedEventData(token=TOKEN).into_event(hook_id),
+            w.HookReceivedEventData(payload=PLAIN_ENCODER.encode({"approved": True})).into_event(
+                hook_id
+            ),
+            w.HookReceivedEventData(payload=PLAIN_ENCODER.encode({"approved": False})).into_event(
+                hook_id
+            ),
+            w.HookDisposedEvent(correlation_id=hook_id),
+        ]
+    )
+    for _ in context.events:
+        context.resume()
+
+    hook = context.hooks[hook_id]
+    assert hook.has_dispose_event
+    assert not hook.disposed
+    assert (await context.run_hook(correlation_id=hook_id)).approved is True
+    assert (await context.run_hook(correlation_id=hook_id)).approved is False
+    context.dispose_hook(correlation_id=hook_id)
+    with pytest.raises(StopAsyncIteration):
+        await context.run_hook(correlation_id=hook_id)
+
+
 async def test_a_workflow_can_recover_and_await_the_next_payload(world) -> None:
     run_id = await _create_run(world, recover_from_invalid_payload.workflow_id)
     await _invoke(run_id, recover_from_invalid_payload.workflow_id)
@@ -293,3 +342,268 @@ async def test_a_workflow_can_recover_and_await_the_next_payload(world) -> None:
 
     assert (await world.runs_get(run_id)).status == "completed"
     assert await Run(run_id).return_value() is True
+
+
+@pytest.mark.parametrize("end", ["return", "raise", "suspend"])
+@pytest.mark.parametrize("disposition", ["live", "dispose", "scope"])
+async def test_unconsumed_hook_lifecycle_is_committed(world, end, disposition) -> None:
+    run = await start(unconsumed_hook, end, disposition)
+    await _invoke(run.run_id, unconsumed_hook.workflow_id)
+    expected = ["hook_created"]
+    if disposition != "live":
+        expected.append("hook_disposed")
+
+    events = (await world.events_list(run.run_id)).data
+    assert [e.event_type for e in events if e.event_type.startswith("hook_")] == expected
+    if end == "suspend":
+        assert await run.status() == "running"
+        if disposition == "live":
+            assert (await world.hooks_get_by_token(TOKEN)).run_id == run.run_id
+        else:
+            with pytest.raises(w.HookNotFoundError):
+                await world.hooks_get_by_token(TOKEN)
+        step_id = await _correlation_id(world, run.run_id, w.StepCreatedEvent)
+        await world.events_create(
+            run.run_id,
+            w.StepCompletedEventData(result=PLAIN_ENCODER.encode("done")).into_event(step_id),
+        )
+        await _invoke(run.run_id, unconsumed_hook.workflow_id)
+
+    if end == "raise":
+        with pytest.raises(WorkflowRunFailedError, match="body failed"):
+            await run.return_value()
+    else:
+        assert await run.return_value() == "done"
+
+    # Terminal cleanup removes entities; the lifecycle remains in the log.
+    with pytest.raises(w.HookNotFoundError):
+        await world.hooks_get_by_token(TOKEN)
+    events = (await world.events_list(run.run_id)).data
+    assert [e.event_type for e in events if e.event_type.startswith("hook_")] == expected
+    assert events[-1].event_type == ("run_failed" if end == "raise" else "run_completed")
+    await _invoke(run.run_id, unconsumed_hook.workflow_id)
+    assert (await world.events_list(run.run_id)).data == events
+
+
+async def test_scope_suspension_is_not_disposal(world) -> None:
+    run = await start(unconsumed_hook, "scoped_suspend", "scope")
+    await _invoke(run.run_id, unconsumed_hook.workflow_id)
+    assert (await world.hooks_get_by_token(TOKEN)).run_id == run.run_id
+    events = (await world.events_list(run.run_id)).data
+    assert not any(isinstance(e, w.HookDisposedEvent) for e in events)
+    step_id = await _correlation_id(world, run.run_id, w.StepCreatedEvent)
+    await world.events_create(
+        run.run_id,
+        w.StepCompletedEventData(result=PLAIN_ENCODER.encode("done")).into_event(step_id),
+    )
+    await _invoke(run.run_id, unconsumed_hook.workflow_id)
+    events = (await world.events_list(run.run_id)).data
+    assert [e.event_type for e in events][-2:] == ["hook_disposed", "run_completed"]
+
+
+@pytest.mark.parametrize("end", ["return", "raise", "suspend"])
+@pytest.mark.parametrize("disposition", ["live", "dispose"])
+async def test_unconsumed_conflict_does_not_dispose_the_owner(world, end, disposition) -> None:
+    owner = await _create_run(world, create_then_step_then_await.workflow_id)
+    await _invoke(owner, create_then_step_then_await.workflow_id)
+    owner_hook = await world.hooks_get_by_token(TOKEN)
+
+    run = await start(unconsumed_hook, end, disposition)
+    await _invoke(run.run_id, unconsumed_hook.workflow_id)
+    events = (await world.events_list(run.run_id)).data
+    assert [e.event_type for e in events if e.event_type.startswith("hook_")] == ["hook_conflict"]
+    assert (await world.hooks_get_by_token(TOKEN)).hook_id == owner_hook.hook_id
+    assert (
+        await run.status() == {"return": "completed", "raise": "failed", "suspend": "running"}[end]
+    )
+
+
+@pytest.mark.parametrize("end", ["return", "raise"])
+@pytest.mark.parametrize("failed_event", ["hook_created", "hook_disposed"])
+async def test_terminal_hook_flush_failure_preserves_body_outcome(
+    world, monkeypatch, caplog, end, failed_event
+) -> None:
+    create = world.events_create
+
+    async def fail_hook(run_id, data):
+        if data.event_type == failed_event:
+            raise RuntimeError("hook storage unavailable")
+        return await create(run_id, data)
+
+    monkeypatch.setattr(world, "events_create", fail_hook)
+    run = await start(unconsumed_hook, end, "dispose")
+    await _invoke(run.run_id, unconsumed_hook.workflow_id)
+    assert "Failed to flush hooks" in caplog.text
+    if end == "raise":
+        with pytest.raises(WorkflowRunFailedError, match="body failed"):
+            await run.return_value()
+    else:
+        assert await run.return_value() == "done"
+
+
+@pytest.mark.parametrize("disposition", ["live", "dispose"])
+async def test_retry_after_terminal_write_failure_does_not_recreate_hooks(
+    world, monkeypatch, disposition
+) -> None:
+    create = world.events_create
+
+    async def fail_terminal(run_id, data):
+        if isinstance(data, w.RunCompletedEvent):
+            raise RuntimeError("terminal write unavailable")
+        return await create(run_id, data)
+
+    run = await start(unconsumed_hook, "return", disposition)
+    with monkeypatch.context() as patch:
+        patch.setattr(world, "events_create", fail_terminal)
+        with pytest.raises(RuntimeError, match="terminal write unavailable"):
+            await _invoke(run.run_id, unconsumed_hook.workflow_id)
+    before = (await world.events_list(run.run_id)).data
+    assert any(isinstance(e, w.HookCreatedEvent) for e in before)
+
+    hook_attempts = []
+
+    async def record(run_id, data):
+        if data.event_type.startswith("hook_"):
+            hook_attempts.append(data)
+        return await create(run_id, data)
+
+    monkeypatch.setattr(world, "events_create", record)
+    await _invoke(run.run_id, unconsumed_hook.workflow_id)
+    assert hook_attempts == []
+    assert await run.return_value() == "done"
+
+
+async def test_legacy_history_without_ephemeral_hook_events_can_continue(
+    world, monkeypatch
+) -> None:
+    run = await start(unconsumed_hook, "suspend", "dispose")
+
+    async def legacy_flush(context):
+        # Older runtimes elided a hook created and disposed before suspension.
+        return False, set()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(runtime, "_flush_hooks", legacy_flush)
+        await _invoke(run.run_id, unconsumed_hook.workflow_id)
+    events = (await world.events_list(run.run_id)).data
+    assert [e.event_type for e in events] == ["run_created", "run_started", "step_created"]
+
+    await _invoke(run.run_id, unconsumed_hook.workflow_id)
+    step_id = await _correlation_id(world, run.run_id, w.StepCreatedEvent)
+    await world.events_create(
+        run.run_id,
+        w.StepCompletedEventData(result=PLAIN_ENCODER.encode("done")).into_event(step_id),
+    )
+    await _invoke(run.run_id, unconsumed_hook.workflow_id)
+    assert await run.return_value() == "done"
+    events = (await world.events_list(run.run_id)).data
+    assert [e.event_type for e in events if e.event_type.startswith("hook_")] == [
+        "hook_created",
+        "hook_disposed",
+    ]
+
+
+@pytest.mark.parametrize("conflicted", [False, True])
+async def test_registration_result_waits_for_its_replay_event(conflicted) -> None:
+    def make_context(events):
+        return runtime.WorkflowOrchestratorContext(
+            events, run_id="wrun_test", seed="seed", started_at=0, registry=registry
+        )
+
+    hook_id = make_context([]).create_hook(TOKEN, Approval)._correlation_id
+    event = (
+        w.HookConflictEvent(
+            correlation_id=hook_id,
+            event_data=w.HookConflictEventData(token=TOKEN, conflicting_run_id="wrun_owner"),
+        )
+        if conflicted
+        else w.HookCreatedEventData(token=TOKEN).into_event(hook_id)
+    )
+    context = make_context([event])
+    context.create_hook(TOKEN, Approval)
+    assert context.replay_index == 0
+    waiter = asyncio.create_task(context.run_hook_conflict(correlation_id=hook_id))
+    await asyncio.sleep(0)
+    assert not waiter.done()
+    context.resume()
+    result = await waiter
+    assert (result.run_id if result is not None else None) == ("wrun_owner" if conflicted else None)
+
+
+async def test_disposed_hook_still_rejects_a_changed_token_on_replay(world, monkeypatch) -> None:
+    run = await start(unconsumed_hook, "suspend", "dispose")
+    await _invoke(run.run_id, unconsumed_hook.workflow_id)
+    list_events = world.events_list
+
+    async def changed_token(run_id, *, pagination=None):
+        page = await list_events(run_id, pagination=pagination)
+        return page.model_copy(
+            update={
+                "data": [
+                    e.model_copy(update={"event_data": w.HookCreatedEventData(token="other")})
+                    if isinstance(e, w.HookCreatedEvent)
+                    else e
+                    for e in page.data
+                ]
+            }
+        )
+
+    monkeypatch.setattr(world, "events_list", changed_token)
+    await _invoke(run.run_id, unconsumed_hook.workflow_id)
+    failed = await world.runs_get(run.run_id)
+    assert isinstance(failed, w.FailedWorkflowRun)
+    assert failed.error_code == "REPLAY_DIVERGENCE"
+    with pytest.raises(WorkflowRunFailedError, match="recorded hook token"):
+        await run.return_value()
+
+
+@pytest.mark.parametrize("end", ["return", "raise", "suspend"])
+@pytest.mark.parametrize("mismatch", ["replaced", "missing"])
+async def test_replay_divergence_does_not_flush_disposed_hooks(
+    world, monkeypatch, end, mismatch
+) -> None:
+    run = await start(unconsumed_hook, end, "dispose")
+    started = await world.events_create(run.run_id, w.RunStartedEvent())
+    assert started.run is not None and started.run.started_at is not None
+    probe = runtime.WorkflowOrchestratorContext(
+        [],
+        run_id=run.run_id,
+        seed=run.run_id,
+        started_at=int(started.run.started_at.timestamp() * 1000),
+        registry=registry,
+    )
+    position = probe.generate_ulid()
+    if mismatch == "missing":
+        # Neither the disposed hook (slot 1) nor the pending step (slot 2)
+        # occupies this historical operation's position.
+        probe.generate_ulid()
+        position = probe.generate_ulid()
+    await world.events_create(
+        run.run_id,
+        w.StepCreatedEventData(
+            step_name=pending_step.name,
+            input=PLAIN_ENCODER.encode(ser.step_arguments((), {})),
+        ).into_event(f"step_{position}"),
+    )
+    create = world.events_create
+    hook_attempts = []
+
+    async def record(run_id, data):
+        if data.event_type.startswith("hook_"):
+            hook_attempts.append(data)
+        return await create(run_id, data)
+
+    monkeypatch.setattr(world, "events_create", record)
+    await _invoke(run.run_id, unconsumed_hook.workflow_id)
+
+    failed = await world.runs_get(run.run_id)
+    assert isinstance(failed, w.FailedWorkflowRun)
+    assert failed.error_code == "REPLAY_DIVERGENCE"
+    assert hook_attempts == []
+    message = (
+        "recorded a 'step' call, but the body now issues a 'hook' call"
+        if mismatch == "replaced"
+        else "has not registered its suspension"
+    )
+    with pytest.raises(WorkflowRunFailedError, match=message):
+        await run.return_value()

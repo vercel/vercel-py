@@ -5,9 +5,13 @@ hook_disposed (or delivering a payload) once the hook is gone raises
 HookNotFoundError -- the same typed error the backend's 404 yields, which the
 runtime swallows. A concurrent invocation that loses the dispose-lock race gets
 EntityConflictError instead of double-deleting and writing a duplicate event.
+The durable disposal marker also rejects recreating that hook, while another
+hook can claim the released token.
 """
 
 from __future__ import annotations
+
+import pytest
 
 from tests.payloads import PLAIN_ENCODER
 from vercel.workflow._internal import world as w
@@ -66,3 +70,31 @@ async def test_concurrent_dispose_loser_gets_entity_conflict(tmp_path, monkeypat
         pass
     else:
         raise AssertionError("losing the dispose lock should raise EntityConflictError")
+
+
+@pytest.mark.parametrize("successor_run_id", [None, RUN_ID, "wrun_successor"])
+async def test_disposed_hook_cannot_be_recreated(tmp_path, monkeypatch, successor_run_id) -> None:
+    world = _world(tmp_path, monkeypatch)
+    created = w.HookCreatedEventData(token=TOKEN).into_event("hook_1")
+    await world.events_create(RUN_ID, created)
+    await world.events_create(RUN_ID, w.HookDisposedEvent(correlation_id="hook_1"))
+    if successor_run_id is not None:
+        await world.events_create(
+            successor_run_id, w.HookCreatedEventData(token=TOKEN).into_event("hook_successor")
+        )
+    before = (await world.events_list(RUN_ID)).data
+
+    # Another worker has no in-memory knowledge of the first hook's lifetime.
+    other_world = _world(tmp_path, monkeypatch)
+    with pytest.raises(w.EntityConflictError):
+        await other_world.events_create(RUN_ID, created)
+
+    assert (await other_world.events_list(RUN_ID)).data == before
+    assert not (other_world.data_dir / "hooks" / "hook_1.json").exists()
+    if successor_run_id is None:
+        with pytest.raises(w.HookNotFoundError):
+            await other_world.hooks_get_by_token(TOKEN)
+        await other_world.events_create(
+            RUN_ID, w.HookCreatedEventData(token=TOKEN).into_event("hook_successor")
+        )
+    assert (await other_world.hooks_get_by_token(TOKEN)).hook_id == "hook_successor"

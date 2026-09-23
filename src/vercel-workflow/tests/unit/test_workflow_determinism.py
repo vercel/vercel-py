@@ -113,13 +113,16 @@ async def test_wait_step_swap_raises_nondeterminism() -> None:
     assert ctx.suspended
 
 
-async def test_created_event_without_suspension_raises_runtime_error() -> None:
+async def test_created_event_without_suspension_fails_the_run() -> None:
     """A creation event cannot precede the body's matching suspension."""
     step = core.Step(_greet)
     ctx = _context([_created(step, "step_1")])
 
-    with pytest.raises(RuntimeError, match="has not registered its suspension"):
-        ctx.resume()
+    _resume_isolated(ctx)
+
+    assert isinstance(ctx.resume_exception, runtime.NondeterminismError)
+    assert "has not registered its suspension" in str(ctx.resume_exception)
+    assert ctx.suspended
 
 
 # --- concurrent delivery: the loop workflow + resume single-step -----------------
@@ -287,6 +290,48 @@ async def _reraising() -> str:
         raise runtime.NondeterminismError("surfaced by the body") from None
 
 
+@_run_registry.workflow
+async def _unawaited_record(fail: bool = False) -> str:
+    ctx = runtime.WorkflowOrchestratorContext.current()
+    pending = ctx.run_step(_record, name="a")
+    # Completing historical operations after the body finishes must not start
+    # user continuations. The isolated loop has already shut down by then.
+    pending.add_done_callback(lambda _: ctx.run_step(_record, name="unexpected continuation"))
+    if fail:
+        raise ValueError("body failed")
+    return "done"
+
+
+@_run_registry.workflow
+async def _unawaited_wait_and_attributes() -> str:
+    ctx = runtime.WorkflowOrchestratorContext.current()
+    pending = [
+        ctx.run_wait(datetime(2026, 1, 1, tzinfo=timezone.utc)),
+        ctx.set_attributes([w.AttributeChange(key="phase", value="done")], allow_reserved=False),
+    ]
+    for future in pending:
+        future.add_done_callback(lambda _: ctx.run_step(_record, name="unexpected continuation"))
+    return "done"
+
+
+@_run_registry.workflow
+async def _operation_from_task_cleanup() -> str:
+    async def background() -> None:
+        try:
+            await asyncio.Future()
+        finally:
+            runtime.WorkflowOrchestratorContext.current().run_step(_record, name="a")
+
+    asyncio.create_task(background())
+    await asyncio.sleep(0)
+    return "done"
+
+
+@_run_registry.workflow
+async def _no_operations() -> str:
+    return "done"
+
+
 def _running_run(workflow_id: str) -> w.WorkflowRun:
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     return w.NonFinalWorkflowRun(
@@ -332,6 +377,120 @@ async def test_nondeterminism_cannot_be_suppressed_by_the_body() -> None:
 
     with pytest.raises(runtime.NondeterminismError):
         ctx.run_workflow(_running_run(_suppressing.workflow_id))
+
+
+@pytest.mark.parametrize("fail", [False, True])
+@pytest.mark.parametrize("outcome", ["pending", "completed", "failed"])
+async def test_terminal_replay_applies_unawaited_operation_history(fail, outcome) -> None:
+    cid = f"step_{_context([]).generate_ulid()}"
+    events = [_created(_record, cid)]
+    if outcome == "completed":
+        events.append(_completed(cid, "recorded result"))
+    elif outcome == "failed":
+        events.append(
+            w.StepFailedEventData(
+                error=PLAIN_ENCODER.encode_error(ValueError("step failed"))
+            ).into_event(cid)
+        )
+    ctx = runtime.WorkflowOrchestratorContext(
+        events, run_id="wrun_test", seed="wrun_test", started_at=0, registry=_run_registry
+    )
+    run = _running_run(_unawaited_record.workflow_id).model_copy(
+        update={"input": PLAIN_ENCODER.encode(ser.argument_array((fail,), {}))}
+    )
+
+    if fail:
+        with pytest.raises(ValueError, match="body failed"):
+            ctx.run_workflow(run)
+    else:
+        assert ctx.run_workflow(run) == PLAIN_ENCODER.encode("done")
+
+    assert ctx.replay_index == len(events)
+    assert not ctx.suspended
+    assert set(ctx.suspensions) == ({cid} if outcome == "pending" else set())
+    if outcome == "pending":
+        assert ctx.suspensions[cid].has_created_event
+
+
+@pytest.mark.parametrize("diverged", [False, True])
+async def test_terminal_replay_applies_waits_and_validates_attributes(diverged) -> None:
+    probe = _context([])
+    wait_id = f"wait_{probe.generate_ulid()}"
+    attr_id = f"attr_{probe.generate_ulid()}"
+    events: list[w.Event] = [
+        w.WaitCreatedEventData(resume_at=datetime(2026, 1, 1, tzinfo=timezone.utc)).into_event(
+            wait_id
+        ),
+        w.WaitCompletedEvent(correlation_id=wait_id),
+        w.AttrSetEventData(
+            changes=[w.AttributeChange(key="phase", value="other" if diverged else "done")],
+            writer=w.WorkflowAttributeWriter(),
+        ).into_event(attr_id),
+    ]
+    ctx = runtime.WorkflowOrchestratorContext(
+        events, run_id="wrun_test", seed="wrun_test", started_at=0, registry=_run_registry
+    )
+    run = _running_run(_unawaited_wait_and_attributes.workflow_id)
+
+    if diverged:
+        with pytest.raises(runtime.NondeterminismError, match="recorded attributes"):
+            ctx.run_workflow(run)
+    else:
+        assert ctx.run_workflow(run) == PLAIN_ENCODER.encode("done")
+
+    assert ctx.replay_index == len(events)
+    assert not ctx.suspensions
+    await asyncio.sleep(0)
+
+
+async def test_terminal_replay_runs_after_task_cleanup() -> None:
+    cid = f"step_{_context([]).generate_ulid()}"
+    events = [_created(_record, cid), _completed(cid, "recorded result")]
+    ctx = runtime.WorkflowOrchestratorContext(
+        events, run_id="wrun_test", seed="wrun_test", started_at=0, registry=_run_registry
+    )
+
+    assert ctx.run_workflow(_running_run(_operation_from_task_cleanup.workflow_id)) == (
+        PLAIN_ENCODER.encode("done")
+    )
+    assert ctx.replay_index == len(events)
+    assert not ctx.suspended
+    assert not ctx.suspensions
+
+
+@pytest.mark.parametrize("fail", [False, True])
+async def test_terminal_replay_validates_unawaited_operation_input(fail) -> None:
+    cid = f"step_{_context([]).generate_ulid()}"
+    event = w.StepCreatedEventData(step_name=_record.name, input=_args(name="other")).into_event(
+        cid
+    )
+    ctx = runtime.WorkflowOrchestratorContext(
+        [event], run_id="wrun_test", seed="wrun_test", started_at=0, registry=_run_registry
+    )
+    run = _running_run(_unawaited_record.workflow_id).model_copy(
+        update={"input": PLAIN_ENCODER.encode(ser.argument_array((fail,), {}))}
+    )
+
+    with pytest.raises(runtime.NondeterminismError, match="different arguments"):
+        ctx.run_workflow(run)
+
+    # Terminal validation runs outside the isolated loop. It must not cancel
+    # tasks in the caller's event loop when it finds a divergence.
+    await asyncio.sleep(0)
+
+
+async def test_terminal_replay_rejects_an_operation_the_body_no_longer_declares() -> None:
+    cid = f"step_{_context([]).generate_ulid()}"
+    ctx = runtime.WorkflowOrchestratorContext(
+        [_created(_record, cid)],
+        run_id="wrun_test",
+        seed="wrun_test",
+        started_at=0,
+        registry=_run_registry,
+    )
+
+    with pytest.raises(runtime.NondeterminismError, match="has not registered"):
+        ctx.run_workflow(_running_run(_no_operations.workflow_id))
 
 
 # --- now(): deterministic clock anchored to replay progress, not list tail ------

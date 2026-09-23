@@ -21,8 +21,13 @@ results stay opaque.
 from __future__ import annotations
 
 import asyncio
+import multiprocessing
+import os
+import sys
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import anyio
 import pydantic
 import pytest
 
@@ -57,6 +62,16 @@ async def reuse_claim_after_dispose() -> str:
     first = Claim.wait(token=TOKEN)
     await first
     first.dispose()
+    conflict = await Claim.wait(token=TOKEN).get_conflict()
+    return "available" if conflict is None else "conflict"
+
+
+@registry.workflow
+async def reuse_uncommitted_claims() -> str:
+    first = Claim.wait(token=TOKEN)
+    first.dispose()
+    second = Claim.wait(token=TOKEN)
+    second.dispose()
     conflict = await Claim.wait(token=TOKEN).get_conflict()
     return "available" if conflict is None else "conflict"
 
@@ -247,6 +262,253 @@ async def test_disposal_is_flushed_before_reusing_a_hook_token(tmp_path, monkeyp
         "run_completed",
     ]
     assert await Run(run_id).return_value() == "available"
+
+
+async def test_uncommitted_hooks_are_created_disposed_and_replayed_in_order(
+    tmp_path, monkeypatch
+) -> None:
+    world = _world(tmp_path, monkeypatch)
+    w.set_world(world)
+    run_id = await _create_run(world, reuse_uncommitted_claims.workflow_id)
+    await _invoke(run_id, reuse_uncommitted_claims.workflow_id)
+    events = (await world.events_list(run_id)).data
+    hooks = [e for e in events if e.event_type.startswith("hook_")]
+    assert [e.event_type for e in hooks] == [
+        "hook_created",
+        "hook_disposed",
+        "hook_created",
+        "hook_disposed",
+        "hook_created",
+    ]
+    assert hooks[0].correlation_id == hooks[1].correlation_id
+    assert hooks[2].correlation_id == hooks[3].correlation_id
+    assert len({e.correlation_id for e in hooks}) == 3
+    assert await Run(run_id).return_value() == "available"
+
+
+def _invoke_overlapping_lifecycle(
+    name, data_dir, run_id, first_hook, both_read, first_disposed, second_finished
+) -> None:
+    os.environ["WORKFLOW_LOCAL_DATA_DIR"] = str(data_dir)
+
+    class OverlappingWorld(RecordingLocalWorld):
+        initial_read = True
+
+        async def events_list(self, run_id, *, pagination=None):
+            page = await super().events_list(run_id, pagination=pagination)
+            if self.initial_read:
+                self.initial_read = False
+                both_read.wait(timeout=15)
+            return page
+
+        async def events_create(self, run_id, data):
+            if (
+                name == "second"
+                and isinstance(data, w.HookCreatedEvent)
+                and data.correlation_id == first_hook
+            ):
+                assert first_disposed.wait(timeout=15)
+            result = await super().events_create(run_id, data)
+            if (
+                name == "first"
+                and isinstance(data, w.HookDisposedEvent)
+                and data.correlation_id == first_hook
+            ):
+                first_disposed.set()
+                assert second_finished.wait(timeout=15)
+            return result
+
+    w.set_world(OverlappingWorld())
+    try:
+        asyncio.run(_invoke(run_id, reuse_uncommitted_claims.workflow_id))
+    finally:
+        if name == "second":
+            second_finished.set()
+        w.set_world(None)
+
+
+def _run_overlapping_lifecycles(data_dir, run_id, first_hook) -> None:
+    process_context = multiprocessing.get_context("spawn")
+    signals = (process_context.Barrier(2), process_context.Event(), process_context.Event())
+    processes = [
+        process_context.Process(
+            target=_invoke_overlapping_lifecycle,
+            args=(name, data_dir, run_id, first_hook, *signals),
+        )
+        for name in ("first", "second")
+    ]
+    # Both workers read the same log. The first releases its first hook, then
+    # the second flushes that hook using its stale snapshot before the first
+    # worker moves on to the successor. The World must reject resurrection.
+    try:
+        for process in processes:
+            process.start()
+        for process in processes:
+            process.join(timeout=20)
+            assert process.exitcode == 0
+    finally:
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+            if process.pid is not None:
+                process.join(timeout=5)
+
+
+async def test_overlapping_invocations_do_not_recreate_disposed_hooks(tmp_path, monkeypatch):
+    world = _world(tmp_path, monkeypatch)
+    w.set_world(world)
+    run_id = await _create_run(world, reuse_uncommitted_claims.workflow_id)
+    started = await world.events_create(run_id, w.RunStartedEvent())
+    assert started.run is not None and started.run.started_at is not None
+    probe = runtime.WorkflowOrchestratorContext(
+        [],
+        run_id=run_id,
+        seed=run_id,
+        started_at=int(started.run.started_at.timestamp() * 1000),
+        registry=registry,
+    )
+    first_hook = f"hook_{probe.generate_ulid()}"
+    # ggt runs tests in daemonic workers, which cannot use multiprocessing
+    # directly. A fresh interpreter lets this exercise actual local workers
+    # under either test runner.
+    with anyio.fail_after(50):
+        result = await anyio.run_process(
+            [
+                sys.executable,
+                "-c",
+                "import sys\n"
+                "from tests.unit.test_workflow_hook_conflict import _run_overlapping_lifecycles\n"
+                "_run_overlapping_lifecycles(*sys.argv[1:])\n",
+                str(world.data_dir),
+                run_id,
+                first_hook,
+            ],
+            cwd=Path(__file__).resolve().parents[2],
+            check=False,
+        )
+    assert result.returncode == 0, result.stderr.decode()
+    assert await Run(run_id).return_value() == "available"
+    hooks = [e for e in (await world.events_list(run_id)).data if e.event_type.startswith("hook_")]
+    assert [e.event_type for e in hooks] == [
+        "hook_created",
+        "hook_disposed",
+        "hook_created",
+        "hook_disposed",
+        "hook_created",
+    ]
+    assert hooks[0].correlation_id == hooks[1].correlation_id == first_hook
+    assert hooks[2].correlation_id == hooks[3].correlation_id
+    assert len({e.correlation_id for e in hooks}) == 3
+
+
+@pytest.mark.parametrize("lost_ack", ["hook_created", "hook_disposed"])
+async def test_partial_hook_flush_retries_without_recreating_prior_hooks(
+    tmp_path, monkeypatch, lost_ack
+) -> None:
+    world = _world(tmp_path, monkeypatch)
+    w.set_world(world)
+    run_id = await _create_run(world, reuse_uncommitted_claims.workflow_id)
+    create = world.events_create
+
+    async def lose_ack(run_id, data):
+        result = await create(run_id, data)
+        if data.event_type == lost_ack:
+            raise RuntimeError("lost hook acknowledgement")
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(world, "events_create", lose_ack)
+        with pytest.raises(RuntimeError, match="lost hook acknowledgement"):
+            await _invoke(run_id, reuse_uncommitted_claims.workflow_id)
+    assert (await world.runs_get(run_id)).status == "running"
+    await _invoke(run_id, reuse_uncommitted_claims.workflow_id)
+    events = (await world.events_list(run_id)).data
+    assert [e.event_type for e in events if e.event_type.startswith("hook_")] == [
+        "hook_created",
+        "hook_disposed",
+        "hook_created",
+        "hook_disposed",
+        "hook_created",
+    ]
+    assert await Run(run_id).return_value() == "available"
+
+
+async def test_retry_of_disposed_hook_does_not_reclaim_a_successors_token(
+    tmp_path, monkeypatch
+) -> None:
+    world = _world(tmp_path, monkeypatch)
+    w.set_world(world)
+    run_id = await _create_run(world, reuse_uncommitted_claims.workflow_id)
+    create = world.events_create
+
+    async def lose_dispose_ack(run_id, data):
+        result = await create(run_id, data)
+        if isinstance(data, w.HookDisposedEvent):
+            raise RuntimeError("lost dispose acknowledgement")
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(world, "events_create", lose_dispose_ack)
+        with pytest.raises(RuntimeError, match="lost dispose acknowledgement"):
+            await _invoke(run_id, reuse_uncommitted_claims.workflow_id)
+    owner = await _create_run(world)
+    await _invoke(owner)
+    replacement = await world.hooks_get_by_token(TOKEN)
+
+    await _invoke(run_id, reuse_uncommitted_claims.workflow_id)
+    assert await Run(run_id).return_value() == "conflict"
+    assert (await world.hooks_get_by_token(TOKEN)).hook_id == replacement.hook_id
+    events = (await world.events_list(run_id)).data
+    assert [e.event_type for e in events if e.event_type.startswith("hook_")] == [
+        "hook_created",
+        "hook_disposed",
+        "hook_conflict",
+        "hook_conflict",
+    ]
+
+
+@pytest.mark.parametrize("fail_first", [False, True])
+async def test_token_groups_are_concurrent_and_settle_before_a_flush_returns(
+    tmp_path, monkeypatch, fail_first
+) -> None:
+    world = _world(tmp_path, monkeypatch)
+    w.set_world(world)
+    run_id = await _create_run(world)
+    context = runtime.WorkflowOrchestratorContext(
+        [], run_id=run_id, seed=run_id, started_at=0, registry=registry
+    )
+    for token in ("first-token", "second-token"):
+        handle = context.create_hook(token, Claim)
+        context.dispose_hook(correlation_id=handle._correlation_id)
+
+    second_started = anyio.Event()
+    create = world.events_create
+
+    async def delay_create(run_id, data):
+        if isinstance(data, w.HookCreatedEvent):
+            if data.event_data.token == "first-token":
+                await second_started.wait()
+                if fail_first:
+                    raise RuntimeError("first group failed")
+            else:
+                second_started.set()
+                await anyio.sleep(0)
+        return await create(run_id, data)
+
+    monkeypatch.setattr(world, "events_create", delay_create)
+    with anyio.fail_after(5):
+        if fail_first:
+            with pytest.raises(RuntimeError, match="first group failed"):
+                await runtime._flush_hooks(context)
+        else:
+            await runtime._flush_hooks(context)
+    events = (await world.events_list(run_id)).data
+    for hook in context.hooks.values():
+        kinds = [e.event_type for e in events if e.correlation_id == hook.correlation_id]
+        if fail_first and hook.token == "first-token":
+            assert kinds == []
+        else:
+            assert kinds == ["hook_created", "hook_disposed"]
 
 
 def test_hook_conflict_owner_id_round_trips_on_the_wire() -> None:
