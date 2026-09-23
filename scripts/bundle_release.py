@@ -94,6 +94,9 @@ EXTERNAL_DEPENDENCIES = {
 UNBUNDLED_PACKAGES = {
     # Workflow is not vendored by anything yet, so we don't need its -bundle
     "vercel-workflow",
+    # Proxy is not vendored by anything yet. Its bundle would also need
+    # vendored starlette's anyio imports rewritten to the shared namespace.
+    "vercel-proxy",
 }
 COMMON_DROP_TRANSFORMATIONS = (
     "*.so",
