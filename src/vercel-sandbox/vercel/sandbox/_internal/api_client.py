@@ -1516,20 +1516,30 @@ class SandboxApiClient:
         project_id: str | None = None,
         max_size_bytes: int | None = None,
         region: str | None = None,
-    ) -> DriveState:
+    ) -> tuple[DriveState, bool]:
         credentials = await self._credentials_factory()
         request = _GetOrCreateDriveRequest(
             project_id=project_id or credentials.project_id,
             max_size_bytes=max_size_bytes,
             region=region,
         )
-        data = await self._request_json(
+        response = await self._request(
             "POST",
             format_url_path("v2/sandboxes/drives/{name}", name=name),
             credentials=credentials,
-            body=request.to_api_dict(),
+            body=JSONBody(request.to_api_dict()),
+            headers={"content-type": "application/json"},
         )
-        return _validate_response(_DriveResponse, data).to_drive()
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise SandboxResponseError(
+                "Sandbox API response body could not be decoded as JSON"
+            ) from exc
+        if not isinstance(data, dict):
+            raise SandboxResponseError("Sandbox API response must be a JSON object", data=data)
+        drive = _validate_response(_DriveResponse, cast(JSONObject, data)).to_drive()
+        return drive, response.status_code == 201
 
     async def query_drives(
         self,

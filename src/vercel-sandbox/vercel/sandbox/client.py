@@ -253,7 +253,7 @@ class SandboxClient:
         project_id: str | None = None,
         max_size_bytes: int | None = None,
         region: str | None = None,
-    ) -> Drive:
+    ) -> tuple[Drive, bool]:
         return await _get_or_create_drive(
             self._service,
             name=name,

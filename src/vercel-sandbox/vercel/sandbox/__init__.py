@@ -432,7 +432,7 @@ async def get_or_create_drive(
     project_id: str | None = None,
     max_size_bytes: int | None = None,
     region: str | None = None,
-) -> Drive:
+) -> tuple[Drive, bool]:
     """Return a named Drive, creating it when necessary.
 
     Args:
@@ -441,11 +441,12 @@ async def get_or_create_drive(
             omitted.
         max_size_bytes: Maximum size for a new Drive. Uses the project's default
             when omitted.
-        region: Storage region for a new Drive. The backend defaults to ``"iad1"``.
-            An existing Drive must already use the requested region.
+        region: Storage region for a new Drive. Uses ``SandboxServiceOptions.region``
+            when omitted. An existing Drive must already use the requested region.
 
     Returns:
-        The existing or newly created Drive.
+        A ``(drive, created)`` tuple. ``created`` is true when this call created
+        the Drive, and false when it returned an existing Drive.
     """
     return await _get_or_create_drive(
         _service(),
