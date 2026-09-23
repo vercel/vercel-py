@@ -71,12 +71,7 @@ class SchedulesValidationError(SchedulesError, ValueError):
     """
 
 
-class ScheduleEventParseError(SchedulesError, ValueError):
-    """Raised when an inbound request is not a valid schedule dispatch."""
-
-
 __all__ = [
-    "ScheduleEventParseError",
     "ScheduleNotFoundError",
     "SchedulesApiError",
     "SchedulesCredentialsError",

@@ -10,8 +10,7 @@ mixing modes in one session is a bug.
 
 Schedules fire on a cron cadence or once at a fixed instant, and dispatch to a
 Vercel Queue topic or function. A schedule is identified by its name within a
-namespace. Manage them with `create_schedule` and friends; parse function
-dispatches with `parse_schedule_event`.
+namespace. Manage them with `create_schedule` and friends.
 
 Requests authenticate with the deployment's Vercel OIDC token. Locally, run
 `vercel env pull` or pass `SchedulesServiceOptions(token=...)` in a session.
@@ -22,28 +21,12 @@ from datetime import datetime, timedelta
 
 from vercel._internal.core.session import get_active_sync_session
 from vercel.schedules._internal.errors import (
-    ScheduleEventParseError,
     ScheduleNotFoundError,
     SchedulesApiError,
     SchedulesCredentialsError,
     SchedulesError,
     SchedulesResponseError,
     SchedulesValidationError,
-)
-from vercel.schedules._internal.events import (
-    CLOUD_EVENT_ID_HEADER,
-    CLOUD_EVENT_SOURCE_HEADER,
-    CLOUD_EVENT_SPEC_VERSION_HEADER,
-    CLOUD_EVENT_TYPE_HEADER,
-    SCHEDULE_CLOUD_EVENT_TYPE,
-    SCHEDULE_FIRED_AT_HEADER,
-    SCHEDULE_ID_HEADER,
-    SCHEDULE_NAME_HEADER,
-    SCHEDULE_NAMESPACE_HEADER,
-    SCHEDULE_SOURCE_HEADER,
-    ScheduleHandler,
-    parse_schedule_event,
-    resolve_payload_type,
 )
 from vercel.schedules._internal.models import (
     MAX_JITTER,
@@ -54,7 +37,6 @@ from vercel.schedules._internal.models import (
     OneOffExpression,
     QueueTarget,
     Schedule,
-    ScheduleEvent,
     ScheduleExpression,
     ScheduleSource,
     ScheduleState,
@@ -263,19 +245,9 @@ def invoke_schedule(name: str, *, namespace: str | None = None) -> None:
 
 # Only add public symbols to __all__; internal helpers must stay unexported.
 __all__ = [
-    "CLOUD_EVENT_ID_HEADER",
-    "CLOUD_EVENT_SOURCE_HEADER",
-    "CLOUD_EVENT_SPEC_VERSION_HEADER",
-    "CLOUD_EVENT_TYPE_HEADER",
     "DEFAULT_SCHEDULES_BASE_URL",
     "MAX_JITTER",
     "MIN_JITTER",
-    "SCHEDULE_CLOUD_EVENT_TYPE",
-    "SCHEDULE_FIRED_AT_HEADER",
-    "SCHEDULE_ID_HEADER",
-    "SCHEDULE_NAMESPACE_HEADER",
-    "SCHEDULE_NAME_HEADER",
-    "SCHEDULE_SOURCE_HEADER",
     "UNSET",
     "CronExpression",
     "FunctionTarget",
@@ -283,10 +255,7 @@ __all__ = [
     "OneOffExpression",
     "QueueTarget",
     "Schedule",
-    "ScheduleEvent",
-    "ScheduleEventParseError",
     "ScheduleExpression",
-    "ScheduleHandler",
     "ScheduleNotFoundError",
     "ScheduleSource",
     "ScheduleState",
@@ -306,7 +275,5 @@ __all__ = [
     "get_schedule",
     "invoke_schedule",
     "list_schedules",
-    "parse_schedule_event",
-    "resolve_payload_type",
     "update_schedule",
 ]

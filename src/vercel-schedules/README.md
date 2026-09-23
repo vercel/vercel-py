@@ -105,38 +105,23 @@ Point a static schedule at a Python callable with a module entrypoint:
     {
       "name": "cleanup",
       "expression": { "cron": "0 * * * *" },
-      "payload": { "max_age_days": 30 },
       "target": { "entrypoint": "jobs.cleanup:run" }
     }
   ]
 }
 ```
 
-The callable receives a `ScheduleEvent`. Its generic argument controls payload
-validation:
+The Vercel Python runtime dispatches the schedule to the callable with one
+event argument. Static function-targeted schedules do not carry a payload:
 
 ```python
 # jobs/cleanup.py
-from pydantic import BaseModel
-from vercel.schedules import ScheduleEvent
-
-
-class CleanupPayload(BaseModel):
-    max_age_days: int
-
-
-async def run(event: ScheduleEvent[CleanupPayload]) -> None:
-    print(f"Running {event.name}, fired at {event.fired_at}")
-    if event.payload:
-        await delete_expired_records(event.payload.max_age_days)
+async def run(event):
+    print(f"Running {event.name}, scheduled at {event.scheduled_at}")
 ```
 
-The Vercel Python runtime receives the schedule's CloudEvent `POST`, validates
-the payload, and invokes the entrypoint. An unparameterized `ScheduleEvent`
-receives the decoded JSON as-is.
-
-When handling the request in your own framework, use
-`parse_schedule_event(headers, body, payload_type=...)` to parse the same event.
+The runtime owns the inbound CloudEvent parsing; `vercel-schedules` is only
+needed to manage schedules through the API.
 
 ## Configuration
 

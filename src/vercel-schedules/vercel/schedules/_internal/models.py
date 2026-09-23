@@ -1,12 +1,10 @@
 """Public value types for the Schedules SDK."""
 
 from datetime import datetime, timedelta
-from typing import Any, Generic, TypeAlias, TypeVar
+from typing import Any, TypeAlias
 
 from vercel._internal.core.polyfills import StrEnum
 from vercel.schedules._internal.base import SchedulesModel
-
-PayloadT = TypeVar("PayloadT")
 
 # VSS stores and validates jitter as the AWS EventBridge Scheduler flexible
 # time window: an integer number of minutes.
@@ -121,27 +119,6 @@ class Schedule(SchedulesModel):
         return self.state is ScheduleState.ACTIVE
 
 
-class ScheduleEvent(SchedulesModel, Generic[PayloadT]):
-    """One firing of a schedule, as delivered to the target function.
-
-    Attributes:
-        schedule_id: Unique identifier of the schedule.
-        name: Schedule name, unique within its project and namespace.
-        namespace: Namespace the schedule belongs to.
-        fired_at: When the schedule fired.
-        source: How the schedule was defined, such as `"static"`.
-        payload: The payload configured on the schedule, or `None` when the
-            dispatch carried no body.
-    """
-
-    schedule_id: str
-    name: str
-    namespace: str
-    fired_at: datetime
-    source: str
-    payload: PayloadT | None = None
-
-
 JSONValue: TypeAlias = Any
 """Any JSON-serializable value."""
 
@@ -154,10 +131,8 @@ __all__ = [
     "FunctionTarget",
     "JSONValue",
     "OneOffExpression",
-    "PayloadT",
     "QueueTarget",
     "Schedule",
-    "ScheduleEvent",
     "ScheduleExpression",
     "ScheduleSource",
     "ScheduleState",
