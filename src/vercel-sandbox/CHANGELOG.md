@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.7.0 - 2026-09-23
+
+### Breaking Changes
+
+- Remove operation-level ``project_id`` arguments. Sandbox operations now always
+  use the project associated with the active credentials. (#409)
+- ``get_or_create_drive`` now returns a ``(drive, created)`` tuple instead of a Drive. Drive creation also uses the configured Sandbox region. (#402)
+
+### Features
+
+- Add a ``delete_orphan_snapshots`` option when destroying a sandbox. (#400)
+- Add standalone `SandboxClient` and `SyncSandboxClient` factories for explicitly configured, injectable service clients. (#404)
+- Support Secure Compute networks when creating, forking, and updating sandboxes with `network_id`. Expose the attached network ID on sandbox handles and allow `update(network_id=None)` to disconnect a sandbox. (#411)
+
+### Bug Fixes
+
+- When an auto-resuming operation (or explicit session acquisition) encounters a stopping or snapshotting sandbox, we now directly resume the sandbox instead of polling. (#412)
+
 ## 0.6.0 - 2026-09-17
 
 ### Features
