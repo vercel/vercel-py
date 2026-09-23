@@ -80,7 +80,6 @@ from vercel.sandbox._internal.process_output import (
 )
 from vercel.sandbox._internal.recovery import (
     SandboxLifecycle,
-    SandboxRecoveryTarget,
     classify_sandbox_lifecycle_error,
     execute_with_sandbox_recovery,
 )
@@ -1052,10 +1051,6 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         to stop that exact session identity on exit.
         """
         return SandboxSessionOperation(self)
-
-    async def _recover(self, lifecycle: SandboxLifecycle, target: SandboxRecoveryTarget) -> bool:
-        await self._await_shared_resume()
-        return True
 
     async def run_process(
         self,

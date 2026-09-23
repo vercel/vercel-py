@@ -23,7 +23,6 @@ from vercel.sandbox._internal.models import (
     SandboxStatus,
     _WriteFile,
 )
-from vercel.sandbox._internal.recovery import SandboxRecoveryTarget
 from vercel.sandbox._internal.state import (
     DriveState,
     ProcessState,
@@ -656,11 +655,8 @@ class SandboxHandleBase(Generic[RuntimeSessionHandleT]):
         ):
             self._apply_payload(sandbox)
 
-    def _capture_recovery_target(self) -> SandboxRecoveryTarget:
-        session = self._current_session
-        if session is not None and session.id != self.current_session_id:
-            session = None
-        return SandboxRecoveryTarget(session_id=self.current_session_id, session=session)
+    def _capture_recovery_session_id(self) -> str:
+        return self.current_session_id
 
     def _write_files_cwd(self, cwd: RemotePath | None) -> str:
         if self.current_session is not None and self.current_session.cwd is not None:

@@ -72,7 +72,6 @@ from vercel.sandbox._internal.process_output import (
 )
 from vercel.sandbox._internal.recovery import (
     SandboxLifecycle,
-    SandboxRecoveryTarget,
     classify_sandbox_lifecycle_error,
     execute_with_sandbox_recovery,
 )
@@ -1074,9 +1073,9 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         with self._recovery_condition:
             super()._apply_session_stop_from_child(child, result)
 
-    def _capture_recovery_target(self) -> SandboxRecoveryTarget:
+    def _capture_recovery_session_id(self) -> str:
         with self._recovery_condition:
-            return super()._capture_recovery_target()
+            return super()._capture_recovery_session_id()
 
     async def _await_shared_resume(self) -> None:
         while True:
@@ -1154,10 +1153,6 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         exact session identity on exit.
         """
         return iter_coroutine(self._acquire_session())
-
-    async def _recover(self, lifecycle: SandboxLifecycle, target: SandboxRecoveryTarget) -> bool:
-        await self._await_shared_resume()
-        return True
 
     def run_process(
         self,
