@@ -103,6 +103,7 @@ from vercel.sandbox._internal.state import SnapshotRetentionState
 from vercel.sandbox._internal.text_reader import TextReader
 
 from . import sync
+from .client import SandboxClient
 
 
 def _service() -> SandboxService:
@@ -606,6 +607,7 @@ async def get_snapshot(*, snapshot_id: str) -> Snapshot:
 __all__ = [
     "SandboxBinaryReader",
     "SandboxBinaryWriter",
+    "SandboxClient",
     "SandboxTextReader",
     "SandboxTextWriter",
     "Drive",
