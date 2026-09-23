@@ -188,7 +188,7 @@ await cache.delete()
 
 Drives must be unmounted from any running Sandbox before they are able to be
 deleted. You can either call the `delete` method on the Drive handle, or use the
-`delete_drive(name=..., project_id=...)` function to delete a drive by name if
+`delete_drive(name=...)` function to delete a drive by name if
 you do not have a drive handle already.
 
 By default, a `Drive` handle or Drive name mounts it read-write. Use

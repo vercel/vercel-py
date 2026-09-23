@@ -108,7 +108,6 @@ def _service() -> SandboxService:
 
 def create_sandbox(
     *,
-    project_id: str | None = None,
     name: str | None = None,
     image: str | None = None,
     source: SandboxSource | None = None,
@@ -135,8 +134,6 @@ def create_sandbox(
     automatic cleanup.
 
     Args:
-        project_id: Project that owns the sandbox. Uses the active credentials
-            when omitted.
         name: Requested sandbox name. The service generates one when omitted.
         image: Vercel Container Registry image reference. The backend validates
             and resolves the reference.
@@ -166,7 +163,6 @@ def create_sandbox(
     """
     return _create_sandbox(
         _service(),
-        project_id=project_id,
         name=name,
         image=image,
         source=source,
@@ -190,7 +186,6 @@ def create_sandbox(
 def fork_sandbox(
     *,
     source_sandbox: str,
-    project_id: str | None = None,
     name: str | None = None,
     ports: list[int] | None = None,
     execution_time_limit: DurationInput = None,
@@ -221,8 +216,6 @@ def fork_sandbox(
 
     Args:
         source_sandbox: Name of the sandbox to fork.
-        project_id: Project that owns both the source and fork. Uses the active
-            credentials when omitted.
         name: Requested name for the fork. The service generates one when
             omitted.
         ports: Ports to expose instead of the source sandbox's ports.
@@ -252,7 +245,6 @@ def fork_sandbox(
     return _fork_sandbox(
         _service(),
         source_sandbox=source_sandbox,
-        project_id=project_id,
         name=name,
         ports=ports,
         execution_time_limit=execution_time_limit,
@@ -275,7 +267,6 @@ def fork_sandbox(
 def get_or_create_sandbox(
     *,
     name: str,
-    project_id: str | None = None,
     resume: bool = True,
     include_system_routes: bool | None = None,
     image: str | None = None,
@@ -303,8 +294,6 @@ def get_or_create_sandbox(
 
     Args:
         name: Sandbox name to retrieve or create.
-        project_id: Project that owns the sandbox. Uses the active credentials
-            when omitted.
         resume: Whether to resume an existing stopped sandbox during lookup.
         include_system_routes: Whether to include platform-managed routes.
         image: Vercel Container Registry image reference. The backend validates
@@ -333,7 +322,6 @@ def get_or_create_sandbox(
     return _get_or_create_sandbox(
         _service(),
         name=name,
-        project_id=project_id,
         resume=resume,
         include_system_routes=include_system_routes,
         image=image,
@@ -359,7 +347,6 @@ def get_or_create_sandbox(
 def get_sandbox(
     *,
     name: str,
-    project_id: str | None = None,
     include_system_routes: bool | None = None,
     **private_parameters: _JSONValue,
 ) -> SyncSandbox:
@@ -371,7 +358,6 @@ def get_sandbox(
 
     Args:
         name: Sandbox name.
-        project_id: Project that owns the sandbox.
         include_system_routes: Whether to include platform-managed routes.
 
     Returns:
@@ -383,7 +369,6 @@ def get_sandbox(
     return _get_sandbox(
         _service(),
         name=name,
-        project_id=project_id,
         include_system_routes=include_system_routes,
         private_parameters=_normalize_private_parameters("get_sandbox", private_parameters),
     )
@@ -392,7 +377,6 @@ def get_sandbox(
 def resume_sandbox(
     *,
     name: str,
-    project_id: str | None = None,
     include_system_routes: bool | None = None,
     **private_parameters: _JSONValue,
 ) -> _ManagedSyncSandbox:
@@ -404,7 +388,6 @@ def resume_sandbox(
 
     Args:
         name: Sandbox name.
-        project_id: Project that owns the sandbox.
         include_system_routes: Whether to include platform-managed routes.
 
     Returns:
@@ -416,7 +399,6 @@ def resume_sandbox(
     return _resume_sandbox(
         _service(),
         name=name,
-        project_id=project_id,
         include_system_routes=include_system_routes,
         private_parameters=_normalize_private_parameters("resume_sandbox", private_parameters),
     )
@@ -425,7 +407,6 @@ def resume_sandbox(
 def get_or_create_drive(
     *,
     name: str,
-    project_id: str | None = None,
     max_size_bytes: int | None = None,
     region: str | None = None,
 ) -> tuple[SyncDrive, bool]:
@@ -433,8 +414,6 @@ def get_or_create_drive(
 
     Args:
         name: Project-local Drive name.
-        project_id: Owning project ID or name. Uses the active project when
-            omitted.
         max_size_bytes: Maximum size for a new Drive. Uses the project's default
             when omitted.
         region: Storage region for a new Drive. Uses ``SyncSandboxServiceOptions.region``
@@ -447,13 +426,12 @@ def get_or_create_drive(
     return _get_or_create_drive(
         _service(),
         name=name,
-        project_id=project_id,
         max_size_bytes=max_size_bytes,
         region=region,
     )
 
 
-def delete_drive(*, name: str, project_id: str | None = None) -> SyncDrive:
+def delete_drive(*, name: str) -> SyncDrive:
     """Delete a Drive by project-local name.
 
     Use this function when no handle is available, such as after an uncertain
@@ -461,19 +439,16 @@ def delete_drive(*, name: str, project_id: str | None = None) -> SyncDrive:
 
     Args:
         name: Project-local Drive name.
-        project_id: Owning project ID or name. Uses the active project when
-            omitted.
 
     Returns:
         The Drive returned by the deletion request.
     """
-    return _delete_drive(_service(), name=name, project_id=project_id)
+    return _delete_drive(_service(), name=name)
 
 
 def query_drives(
     *,
     query: DriveQuery | None = None,
-    project_id: str | None = None,
     page_size: int | None = None,
     cursor: str | None = None,
 ) -> Iterator[SyncDrive]:
@@ -481,7 +456,6 @@ def query_drives(
 
     Args:
         query: Ordering and optional name-prefix filter.
-        project_id: Project whose Drives should be queried.
         page_size: Maximum number of Drives fetched per API request.
         cursor: Cursor at which to begin pagination.
 
@@ -491,7 +465,6 @@ def query_drives(
     return _query_drives(
         _service(),
         query=query,
-        project_id=project_id,
         page_size=page_size,
         cursor=cursor,
     )
@@ -500,7 +473,6 @@ def query_drives(
 def query_sandboxes(
     *,
     query: SandboxQuery | None = None,
-    project_id: str | None = None,
     page_size: int | None = None,
     cursor: str | None = None,
 ) -> Iterator[SyncSandbox]:
@@ -508,7 +480,6 @@ def query_sandboxes(
 
     Args:
         query: Ordering and filtering options.
-        project_id: Project whose sandboxes should be queried.
         page_size: Maximum number of sandboxes fetched per API request.
         cursor: Cursor at which to begin pagination.
 
@@ -518,7 +489,6 @@ def query_sandboxes(
     return _query_sandboxes(
         _service(),
         query=query,
-        project_id=project_id,
         page_size=page_size,
         cursor=cursor,
     )
@@ -526,7 +496,6 @@ def query_sandboxes(
 
 def query_sessions(
     *,
-    project_id: str | None = None,
     name: str | None = None,
     page_size: int | None = None,
     cursor: str | None = None,
@@ -535,7 +504,6 @@ def query_sessions(
     """Iterate over runtime sessions.
 
     Args:
-        project_id: Project whose sessions should be queried.
         name: Sandbox name used to restrict the results.
         page_size: Maximum number of sessions fetched per API request.
         cursor: Cursor at which to begin pagination.
@@ -547,7 +515,6 @@ def query_sessions(
     """
     return _query_sessions(
         _service(),
-        project_id=project_id,
         name=name,
         page_size=page_size,
         cursor=cursor,
@@ -557,7 +524,6 @@ def query_sessions(
 
 def query_snapshots(
     *,
-    project_id: str | None = None,
     name: str | None = None,
     page_size: int | None = None,
     cursor: str | None = None,
@@ -566,7 +532,6 @@ def query_snapshots(
     """Iterate over snapshots.
 
     Args:
-        project_id: Project whose snapshots should be queried.
         name: Sandbox name used to restrict the results.
         page_size: Maximum number of snapshots fetched per API request.
         cursor: Cursor at which to begin pagination.
@@ -578,7 +543,6 @@ def query_snapshots(
     """
     return _query_snapshots(
         _service(),
-        project_id=project_id,
         name=name,
         page_size=page_size,
         cursor=cursor,

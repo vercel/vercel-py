@@ -79,7 +79,6 @@ class SyncSandboxClient:
     def create_sandbox(
         self,
         *,
-        project_id: str | None = None,
         name: str | None = None,
         image: str | None = None,
         source: SandboxSource | None = None,
@@ -100,7 +99,6 @@ class SyncSandboxClient:
     ) -> _ManagedSyncSandbox:
         return _create_sync_sandbox(
             self._service,
-            project_id=project_id,
             name=name,
             image=image,
             source=source,
@@ -124,7 +122,6 @@ class SyncSandboxClient:
         self,
         *,
         source_sandbox: str,
-        project_id: str | None = None,
         name: str | None = None,
         ports: list[int] | None = None,
         execution_time_limit: DurationInput = None,
@@ -145,7 +142,6 @@ class SyncSandboxClient:
         return _fork_sync_sandbox(
             self._service,
             source_sandbox=source_sandbox,
-            project_id=project_id,
             name=name,
             ports=ports,
             execution_time_limit=execution_time_limit,
@@ -168,7 +164,6 @@ class SyncSandboxClient:
         self,
         *,
         name: str,
-        project_id: str | None = None,
         resume: bool = True,
         include_system_routes: bool | None = None,
         image: str | None = None,
@@ -190,7 +185,6 @@ class SyncSandboxClient:
         return _get_or_create_sync_sandbox(
             self._service,
             name=name,
-            project_id=project_id,
             resume=resume,
             include_system_routes=include_system_routes,
             image=image,
@@ -216,14 +210,12 @@ class SyncSandboxClient:
         self,
         *,
         name: str,
-        project_id: str | None = None,
         include_system_routes: bool | None = None,
         **private_parameters: _JSONValue,
     ) -> SyncSandbox:
         return _get_sync_sandbox(
             self._service,
             name=name,
-            project_id=project_id,
             include_system_routes=include_system_routes,
             private_parameters=_normalize_private_parameters("get_sandbox", private_parameters),
         )
@@ -232,14 +224,12 @@ class SyncSandboxClient:
         self,
         *,
         name: str,
-        project_id: str | None = None,
         include_system_routes: bool | None = None,
         **private_parameters: _JSONValue,
     ) -> _ManagedSyncSandbox:
         return _resume_sync_sandbox(
             self._service,
             name=name,
-            project_id=project_id,
             include_system_routes=include_system_routes,
             private_parameters=_normalize_private_parameters("resume_sandbox", private_parameters),
         )
@@ -248,33 +238,29 @@ class SyncSandboxClient:
         self,
         *,
         name: str,
-        project_id: str | None = None,
         max_size_bytes: int | None = None,
         region: str | None = None,
     ) -> tuple[SyncDrive, bool]:
         return _get_or_create_sync_drive(
             self._service,
             name=name,
-            project_id=project_id,
             max_size_bytes=max_size_bytes,
             region=region,
         )
 
-    def delete_drive(self, *, name: str, project_id: str | None = None) -> SyncDrive:
-        return _delete_sync_drive(self._service, name=name, project_id=project_id)
+    def delete_drive(self, *, name: str) -> SyncDrive:
+        return _delete_sync_drive(self._service, name=name)
 
     def query_drives(
         self,
         *,
         query: DriveQuery | None = None,
-        project_id: str | None = None,
         page_size: int | None = None,
         cursor: str | None = None,
     ) -> Iterator[SyncDrive]:
         return _query_sync_drives(
             self._service,
             query=query,
-            project_id=project_id,
             page_size=page_size,
             cursor=cursor,
         )
@@ -283,14 +269,12 @@ class SyncSandboxClient:
         self,
         *,
         query: SandboxQuery | None = None,
-        project_id: str | None = None,
         page_size: int | None = None,
         cursor: str | None = None,
     ) -> Iterator[SyncSandbox]:
         return _query_sync_sandboxes(
             self._service,
             query=query,
-            project_id=project_id,
             page_size=page_size,
             cursor=cursor,
         )
@@ -298,7 +282,6 @@ class SyncSandboxClient:
     def query_sessions(
         self,
         *,
-        project_id: str | None = None,
         name: str | None = None,
         page_size: int | None = None,
         cursor: str | None = None,
@@ -306,7 +289,6 @@ class SyncSandboxClient:
     ) -> Iterator[SyncSandboxRuntimeSession]:
         return _query_sync_sessions(
             self._service,
-            project_id=project_id,
             name=name,
             page_size=page_size,
             cursor=cursor,
@@ -316,7 +298,6 @@ class SyncSandboxClient:
     def query_snapshots(
         self,
         *,
-        project_id: str | None = None,
         name: str | None = None,
         page_size: int | None = None,
         cursor: str | None = None,
@@ -324,7 +305,6 @@ class SyncSandboxClient:
     ) -> Iterator[SyncSnapshot]:
         return _query_sync_snapshots(
             self._service,
-            project_id=project_id,
             name=name,
             page_size=page_size,
             cursor=cursor,

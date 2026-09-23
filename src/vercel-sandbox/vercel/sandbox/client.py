@@ -81,7 +81,6 @@ class SandboxClient:
     def create_sandbox(
         self,
         *,
-        project_id: str | None = None,
         name: str | None = None,
         image: str | None = None,
         source: SandboxSource | None = None,
@@ -102,7 +101,6 @@ class SandboxClient:
     ) -> CreateSandboxOperation:
         return _create_sandbox_operation(
             self._service,
-            project_id=project_id,
             name=name,
             image=image,
             source=source,
@@ -126,7 +124,6 @@ class SandboxClient:
         self,
         *,
         source_sandbox: str,
-        project_id: str | None = None,
         name: str | None = None,
         ports: list[int] | None = None,
         execution_time_limit: DurationInput = None,
@@ -147,7 +144,6 @@ class SandboxClient:
         return _fork_sandbox_operation(
             self._service,
             source_sandbox=source_sandbox,
-            project_id=project_id,
             name=name,
             ports=ports,
             execution_time_limit=execution_time_limit,
@@ -170,7 +166,6 @@ class SandboxClient:
         self,
         *,
         name: str,
-        project_id: str | None = None,
         resume: bool = True,
         include_system_routes: bool | None = None,
         image: str | None = None,
@@ -192,7 +187,6 @@ class SandboxClient:
         return await _get_or_create_sandbox(
             self._service,
             name=name,
-            project_id=project_id,
             resume=resume,
             include_system_routes=include_system_routes,
             image=image,
@@ -218,14 +212,12 @@ class SandboxClient:
         self,
         *,
         name: str,
-        project_id: str | None = None,
         include_system_routes: bool | None = None,
         **private_parameters: _JSONValue,
     ) -> Sandbox:
         return await _get_sandbox(
             self._service,
             name=name,
-            project_id=project_id,
             include_system_routes=include_system_routes,
             private_parameters=_normalize_private_parameters("get_sandbox", private_parameters),
         )
@@ -234,14 +226,12 @@ class SandboxClient:
         self,
         *,
         name: str,
-        project_id: str | None = None,
         include_system_routes: bool | None = None,
         **private_parameters: _JSONValue,
     ) -> ResumeSandboxOperation:
         return _resume_sandbox_operation(
             self._service,
             name=name,
-            project_id=project_id,
             include_system_routes=include_system_routes,
             private_parameters=_normalize_private_parameters("resume_sandbox", private_parameters),
         )
@@ -250,33 +240,29 @@ class SandboxClient:
         self,
         *,
         name: str,
-        project_id: str | None = None,
         max_size_bytes: int | None = None,
         region: str | None = None,
     ) -> tuple[Drive, bool]:
         return await _get_or_create_drive(
             self._service,
             name=name,
-            project_id=project_id,
             max_size_bytes=max_size_bytes,
             region=region,
         )
 
-    async def delete_drive(self, *, name: str, project_id: str | None = None) -> Drive:
-        return await _delete_drive(self._service, name=name, project_id=project_id)
+    async def delete_drive(self, *, name: str) -> Drive:
+        return await _delete_drive(self._service, name=name)
 
     def query_drives(
         self,
         *,
         query: DriveQuery | None = None,
-        project_id: str | None = None,
         page_size: int | None = None,
         cursor: str | None = None,
     ) -> AsyncIterator[Drive]:
         return _query_drives(
             self._service,
             query=query,
-            project_id=project_id,
             page_size=page_size,
             cursor=cursor,
         )
@@ -285,14 +271,12 @@ class SandboxClient:
         self,
         *,
         query: SandboxQuery | None = None,
-        project_id: str | None = None,
         page_size: int | None = None,
         cursor: str | None = None,
     ) -> AsyncIterator[Sandbox]:
         return _query_sandboxes(
             self._service,
             query=query,
-            project_id=project_id,
             page_size=page_size,
             cursor=cursor,
         )
@@ -300,7 +284,6 @@ class SandboxClient:
     def query_sessions(
         self,
         *,
-        project_id: str | None = None,
         name: str | None = None,
         page_size: int | None = None,
         cursor: str | None = None,
@@ -308,7 +291,6 @@ class SandboxClient:
     ) -> AsyncIterator[SandboxRuntimeSession]:
         return _query_sessions(
             self._service,
-            project_id=project_id,
             name=name,
             page_size=page_size,
             cursor=cursor,
@@ -318,7 +300,6 @@ class SandboxClient:
     def query_snapshots(
         self,
         *,
-        project_id: str | None = None,
         name: str | None = None,
         page_size: int | None = None,
         cursor: str | None = None,
@@ -326,7 +307,6 @@ class SandboxClient:
     ) -> AsyncIterator[Snapshot]:
         return _query_snapshots(
             self._service,
-            project_id=project_id,
             name=name,
             page_size=page_size,
             cursor=cursor,

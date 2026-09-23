@@ -42,7 +42,6 @@ async def reconcile_sandbox_drive_cleanup(
     names: Iterable[str],
     known_sandboxes: Mapping[str, Any],
     drive_name: str,
-    project_id: str | None,
     original_error: BaseException | None,
     cleanup_timeout: float = _SESSION_STOP_TIMEOUT_SECONDS,
     get_sandbox: Callable[..., Awaitable[Any]] = sandbox.get_sandbox,
@@ -93,7 +92,7 @@ async def reconcile_sandbox_drive_cleanup(
 
         await attempt(
             f"Drive {drive_name!r}",
-            lambda: delete_drive(name=drive_name, project_id=project_id),
+            lambda: delete_drive(name=drive_name),
         )
         return errors
 
@@ -484,7 +483,7 @@ class AsyncDriver(_ScenarioDriver):
         return await box.snapshot()
 
     async def run_independent_session(self, box: Any) -> tuple[str, int | None, bool]:
-        async with sandbox.resume_sandbox(name=box.name, project_id=box.project_id) as resumed:
+        async with sandbox.resume_sandbox(name=box.name) as resumed:
             command = await resumed.run_process(
                 "printf", ["session follow-up\n"], stdout=subprocess.PIPE
             )
@@ -673,7 +672,7 @@ class SyncDriver(_ScenarioDriver):
         return box.snapshot()
 
     async def run_independent_session(self, box: Any) -> tuple[str, int | None, bool]:
-        with sandbox_sync.resume_sandbox(name=box.name, project_id=box.project_id) as resumed:
+        with sandbox_sync.resume_sandbox(name=box.name) as resumed:
             command = resumed.run_process("printf", ["session follow-up\n"], stdout=subprocess.PIPE)
             assert command.stdout is not None
             output = command.stdout
