@@ -4,8 +4,8 @@ Python SDK for Vercel Schedules.
 
 A schedule fires on a cron cadence or once at a fixed instant, and dispatches
 to a Vercel Queue topic or function. A schedule is identified by its name
-within a namespace. This package manages queue-targeted schedules and parses
-function-targeted schedule events.
+within a namespace. This package manages schedules and reads the firing inside
+a schedule entrypoint.
 
 ```sh
 pip install vercel-schedules
@@ -96,9 +96,9 @@ for schedule in list_schedules():
     ...
 ```
 
-## Handle a function-targeted schedule
+## Run a schedule entrypoint
 
-Point a static schedule at a Python callable with a module entrypoint:
+Point a static schedule at a Python script:
 
 ```json
 {
@@ -106,23 +106,28 @@ Point a static schedule at a Python callable with a module entrypoint:
     {
       "name": "cleanup",
       "expression": { "cron": "0 * * * *" },
-      "target": { "entrypoint": "jobs.cleanup:run" }
+      "target": { "entrypoint": "jobs/cleanup.py" }
     }
   ]
 }
 ```
 
-The Vercel Python runtime dispatches the schedule to the callable with one
-event argument. Static function-targeted schedules do not carry a payload:
+The platform runs the file as `__main__` once per firing. Exiting normally marks
+the firing successful; an exception or non-zero exit fails it. The firing's
+metadata is in `VERCEL_SCHEDULE_*` environment variables:
 
 ```python
 # jobs/cleanup.py
-async def run(event):
-    print(f"Running {event.name}, scheduled at {event.scheduled_at}")
+from vercel.schedules import ScheduleEvent
+
+event = ScheduleEvent.from_env()
+print(f"Running {event.name}, scheduled at {event.scheduled_at}")
 ```
 
-The runtime owns the inbound CloudEvent parsing; `vercel-schedules` is only
-needed to manage schedules through the API.
+`get_event()` is shorthand for `ScheduleEvent.from_env()`. Run by hand without
+the variables, it raises `NotAScheduleInvocationError`. The package is optional
+here: `os.environ["VERCEL_SCHEDULE_NAME"]` works too. Function-targeted
+schedules carry no payload.
 
 ## Configuration
 

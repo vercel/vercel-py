@@ -4,6 +4,9 @@ Schedules fire on a cron cadence or once at a fixed instant, and dispatch to a
 Vercel Queue topic or function. A schedule is identified by its name within a
 namespace. Manage them with `create_schedule` and friends.
 
+A schedule entrypoint runs once per firing; read the firing with
+`ScheduleEvent.from_env()` or `get_event()`.
+
 Requests authenticate with the deployment's Vercel OIDC token. Locally, run
 `vercel env pull` or pass `SchedulesServiceOptions(token=...)` in a session.
 """
@@ -29,6 +32,13 @@ from vercel.schedules._internal.errors import (
     SchedulesError,
     SchedulesResponseError,
     SchedulesValidationError,
+)
+from vercel.schedules._internal.event import (
+    SCHEDULE_EVENT_VERSION,
+    NotAScheduleInvocationError,
+    ScheduleEvent,
+    ScheduleEventError,
+    get_event,
 )
 from vercel.schedules._internal.models import (
     MAX_JITTER,
@@ -242,13 +252,17 @@ __all__ = [
     "DEFAULT_SCHEDULES_BASE_URL",
     "MAX_JITTER",
     "MIN_JITTER",
+    "SCHEDULE_EVENT_VERSION",
     "UNSET",
     "CronExpression",
     "FunctionTarget",
     "JSONValue",
+    "NotAScheduleInvocationError",
     "OneOffExpression",
     "QueueTarget",
     "Schedule",
+    "ScheduleEvent",
+    "ScheduleEventError",
     "ScheduleExpression",
     "ScheduleNotFoundError",
     "ScheduleSource",
@@ -266,6 +280,7 @@ __all__ = [
     "delete_schedule",
     "disable_schedule",
     "enable_schedule",
+    "get_event",
     "get_schedule",
     "invoke_schedule",
     "list_schedules",
