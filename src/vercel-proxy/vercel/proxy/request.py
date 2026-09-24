@@ -13,44 +13,41 @@ _BODY_UNAVAILABLE = (
 
 
 class Request(StarletteRequest):
-    """The incoming request passed to a proxy route handler.
+    """The incoming request passed to a proxy handler.
 
-    Use it to decide how to route the request: inspect ``method``, ``url``,
-    ``headers``, ``query_params``, ``cookies``, ``path_params`` and
-    ``client``. These work exactly as in Starlette.
+    Use ``method``, ``url``, ``headers``, ``query_params``, ``cookies``,
+    ``path_params`` and ``client`` to decide how to route it. They work as in
+    Starlette.
 
-    The request body is not available. A proxy handler runs before the request
-    reaches its destination, and the body is forwarded there unread, so
-    ``body()``, ``json()``, ``form()``, ``stream()``, ``receive`` and
-    ``is_disconnected()`` raise :exc:`RuntimeError`. Route on headers, the
-    path or the query string instead, and read the body in the destination.
+    The request body is not available because it is forwarded to the
+    destination unread. Methods that read it raise ``RuntimeError``. Route on
+    the path, headers or query string instead.
     """
 
     def __init__(self, scope: Scope) -> None:
-        """Create a request from an ASGI connection scope.
+        """Create a request from an ASGI scope.
 
-        You do not normally construct this yourself; the proxy creates one for
-        each incoming request and passes it to the matching handler.
+        The proxy creates requests for you, so you rarely need this.
 
-        *scope* is the ASGI ``http`` scope of the incoming request.
+        *scope* is the ASGI HTTP scope of the request.
         """
         super().__init__(scope)
 
     @property
     def receive(self) -> NoReturn:
-        """Not available in proxy handlers; always raises :exc:`RuntimeError`."""
+        """Not available in proxy handlers. Always raises ``RuntimeError``."""
         raise RuntimeError(_BODY_UNAVAILABLE)
 
     def stream(self) -> NoReturn:
-        """Not available in proxy handlers; always raises :exc:`RuntimeError`."""
+        """Not available in proxy handlers. Always raises ``RuntimeError``."""
         raise RuntimeError(_BODY_UNAVAILABLE)
 
     async def body(self) -> NoReturn:
-        """Not available in proxy handlers; always raises :exc:`RuntimeError`."""
+        """Not available in proxy handlers. Always raises ``RuntimeError``."""
         raise RuntimeError(_BODY_UNAVAILABLE)
 
     async def json(self) -> NoReturn:
-        """Not available in proxy handlers; always raises :exc:`RuntimeError`."""
+        """Not available in proxy handlers. Always raises ``RuntimeError``."""
         raise RuntimeError(_BODY_UNAVAILABLE)
 
     def form(
@@ -60,16 +57,12 @@ class Request(StarletteRequest):
         max_fields: int | float = 1000,
         max_part_size: int = 1024 * 1024,
     ) -> NoReturn:
-        """Not available in proxy handlers; always raises :exc:`RuntimeError`.
+        """Not available in proxy handlers. Always raises ``RuntimeError``.
 
-        *max_files*, *max_fields* and *max_part_size* are accepted for
-        compatibility with Starlette and have no effect.
+        *max_files*, *max_fields* and *max_part_size* are ignored.
         """
         raise RuntimeError(_BODY_UNAVAILABLE)
 
     async def is_disconnected(self) -> NoReturn:
-        """Not available in proxy handlers; always raises :exc:`RuntimeError`.
-
-        Checking for a disconnect requires reading the request body stream.
-        """
+        """Not available in proxy handlers. Always raises ``RuntimeError``."""
         raise RuntimeError(_BODY_UNAVAILABLE)

@@ -10,17 +10,18 @@ __all__ = ["Kind", "Response"]
 
 
 class Kind(enum.Enum):
+    """Whether a response lets the request continue or ends it."""
+
     CONTINUING = "continuing"
     TERMINATING = "terminating"
 
 
 @final
 class Response:
-    """Proxy response produced by a route handler.
+    """The result of a proxy handler.
 
-    Use the static factory methods rather than constructing directly:
-    :meth:`next`, :meth:`rewrite`, :meth:`redirect`, :meth:`json`,
-    or :meth:`respond`.
+    Create one with ``next``, ``rewrite``, ``redirect``, ``json`` or
+    ``respond``.
     """
 
     __slots__ = ("_body", "_destination", "_headers", "_kind", "_status")
@@ -40,11 +41,10 @@ class Response:
         *,
         headers: dict[str, str | None] | None = None,
     ) -> "Response":
-        """Pass the request to the next handler.
+        """Let the request continue to its destination.
 
-        *headers* overrides named headers in the upstream request; a ``None``
-        value for a key drops that header. Omit to leave upstream headers
-        untouched.
+        *headers* sets headers on the forwarded request. A ``None`` value
+        removes that header. Omit to forward the headers unchanged.
         """
         return Response._make(Kind.CONTINUING, None, 200, b"", headers or {})
 
@@ -54,13 +54,12 @@ class Response:
         *,
         headers: dict[str, str | None] | None = None,
     ) -> "Response":
-        """Serve the response from *destination* with the client URL unchanged.
+        """Serve the request from *destination* without changing the URL the client sees.
 
-        *destination* is the URL to fetch the response from.
+        *destination* is the URL to serve the request from.
 
-        *headers* overrides named headers in the upstream request; a ``None``
-        value for a key drops that header. Omit to leave upstream headers
-        untouched.
+        *headers* sets headers on the forwarded request. A ``None`` value
+        removes that header. Omit to forward the headers unchanged.
         """
         return Response._make(Kind.CONTINUING, destination, 200, b"", headers or {})
 
@@ -75,10 +74,9 @@ class Response:
 
         *destination* is the URL to redirect to.
 
-        *status* is the HTTP redirect code; must be 3xx. Defaults to 307
-        (Temporary Redirect).
+        *status* is the redirect status code and must be 3xx. Defaults to 307.
 
-        *headers* are sent to the client as response headers.
+        *headers* are added to the response.
         """
         if not (300 <= status <= 399):
             raise ValueError(f"invalid redirect status {status}: must be a 3xx code")
@@ -91,15 +89,14 @@ class Response:
         status: int = 200,
         headers: dict[str, str] | None = None,
     ) -> "Response":
-        """Terminate the request with a JSON body.
+        """Answer the request with a JSON body.
 
-        *data* is any JSON-serialisable value.
+        *data* is any value that can be serialized to JSON.
 
-        *status* is the HTTP response code. Defaults to 200.
+        *status* is the HTTP status code. Defaults to 200.
 
-        *headers* are sent to the client as response headers. ``Content-Type``
-        is always set to ``application/json``; any value in *headers* is
-        overridden.
+        *headers* are added to the response. ``Content-Type`` is always
+        ``application/json``.
         """
         body = _json.dumps(data).encode()
         out: dict[str, str] = dict(headers) if headers else {}
@@ -113,13 +110,13 @@ class Response:
         body: bytes = b"",
         headers: dict[str, str] | None = None,
     ) -> "Response":
-        """Terminate the request with a raw HTTP response.
+        """Answer the request with a raw HTTP response.
 
-        *status* is the HTTP response code.
+        *status* is the HTTP status code.
 
-        *body* is the raw response body. Defaults to an empty byte string.
+        *body* is the response body. Defaults to empty.
 
-        *headers* are sent to the client as response headers.
+        *headers* are added to the response.
         """
         return Response._make(Kind.TERMINATING, None, status, body, headers or {})
 
@@ -129,30 +126,30 @@ class Response:
 
     @property
     def kind(self) -> Kind:
-        """Response category."""
+        """Whether the request continues or ends here."""
         return self._kind
 
     @property
     def destination(self) -> str | None:
-        """Destination URL for ``rewrite`` and ``redirect`` responses."""
+        """The URL for ``rewrite`` and ``redirect`` responses."""
         return self._destination
 
     @property
     def status(self) -> int:
-        """HTTP status code."""
+        """The HTTP status code."""
         return self._status
 
     @property
     def body(self) -> bytes:
-        """Response body bytes."""
+        """The response body."""
         return self._body
 
     @property
     def headers(self) -> Mapping[str, str | None]:
-        """Read-only view of the headers passed to the factory.
+        """The headers given when the response was created.
 
-        For continuing responses (``next``, ``rewrite``), a ``None`` value
-        for a key means drop that header from the upstream request.
+        For ``next`` and ``rewrite``, a ``None`` value means the header is
+        removed.
         """
         return types.MappingProxyType(self._headers)
 
