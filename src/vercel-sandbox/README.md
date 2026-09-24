@@ -228,9 +228,9 @@ and each Drive must use the sandbox region. Drives default to `iad1` when
 ## Interactive PTY sessions
 
 `open_interactive(...)` starts a process attached to a pseudo-terminal and
-scopes the connection to a context manager. Terminal output arrives as raw
-bytes, input is written with `send(...)`, and the remote exit code is
-available once the process ends:
+scopes the connection to a context manager. Terminal I/O is a standard byte
+stream on `session.stream`, so it can be handed to anything that consumes one;
+the session itself carries the controls that are not part of the stream:
 
 ```python
 import asyncio
@@ -241,30 +241,42 @@ from vercel import sandbox
 async def main() -> None:
     async with sandbox.create_sandbox() as box:
         async with box.open_interactive("/bin/bash", cols=100, rows=30) as pty:
-            await pty.send(b"tty\n")
-            async for chunk in pty:
+            await pty.stream.send(b"tty\n")
+            async for chunk in pty.stream:
                 print(chunk.decode(errors="replace"), end="")
                 break
 
             await pty.resize(120, 40)
-            await pty.send(b"exit 0\n")
+            await pty.stream.send(b"exit 0\n")
             print(await pty.wait())
 
 
 asyncio.run(main())
 ```
 
+The asynchronous `stream` is an `anyio.abc.ByteStream`; the synchronous one is
+an `io.RawIOBase`, so each matches the conventions of its own ecosystem:
+
+```python
+from vercel.sandbox import sync as sandbox
+
+with sandbox.create_sandbox() as box:
+    with box.open_interactive("/bin/bash") as pty:
+        pty.stream.write(b"tty\n")
+        print(pty.stream.read(1024))
+        pty.stream.write(b"exit 0\n")
+        print(pty.wait(timeout=30))
+```
+
 `TERM` defaults to `xterm-256color` so full-screen programs render correctly;
-override it through `env`. Iteration ends when the process exits, and `wait()`
-returns its exit code, or `None` if the connection closed without reporting
-one.
+override it through `env`. The stream ends when the process exits, and
+`wait()` returns its exit code, or `None` if the connection closed without
+reporting one.
 
 The session is bound to one connection: it cannot be reattached after the
-context exits, and the output stream is raw terminal bytes including escape
+context exits, and the stream carries raw terminal bytes including escape
 sequences. Programs that repaint the screen need a terminal emulator on the
 consuming side to interpret those sequences.
-
-The synchronous API mirrors this with `with box.open_interactive(...) as pty:`.
 
 ## Session lifecycles
 

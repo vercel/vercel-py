@@ -488,12 +488,12 @@ class AsyncDriver(_ScenarioDriver):
             yield pty
 
     async def interactive_send(self, pty: Any, data: bytes) -> None:
-        await pty.send(data)
+        await pty.stream.send(data)
 
     async def interactive_read_until(self, pty: Any, marker: str) -> str:
         async def collect() -> str:
             output = ""
-            async for chunk in pty:
+            async for chunk in pty.stream:
                 output += chunk.decode("utf-8", errors="replace")
                 if _marker_on_own_line(output, marker):
                     return output
@@ -704,12 +704,12 @@ class SyncDriver(_ScenarioDriver):
             yield pty
 
     async def interactive_send(self, pty: Any, data: bytes) -> None:
-        pty.send(data)
+        pty.stream.write(data)
 
     async def interactive_read_until(self, pty: Any, marker: str) -> str:
         deadline = time.monotonic() + INTERACTIVE_TIMEOUT_SECONDS
         output = ""
-        for chunk in pty:
+        while chunk := pty.stream.read(65536):
             output += chunk.decode("utf-8", errors="replace")
             if _marker_on_own_line(output, marker):
                 return output

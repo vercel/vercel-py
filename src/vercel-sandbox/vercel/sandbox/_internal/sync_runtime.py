@@ -1,7 +1,9 @@
 """Sync runtime handles and entry points for Sandbox operations."""
 
+import io
 import signal as signal_module
 import subprocess
+import time
 import warnings
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager
@@ -9,9 +11,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from threading import Condition
 from types import TracebackType
-from typing import Any, Literal, TextIO, overload
-
-import anyio
+from typing import TYPE_CHECKING, Any, Literal, TextIO, overload
 
 from vercel._internal.core.byte_stream import SyncByteStreamRuntime
 from vercel._internal.core.iter_coroutine import iter_coroutine
@@ -117,6 +117,9 @@ from vercel.sandbox._internal.sync_filesystem_handle import (
     SyncSandboxTextWriter,
 )
 from vercel.sandbox._internal.text_reader import SyncTextReader, _sync_text_readers
+
+if TYPE_CHECKING:
+    from _typeshed import ReadableBuffer, WriteableBuffer
 
 
 def _terminal_error(error: _SandboxTerminalState, sandbox: object) -> SandboxTerminalStateError:
@@ -232,70 +235,119 @@ class SyncProcess(_ProcessHandleState):
         self.send_signal(ProcessSignal.SIGKILL)
 
 
-class SyncInteractiveSession:
-    """Read and write the PTY of an interactive sandbox process.
+class SyncInteractiveStream(io.RawIOBase):
+    """Terminal I/O for an interactive session, as a plain raw binary stream."""
 
-    Iterating the session yields terminal output as it arrives and stops once
-    the remote process exits. The session cannot be reattached after closing.
+    def __init__(self, session: "SyncInteractiveSession") -> None:
+        super().__init__()
+        self._session = session
+        self._buffer = b""
+
+    def readable(self) -> bool:
+        return True
+
+    def writable(self) -> bool:
+        return True
+
+    def readinto(self, buffer: "WriteableBuffer", /) -> int:
+        self._checkClosed()
+        view = memoryview(buffer).cast("B")
+        if not len(view):
+            return 0
+        if not self._buffer:
+            data = self._session._read()
+            if data is None:
+                return 0
+            self._buffer = data
+        count = min(len(view), len(self._buffer))
+        view[:count] = self._buffer[:count]
+        self._buffer = self._buffer[count:]
+        return count
+
+    def write(self, data: "ReadableBuffer", /) -> int:
+        self._checkClosed()
+        payload = bytes(memoryview(data).cast("B"))
+        self._session._write(payload)
+        return len(payload)
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        try:
+            super().close()
+        finally:
+            self._session._aclose_transport()
+
+
+class SyncInteractiveSession:
+    """Control an interactive sandbox process attached to a PTY.
+
+    Terminal I/O goes through :attr:`stream`; this object carries the controls
+    that are not part of the byte stream. The session cannot be reattached
+    after it closes.
     """
 
-    __slots__ = ("_returncode", "_transport")
+    __slots__ = ("_returncode", "_transport", "stream")
+
+    stream: SyncInteractiveStream
+    """Raw terminal output and input."""
 
     def __init__(self, *, transport: SyncInteractiveTransport) -> None:
         self._transport = transport
         self._returncode: int | None = None
+        self.stream = SyncInteractiveStream(self)
 
     @property
     def returncode(self) -> int | None:
         """Exit code of the remote process, or ``None`` while it runs."""
         return self._returncode
 
-    def send(self, data: bytes) -> None:
-        """Write bytes to the terminal's standard input."""
-        iter_coroutine(self._transport.send_bytes(data))
-
     def resize(self, cols: int, rows: int) -> None:
         """Tell the remote terminal its new size in characters."""
+        self.stream._checkClosed()
         iter_coroutine(self._transport.send_json(resize_message(cols, rows)))
 
-    def receive(self) -> bytes:
-        """Return the next chunk of terminal output.
+    def wait(self, timeout: float | None = None) -> int | None:
+        """Wait for the remote process to exit and return its exit code.
+
+        Pending terminal output is discarded. Returns ``None`` when the
+        connection closed without reporting an exit code.
+
+        Args:
+            timeout: Seconds to wait before giving up. Waits indefinitely
+                when ``None``.
 
         Raises:
-            anyio.EndOfStream: If the remote process exited.
+            TimeoutError: If the process is still running at the deadline.
         """
-        frame = iter_coroutine(self._transport.receive())
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while self._returncode is None:
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                raise TimeoutError("Interactive process did not exit before the timeout")
+            if self._read(timeout=remaining) is None:
+                break
+        return self._returncode
+
+    def close(self) -> None:
+        """Close the session and release the connection."""
+        self.stream.close()
+
+    def _read(self, timeout: float | None = None) -> bytes | None:
+        frame = iter_coroutine(self._transport.receive(timeout=timeout))
         if frame.data is not None:
             return frame.data
         # The exit frame is the last thing the service sends before dropping
         # the connection, so it ends the output stream.
         if frame.returncode is not None:
             self._returncode = frame.returncode
-        raise anyio.EndOfStream
+        return None
 
-    def wait(self) -> int | None:
-        """Wait for the remote process to exit and return its exit code.
+    def _write(self, data: bytes) -> None:
+        iter_coroutine(self._transport.send_bytes(data))
 
-        Pending terminal output is discarded. Returns ``None`` when the
-        connection closed without reporting an exit code.
-        """
-        while self._returncode is None:
-            try:
-                self.receive()
-            except anyio.EndOfStream:
-                break
-        return self._returncode
-
-    def close(self) -> None:
-        """Close the session and release the connection."""
+    def _aclose_transport(self) -> None:
         iter_coroutine(self._transport.close())
-
-    def __iter__(self) -> Iterator[bytes]:
-        while True:
-            try:
-                yield self.receive()
-            except anyio.EndOfStream:
-                return
 
 
 @contextmanager
@@ -326,7 +378,11 @@ def _open_interactive_session(
                 )
             )
         )
-        yield SyncInteractiveSession(transport=transport)
+        pty = SyncInteractiveSession(transport=transport)
+        try:
+            yield pty
+        finally:
+            pty.close()
     finally:
         iter_coroutine(transport.close())
 
@@ -1042,7 +1098,7 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         must be used as a context manager::
 
             with session.open_interactive() as pty:
-                pty.send(b"echo hi\n")
+                pty.stream.write(b"echo hi\n")
 
         Args:
             command: Executable or command name.

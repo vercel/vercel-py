@@ -228,46 +228,73 @@ class Process(_ProcessHandleState):
         await self.send_signal(ProcessSignal.SIGKILL)
 
 
-class InteractiveSession:
-    """Read and write the PTY of an interactive sandbox process.
+class InteractiveStream(anyio.abc.ByteStream):
+    """Terminal I/O for an interactive session, as a plain anyio byte stream."""
 
-    Iterating the session yields terminal output as it arrives and stops once
-    the remote process exits. The session cannot be reattached after closing.
+    def __init__(self, session: "InteractiveSession") -> None:
+        self._session = session
+        self._buffer = b""
+        self._closed = False
+        self._read_guard = anyio.ResourceGuard("reading from")
+        self._write_guard = anyio.ResourceGuard("writing to")
+
+    async def receive(self, max_bytes: int = 65536) -> bytes:
+        if max_bytes < 1:
+            raise ValueError("max_bytes must be at least 1")
+        with self._read_guard:
+            if self._closed:
+                raise anyio.ClosedResourceError
+            if not self._buffer:
+                data = await self._session._read()
+                if data is None:
+                    raise anyio.EndOfStream
+                self._buffer = data
+            chunk, self._buffer = self._buffer[:max_bytes], self._buffer[max_bytes:]
+            return chunk
+
+    async def send(self, item: bytes) -> None:
+        with self._write_guard:
+            if self._closed:
+                raise anyio.ClosedResourceError
+            await self._session._write(item)
+
+    async def send_eof(self) -> None:
+        raise NotImplementedError("Interactive sessions cannot half-close a terminal")
+
+    async def aclose(self) -> None:
+        self._closed = True
+        self._buffer = b""
+        await self._session._aclose_transport()
+
+
+class InteractiveSession:
+    """Control an interactive sandbox process attached to a PTY.
+
+    Terminal I/O goes through :attr:`stream`; this object carries the controls
+    that are not part of the byte stream. The session cannot be reattached
+    after it closes.
     """
 
-    __slots__ = ("_returncode", "_transport")
+    __slots__ = ("_returncode", "_transport", "stream")
+
+    stream: InteractiveStream
+    """Raw terminal output and input."""
 
     def __init__(self, *, transport: AsyncInteractiveTransport) -> None:
         self._transport = transport
         self._returncode: int | None = None
+        self.stream = InteractiveStream(self)
 
     @property
     def returncode(self) -> int | None:
         """Exit code of the remote process, or ``None`` while it runs."""
         return self._returncode
 
-    async def send(self, data: bytes) -> None:
-        """Write bytes to the terminal's standard input."""
-        await self._transport.send_bytes(data)
-
     async def resize(self, cols: int, rows: int) -> None:
         """Tell the remote terminal its new size in characters."""
+        if self.stream._closed:
+            raise anyio.ClosedResourceError
         await self._transport.send_json(resize_message(cols, rows))
-
-    async def receive(self) -> bytes:
-        """Return the next chunk of terminal output.
-
-        Raises:
-            anyio.EndOfStream: If the remote process exited.
-        """
-        frame = await self._transport.receive()
-        if frame.data is not None:
-            return frame.data
-        # The exit frame is the last thing the service sends before dropping
-        # the connection, so it ends the output stream.
-        if frame.returncode is not None:
-            self._returncode = frame.returncode
-        raise anyio.EndOfStream
 
     async def wait(self) -> int | None:
         """Wait for the remote process to exit and return its exit code.
@@ -276,25 +303,29 @@ class InteractiveSession:
         connection closed without reporting an exit code.
         """
         while self._returncode is None:
-            try:
-                await self.receive()
-            except anyio.EndOfStream:
+            if await self._read() is None:
                 break
         return self._returncode
 
-    async def close(self) -> None:
+    async def aclose(self) -> None:
         """Close the session and release the connection."""
+        await self.stream.aclose()
+
+    async def _read(self) -> bytes | None:
+        frame = await self._transport.receive()
+        if frame.data is not None:
+            return frame.data
+        # The exit frame is the last thing the service sends before dropping
+        # the connection, so it ends the output stream.
+        if frame.returncode is not None:
+            self._returncode = frame.returncode
+        return None
+
+    async def _write(self, data: bytes) -> None:
+        await self._transport.send_bytes(data)
+
+    async def _aclose_transport(self) -> None:
         await self._transport.close()
-
-    def __aiter__(self) -> AsyncIterator[bytes]:
-        return self._iterate()
-
-    async def _iterate(self) -> AsyncIterator[bytes]:
-        while True:
-            try:
-                yield await self.receive()
-            except anyio.EndOfStream:
-                return
 
 
 @asynccontextmanager
@@ -322,7 +353,11 @@ async def _open_interactive_session(
                 rows=rows,
             )
         )
-        yield InteractiveSession(transport=transport)
+        pty = InteractiveSession(transport=transport)
+        try:
+            yield pty
+        finally:
+            await pty.aclose()
 
 
 class Snapshot(SnapshotHandleBase):
@@ -987,7 +1022,7 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         must be used as an async context manager::
 
             async with session.open_interactive() as pty:
-                await pty.send(b"echo hi\n")
+                await pty.stream.send(b"echo hi\n")
 
         Args:
             command: Executable or command name.

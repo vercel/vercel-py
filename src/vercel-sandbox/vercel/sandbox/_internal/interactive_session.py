@@ -5,6 +5,7 @@ import time
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import ExitStack, asynccontextmanager
 from dataclasses import dataclass
+from typing import cast
 
 import anyio
 import httpx2 as httpx
@@ -13,6 +14,7 @@ from httpx2.websockets import (
     HTTPXWSException,
     WebSocketSession,
 )
+from wsproto.utilities import LocalProtocolError
 
 from vercel.sandbox._internal.errors import SandboxInteractiveError
 from vercel.sandbox._internal.models import JSONObject, JSONValue
@@ -25,6 +27,7 @@ DEFAULT_TERM = "xterm-256color"
 _HEALTH_ATTEMPTS = 5
 _HEALTH_BACKOFF_SECONDS = 0.1
 _FRAME_BUFFER = 64
+_SEND_ERRORS = (HTTPXWSException, httpx.HTTPError, LocalProtocolError)
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,30 +77,37 @@ def health_url(url: str) -> str:
     return str(httpx.URL(url).copy_with(scheme="https", raw_path=b"/health"))
 
 
-def decode_frame(event: object) -> Frame:
-    """Map one received WebSocket event to terminal output or an exit."""
+def decode_frame(event: object) -> Frame | None:
+    """Map one received WebSocket event to terminal output or an exit.
+
+    Returns ``None`` for control frames that carry nothing for the caller, so
+    protocol chatter never reaches the terminal stream.
+    """
     data = getattr(event, "data", None)
     if isinstance(data, bytes):
-        return Frame(data=data)
+        # An empty frame is not end-of-stream, so it must not reach a reader.
+        return Frame(data=data) if data else None
     if isinstance(data, str):
-        # Control frames are JSON text.
-        exit_frame = _exit_frame(data)
-        if exit_frame is not None:
-            return exit_frame
-        return Frame(data=data.encode())
+        control = _parse_control(data)
+        if control is None:
+            return Frame(data=data.encode()) if data else None
+        if control.get("type") != "exit":
+            return None
+        # The service omits "code" when the process exited successfully.
+        code = control.get("code")
+        return Frame(returncode=code if isinstance(code, int) else 0, end=True)
     return _CLOSED
 
 
-def _exit_frame(text: str) -> Frame | None:
+def _parse_control(text: str) -> dict[str, JSONValue] | None:
+    """Return the decoded control frame, or ``None`` for terminal output."""
     try:
         message = json.loads(text)
     except ValueError:
         return None
-    if not isinstance(message, dict) or message.get("type") != "exit":
+    if not isinstance(message, dict) or "type" not in message:
         return None
-    # The service omits "code" when the process exited successfully.
-    code = message.get("code")
-    return Frame(returncode=code if isinstance(code, int) else 0, end=True)
+    return cast(dict[str, JSONValue], message)
 
 
 class AsyncInteractiveTransport:
@@ -147,6 +157,8 @@ class AsyncInteractiveTransport:
                 frame = decode_frame(await session.receive())
             except (HTTPXWSException, httpx.HTTPError, anyio.EndOfStream):
                 return
+            if frame is None:
+                continue
             try:
                 await self._send.send(frame)
             except anyio.BrokenResourceError:
@@ -162,13 +174,22 @@ class AsyncInteractiveTransport:
                     return
             except httpx.HTTPError:
                 pass
-            await anyio.sleep(_HEALTH_BACKOFF_SECONDS * (attempt + 1))
+            if attempt + 1 < _HEALTH_ATTEMPTS:
+                await anyio.sleep(_HEALTH_BACKOFF_SECONDS * (attempt + 1))
 
     async def send_bytes(self, data: bytes) -> None:
-        await self._require_session().send_bytes(data)
+        session = self._require_session()
+        try:
+            await session.send_bytes(data)
+        except _SEND_ERRORS as exc:
+            raise anyio.BrokenResourceError from exc
 
     async def send_json(self, message: JSONObject) -> None:
-        await self._require_session().send_json(message)
+        session = self._require_session()
+        try:
+            await session.send_json(message)
+        except _SEND_ERRORS as exc:
+            raise anyio.BrokenResourceError from exc
 
     async def receive(self) -> Frame:
         if self._finished:
@@ -193,17 +214,34 @@ class AsyncInteractiveTransport:
         return self._session
 
 
+def _unwrap_single(error: BaseException) -> BaseException:
+    """Unwrap exception groups that carry exactly one error."""
+    while True:
+        nested = getattr(error, "exceptions", None)
+        if not isinstance(nested, tuple) or len(nested) != 1:
+            return error
+        error = nested[0]
+
+
 @asynccontextmanager
 async def open_async_transport(
     state: InteractiveSessionState,
 ) -> AsyncIterator[AsyncInteractiveTransport]:
     transport = AsyncInteractiveTransport(state)
-    async with anyio.create_task_group() as task_group:
-        await task_group.start(transport.run)
-        try:
-            yield transport
-        finally:
-            await transport.close()
+    try:
+        async with anyio.create_task_group() as task_group:
+            await task_group.start(transport.run)
+            try:
+                yield transport
+            finally:
+                await transport.close()
+    except BaseException as error:
+        # The connection task group wraps the caller's own exceptions, which
+        # would otherwise make them impossible to catch by type.
+        unwrapped = _unwrap_single(error)
+        if unwrapped is error:
+            raise
+        raise unwrapped from None
 
 
 class SyncInteractiveTransport:
@@ -223,7 +261,7 @@ class SyncInteractiveTransport:
             self._session = self._stack.enter_context(
                 client.websocket(self._state.url, params={"token": self._state.token})
             )
-        except (HTTPXWSException, httpx.HTTPError) as exc:
+        except (HTTPXWSException, httpx.HTTPError, OSError) as exc:
             await self.close()
             raise SandboxInteractiveError("Interactive session could not be established") from exc
         except BaseException:
@@ -238,25 +276,51 @@ class SyncInteractiveTransport:
                     return
             except httpx.HTTPError:
                 pass
-            time.sleep(_HEALTH_BACKOFF_SECONDS * (attempt + 1))
+            if attempt + 1 < _HEALTH_ATTEMPTS:
+                time.sleep(_HEALTH_BACKOFF_SECONDS * (attempt + 1))
 
     async def send_bytes(self, data: bytes) -> None:
-        self._require_session().send_bytes(data)
+        session = self._require_session()
+        try:
+            session.send_bytes(data)
+        except _SEND_ERRORS as exc:
+            raise anyio.BrokenResourceError from exc
 
     async def send_json(self, message: JSONObject) -> None:
-        self._require_session().send_json(message)
+        session = self._require_session()
+        try:
+            session.send_json(message)
+        except _SEND_ERRORS as exc:
+            raise anyio.BrokenResourceError from exc
 
-    async def receive(self) -> Frame:
+    async def receive(self, timeout: float | None = None) -> Frame:
+        """Read one frame, waiting at most ``timeout`` seconds for it.
+
+        Raises:
+            TimeoutError: If no frame arrives before the deadline.
+        """
         if self._finished:
             return _CLOSED
-        try:
-            frame = decode_frame(self._require_session().receive())
-        except (HTTPXWSException, httpx.HTTPError, anyio.EndOfStream, anyio.ClosedResourceError):
-            self._finished = True
-            return _CLOSED
-        if frame.end:
-            self._finished = True
-        return frame
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                raise TimeoutError("No interactive frame arrived before the timeout")
+            try:
+                frame = decode_frame(self._require_session().receive(remaining))
+            except (
+                HTTPXWSException,
+                httpx.HTTPError,
+                anyio.EndOfStream,
+                anyio.ClosedResourceError,
+            ):
+                self._finished = True
+                return _CLOSED
+            if frame is None:
+                continue
+            if frame.end:
+                self._finished = True
+            return frame
 
     async def close(self) -> None:
         if self._closed:

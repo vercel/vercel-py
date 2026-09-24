@@ -27,7 +27,7 @@ async def _read_until(pty: InteractiveSession, marker: str, *, timeout: float = 
 
     async def collect() -> str:
         output = ""
-        async for chunk in pty:
+        async for chunk in pty.stream:
             output += chunk.decode("utf-8", errors="replace")
             if any(line.rstrip("\r") == marker for line in output.splitlines()):
                 return output
@@ -51,13 +51,13 @@ async def _main() -> None:
         async with box.open_interactive("/bin/bash", cols=100, rows=30) as pty:
             # The shell needs a round trip before it reliably echoes output, so
             # confirm it is live before sending the command under test.
-            await pty.send(f"printf '\\n{READY}\\n'\n".encode())
+            await pty.stream.send(f"printf '\\n{READY}\\n'\n".encode())
             await _read_until(pty, READY)
             print("interactive shell is ready")
 
             await pty.resize(120, 40)
 
-            await pty.send(f"tty; printf '\\n{DONE}\\n'\n".encode())
+            await pty.stream.send(f"tty; printf '\\n{DONE}\\n'\n".encode())
             output = await _read_until(pty, DONE)
             print("-" * 60)
             print(output.rstrip())
@@ -66,7 +66,7 @@ async def _main() -> None:
             # `tty` prints a terminal device only when the process owns a PTY.
             assert "/dev/pts/" in output, "command did not run under a PTY"
 
-            await pty.send(b"exit 3\n")
+            await pty.stream.send(b"exit 3\n")
             returncode = await pty.wait()
             print(f"interactive process exited with {returncode}")
             assert returncode == 3, f"unexpected exit code {returncode}"
