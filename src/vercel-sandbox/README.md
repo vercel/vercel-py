@@ -225,6 +225,47 @@ Drive name may appear only once. Mounted sandboxes cannot use failover regions,
 and each Drive must use the sandbox region. Drives default to `iad1` when
 `region` is omitted.
 
+## Interactive PTY sessions
+
+`open_interactive(...)` starts a process attached to a pseudo-terminal and
+scopes the connection to a context manager. Terminal output arrives as raw
+bytes, input is written with `send(...)`, and the remote exit code is
+available once the process ends:
+
+```python
+import asyncio
+
+from vercel import sandbox
+
+
+async def main() -> None:
+    async with sandbox.create_sandbox() as box:
+        async with box.open_interactive("/bin/bash", cols=100, rows=30) as pty:
+            await pty.send(b"tty\n")
+            async for chunk in pty:
+                print(chunk.decode(errors="replace"), end="")
+                break
+
+            await pty.resize(120, 40)
+            await pty.send(b"exit 0\n")
+            print(await pty.wait())
+
+
+asyncio.run(main())
+```
+
+`TERM` defaults to `xterm-256color` so full-screen programs render correctly;
+override it through `env`. Iteration ends when the process exits, and `wait()`
+returns its exit code, or `None` if the connection closed without reporting
+one.
+
+The session is bound to one connection: it cannot be reattached after the
+context exits, and the output stream is raw terminal bytes including escape
+sequences. Programs that repaint the screen need a terminal emulator on the
+consuming side to interpret those sequences.
+
+The synchronous API mirrors this with `with box.open_interactive(...) as pty:`.
+
 ## Session lifecycles
 
 Sandbox-level process and filesystem operations resume a stopped sandbox

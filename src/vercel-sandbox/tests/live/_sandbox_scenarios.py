@@ -36,6 +36,15 @@ from vercel.sandbox import (
 _SESSION_STOP_TIMEOUT_SECONDS = 60
 _SESSION_STOP_POLL_INTERVAL_SECONDS = 0.5
 
+INTERACTIVE_TIMEOUT_SECONDS = 60
+_READY = "PTY_READY"
+_DONE = "PTY_DONE"
+
+
+def _marker_on_own_line(output: str, marker: str) -> bool:
+    """Ignore the echoed command line and match only real output."""
+    return any(line.rstrip("\r") == marker for line in output.splitlines())
+
 
 async def reconcile_sandbox_drive_cleanup(
     *,
@@ -128,6 +137,13 @@ async def reconcile_sandbox_drive_cleanup(
 
     if cancellation is not None and original_error is None:
         raise cancellation
+
+
+@dataclass(frozen=True, slots=True)
+class InteractiveObservation:
+    is_tty: bool
+    command_output: str
+    exit_code: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -280,6 +296,23 @@ class _ScenarioDriver:
     async def create_process(
         self, box: Any, command: str, args: list[str], *, kill_after: float | None = None
     ) -> Any:
+        raise NotImplementedError
+
+    @asynccontextmanager
+    async def open_interactive(self, box: Any) -> AsyncIterator[Any]:
+        raise NotImplementedError
+        yield
+
+    async def interactive_send(self, pty: Any, data: bytes) -> None:
+        raise NotImplementedError
+
+    async def interactive_read_until(self, pty: Any, marker: str) -> str:
+        raise NotImplementedError
+
+    async def interactive_resize(self, pty: Any, cols: int, rows: int) -> None:
+        raise NotImplementedError
+
+    async def interactive_wait(self, pty: Any) -> int | None:
         raise NotImplementedError
 
     async def wait(self, command: Any) -> int | None:
@@ -448,6 +481,33 @@ class AsyncDriver(_ScenarioDriver):
         self, box: Any, command: str, args: list[str], *, kill_after: float | None = None
     ) -> Any:
         return await box.create_process(command, args, kill_after=kill_after)
+
+    @asynccontextmanager
+    async def open_interactive(self, box: Any) -> AsyncIterator[Any]:
+        async with box.open_interactive("/bin/bash", cols=100, rows=30) as pty:
+            yield pty
+
+    async def interactive_send(self, pty: Any, data: bytes) -> None:
+        await pty.send(data)
+
+    async def interactive_read_until(self, pty: Any, marker: str) -> str:
+        async def collect() -> str:
+            output = ""
+            async for chunk in pty:
+                output += chunk.decode("utf-8", errors="replace")
+                if _marker_on_own_line(output, marker):
+                    return output
+            return output
+
+        with anyio.fail_after(INTERACTIVE_TIMEOUT_SECONDS):
+            return await collect()
+
+    async def interactive_resize(self, pty: Any, cols: int, rows: int) -> None:
+        await pty.resize(cols, rows)
+
+    async def interactive_wait(self, pty: Any) -> int | None:
+        with anyio.fail_after(INTERACTIVE_TIMEOUT_SECONDS):
+            return await pty.wait()
 
     async def wait(self, command: Any) -> int | None:
         return await command.wait()
@@ -638,6 +698,31 @@ class SyncDriver(_ScenarioDriver):
     ) -> Any:
         return box.create_process(command, args, kill_after=kill_after)
 
+    @asynccontextmanager
+    async def open_interactive(self, box: Any) -> AsyncIterator[Any]:
+        with box.open_interactive("/bin/bash", cols=100, rows=30) as pty:
+            yield pty
+
+    async def interactive_send(self, pty: Any, data: bytes) -> None:
+        pty.send(data)
+
+    async def interactive_read_until(self, pty: Any, marker: str) -> str:
+        deadline = time.monotonic() + INTERACTIVE_TIMEOUT_SECONDS
+        output = ""
+        for chunk in pty:
+            output += chunk.decode("utf-8", errors="replace")
+            if _marker_on_own_line(output, marker):
+                return output
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"timed out waiting for {marker!r}")
+        return output
+
+    async def interactive_resize(self, pty: Any, cols: int, rows: int) -> None:
+        pty.resize(cols, rows)
+
+    async def interactive_wait(self, pty: Any) -> int | None:
+        return pty.wait()
+
     async def wait(self, command: Any) -> int | None:
         return command.wait()
 
@@ -692,6 +777,30 @@ class SyncDriver(_ScenarioDriver):
 
     async def destroy(self, box: Any) -> None:
         box.destroy()
+
+
+async def interactive_session_flow(driver: _ScenarioDriver, name: str) -> InteractiveObservation:
+    async with driver.session():
+        async with driver.ephemeral_sandbox(name) as box:
+            async with driver.open_interactive(box) as pty:
+                # A PTY echoes input, so the shell must prove it is live
+                # before the command under test is sent.
+                await driver.interactive_send(pty, f"printf '\\n{_READY}\\n'\n".encode())
+                await driver.interactive_read_until(pty, _READY)
+
+                await driver.interactive_resize(pty, 120, 40)
+
+                await driver.interactive_send(pty, f"tty; printf '\\n{_DONE}\\n'\n".encode())
+                command_output = await driver.interactive_read_until(pty, _DONE)
+
+                await driver.interactive_send(pty, b"exit 3\n")
+                exit_code = await driver.interactive_wait(pty)
+
+    return InteractiveObservation(
+        is_tty="/dev/pts/" in command_output,
+        command_output=command_output,
+        exit_code=exit_code,
+    )
 
 
 async def workspace_command_flow(driver: _ScenarioDriver, name: str) -> WorkspaceObservation:

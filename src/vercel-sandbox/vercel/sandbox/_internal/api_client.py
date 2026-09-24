@@ -74,6 +74,7 @@ from vercel.sandbox._internal.state import (
     CompletedProcessState,
     DrivesPageState,
     DriveState,
+    InteractiveSessionState,
     ProcessState,
     RuntimeSessionsPageState,
     RuntimeSessionStopState,
@@ -566,6 +567,14 @@ class _Pagination(_ApiModel):
     count: int
     next: str | None = None
     prev: str | None = None
+
+
+class _InteractiveSessionResponse(_ApiModel):
+    url: str
+    token: str
+
+    def to_interactive_session(self) -> InteractiveSessionState:
+        return InteractiveSessionState(url=self.url, token=self.token)
 
 
 class _CommandResponse(_ApiModel):
@@ -1800,6 +1809,19 @@ class SandboxApiClient:
             timeout=NO_TIMEOUT if wait else None,
         )
         return _validate_response(_CommandResponse, data).to_command()
+
+    async def open_interactive(self, *, session_id: str) -> InteractiveSessionState:
+        credentials = await self._credentials_factory()
+        data = await self._request_json(
+            "POST",
+            format_url_path(
+                "v2/sandboxes/sessions/{session_id}/interactive",
+                session_id=session_id,
+            ),
+            credentials=credentials,
+            body={},
+        )
+        return _validate_response(_InteractiveSessionResponse, data).to_interactive_session()
 
     async def query_commands(self, *, session_id: str) -> list[ProcessState]:
         credentials = await self._credentials_factory()

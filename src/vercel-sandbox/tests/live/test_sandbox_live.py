@@ -11,12 +11,14 @@ from vercel.sandbox import SandboxTerminalStateError
 
 from ._sandbox_scenarios import (
     AsyncDriver,
+    InteractiveObservation,
     NetworkPolicyObservation,
     PersistentObservation,
     ProcessFilesystemObservation,
     StreamingTransferObservation,
     SyncDriver,
     WorkspaceObservation,
+    interactive_session_flow,
     network_policy_flow,
     persistent_snapshot_flow,
     process_filesystem_flow,
@@ -86,6 +88,24 @@ def _assert_network_policy(result: NetworkPolicyObservation) -> None:
         deny_all_returned=True,
         resources_cleaned_up=True,
     )
+
+
+def _assert_interactive(result: InteractiveObservation) -> None:
+    assert result.is_tty, result.command_output
+    assert result.exit_code == 3
+
+
+@requires_sandbox_credentials
+@pytest.mark.live
+@pytest.mark.asyncio
+async def test_interactive_session_flow_has_sync_async_semantic_parity() -> None:
+    async_result = await interactive_session_flow(AsyncDriver(), _name("interactive", "async"))
+    sync_result = await interactive_session_flow(SyncDriver(), _name("interactive", "sync"))
+
+    _assert_interactive(async_result)
+    _assert_interactive(sync_result)
+    assert async_result.is_tty == sync_result.is_tty
+    assert async_result.exit_code == sync_result.exit_code
 
 
 @requires_sandbox_credentials

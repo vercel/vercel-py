@@ -4,11 +4,14 @@ import signal as signal_module
 import subprocess
 import warnings
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from datetime import timedelta
 from threading import Condition
 from types import TracebackType
 from typing import Any, Literal, TextIO, overload
+
+import anyio
 
 from vercel._internal.core.byte_stream import SyncByteStreamRuntime
 from vercel._internal.core.iter_coroutine import iter_coroutine
@@ -28,6 +31,13 @@ from vercel.sandbox._internal.filesystem_handle_core import (
     FilesystemOperationBinding,
     TextReaderCore,
     TextWriterCore,
+)
+from vercel.sandbox._internal.interactive_session import (
+    DEFAULT_COLS,
+    DEFAULT_ROWS,
+    SyncInteractiveTransport,
+    resize_message,
+    start_message,
 )
 from vercel.sandbox._internal.models import (
     _OMITTED,
@@ -92,6 +102,7 @@ from vercel.sandbox._internal.runtime_common import (
 from vercel.sandbox._internal.service import SandboxService, _SandboxTerminalState
 from vercel.sandbox._internal.state import (
     DriveState,
+    InteractiveSessionState,
     ProcessState,
     RuntimeSessionStopState,
     SandboxRuntimeSessionState,
@@ -219,6 +230,105 @@ class SyncProcess(_ProcessHandleState):
     def kill(self) -> None:
         """Terminate the process immediately with ``SIGKILL``."""
         self.send_signal(ProcessSignal.SIGKILL)
+
+
+class SyncInteractiveSession:
+    """Read and write the PTY of an interactive sandbox process.
+
+    Iterating the session yields terminal output as it arrives and stops once
+    the remote process exits. The session cannot be reattached after closing.
+    """
+
+    __slots__ = ("_returncode", "_transport")
+
+    def __init__(self, *, transport: SyncInteractiveTransport) -> None:
+        self._transport = transport
+        self._returncode: int | None = None
+
+    @property
+    def returncode(self) -> int | None:
+        """Exit code of the remote process, or ``None`` while it runs."""
+        return self._returncode
+
+    def send(self, data: bytes) -> None:
+        """Write bytes to the terminal's standard input."""
+        iter_coroutine(self._transport.send_bytes(data))
+
+    def resize(self, cols: int, rows: int) -> None:
+        """Tell the remote terminal its new size in characters."""
+        iter_coroutine(self._transport.send_json(resize_message(cols, rows)))
+
+    def receive(self) -> bytes:
+        """Return the next chunk of terminal output.
+
+        Raises:
+            anyio.EndOfStream: If the remote process exited.
+        """
+        frame = iter_coroutine(self._transport.receive())
+        if frame.data is not None:
+            return frame.data
+        # The exit frame is the last thing the service sends before dropping
+        # the connection, so it ends the output stream.
+        if frame.returncode is not None:
+            self._returncode = frame.returncode
+        raise anyio.EndOfStream
+
+    def wait(self) -> int | None:
+        """Wait for the remote process to exit and return its exit code.
+
+        Pending terminal output is discarded. Returns ``None`` when the
+        connection closed without reporting an exit code.
+        """
+        while self._returncode is None:
+            try:
+                self.receive()
+            except anyio.EndOfStream:
+                break
+        return self._returncode
+
+    def close(self) -> None:
+        """Close the session and release the connection."""
+        iter_coroutine(self._transport.close())
+
+    def __iter__(self) -> Iterator[bytes]:
+        while True:
+            try:
+                yield self.receive()
+            except anyio.EndOfStream:
+                return
+
+
+@contextmanager
+def _open_interactive_session(
+    open_state: Callable[[], InteractiveSessionState],
+    *,
+    command: str,
+    args: Sequence[str] | None,
+    cwd: str | None,
+    env: Mapping[str, str] | None,
+    sudo: bool,
+    cols: int,
+    rows: int,
+) -> Iterator[SyncInteractiveSession]:
+    transport = SyncInteractiveTransport(open_state())
+    iter_coroutine(transport.connect())
+    try:
+        iter_coroutine(
+            transport.send_json(
+                start_message(
+                    command=command,
+                    args=args,
+                    cwd=cwd,
+                    env=env,
+                    sudo=sudo,
+                    cols=cols,
+                    rows=rows,
+                )
+            )
+        )
+        yield SyncInteractiveSession(transport=transport)
+    finally:
+        iter_coroutine(transport.close())
 
 
 class SyncSnapshot(SnapshotHandleBase):
@@ -915,6 +1025,49 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         )
         return SyncProcess(payload=state, service=self._service, stdout=stdout, stderr=stderr)
 
+    def open_interactive(
+        self,
+        command: str = "/bin/bash",
+        args: Sequence[str] | None = None,
+        *,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        sudo: bool = False,
+        cols: int = DEFAULT_COLS,
+        rows: int = DEFAULT_ROWS,
+    ) -> AbstractContextManager[SyncInteractiveSession]:
+        """Start a process attached to a PTY and scope its session.
+
+        The connection is opened on entry and closed on exit, so the session
+        must be used as a context manager::
+
+            with session.open_interactive() as pty:
+                pty.send(b"echo hi\n")
+
+        Args:
+            command: Executable or command name.
+            args: Command arguments, excluding the executable.
+            cwd: Process working directory.
+            env: Environment variables added to the process. ``TERM`` defaults
+                to ``xterm-256color`` so full-screen programs render correctly.
+            sudo: Whether to run with elevated privileges.
+            cols: Terminal width in characters.
+            rows: Terminal height in characters.
+
+        Returns:
+            A context manager yielding the terminal session.
+        """
+        return _open_interactive_session(
+            lambda: iter_coroutine(self._service.open_interactive(session_id=self.id)),
+            command=command,
+            args=args,
+            cwd=cwd if cwd is not None else self.cwd,
+            env=env,
+            sudo=sudo,
+            cols=cols,
+            rows=rows,
+        )
+
     def get_process(self, process_id: str, *, wait: bool = False) -> SyncProcess:
         """Get a process in this session."""
         state = iter_coroutine(
@@ -1246,6 +1399,41 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
             )
         )
         return SyncProcess(payload=state, service=self._service, stdout=stdout, stderr=stderr)
+
+    def open_interactive(
+        self,
+        command: str = "/bin/bash",
+        args: Sequence[str] | None = None,
+        *,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        sudo: bool = False,
+        cols: int = DEFAULT_COLS,
+        rows: int = DEFAULT_ROWS,
+    ) -> AbstractContextManager[SyncInteractiveSession]:
+        """Start a PTY-attached process in the current session.
+
+        See ``SyncSandboxRuntimeSession.open_interactive`` for argument
+        behavior.
+
+        Returns:
+            A context manager yielding the terminal session.
+        """
+        return _open_interactive_session(
+            lambda: iter_coroutine(
+                execute_with_sandbox_recovery(
+                    lambda session_id: self._service.open_interactive(session_id=session_id),
+                    coordinator=self,
+                )
+            ),
+            command=command,
+            args=args,
+            cwd=cwd if cwd is not None else self.cwd,
+            env=env,
+            sudo=sudo,
+            cols=cols,
+            rows=rows,
+        )
 
     def get_process(self, process_id: str, *, wait: bool = False) -> SyncProcess:
         """Get a process from the current session."""

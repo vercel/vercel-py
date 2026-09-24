@@ -39,6 +39,12 @@ class CompletedProcessState:
 
 
 @dataclass(frozen=True, slots=True)
+class InteractiveSessionState:
+    url: str
+    token: str
+
+
+@dataclass(frozen=True, slots=True)
 class SandboxRuntimeSessionState:
     id: str
     sandbox_name: str | None = None

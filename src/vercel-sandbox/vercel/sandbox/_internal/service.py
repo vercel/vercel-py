@@ -62,6 +62,7 @@ from vercel.sandbox._internal.state import (
     CompletedProcessState,
     DrivesPageState,
     DriveState,
+    InteractiveSessionState,
     ProcessState,
     RuntimeSessionsPageState,
     RuntimeSessionStopState,
@@ -783,6 +784,10 @@ class SandboxService:
             kill_after=kill_after,
             wait=False,
         )
+
+    async def open_interactive(self, *, session_id: str) -> InteractiveSessionState:
+        self._ensure_open()
+        return await self._api_client.open_interactive(session_id=session_id)
 
     async def get_process(
         self, *, session_id: str, process_id: str, wait: bool = False

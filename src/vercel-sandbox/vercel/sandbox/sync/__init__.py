@@ -12,6 +12,7 @@ from vercel.sandbox._internal.errors import (
     SandboxFilesystemError,
     SandboxFilesystemTransferError,
     SandboxFilesystemWriteError,
+    SandboxInteractiveError,
     SandboxInvalidHandleError,
     SandboxPathNotFoundError,
     SandboxResponseError,
@@ -77,6 +78,7 @@ from vercel.sandbox._internal.sync_filesystem_handle import (
 )
 from vercel.sandbox._internal.sync_runtime import (
     SyncDrive,
+    SyncInteractiveSession,
     SyncProcess,
     SyncSandbox,
     SyncSandboxFilesystem,
@@ -613,6 +615,7 @@ __all__ = [
     "SandboxQueryByName",
     "SandboxQueryByStatusUpdatedAt",
     "SandboxResponseError",
+    "SandboxInteractiveError",
     "SandboxStreamError",
     "SandboxServiceOptions",
     "SandboxSource",
@@ -628,6 +631,7 @@ __all__ = [
     "SyncSandboxClient",
     "SyncSandboxBinaryReader",
     "SyncSandboxBinaryWriter",
+    "SyncInteractiveSession",
     "SyncProcess",
     "SyncSandboxFilesystem",
     "SyncSandboxFilesystemBatch",

@@ -4,6 +4,7 @@ import signal as signal_module
 import subprocess
 import warnings
 from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Mapping, Sequence
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import timedelta
 from types import TracebackType
@@ -34,6 +35,14 @@ from vercel.sandbox._internal.filesystem_handle_core import (
     FilesystemOperationBinding,
     TextReaderCore,
     TextWriterCore,
+)
+from vercel.sandbox._internal.interactive_session import (
+    DEFAULT_COLS,
+    DEFAULT_ROWS,
+    AsyncInteractiveTransport,
+    open_async_transport,
+    resize_message,
+    start_message,
 )
 from vercel.sandbox._internal.models import (
     _OMITTED,
@@ -100,6 +109,7 @@ from vercel.sandbox._internal.runtime_common import (
 from vercel.sandbox._internal.service import SandboxService, _SandboxTerminalState
 from vercel.sandbox._internal.state import (
     DriveState,
+    InteractiveSessionState,
     ProcessState,
     SandboxRuntimeSessionState,
     SandboxState,
@@ -216,6 +226,103 @@ class Process(_ProcessHandleState):
     async def kill(self) -> None:
         """Terminate the process immediately with ``SIGKILL``."""
         await self.send_signal(ProcessSignal.SIGKILL)
+
+
+class InteractiveSession:
+    """Read and write the PTY of an interactive sandbox process.
+
+    Iterating the session yields terminal output as it arrives and stops once
+    the remote process exits. The session cannot be reattached after closing.
+    """
+
+    __slots__ = ("_returncode", "_transport")
+
+    def __init__(self, *, transport: AsyncInteractiveTransport) -> None:
+        self._transport = transport
+        self._returncode: int | None = None
+
+    @property
+    def returncode(self) -> int | None:
+        """Exit code of the remote process, or ``None`` while it runs."""
+        return self._returncode
+
+    async def send(self, data: bytes) -> None:
+        """Write bytes to the terminal's standard input."""
+        await self._transport.send_bytes(data)
+
+    async def resize(self, cols: int, rows: int) -> None:
+        """Tell the remote terminal its new size in characters."""
+        await self._transport.send_json(resize_message(cols, rows))
+
+    async def receive(self) -> bytes:
+        """Return the next chunk of terminal output.
+
+        Raises:
+            anyio.EndOfStream: If the remote process exited.
+        """
+        frame = await self._transport.receive()
+        if frame.data is not None:
+            return frame.data
+        # The exit frame is the last thing the service sends before dropping
+        # the connection, so it ends the output stream.
+        if frame.returncode is not None:
+            self._returncode = frame.returncode
+        raise anyio.EndOfStream
+
+    async def wait(self) -> int | None:
+        """Wait for the remote process to exit and return its exit code.
+
+        Pending terminal output is discarded. Returns ``None`` when the
+        connection closed without reporting an exit code.
+        """
+        while self._returncode is None:
+            try:
+                await self.receive()
+            except anyio.EndOfStream:
+                break
+        return self._returncode
+
+    async def close(self) -> None:
+        """Close the session and release the connection."""
+        await self._transport.close()
+
+    def __aiter__(self) -> AsyncIterator[bytes]:
+        return self._iterate()
+
+    async def _iterate(self) -> AsyncIterator[bytes]:
+        while True:
+            try:
+                yield await self.receive()
+            except anyio.EndOfStream:
+                return
+
+
+@asynccontextmanager
+async def _open_interactive_session(
+    open_state: Callable[[], Awaitable[InteractiveSessionState]],
+    *,
+    command: str,
+    args: Sequence[str] | None,
+    cwd: str | None,
+    env: Mapping[str, str] | None,
+    sudo: bool,
+    cols: int,
+    rows: int,
+) -> AsyncIterator[InteractiveSession]:
+    state = await open_state()
+    async with open_async_transport(state) as transport:
+        await transport.send_json(
+            start_message(
+                command=command,
+                args=args,
+                cwd=cwd,
+                env=env,
+                sudo=sudo,
+                cols=cols,
+                rows=rows,
+            )
+        )
+        yield InteractiveSession(transport=transport)
 
 
 class Snapshot(SnapshotHandleBase):
@@ -863,6 +970,49 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         )
         return Process(payload=state, service=self._service, stdout=stdout, stderr=stderr)
 
+    def open_interactive(
+        self,
+        command: str = "/bin/bash",
+        args: Sequence[str] | None = None,
+        *,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        sudo: bool = False,
+        cols: int = DEFAULT_COLS,
+        rows: int = DEFAULT_ROWS,
+    ) -> AbstractAsyncContextManager[InteractiveSession]:
+        """Start a process attached to a PTY and scope its session.
+
+        The connection is opened on entry and closed on exit, so the session
+        must be used as an async context manager::
+
+            async with session.open_interactive() as pty:
+                await pty.send(b"echo hi\n")
+
+        Args:
+            command: Executable or command name.
+            args: Command arguments, excluding the executable.
+            cwd: Process working directory.
+            env: Environment variables added to the process. ``TERM`` defaults
+                to ``xterm-256color`` so full-screen programs render correctly.
+            sudo: Whether to run with elevated privileges.
+            cols: Terminal width in characters.
+            rows: Terminal height in characters.
+
+        Returns:
+            A context manager yielding the terminal session.
+        """
+        return _open_interactive_session(
+            lambda: self._service.open_interactive(session_id=self.id),
+            command=command,
+            args=args,
+            cwd=cwd if cwd is not None else self.cwd,
+            env=env,
+            sudo=sudo,
+            cols=cols,
+            rows=rows,
+        )
+
     async def get_process(self, process_id: str, *, wait: bool = False) -> Process:
         """Get a process in this session.
 
@@ -1140,6 +1290,38 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
             coordinator=self,
         )
         return Process(payload=state, service=self._service, stdout=stdout, stderr=stderr)
+
+    def open_interactive(
+        self,
+        command: str = "/bin/bash",
+        args: Sequence[str] | None = None,
+        *,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        sudo: bool = False,
+        cols: int = DEFAULT_COLS,
+        rows: int = DEFAULT_ROWS,
+    ) -> AbstractAsyncContextManager[InteractiveSession]:
+        """Start a PTY-attached process in the current session.
+
+        See ``SandboxRuntimeSession.open_interactive`` for argument behavior.
+
+        Returns:
+            A context manager yielding the terminal session.
+        """
+        return _open_interactive_session(
+            lambda: execute_with_sandbox_recovery(
+                lambda session_id: self._service.open_interactive(session_id=session_id),
+                coordinator=self,
+            ),
+            command=command,
+            args=args,
+            cwd=cwd if cwd is not None else self.cwd,
+            env=env,
+            sudo=sudo,
+            cols=cols,
+            rows=rows,
+        )
 
     async def get_process(self, process_id: str, *, wait: bool = False) -> Process:
         """Get a process from the current session."""
