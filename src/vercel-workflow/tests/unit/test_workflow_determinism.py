@@ -113,13 +113,16 @@ async def test_wait_step_swap_raises_nondeterminism() -> None:
     assert ctx.suspended
 
 
-async def test_created_event_without_suspension_raises_runtime_error() -> None:
+async def test_created_event_without_suspension_fails_the_run() -> None:
     """A creation event cannot precede the body's matching suspension."""
     step = core.Step(_greet)
     ctx = _context([_created(step, "step_1")])
 
-    with pytest.raises(RuntimeError, match="has not registered its suspension"):
-        ctx.resume()
+    _resume_isolated(ctx)
+
+    assert isinstance(ctx.resume_exception, runtime.NondeterminismError)
+    assert "has not registered its suspension" in str(ctx.resume_exception)
+    assert ctx.suspended
 
 
 # --- concurrent delivery: the loop workflow + resume single-step -----------------
