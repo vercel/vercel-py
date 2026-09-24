@@ -93,10 +93,19 @@ def decode_frame(event: object) -> Frame | None:
             return Frame(data=data.encode()) if data else None
         if control.get("type") != "exit":
             return None
-        # The service omits "code" when the process exited successfully.
-        code = control.get("code")
-        return Frame(returncode=code if isinstance(code, int) else 0, end=True)
+        return Frame(returncode=_exit_code(control), end=True)
     return _CLOSED
+
+
+def _exit_code(control: dict[str, JSONValue]) -> int | None:
+    """Read the exit code, reporting ``None`` when it cannot be trusted."""
+    if "code" not in control:
+        # The service omits the code when the process exited successfully.
+        return 0
+    code = control["code"]
+    # bool is an int in Python, and a non-integer code must never be read as
+    # success.
+    return code if isinstance(code, int) and not isinstance(code, bool) else None
 
 
 def _parse_control(text: str) -> dict[str, JSONValue] | None:

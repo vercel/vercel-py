@@ -2,6 +2,7 @@ import io
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import cast
 
 import anyio
 import httpx2 as httpx
@@ -15,6 +16,7 @@ from vercel.api import session
 from vercel.sandbox import sync as sandbox_sync
 from vercel.sandbox._internal import async_runtime, sync_runtime
 from vercel.sandbox._internal.interactive_session import (
+    AsyncInteractiveTransport,
     Frame,
     decode_frame,
     health_url,
@@ -151,6 +153,37 @@ def test_start_message_prepends_sudo_and_allows_term_override() -> None:
     assert message["command"] == "sudo"
     assert message["args"] == ["bash"]
     assert message["env"] == ["TERM=dumb"]
+
+
+def test_exit_code_is_only_trusted_when_it_is_an_integer() -> None:
+    def exit_frame(payload: dict[str, object]) -> Frame | None:
+        return decode_frame(_TextEvent(json.dumps(payload)))
+
+    assert exit_frame({"type": "exit"}) == Frame(returncode=0, end=True)
+    assert exit_frame({"type": "exit", "code": 3}) == Frame(returncode=3, end=True)
+    assert exit_frame({"type": "exit", "code": -9}) == Frame(returncode=-9, end=True)
+    # An unexpected shape must never be reported as a successful exit.
+    assert exit_frame({"type": "exit", "code": "3"}) == Frame(returncode=None, end=True)
+    assert exit_frame({"type": "exit", "code": True}) == Frame(returncode=None, end=True)
+
+
+async def test_waiting_conflicts_with_a_concurrent_reader() -> None:
+    # Waiting consumes frames, so letting it run alongside a reader would
+    # split the output between them without anyone noticing.
+    transport = _FakeTransport(InteractiveSessionState(url="wss://h.test/ws", token="t"))
+    transport.frames = [Frame(data=b"chatter")]
+    transport.running = True
+    pty = async_runtime.InteractiveSession(transport=cast(AsyncInteractiveTransport, transport))
+
+    async with anyio.create_task_group() as task_group:
+
+        async def reader() -> None:
+            with pytest.raises(anyio.BusyResourceError):
+                await pty.stream.receive()
+
+        with pty.stream._read_guard:
+            task_group.start_soon(reader)
+            await anyio.sleep(0)
 
 
 def test_empty_frames_are_not_end_of_stream() -> None:

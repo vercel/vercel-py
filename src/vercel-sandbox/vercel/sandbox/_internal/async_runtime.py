@@ -303,8 +303,11 @@ class InteractiveSession:
         connection closed without reporting an exit code.
         """
         while self._returncode is None:
-            if await self._read() is None:
-                break
+            # Waiting consumes frames, so it contends with the stream just as
+            # two readers would.
+            with self.stream._read_guard:
+                if await self._read() is None:
+                    break
         return self._returncode
 
     async def aclose(self) -> None:
