@@ -29,9 +29,12 @@ from vercel.sandbox import (
     DriveQueryByUpdatedAt,
     GitSource,
     NetworkPolicy,
+    NetworkPolicyForwardRuleSummary,
     NetworkPolicyKeyValueMatcher,
     NetworkPolicyMatcher,
     NetworkPolicyRequestMatcher,
+    NetworkPolicyResponse,
+    NetworkPolicyResponseRuleSummary,
     NetworkPolicyRule,
     NetworkPolicySubnets,
     NetworkPolicyTransform,
@@ -336,10 +339,22 @@ def _authored_network_policy() -> NetworkPolicy:
                         ),
                         NetworkPolicyTransform(headers={"X-Trace": "two"}),
                     ],
+                ),
+                NetworkPolicyRule(
+                    match=matcher,
                     forward_url="https://forward-proxy.internal/ingress/",
                 ),
                 NetworkPolicyRule(
                     transform=[NetworkPolicyTransform(headers={"X-Fallback": "fallback"})]
+                ),
+                NetworkPolicyRule(
+                    match=matcher,
+                    response=NetworkPolicyResponse(
+                        status_code=403,
+                        headers={"X-Policy": "blocked"},
+                        body='{"error":"forbidden"}',
+                        content_type="application/json",
+                    ),
                 ),
             ],
         },
@@ -351,22 +366,7 @@ def _authored_network_policy() -> NetworkPolicy:
 
 
 def _normalized_network_policy_response() -> dict[str, object]:
-    match = {
-        "path": {"startsWith": "/v1/"},
-        "method": ["POST"],
-        "queryString": [
-            {
-                "key": {"exact": "stream"},
-                "value": {"regex": "^(true|false)$"},
-            }
-        ],
-        "headers": [
-            {
-                "key": {"exact": "authorization"},
-                "value": {"startsWith": "Bearer "},
-            }
-        ],
-    }
+    match_dimensions = ["path", "method", "queryString", "headers"]
     return {
         "mode": "custom",
         "allowedDomains": ["example.com", "api.example.com"],
@@ -376,7 +376,7 @@ def _normalized_network_policy_response() -> dict[str, object]:
             {
                 "domain": "api.example.com",
                 "headerNames": ["Authorization", "X-Trace"],
-                "match": match,
+                "matchDimensions": match_dimensions,
             },
             {
                 "domain": "api.example.com",
@@ -387,32 +387,48 @@ def _normalized_network_policy_response() -> dict[str, object]:
             {
                 "domain": "api.example.com",
                 "forwardURL": "https://forward-proxy.internal/ingress/",
-                "match": match,
+                "matchDimensions": match_dimensions,
+            }
+        ],
+        "responseRules": [
+            {
+                "domain": "api.example.com",
+                "statusCode": 403,
+                "matchDimensions": match_dimensions,
             }
         ],
     }
 
 
 def _parsed_network_policy_response() -> NetworkPolicy:
-    matcher = _network_policy_matcher()
-    return NetworkPolicy.custom(
+    return NetworkPolicy(
+        mode="custom",
         allow={
             "example.com": (),
-            "api.example.com": [
+            "api.example.com": (
                 NetworkPolicyRule(
-                    match=matcher,
                     transform=[NetworkPolicyTransform(header_names=["Authorization", "X-Trace"])],
                 ),
                 NetworkPolicyRule(transform=[NetworkPolicyTransform(header_names=["X-Fallback"])]),
-                NetworkPolicyRule(
-                    match=matcher,
-                    forward_url="https://forward-proxy.internal/ingress/",
-                ),
-            ],
+            ),
         },
         subnets=NetworkPolicySubnets(
             allow=["10.0.0.0/8"],
             deny=["10.1.0.0/16"],
+        ),
+        forward_rules=(
+            NetworkPolicyForwardRuleSummary(
+                domain="api.example.com",
+                forward_url="https://forward-proxy.internal/ingress/",
+                match_dimensions=("path", "method", "query", "headers"),
+            ),
+        ),
+        response_rules=(
+            NetworkPolicyResponseRuleSummary(
+                domain="api.example.com",
+                status_code=403,
+                match_dimensions=("path", "method", "query", "headers"),
+            ),
         ),
     )
 
@@ -876,9 +892,51 @@ async def test_network_policy_async_public_flow(mock_env_clear: None) -> None:
                         },
                         {"headers": {"X-Trace": "two"}},
                     ],
+                },
+                {
+                    "match": {
+                        "path": {"startsWith": "/v1/"},
+                        "method": ["POST"],
+                        "queryString": [
+                            {
+                                "key": {"exact": "stream"},
+                                "value": {"regex": "^(true|false)$"},
+                            }
+                        ],
+                        "headers": [
+                            {
+                                "key": {"exact": "authorization"},
+                                "value": {"startsWith": "Bearer "},
+                            }
+                        ],
+                    },
                     "forwardURL": "https://forward-proxy.internal/ingress/",
                 },
                 {"transform": [{"headers": {"X-Fallback": "fallback"}}]},
+                {
+                    "match": {
+                        "path": {"startsWith": "/v1/"},
+                        "method": ["POST"],
+                        "queryString": [
+                            {
+                                "key": {"exact": "stream"},
+                                "value": {"regex": "^(true|false)$"},
+                            }
+                        ],
+                        "headers": [
+                            {
+                                "key": {"exact": "authorization"},
+                                "value": {"startsWith": "Bearer "},
+                            }
+                        ],
+                    },
+                    "response": {
+                        "statusCode": 403,
+                        "headers": {"X-Policy": "blocked"},
+                        "body": '{"error":"forbidden"}',
+                        "contentType": "application/json",
+                    },
+                },
             ],
         },
         "subnets": {
@@ -919,6 +977,8 @@ def test_network_policy_sync_public_parity(mock_env_clear: None) -> None:
     assert handle.current_session is not None
     assert handle.current_session.network_policy == handle.network_policy
     assert sandbox_sync.NetworkPolicy is NetworkPolicy
+    assert sandbox_sync.NetworkPolicyForwardRuleSummary is NetworkPolicyForwardRuleSummary
+    assert sandbox_sync.NetworkPolicyResponseRuleSummary is NetworkPolicyResponseRuleSummary
     assert json.loads(route.calls.last.request.content)["networkPolicy"] == {
         "allow": {
             "example.com": [],
@@ -949,9 +1009,51 @@ def test_network_policy_sync_public_parity(mock_env_clear: None) -> None:
                         },
                         {"headers": {"X-Trace": "two"}},
                     ],
+                },
+                {
+                    "match": {
+                        "path": {"startsWith": "/v1/"},
+                        "method": ["POST"],
+                        "queryString": [
+                            {
+                                "key": {"exact": "stream"},
+                                "value": {"regex": "^(true|false)$"},
+                            }
+                        ],
+                        "headers": [
+                            {
+                                "key": {"exact": "authorization"},
+                                "value": {"startsWith": "Bearer "},
+                            }
+                        ],
+                    },
                     "forwardURL": "https://forward-proxy.internal/ingress/",
                 },
                 {"transform": [{"headers": {"X-Fallback": "fallback"}}]},
+                {
+                    "match": {
+                        "path": {"startsWith": "/v1/"},
+                        "method": ["POST"],
+                        "queryString": [
+                            {
+                                "key": {"exact": "stream"},
+                                "value": {"regex": "^(true|false)$"},
+                            }
+                        ],
+                        "headers": [
+                            {
+                                "key": {"exact": "authorization"},
+                                "value": {"startsWith": "Bearer "},
+                            }
+                        ],
+                    },
+                    "response": {
+                        "statusCode": 403,
+                        "headers": {"X-Policy": "blocked"},
+                        "body": '{"error":"forbidden"}',
+                        "contentType": "application/json",
+                    },
+                },
             ],
         },
         "subnets": {
@@ -969,6 +1071,27 @@ async def test_network_policy_structural_validation(mock_env_clear: None) -> Non
         NetworkPolicyKeyValueMatcher()
     with pytest.raises(ValueError, match="at least one matching dimension"):
         NetworkPolicyRequestMatcher()
+    with pytest.raises(ValueError, match="exactly one"):
+        NetworkPolicyRule()
+    with pytest.raises(ValueError, match="exactly one"):
+        NetworkPolicyRule(
+            transform=[NetworkPolicyTransform(headers={"X-Test": "value"})],
+            response=NetworkPolicyResponse(status_code=403),
+        )
+    with pytest.raises(ValueError, match="between 200 and 599"):
+        NetworkPolicyResponse(status_code=199)
+    with pytest.raises(ValueError, match="content_type is required"):
+        NetworkPolicyResponse(status_code=403, body="blocked")
+    with pytest.raises(ValueError, match="body is not allowed"):
+        NetworkPolicyResponse(status_code=204, body="blocked", content_type="text/plain")
+    with pytest.raises(ValueError, match="proxy-managed headers"):
+        NetworkPolicyResponse(status_code=403, headers={"Content-Length": "0"})
+    with pytest.raises(TypeError, match="headers must map strings to strings"):
+        NetworkPolicyResponse(status_code=403, headers={"X-Count": 1})  # type: ignore[dict-item]
+    with pytest.raises(TypeError, match="body must be a string"):
+        NetworkPolicyResponse(status_code=403, body=1)  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="content_type must be a string"):
+        NetworkPolicyResponse(status_code=403, content_type=1)  # type: ignore[arg-type]
 
     headers = {"X-Secret": "value"}
     rules = [NetworkPolicyRule(transform=[NetworkPolicyTransform(headers=headers)])]
@@ -1063,6 +1186,20 @@ async def test_network_policy_structural_validation(mock_env_clear: None) -> Non
         )
         with pytest.raises(ValueError, match="redacted"):
             await handle.update_network_policy(redacted)
+
+        summarized = NetworkPolicy(
+            mode="custom",
+            allow={"example.com": ()},
+            response_rules=(
+                NetworkPolicyResponseRuleSummary(
+                    domain="example.com",
+                    status_code=403,
+                    match_dimensions=("path",),
+                ),
+            ),
+        )
+        with pytest.raises(ValueError, match="summaries"):
+            await handle.update_network_policy(summarized)
 
     assert malformed_route.called
     assert not create_route.called
