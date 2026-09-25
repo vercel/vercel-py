@@ -329,6 +329,34 @@ class InteractiveSession:
         await self._transport.close()
 
 
+class InteractiveSessionOperation:
+    """Scope one interactive session.
+
+    Entering opens the connection and exiting closes it. Unlike the other
+    single-use operations in this SDK this one cannot be awaited: the
+    connection owns a task group, which has to unwind in the task that opened
+    it.
+    """
+
+    def __init__(self, scope: AbstractAsyncContextManager["InteractiveSession"]) -> None:
+        self._scope = scope
+        self._consumed = False
+
+    async def __aenter__(self) -> "InteractiveSession":
+        if self._consumed:
+            raise RuntimeError("open_interactive() operations can only be used once")
+        self._consumed = True
+        return await self._scope.__aenter__()
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> bool | None:
+        return await self._scope.__aexit__(exc_type, exc, traceback)
+
+
 @asynccontextmanager
 async def _open_interactive_session(
     open_state: Callable[[], Awaitable[InteractiveSessionState]],
@@ -1016,7 +1044,7 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         sudo: bool = False,
         cols: int = DEFAULT_COLS,
         rows: int = DEFAULT_ROWS,
-    ) -> AbstractAsyncContextManager[InteractiveSession]:
+    ) -> InteractiveSessionOperation:
         """Start a process attached to a PTY and scope its session.
 
         The connection is opened on entry and closed on exit, so the session
@@ -1038,15 +1066,17 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         Returns:
             A context manager yielding the terminal session.
         """
-        return _open_interactive_session(
-            lambda: self._service.open_interactive(session_id=self.id),
-            command=command,
-            args=args,
-            cwd=cwd if cwd is not None else self.cwd,
-            env=env,
-            sudo=sudo,
-            cols=cols,
-            rows=rows,
+        return InteractiveSessionOperation(
+            _open_interactive_session(
+                lambda: self._service.open_interactive(session_id=self.id),
+                command=command,
+                args=args,
+                cwd=cwd if cwd is not None else self.cwd,
+                env=env,
+                sudo=sudo,
+                cols=cols,
+                rows=rows,
+            )
         )
 
     async def get_process(self, process_id: str, *, wait: bool = False) -> Process:
@@ -1337,7 +1367,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         sudo: bool = False,
         cols: int = DEFAULT_COLS,
         rows: int = DEFAULT_ROWS,
-    ) -> AbstractAsyncContextManager[InteractiveSession]:
+    ) -> InteractiveSessionOperation:
         """Start a PTY-attached process in the current session.
 
         See ``SandboxRuntimeSession.open_interactive`` for argument behavior.
@@ -1345,18 +1375,20 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         Returns:
             A context manager yielding the terminal session.
         """
-        return _open_interactive_session(
-            lambda: execute_with_sandbox_recovery(
-                lambda session_id: self._service.open_interactive(session_id=session_id),
-                coordinator=self,
-            ),
-            command=command,
-            args=args,
-            cwd=cwd if cwd is not None else self.cwd,
-            env=env,
-            sudo=sudo,
-            cols=cols,
-            rows=rows,
+        return InteractiveSessionOperation(
+            _open_interactive_session(
+                lambda: execute_with_sandbox_recovery(
+                    lambda session_id: self._service.open_interactive(session_id=session_id),
+                    coordinator=self,
+                ),
+                command=command,
+                args=args,
+                cwd=cwd if cwd is not None else self.cwd,
+                env=env,
+                sudo=sudo,
+                cols=cols,
+                rows=rows,
+            )
         )
 
     async def get_process(self, process_id: str, *, wait: bool = False) -> Process:

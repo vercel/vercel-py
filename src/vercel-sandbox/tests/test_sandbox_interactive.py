@@ -156,7 +156,13 @@ def fake_transport(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_public_interactive_exports() -> None:
     assert sandbox.InteractiveSession is async_runtime.InteractiveSession
+    assert sandbox.InteractiveStream is async_runtime.InteractiveStream
+    assert sandbox.InteractiveSessionOperation is async_runtime.InteractiveSessionOperation
     assert sandbox_sync.SyncInteractiveSession is sync_runtime.SyncInteractiveSession
+    assert sandbox_sync.SyncInteractiveStream is sync_runtime.SyncInteractiveStream
+    assert (
+        sandbox_sync.SyncInteractiveSessionOperation is sync_runtime.SyncInteractiveSessionOperation
+    )
     assert issubclass(sandbox.SandboxInteractiveError, sandbox.SandboxError)
 
 
@@ -425,6 +431,44 @@ def test_sync_controls_after_close_report_closed(mock_env_clear: None) -> None:
             pty.close()
             with pytest.raises(ValueError):
                 pty.resize(80, 24)
+
+
+@respx.mock
+async def test_interactive_operations_are_single_use(mock_env_clear: None) -> None:
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/interactive").mock(
+        return_value=httpx.Response(200, json=_interactive_response())
+    )
+
+    async with session(service_options=_session_options()):
+        box = await sandbox.create_sandbox(name="preview")
+        operation = box.open_interactive()
+        async with operation:
+            pass
+        with pytest.raises(RuntimeError, match="can only be used once"):
+            async with operation:
+                pass
+
+
+@respx.mock
+def test_sync_interactive_operations_are_single_use(mock_env_clear: None) -> None:
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/interactive").mock(
+        return_value=httpx.Response(200, json=_interactive_response())
+    )
+
+    with session(service_options=_session_options()):
+        box = sandbox_sync.create_sandbox(name="preview")
+        operation = box.open_interactive()
+        with operation:
+            pass
+        with pytest.raises(RuntimeError, match="can only be used once"):
+            with operation:
+                pass
 
 
 @respx.mock

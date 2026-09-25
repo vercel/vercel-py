@@ -343,6 +343,33 @@ class SyncInteractiveSession:
         iter_coroutine(self._transport.close())
 
 
+class SyncInteractiveSessionOperation:
+    """Scope one interactive session.
+
+    Entering opens the connection and exiting closes it. Unlike the other
+    single-use operations in this SDK this one has no direct call form: the
+    connection is owned by the scope that opened it.
+    """
+
+    def __init__(self, scope: AbstractContextManager["SyncInteractiveSession"]) -> None:
+        self._scope = scope
+        self._consumed = False
+
+    def __enter__(self) -> "SyncInteractiveSession":
+        if self._consumed:
+            raise RuntimeError("open_interactive() operations can only be used once")
+        self._consumed = True
+        return self._scope.__enter__()
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> bool | None:
+        return self._scope.__exit__(exc_type, exc, traceback)
+
+
 @contextmanager
 def _open_interactive_session(
     open_state: Callable[[], InteractiveSessionState],
@@ -1084,7 +1111,7 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         sudo: bool = False,
         cols: int = DEFAULT_COLS,
         rows: int = DEFAULT_ROWS,
-    ) -> AbstractContextManager[SyncInteractiveSession]:
+    ) -> SyncInteractiveSessionOperation:
         """Start a process attached to a PTY and scope its session.
 
         The connection is opened on entry and closed on exit, so the session
@@ -1106,15 +1133,17 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         Returns:
             A context manager yielding the terminal session.
         """
-        return _open_interactive_session(
-            lambda: iter_coroutine(self._service.open_interactive(session_id=self.id)),
-            command=command,
-            args=args,
-            cwd=cwd if cwd is not None else self.cwd,
-            env=env,
-            sudo=sudo,
-            cols=cols,
-            rows=rows,
+        return SyncInteractiveSessionOperation(
+            _open_interactive_session(
+                lambda: iter_coroutine(self._service.open_interactive(session_id=self.id)),
+                command=command,
+                args=args,
+                cwd=cwd if cwd is not None else self.cwd,
+                env=env,
+                sudo=sudo,
+                cols=cols,
+                rows=rows,
+            )
         )
 
     def get_process(self, process_id: str, *, wait: bool = False) -> SyncProcess:
@@ -1459,7 +1488,7 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         sudo: bool = False,
         cols: int = DEFAULT_COLS,
         rows: int = DEFAULT_ROWS,
-    ) -> AbstractContextManager[SyncInteractiveSession]:
+    ) -> SyncInteractiveSessionOperation:
         """Start a PTY-attached process in the current session.
 
         See ``SyncSandboxRuntimeSession.open_interactive`` for argument
@@ -1468,20 +1497,22 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         Returns:
             A context manager yielding the terminal session.
         """
-        return _open_interactive_session(
-            lambda: iter_coroutine(
-                execute_with_sandbox_recovery(
-                    lambda session_id: self._service.open_interactive(session_id=session_id),
-                    coordinator=self,
-                )
-            ),
-            command=command,
-            args=args,
-            cwd=cwd if cwd is not None else self.cwd,
-            env=env,
-            sudo=sudo,
-            cols=cols,
-            rows=rows,
+        return SyncInteractiveSessionOperation(
+            _open_interactive_session(
+                lambda: iter_coroutine(
+                    execute_with_sandbox_recovery(
+                        lambda session_id: self._service.open_interactive(session_id=session_id),
+                        coordinator=self,
+                    )
+                ),
+                command=command,
+                args=args,
+                cwd=cwd if cwd is not None else self.cwd,
+                env=env,
+                sudo=sudo,
+                cols=cols,
+                rows=rows,
+            )
         )
 
     def get_process(self, process_id: str, *, wait: bool = False) -> SyncProcess:

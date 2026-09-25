@@ -79,6 +79,7 @@ from vercel.sandbox._internal.sync_filesystem_handle import (
 from vercel.sandbox._internal.sync_runtime import (
     SyncDrive,
     SyncInteractiveSession,
+    SyncInteractiveSessionOperation,
     SyncInteractiveStream,
     SyncProcess,
     SyncSandbox,
@@ -633,6 +634,7 @@ __all__ = [
     "SyncSandboxBinaryReader",
     "SyncSandboxBinaryWriter",
     "SyncInteractiveSession",
+    "SyncInteractiveSessionOperation",
     "SyncInteractiveStream",
     "SyncProcess",
     "SyncSandboxFilesystem",
