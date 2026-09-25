@@ -1106,17 +1106,18 @@ class WorkflowOrchestratorContext:
                 fut.set_exception(StopAsyncIteration)
         self.suspensions.pop(correlation_id, None)
 
-    def _fail_nondeterminism(self, sus: BaseSuspension, exc: Exception) -> None:
+    def _fail_nondeterminism(self, sus: BaseSuspension | None, exc: Exception) -> None:
         """Fail the run with a replay-divergence error the body cannot suppress.
 
-        The diverged suspension may not be what the body is currently blocked
+        The diverged suspension may be absent or not be what the body is blocked
         on, so failing its future alone might never surface anywhere -- and a
         body that is awaiting it could catch the error. So the exception is
         also stashed for ``run_workflow`` to raise, and the run is suspended
         so nothing else executes.
         """
-        sus.fail(exc)
         self.resume_exception = exc
+        if sus is not None:
+            sus.fail(exc)
         self.suspend()
 
     def resume(self) -> None:
@@ -1192,10 +1193,14 @@ class WorkflowOrchestratorContext:
                                 ),
                             )
                             return
-                    raise RuntimeError(
-                        f"workflow replay cannot deliver {slot_id!r}: "
-                        "the workflow body has not registered its suspension"
+                    self._fail_nondeterminism(
+                        None,
+                        NondeterminismError(
+                            f"workflow replay cannot deliver {slot_id!r}: "
+                            "the workflow body has not registered its suspension"
+                        ),
                     )
+                    return
 
         match event:
             case w.StepCreatedEvent(
