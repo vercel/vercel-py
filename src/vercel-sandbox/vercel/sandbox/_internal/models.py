@@ -656,8 +656,6 @@ def _serialize_drive_mounts(
     mount_entries = tuple(mounts.items())
     if len(mount_entries) > 4:
         raise ValueError("A sandbox can mount at most 4 Drives")
-    if mount_entries and failover_regions:
-        raise ValueError("Drive mounts cannot be combined with failover regions")
 
     paths = [_canonicalize_drive_mount_path(path) for path, _ in mount_entries]
     if any(
