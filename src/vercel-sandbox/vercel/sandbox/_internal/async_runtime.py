@@ -4,6 +4,7 @@ import signal as signal_module
 import subprocess
 import warnings
 from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Mapping, Sequence
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import timedelta
 from types import TracebackType
@@ -34,6 +35,14 @@ from vercel.sandbox._internal.filesystem_handle_core import (
     FilesystemOperationBinding,
     TextReaderCore,
     TextWriterCore,
+)
+from vercel.sandbox._internal.interactive_session import (
+    DEFAULT_COLS,
+    DEFAULT_ROWS,
+    AsyncInteractiveTransport,
+    open_async_transport,
+    resize_message,
+    start_message,
 )
 from vercel.sandbox._internal.models import (
     _OMITTED,
@@ -100,6 +109,7 @@ from vercel.sandbox._internal.runtime_common import (
 from vercel.sandbox._internal.service import SandboxService, _SandboxTerminalState
 from vercel.sandbox._internal.state import (
     DriveState,
+    InteractiveSessionState,
     ProcessState,
     SandboxRuntimeSessionState,
     SandboxState,
@@ -216,6 +226,167 @@ class Process(_ProcessHandleState):
     async def kill(self) -> None:
         """Terminate the process immediately with ``SIGKILL``."""
         await self.send_signal(ProcessSignal.SIGKILL)
+
+
+class InteractiveStream(anyio.abc.ByteStream):
+    """Terminal I/O for an interactive session, as a plain anyio byte stream."""
+
+    def __init__(self, session: "InteractiveSession") -> None:
+        self._session = session
+        self._buffer = b""
+        self._closed = False
+        self._read_guard = anyio.ResourceGuard("reading from")
+        self._write_guard = anyio.ResourceGuard("writing to")
+
+    async def receive(self, max_bytes: int = 65536) -> bytes:
+        if max_bytes < 1:
+            raise ValueError("max_bytes must be at least 1")
+        with self._read_guard:
+            if self._closed:
+                raise anyio.ClosedResourceError
+            if not self._buffer:
+                data = await self._session._read()
+                if data is None:
+                    self._session._raise_for_failure()
+                    raise anyio.EndOfStream
+                self._buffer = data
+            chunk, self._buffer = self._buffer[:max_bytes], self._buffer[max_bytes:]
+            return chunk
+
+    async def send(self, item: bytes) -> None:
+        with self._write_guard:
+            if self._closed:
+                raise anyio.ClosedResourceError
+            await self._session._write(item)
+
+    async def send_eof(self) -> None:
+        raise NotImplementedError("Interactive sessions cannot half-close a terminal")
+
+    async def aclose(self) -> None:
+        self._closed = True
+        self._buffer = b""
+        await self._session._aclose_transport()
+
+
+class InteractiveSession:
+    """Control an interactive sandbox process attached to a PTY.
+
+    Terminal I/O goes through :attr:`stream`; this object carries the controls
+    that are not part of the byte stream. The session cannot be reattached
+    after it closes.
+    """
+
+    __slots__ = ("_transport", "stream")
+
+    stream: InteractiveStream
+    """Raw terminal output and input."""
+
+    def __init__(self, *, transport: AsyncInteractiveTransport) -> None:
+        self._transport = transport
+        self.stream = InteractiveStream(self)
+
+    @property
+    def returncode(self) -> int | None:
+        """Exit code of the remote process, or ``None`` while it runs."""
+        return self._transport.returncode
+
+    async def resize(self, cols: int, rows: int) -> None:
+        """Tell the remote terminal its new size in characters."""
+        if self.stream._closed:
+            raise anyio.ClosedResourceError
+        await self._transport.send_json(resize_message(cols, rows))
+
+    async def wait(self) -> int | None:
+        """Wait for the remote process to exit and return its exit code.
+
+        Terminal output is untouched, so this can run alongside a reader.
+        Returns ``None`` when the connection closed without reporting an exit
+        code.
+
+        Raises:
+            anyio.BrokenResourceError: If the connection failed before the
+                process reported an exit code.
+        """
+        return await self._transport.wait()
+
+    async def aclose(self) -> None:
+        """Close the session and release the connection."""
+        await self.stream.aclose()
+
+    async def _read(self) -> bytes | None:
+        frame = await self._transport.receive()
+        return frame.data
+
+    def _raise_for_failure(self) -> None:
+        failure = self._transport.failure
+        if failure is not None:
+            raise anyio.BrokenResourceError from failure
+
+    async def _write(self, data: bytes) -> None:
+        await self._transport.send_bytes(data)
+
+    async def _aclose_transport(self) -> None:
+        await self._transport.close()
+
+
+class InteractiveSessionOperation:
+    """Scope one interactive session.
+
+    Entering opens the connection and exiting closes it. Unlike the other
+    single-use operations in this SDK this one cannot be awaited: the
+    connection owns a task group, which has to unwind in the task that opened
+    it.
+    """
+
+    def __init__(self, scope: AbstractAsyncContextManager["InteractiveSession"]) -> None:
+        self._scope = scope
+        self._consumed = False
+
+    async def __aenter__(self) -> "InteractiveSession":
+        if self._consumed:
+            raise RuntimeError("open_interactive() operations can only be used once")
+        self._consumed = True
+        return await self._scope.__aenter__()
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> bool | None:
+        return await self._scope.__aexit__(exc_type, exc, traceback)
+
+
+@asynccontextmanager
+async def _open_interactive_session(
+    open_state: Callable[[], Awaitable[InteractiveSessionState]],
+    *,
+    command: str,
+    args: Sequence[str] | None,
+    cwd: str | None,
+    env: Mapping[str, str] | None,
+    sudo: bool,
+    cols: int,
+    rows: int,
+) -> AsyncIterator[InteractiveSession]:
+    state = await open_state()
+    async with open_async_transport(state) as transport:
+        await transport.send_json(
+            start_message(
+                command=command,
+                args=args,
+                cwd=cwd,
+                env=env,
+                sudo=sudo,
+                cols=cols,
+                rows=rows,
+            )
+        )
+        pty = InteractiveSession(transport=transport)
+        try:
+            yield pty
+        finally:
+            await pty.aclose()
 
 
 class Snapshot(SnapshotHandleBase):
@@ -863,6 +1034,51 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         )
         return Process(payload=state, service=self._service, stdout=stdout, stderr=stderr)
 
+    def open_interactive(
+        self,
+        command: str = "/bin/bash",
+        args: Sequence[str] | None = None,
+        *,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        sudo: bool = False,
+        cols: int = DEFAULT_COLS,
+        rows: int = DEFAULT_ROWS,
+    ) -> InteractiveSessionOperation:
+        """Start a process attached to a PTY and scope its session.
+
+        The connection is opened on entry and closed on exit, so the session
+        must be used as an async context manager::
+
+            async with session.open_interactive() as pty:
+                await pty.stream.send(b"echo hi\n")
+
+        Args:
+            command: Executable or command name.
+            args: Command arguments, excluding the executable.
+            cwd: Process working directory.
+            env: Environment variables added to the process. ``TERM`` defaults
+                to ``xterm-256color`` so full-screen programs render correctly.
+            sudo: Whether to run with elevated privileges.
+            cols: Terminal width in characters.
+            rows: Terminal height in characters.
+
+        Returns:
+            A context manager yielding the terminal session.
+        """
+        return InteractiveSessionOperation(
+            _open_interactive_session(
+                lambda: self._service.open_interactive(session_id=self.id),
+                command=command,
+                args=args,
+                cwd=cwd if cwd is not None else self.cwd,
+                env=env,
+                sudo=sudo,
+                cols=cols,
+                rows=rows,
+            )
+        )
+
     async def get_process(self, process_id: str, *, wait: bool = False) -> Process:
         """Get a process in this session.
 
@@ -1140,6 +1356,40 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
             coordinator=self,
         )
         return Process(payload=state, service=self._service, stdout=stdout, stderr=stderr)
+
+    def open_interactive(
+        self,
+        command: str = "/bin/bash",
+        args: Sequence[str] | None = None,
+        *,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        sudo: bool = False,
+        cols: int = DEFAULT_COLS,
+        rows: int = DEFAULT_ROWS,
+    ) -> InteractiveSessionOperation:
+        """Start a PTY-attached process in the current session.
+
+        See ``SandboxRuntimeSession.open_interactive`` for argument behavior.
+
+        Returns:
+            A context manager yielding the terminal session.
+        """
+        return InteractiveSessionOperation(
+            _open_interactive_session(
+                lambda: execute_with_sandbox_recovery(
+                    lambda session_id: self._service.open_interactive(session_id=session_id),
+                    coordinator=self,
+                ),
+                command=command,
+                args=args,
+                cwd=cwd if cwd is not None else self.cwd,
+                env=env,
+                sudo=sudo,
+                cols=cols,
+                rows=rows,
+            )
+        )
 
     async def get_process(self, process_id: str, *, wait: bool = False) -> Process:
         """Get a process from the current session."""

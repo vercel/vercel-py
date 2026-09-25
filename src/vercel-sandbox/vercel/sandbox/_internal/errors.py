@@ -87,6 +87,10 @@ class SandboxStreamError(SandboxError):
         self.code = code
 
 
+class SandboxInteractiveError(SandboxError):
+    """Raised when an interactive PTY session connection fails."""
+
+
 class SandboxFilesystemError(SandboxError):
     """Base error for filesystem capability operations."""
 

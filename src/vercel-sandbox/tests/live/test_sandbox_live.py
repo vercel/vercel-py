@@ -1,5 +1,6 @@
 """Live semantic parity scenarios for `vercel.sandbox`."""
 
+from datetime import timedelta
 from uuid import uuid4
 
 import anyio
@@ -7,16 +8,18 @@ import pytest
 
 from vercel import sandbox
 from vercel.api import session
-from vercel.sandbox import SandboxTerminalStateError
+from vercel.sandbox import SandboxTerminalStateError, sync as sandbox_sync
 
 from ._sandbox_scenarios import (
     AsyncDriver,
+    InteractiveObservation,
     NetworkPolicyObservation,
     PersistentObservation,
     ProcessFilesystemObservation,
     StreamingTransferObservation,
     SyncDriver,
     WorkspaceObservation,
+    interactive_session_flow,
     network_policy_flow,
     persistent_snapshot_flow,
     process_filesystem_flow,
@@ -86,6 +89,59 @@ def _assert_network_policy(result: NetworkPolicyObservation) -> None:
         deny_all_returned=True,
         resources_cleaned_up=True,
     )
+
+
+def _assert_interactive(result: InteractiveObservation) -> None:
+    assert result.is_tty, result.command_output
+    assert result.exit_code == 3
+
+
+@requires_sandbox_credentials
+@pytest.mark.live
+@pytest.mark.asyncio
+async def test_interactive_session_flow_has_sync_async_semantic_parity() -> None:
+    async_result = await interactive_session_flow(AsyncDriver(), _name("interactive", "async"))
+    sync_result = await interactive_session_flow(SyncDriver(), _name("interactive", "sync"))
+
+    _assert_interactive(async_result)
+    _assert_interactive(sync_result)
+    assert async_result.is_tty == sync_result.is_tty
+    assert async_result.exit_code == sync_result.exit_code
+
+
+@requires_sandbox_credentials
+@pytest.mark.live
+def test_sync_interactive_close_does_not_hang_on_a_saturated_websocket() -> None:
+    """Regression gate for the shutdown hang.
+
+    It asserts the precondition before closing: the websocket's own queue is
+    full and its reader thread is parked. A pass therefore means the hang is
+    fixed, not that timing happened to be kind.
+    """
+    import threading
+    import time
+
+    with session():
+        with sandbox_sync.create_sandbox(
+            name=_name("interactive-close", "sync"), execution_time_limit=timedelta(minutes=5)
+        ) as box:
+            scope = box.open_interactive("/bin/bash")
+            pty = scope.__enter__()
+            websocket = pty._transport._session  # noqa: SLF001 - precondition only
+            assert websocket is not None
+            events = websocket._events  # noqa: SLF001
+            # Many small frames that nobody reads.
+            pty.stream.write(b"for i in $(seq 1 3000); do echo L$i; sleep 0.002; done\n")
+            deadline = time.monotonic() + 90
+            while time.monotonic() < deadline and events.qsize() < events.maxsize:
+                time.sleep(0.5)
+            if events.qsize() < events.maxsize:
+                pytest.fail("could not saturate the websocket queue; result would be inconclusive")
+
+            closer = threading.Thread(target=scope.__exit__, args=(None, None, None), daemon=True)
+            closer.start()
+            closer.join(30)
+            assert not closer.is_alive(), "closing hung with the websocket queue saturated"
 
 
 @requires_sandbox_credentials

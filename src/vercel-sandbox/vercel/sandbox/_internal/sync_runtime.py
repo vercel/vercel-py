@@ -1,14 +1,16 @@
 """Sync runtime handles and entry points for Sandbox operations."""
 
+import io
 import signal as signal_module
 import subprocess
 import warnings
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from datetime import timedelta
 from threading import Condition
 from types import TracebackType
-from typing import Any, Literal, TextIO, overload
+from typing import TYPE_CHECKING, Any, Literal, TextIO, overload
 
 from vercel._internal.core.byte_stream import SyncByteStreamRuntime
 from vercel._internal.core.iter_coroutine import iter_coroutine
@@ -28,6 +30,13 @@ from vercel.sandbox._internal.filesystem_handle_core import (
     FilesystemOperationBinding,
     TextReaderCore,
     TextWriterCore,
+)
+from vercel.sandbox._internal.interactive_session import (
+    DEFAULT_COLS,
+    DEFAULT_ROWS,
+    SyncInteractiveTransport,
+    resize_message,
+    start_message,
 )
 from vercel.sandbox._internal.models import (
     _OMITTED,
@@ -92,6 +101,7 @@ from vercel.sandbox._internal.runtime_common import (
 from vercel.sandbox._internal.service import SandboxService, _SandboxTerminalState
 from vercel.sandbox._internal.state import (
     DriveState,
+    InteractiveSessionState,
     ProcessState,
     RuntimeSessionStopState,
     SandboxRuntimeSessionState,
@@ -106,6 +116,9 @@ from vercel.sandbox._internal.sync_filesystem_handle import (
     SyncSandboxTextWriter,
 )
 from vercel.sandbox._internal.text_reader import SyncTextReader, _sync_text_readers
+
+if TYPE_CHECKING:
+    from _typeshed import ReadableBuffer, WriteableBuffer
 
 
 def _terminal_error(error: _SandboxTerminalState, sandbox: object) -> SandboxTerminalStateError:
@@ -219,6 +232,181 @@ class SyncProcess(_ProcessHandleState):
     def kill(self) -> None:
         """Terminate the process immediately with ``SIGKILL``."""
         self.send_signal(ProcessSignal.SIGKILL)
+
+
+class SyncInteractiveStream(io.RawIOBase):
+    """Terminal I/O for an interactive session, as a plain raw binary stream."""
+
+    def __init__(self, session: "SyncInteractiveSession") -> None:
+        super().__init__()
+        self._session = session
+        self._buffer = b""
+
+    def readable(self) -> bool:
+        return True
+
+    def writable(self) -> bool:
+        return True
+
+    def readinto(self, buffer: "WriteableBuffer", /) -> int:
+        self._checkClosed()
+        view = memoryview(buffer).cast("B")
+        if not len(view):
+            return 0
+        if not self._buffer:
+            data = self._session._read()
+            if data is None:
+                self._session._raise_for_failure()
+                return 0
+            self._buffer = data
+        count = min(len(view), len(self._buffer))
+        view[:count] = self._buffer[:count]
+        self._buffer = self._buffer[count:]
+        return count
+
+    def write(self, data: "ReadableBuffer", /) -> int:
+        self._checkClosed()
+        payload = bytes(memoryview(data).cast("B"))
+        self._session._write(payload)
+        return len(payload)
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        try:
+            super().close()
+        finally:
+            self._session._aclose_transport()
+
+
+class SyncInteractiveSession:
+    """Control an interactive sandbox process attached to a PTY.
+
+    Terminal I/O goes through :attr:`stream`; this object carries the controls
+    that are not part of the byte stream. The session cannot be reattached
+    after it closes.
+    """
+
+    __slots__ = ("_transport", "stream")
+
+    stream: SyncInteractiveStream
+    """Raw terminal output and input."""
+
+    def __init__(self, *, transport: SyncInteractiveTransport) -> None:
+        self._transport = transport
+        self.stream = SyncInteractiveStream(self)
+
+    @property
+    def returncode(self) -> int | None:
+        """Exit code of the remote process, or ``None`` while it runs."""
+        return self._transport.returncode
+
+    def resize(self, cols: int, rows: int) -> None:
+        """Tell the remote terminal its new size in characters."""
+        self.stream._checkClosed()
+        iter_coroutine(self._transport.send_json(resize_message(cols, rows)))
+
+    def wait(self, timeout: float | None = None) -> int | None:
+        """Wait for the remote process to exit and return its exit code.
+
+        Output that arrives meanwhile is buffered for :attr:`stream` rather
+        than discarded. The buffer is bounded, so with more output pending
+        than it holds this blocks until a reader makes room; sequential code
+        should read to the end of the stream first. Returns ``None`` when the
+        connection closed without reporting an exit code.
+
+        Args:
+            timeout: Seconds to wait before giving up. Waits indefinitely
+                when ``None``.
+
+        Raises:
+            TimeoutError: If the process is still running at the deadline.
+            ConnectionError: If the connection failed before the process
+                reported an exit code.
+        """
+        return iter_coroutine(self._transport.wait(timeout))
+
+    def close(self) -> None:
+        """Close the session and release the connection."""
+        self.stream.close()
+
+    def _read(self, timeout: float | None = None) -> bytes | None:
+        return iter_coroutine(self._transport.receive(timeout=timeout)).data
+
+    def _raise_for_failure(self) -> None:
+        failure = self._transport.failure
+        if failure is not None:
+            raise ConnectionError("Interactive session connection failed") from failure
+
+    def _write(self, data: bytes) -> None:
+        iter_coroutine(self._transport.send_bytes(data))
+
+    def _aclose_transport(self) -> None:
+        iter_coroutine(self._transport.close())
+
+
+class SyncInteractiveSessionOperation:
+    """Scope one interactive session.
+
+    Entering opens the connection and exiting closes it. Unlike the other
+    single-use operations in this SDK this one has no direct call form: the
+    connection is owned by the scope that opened it.
+    """
+
+    def __init__(self, scope: AbstractContextManager["SyncInteractiveSession"]) -> None:
+        self._scope = scope
+        self._consumed = False
+
+    def __enter__(self) -> "SyncInteractiveSession":
+        if self._consumed:
+            raise RuntimeError("open_interactive() operations can only be used once")
+        self._consumed = True
+        return self._scope.__enter__()
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> bool | None:
+        return self._scope.__exit__(exc_type, exc, traceback)
+
+
+@contextmanager
+def _open_interactive_session(
+    open_state: Callable[[], InteractiveSessionState],
+    *,
+    command: str,
+    args: Sequence[str] | None,
+    cwd: str | None,
+    env: Mapping[str, str] | None,
+    sudo: bool,
+    cols: int,
+    rows: int,
+) -> Iterator[SyncInteractiveSession]:
+    transport = SyncInteractiveTransport(open_state())
+    iter_coroutine(transport.connect())
+    try:
+        iter_coroutine(
+            transport.send_json(
+                start_message(
+                    command=command,
+                    args=args,
+                    cwd=cwd,
+                    env=env,
+                    sudo=sudo,
+                    cols=cols,
+                    rows=rows,
+                )
+            )
+        )
+        pty = SyncInteractiveSession(transport=transport)
+        try:
+            yield pty
+        finally:
+            pty.close()
+    finally:
+        iter_coroutine(transport.close())
 
 
 class SyncSnapshot(SnapshotHandleBase):
@@ -915,6 +1103,51 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         )
         return SyncProcess(payload=state, service=self._service, stdout=stdout, stderr=stderr)
 
+    def open_interactive(
+        self,
+        command: str = "/bin/bash",
+        args: Sequence[str] | None = None,
+        *,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        sudo: bool = False,
+        cols: int = DEFAULT_COLS,
+        rows: int = DEFAULT_ROWS,
+    ) -> SyncInteractiveSessionOperation:
+        """Start a process attached to a PTY and scope its session.
+
+        The connection is opened on entry and closed on exit, so the session
+        must be used as a context manager::
+
+            with session.open_interactive() as pty:
+                pty.stream.write(b"echo hi\n")
+
+        Args:
+            command: Executable or command name.
+            args: Command arguments, excluding the executable.
+            cwd: Process working directory.
+            env: Environment variables added to the process. ``TERM`` defaults
+                to ``xterm-256color`` so full-screen programs render correctly.
+            sudo: Whether to run with elevated privileges.
+            cols: Terminal width in characters.
+            rows: Terminal height in characters.
+
+        Returns:
+            A context manager yielding the terminal session.
+        """
+        return SyncInteractiveSessionOperation(
+            _open_interactive_session(
+                lambda: iter_coroutine(self._service.open_interactive(session_id=self.id)),
+                command=command,
+                args=args,
+                cwd=cwd if cwd is not None else self.cwd,
+                env=env,
+                sudo=sudo,
+                cols=cols,
+                rows=rows,
+            )
+        )
+
     def get_process(self, process_id: str, *, wait: bool = False) -> SyncProcess:
         """Get a process in this session."""
         state = iter_coroutine(
@@ -1246,6 +1479,43 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
             )
         )
         return SyncProcess(payload=state, service=self._service, stdout=stdout, stderr=stderr)
+
+    def open_interactive(
+        self,
+        command: str = "/bin/bash",
+        args: Sequence[str] | None = None,
+        *,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        sudo: bool = False,
+        cols: int = DEFAULT_COLS,
+        rows: int = DEFAULT_ROWS,
+    ) -> SyncInteractiveSessionOperation:
+        """Start a PTY-attached process in the current session.
+
+        See ``SyncSandboxRuntimeSession.open_interactive`` for argument
+        behavior.
+
+        Returns:
+            A context manager yielding the terminal session.
+        """
+        return SyncInteractiveSessionOperation(
+            _open_interactive_session(
+                lambda: iter_coroutine(
+                    execute_with_sandbox_recovery(
+                        lambda session_id: self._service.open_interactive(session_id=session_id),
+                        coordinator=self,
+                    )
+                ),
+                command=command,
+                args=args,
+                cwd=cwd if cwd is not None else self.cwd,
+                env=env,
+                sudo=sudo,
+                cols=cols,
+                rows=rows,
+            )
+        )
 
     def get_process(self, process_id: str, *, wait: bool = False) -> SyncProcess:
         """Get a process from the current session."""
