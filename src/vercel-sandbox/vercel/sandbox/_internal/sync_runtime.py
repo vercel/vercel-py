@@ -3,7 +3,6 @@
 import io
 import signal as signal_module
 import subprocess
-import time
 import warnings
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager
@@ -310,8 +309,9 @@ class SyncInteractiveSession:
     def wait(self, timeout: float | None = None) -> int | None:
         """Wait for the remote process to exit and return its exit code.
 
-        Pending terminal output is discarded. Returns ``None`` when the
-        connection closed without reporting an exit code.
+        Terminal output is untouched, so this can run alongside a reader.
+        Returns ``None`` when the connection closed without reporting an exit
+        code.
 
         Args:
             timeout: Seconds to wait before giving up. Waits indefinitely
@@ -322,14 +322,7 @@ class SyncInteractiveSession:
             ConnectionError: If the connection failed before the process
                 reported an exit code.
         """
-        deadline = None if timeout is None else time.monotonic() + timeout
-        while not self._transport.finished:
-            remaining = None if deadline is None else deadline - time.monotonic()
-            if remaining is not None and remaining <= 0:
-                raise TimeoutError("Interactive process did not exit before the timeout")
-            self._read(timeout=remaining)
-        self._raise_for_failure()
-        return self._transport.returncode
+        return iter_coroutine(self._transport.wait(timeout))
 
     def close(self) -> None:
         """Close the session and release the connection."""

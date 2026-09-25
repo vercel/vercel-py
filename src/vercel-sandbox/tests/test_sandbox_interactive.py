@@ -113,9 +113,22 @@ class _FakeTransport:
         self._finished = True
         return Frame(end=True)
 
-    async def wait(self) -> int | None:
-        while not self._finished:
-            await self.receive()
+    async def wait(self, timeout: float | None = None) -> int | None:
+        if not self._finished:
+            # Mirror the real transports: the exit frame is tracked as it
+            # passes the connection and never reaches a reader.
+            for index, frame in enumerate(self.frames):
+                if frame.end:
+                    self._returncode = frame.returncode
+                    del self.frames[index]
+                    self._finished = True
+                    break
+            else:
+                if self.running:
+                    raise TimeoutError
+                self._finished = True
+        if self.failure is not None:
+            raise ConnectionError from self.failure
         return self._returncode
 
     async def close(self) -> None:
@@ -616,12 +629,13 @@ def test_sync_interactive_wait_honours_timeout(mock_env_clear: None) -> None:
             transport = _FakeTransport.instances[-1]
             transport.frames = [Frame(data=b"still running")]
             transport.running = True
+
             with pytest.raises(TimeoutError):
                 pty.wait(timeout=5)
-            # The deadline is passed down so the read cannot outlive it.
-            assert transport.receive_timeouts and all(
-                value is not None and value <= 5 for value in transport.receive_timeouts
-            )
+
+            # Waiting is lifecycle, not I/O: the output it timed out on must
+            # still be there for the reader.
+            assert pty.stream.read(13) == b"still running"
 
 
 @respx.mock
