@@ -309,9 +309,11 @@ class SyncInteractiveSession:
     def wait(self, timeout: float | None = None) -> int | None:
         """Wait for the remote process to exit and return its exit code.
 
-        Terminal output is untouched, so this can run alongside a reader.
-        Returns ``None`` when the connection closed without reporting an exit
-        code.
+        Output that arrives meanwhile is buffered for :attr:`stream` rather
+        than discarded. The buffer is bounded, so with more output pending
+        than it holds this blocks until a reader makes room; sequential code
+        should read to the end of the stream first. Returns ``None`` when the
+        connection closed without reporting an exit code.
 
         Args:
             timeout: Seconds to wait before giving up. Waits indefinitely

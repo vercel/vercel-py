@@ -32,7 +32,9 @@ _HEALTH_BACKOFF_SECONDS = 0.1
 _FRAME_BUFFER = 64
 _SEND_ERRORS = (HTTPXWSException, httpx.HTTPError, LocalProtocolError)
 _READ_POLL_SECONDS = 0.2
-_READER_JOIN_SECONDS = 5.0
+_BUFFER_BYTES = 1 << 20
+_RELEASE_SECONDS = 5.0
+_RELEASE_PAUSE_SECONDS = 0.02
 
 
 @dataclass(frozen=True, slots=True)
@@ -287,11 +289,14 @@ async def open_async_transport(
 class SyncInteractiveTransport:
     """Blocking WebSocket transport with the same async-shaped interface.
 
-    A reader thread owns the connection, mirroring the async transport: it
-    buffers terminal output and records the exit status separately, so waiting
-    for the process never takes output away from a reader. That thread also
-    keeps draining during shutdown, because the websocket parks its own reader
-    once its queue fills and then waits for it while closing.
+    It owns no thread. Whichever caller is reading or waiting drives the
+    websocket, one caller at a time, and dispatches what arrives: terminal
+    output is buffered for readers while the exit status is tracked
+    separately, so waiting never discards output.
+
+    Output is buffered up to a byte bound. A caller waiting for the process
+    with more output pending than that blocks until a reader makes room, so
+    sequential code should read to the end of the stream before waiting.
     """
 
     def __init__(self, state: InteractiveSessionState) -> None:
@@ -299,14 +304,13 @@ class SyncInteractiveTransport:
         self._stack = ExitStack()
         self._session: WebSocketSession | None = None
         self._frames: deque[Frame] = deque()
-        self._ready = threading.Condition()
-        self._exited = threading.Event()
-        self._stopping = threading.Event()
-        self._reader: threading.Thread | None = None
+        self._buffered = 0
+        self._changed = threading.Condition()
+        self._receiving = False
         self._returncode: int | None = None
         self._failure: BaseException | None = None
+        self._completed = False
         self._closed = False
-        self._finished = False
 
     @property
     def failure(self) -> BaseException | None:
@@ -319,7 +323,7 @@ class SyncInteractiveTransport:
 
     @property
     def finished(self) -> bool:
-        return self._finished
+        return self._completed or self._closed
 
     async def connect(self) -> None:
         try:
@@ -334,62 +338,6 @@ class SyncInteractiveTransport:
         except BaseException:
             await self.close()
             raise
-        self._reader = threading.Thread(
-            target=self._run,
-            name="vercel-sandbox-interactive-reader",
-            daemon=True,
-        )
-        self._reader.start()
-
-    def _run(self) -> None:
-        session = self._session
-        assert session is not None
-        try:
-            while not self._stopping.is_set():
-                try:
-                    event = session.receive(_READ_POLL_SECONDS)
-                except TimeoutError:
-                    continue
-                except (
-                    HTTPXWSException,
-                    httpx.HTTPError,
-                    anyio.EndOfStream,
-                    anyio.ClosedResourceError,
-                ) as exc:
-                    if not isinstance(exc, WebSocketDisconnect) and not self._closed:
-                        self._failure = exc
-                    return
-                except Exception as exc:
-                    if not self._closed:
-                        self._failure = exc
-                    return
-                if self._closed:
-                    # Discard, so closing can join the websocket's own reader.
-                    continue
-                frame = decode_frame(event)
-                if frame is None:
-                    continue
-                if frame.end:
-                    self._returncode = frame.returncode
-                    return
-                if not self._buffer(frame):
-                    return
-        finally:
-            with self._ready:
-                self._finished = True
-                self._ready.notify_all()
-            self._exited.set()
-
-    def _buffer(self, frame: Frame) -> bool:
-        """Hand one frame to readers, waiting for room. False once closing."""
-        with self._ready:
-            while len(self._frames) >= _FRAME_BUFFER:
-                if self._closed or self._stopping.is_set():
-                    return False
-                self._ready.wait(_READ_POLL_SECONDS)
-            self._frames.append(frame)
-            self._ready.notify_all()
-            return True
 
     def _await_health(self, client: httpx.Client) -> None:
         url = health_url(self._state.url)
@@ -417,54 +365,132 @@ class SyncInteractiveTransport:
             raise anyio.BrokenResourceError from exc
 
     async def receive(self, timeout: float | None = None) -> Frame:
-        """Take one buffered frame, waiting at most ``timeout`` seconds.
+        """Take one frame of output, waiting at most ``timeout`` seconds.
 
         Raises:
             TimeoutError: If no frame arrives before the deadline.
         """
-        deadline = None if timeout is None else time.monotonic() + timeout
-        with self._ready:
+        deadline = _deadline(timeout)
+        with self._changed:
             while True:
                 if self._frames:
                     frame = self._frames.popleft()
-                    self._ready.notify_all()
+                    self._buffered -= len(frame.data or b"")
+                    self._changed.notify_all()
                     return frame
-                if self._finished or self._closed:
+                if self._completed or self._closed:
                     return _CLOSED
-                remaining = None if deadline is None else deadline - time.monotonic()
-                if remaining is not None and remaining <= 0:
-                    raise TimeoutError("No interactive frame arrived before the timeout")
-                self._ready.wait(remaining if remaining is not None else _READ_POLL_SECONDS)
+                self._drive(deadline)
 
     async def wait(self, timeout: float | None = None) -> int | None:
-        """Wait for the process to exit, without consuming terminal output."""
-        if not self._exited.wait(timeout):
-            raise TimeoutError("Interactive process did not exit before the timeout")
-        if self._failure is not None:
-            raise ConnectionError("Interactive session connection failed") from self._failure
-        return self._returncode
+        """Wait for the process to exit, buffering output for readers."""
+        deadline = _deadline(timeout)
+        with self._changed:
+            while not self._completed and not self._closed:
+                self._drive(deadline)
+            if self._failure is not None:
+                raise ConnectionError("Interactive session connection failed") from self._failure
+            return self._returncode
+
+    def _drive(self, deadline: float | None) -> None:
+        """Advance the connection by one step.
+
+        Called with the lock held, which is released around network I/O so
+        other callers can take buffered output or close the session. Reads
+        are sliced so a close on another thread is noticed between them.
+        """
+        remaining = _remaining(deadline)
+        if remaining is not None and remaining <= 0:
+            raise TimeoutError("No interactive frame arrived before the timeout")
+        slice_seconds = (
+            _READ_POLL_SECONDS if remaining is None else min(_READ_POLL_SECONDS, remaining)
+        )
+        if self._receiving or self._buffered >= _BUFFER_BYTES:
+            # Someone else is on the socket, or readers must make room first.
+            self._changed.wait(slice_seconds)
+            return
+        session = self._require_session()
+        self._receiving = True
+        self._changed.release()
+        try:
+            event: object = session.receive(slice_seconds)
+        except TimeoutError:
+            event = None
+        except Exception as exc:
+            event = exc
+        finally:
+            self._changed.acquire()
+            self._receiving = False
+        if event is None:
+            return
+        if isinstance(event, BaseException):
+            if not isinstance(event, WebSocketDisconnect) and not self._closed:
+                self._failure = event
+            self._completed = True
+        else:
+            frame = decode_frame(event)
+            if frame is None:
+                return
+            if frame.end:
+                self._returncode = frame.returncode
+                self._completed = True
+            else:
+                self._frames.append(frame)
+                self._buffered += len(frame.data or b"")
+        self._changed.notify_all()
 
     async def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        with self._ready:
-            self._ready.notify_all()
-        self._exited.set()
+        with self._changed:
+            if self._closed:
+                return
+            self._closed = True
+            self._changed.notify_all()
+        session = self._session
+        if session is not None:
+            _release_reader(session)
         try:
-            # The reader keeps draining until the connection is gone, which is
-            # what lets this close finish.
             self._stack.close()
         except Exception:
             pass
-        finally:
-            self._stopping.set()
-            with self._ready:
-                self._ready.notify_all()
-            if self._reader is not None:
-                self._reader.join(_READER_JOIN_SECONDS)
 
     def _require_session(self) -> WebSocketSession:
         if self._session is None:
             raise anyio.ClosedResourceError
         return self._session
+
+
+def _deadline(timeout: float | None) -> float | None:
+    return None if timeout is None else time.monotonic() + timeout
+
+
+def _remaining(deadline: float | None) -> float | None:
+    return None if deadline is None else deadline - time.monotonic()
+
+
+def _release_reader(session: WebSocketSession) -> None:
+    """Let the websocket's reader thread finish before shutdown joins it.
+
+    That thread blocks on a bounded queue with no way to be woken, and
+    exiting the session waits for it. Closing first stops it reading anything
+    new, so draining what is queued is enough for it to notice the close.
+    Local closure discards that output by design.
+    """
+    try:
+        session.close()
+    except Exception:
+        pass
+    deadline = time.monotonic() + _RELEASE_SECONDS
+    while time.monotonic() < deadline:
+        drained = 0
+        while True:
+            try:
+                session.receive(0)
+            except TimeoutError:
+                break
+            except Exception:
+                pass
+            drained += 1
+        if not drained:
+            return
+        # A reader freed mid-put may still land the rest of that read's events.
+        time.sleep(_RELEASE_PAUSE_SECONDS)

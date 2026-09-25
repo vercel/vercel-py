@@ -1,7 +1,9 @@
 import io
 import json
+import queue
 import threading
 import time
+from collections import deque
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any, cast
@@ -282,6 +284,118 @@ def test_sync_reader_reports_a_broken_connection() -> None:
     assert pty.stream.read(7) == b"partial"
     with pytest.raises(ConnectionError):
         pty.stream.read(1)
+
+
+class _ScriptedSocket:
+    """Stands in for httpx2's sync websocket: scripted events behind receive()."""
+
+    def __init__(self, events: list[object]) -> None:
+        self.events = deque(events)
+        self.closed = False
+
+    def receive(self, timeout: float | None = None) -> object:
+        if self.events:
+            event = self.events.popleft()
+            if isinstance(event, BaseException):
+                raise event
+            return event
+        time.sleep(min(timeout or 0.01, 0.01))
+        raise TimeoutError
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _sync_transport(socket: object) -> SyncInteractiveTransport:
+    transport = SyncInteractiveTransport(InteractiveSessionState(url="wss://h.test/ws", token="t"))
+    transport._session = cast(Any, socket)
+    return transport
+
+
+def test_sync_transport_waiting_buffers_output_for_readers() -> None:
+    # Waiting drives the connection but must not lose what it dispatches.
+    transport = _sync_transport(
+        _ScriptedSocket(
+            [
+                _BytesEvent(b"one"),
+                _BytesEvent(b"two"),
+                _TextEvent(json.dumps({"type": "exit", "code": 5})),
+            ]
+        )
+    )
+
+    assert iter_coroutine(transport.wait()) == 5
+    assert iter_coroutine(transport.receive()).data == b"one"
+    assert iter_coroutine(transport.receive()).data == b"two"
+    assert iter_coroutine(transport.receive()).end
+
+
+def test_sync_transport_backpressure_blocks_rather_than_dropping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vercel.sandbox._internal import interactive_session
+
+    monkeypatch.setattr(interactive_session, "_BUFFER_BYTES", 8)
+    transport = _sync_transport(
+        _ScriptedSocket(
+            [
+                _BytesEvent(b"abcd"),
+                _BytesEvent(b"efgh"),
+                _BytesEvent(b"ijkl"),
+                _TextEvent(json.dumps({"type": "exit"})),
+            ]
+        )
+    )
+
+    # The buffer fills before the exit frame is reached, so waiting must stop
+    # pulling and time out instead of discarding output.
+    with pytest.raises(TimeoutError):
+        iter_coroutine(transport.wait(timeout=0.3))
+
+    assert iter_coroutine(transport.receive()).data == b"abcd"
+    assert iter_coroutine(transport.receive()).data == b"efgh"
+    assert iter_coroutine(transport.receive()).data == b"ijkl"
+    assert iter_coroutine(transport.wait()) == 0
+
+
+def test_sync_transport_reports_disconnect_after_buffered_output() -> None:
+    from httpx2.websockets import WebSocketNetworkError
+
+    transport = _sync_transport(_ScriptedSocket([_BytesEvent(b"tail"), WebSocketNetworkError()]))
+
+    assert iter_coroutine(transport.receive()).data == b"tail"
+    assert iter_coroutine(transport.receive()).end
+    with pytest.raises(ConnectionError):
+        iter_coroutine(transport.wait())
+
+
+def test_sync_transport_close_releases_a_parked_websocket_reader() -> None:
+    # httpx2's reader blocks on a bounded queue with no way to be woken, and
+    # its shutdown joins that thread. Closing must drain enough for it to
+    # finish, or exiting the session hangs.
+    events: queue.Queue[object] = queue.Queue(maxsize=2)
+    events.put(_BytesEvent(b"a"))
+    events.put(_BytesEvent(b"b"))
+
+    class QueueSocket:
+        def receive(self, timeout: float | None = None) -> object:
+            try:
+                return events.get(timeout=timeout)
+            except queue.Empty:
+                raise TimeoutError from None
+
+        def close(self) -> None:
+            pass
+
+    producer = threading.Thread(target=lambda: events.put(_BytesEvent(b"c")), daemon=True)
+    producer.start()
+    time.sleep(0.05)
+    assert producer.is_alive()  # parked on the full queue
+
+    iter_coroutine(_sync_transport(QueueSocket()).close())
+
+    producer.join(2)
+    assert not producer.is_alive()
 
 
 def test_sync_reads_wake_when_closed_from_another_thread() -> None:
