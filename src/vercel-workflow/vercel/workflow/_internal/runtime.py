@@ -196,6 +196,8 @@ class Attributes(FutureSuspension[None]):
 @dataclasses.dataclass(kw_only=True)
 class Hook(BaseSuspension, Generic[T]):
     token: str
+    # User disposal and a historical disposal are distinct: replay may have
+    # consumed the latter before user code has claimed earlier payloads.
     disposed: bool = False
     has_dispose_event: bool = False
     has_conflict_awaiter: bool = False
@@ -1104,6 +1106,7 @@ class WorkflowOrchestratorContext:
             fut = hook.futures.popleft()
             if not fut.done():
                 fut.set_exception(StopAsyncIteration)
+        hook.buffered_results.clear()
         self.suspensions.pop(correlation_id, None)
 
     def _fail_nondeterminism(self, sus: BaseSuspension, exc: Exception) -> None:
@@ -1345,7 +1348,10 @@ class WorkflowOrchestratorContext:
 
             case w.HookDisposedEvent():
                 self.hooks[event.correlation_id].has_dispose_event = True
-                self.dispose_hook(correlation_id=event.correlation_id)
+                # A historical release confirms storage state; it is not a
+                # dispose() call by this execution. Previously buffered payloads
+                # remain available until user code consumes or disposes them.
+                self.suspensions.pop(event.correlation_id, None)
 
 
 # ── lazy hook resume ───────────────────────────────────────────────────────
