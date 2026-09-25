@@ -24,6 +24,7 @@ from collections.abc import (
     Sequence,
 )
 from datetime import datetime
+from itertools import chain
 from typing import Any, Generic, ParamSpec, TypeVar, overload
 from urllib.parse import parse_qsl, urlsplit
 
@@ -1170,7 +1171,7 @@ class WorkflowOrchestratorContext:
                         ),
                     )
                     return
-        if event.correlation_id not in self.suspensions:
+        elif event.correlation_id not in self.suspensions:
             match event:
                 case (
                     # A step's attribute write. It answers no call in
@@ -1194,7 +1195,7 @@ class WorkflowOrchestratorContext:
                     # instead of yielding forever (the matching ID will never
                     # appear, so plain `return` would deadlock the run).
                     pos = _correlation_ulid(slot_id)
-                    for sus in self.suspensions.values():
+                    for sus in chain(self.suspensions.values(), self.hooks.values()):
                         if _correlation_ulid(sus.correlation_id) == pos:
                             self._fail_nondeterminism(
                                 sus,
@@ -1240,7 +1241,10 @@ class WorkflowOrchestratorContext:
                 sus.has_created_event = True
 
             case w.HookCreatedEvent():
-                hook = self.suspensions[event.correlation_id]
+                hook = self.hooks.get(event.correlation_id)
+                if hook is None:
+                    # Internal step-cancellation hooks only live in suspensions.
+                    hook = self.suspensions[event.correlation_id]
                 hook.has_created_event = True
                 if isinstance(hook, Hook):
                     while hook.conflict_futures:
@@ -1318,10 +1322,9 @@ class WorkflowOrchestratorContext:
                     conflicting_run_id=conflicting_run_id,
                 )
             ):
-                conflicting_hook = self.suspensions.get(event.correlation_id)
+                conflicting_hook = self.hooks.get(event.correlation_id)
                 if conflicting_hook is not None:
-                    self.suspensions.pop(event.correlation_id)
-                    assert isinstance(conflicting_hook, Hook)
+                    self.suspensions.pop(event.correlation_id, None)
                     conflict_error = errors.HookConflictError(token, conflicting_run_id)
                     conflicting_hook.conflict_error = conflict_error
                     conflicting_hook.conflicting_run = (
