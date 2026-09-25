@@ -151,12 +151,54 @@ class NetworkPolicyTransform:
 
 
 @dataclass(frozen=True, slots=True)
+class NetworkPolicyResponse:
+    """Response returned by the network proxy without contacting the origin."""
+
+    status_code: int
+    headers: Mapping[str, str] | None = None
+    body: str | None = None
+    content_type: str | None = None
+    __hash__ = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if type(self.status_code) is not int or not 200 <= self.status_code <= 599:
+            raise ValueError("response status_code must be an integer between 200 and 599")
+        if self.body is not None and not isinstance(self.body, str):
+            raise TypeError("response body must be a string")
+        if self.content_type is not None and not isinstance(self.content_type, str):
+            raise TypeError("response content_type must be a string")
+        if self.body is not None and self.status_code in {204, 205, 304}:
+            raise ValueError("response body is not allowed for status codes 204, 205, and 304")
+        if self.body is not None and self.content_type is None:
+            raise ValueError("response content_type is required when body is set")
+
+        headers = None if self.headers is None else dict(self.headers)
+        if headers is not None and any(
+            not isinstance(name, str) or not isinstance(value, str)
+            for name, value in headers.items()
+        ):
+            raise TypeError("response headers must map strings to strings")
+        names = [name.lower() for name in headers or ()]
+        if len(names) != len(set(names)):
+            raise ValueError("response headers cannot contain duplicate names")
+        proxy_managed = {"connection", "content-length", "transfer-encoding"}
+        if any(name in proxy_managed for name in names):
+            raise ValueError("response headers cannot set proxy-managed headers")
+        object.__setattr__(
+            self,
+            "headers",
+            None if headers is None else MappingProxyType(headers),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class NetworkPolicyRule:
-    """Configure request matching, transforms, and forwarding for one domain."""
+    """Configure one matched request action for a domain."""
 
     transform: tuple[NetworkPolicyTransform, ...] = ()
     match: NetworkPolicyRequestMatcher | None = None
     forward_url: str | None = None
+    response: NetworkPolicyResponse | None = None
     __hash__ = None  # type: ignore[assignment]
 
     def __init__(
@@ -165,10 +207,18 @@ class NetworkPolicyRule:
         transform: Iterable[NetworkPolicyTransform] = (),
         match: NetworkPolicyRequestMatcher | None = None,
         forward_url: str | None = None,
+        response: NetworkPolicyResponse | None = None,
     ) -> None:
-        object.__setattr__(self, "transform", tuple(transform))
+        normalized_transform = tuple(transform)
+        handlers = sum((bool(normalized_transform), forward_url is not None, response is not None))
+        if handlers != 1:
+            raise ValueError(
+                "network policy rule requires exactly one of transform, forward_url, or response"
+            )
+        object.__setattr__(self, "transform", normalized_transform)
         object.__setattr__(self, "match", match)
         object.__setattr__(self, "forward_url", forward_url)
+        object.__setattr__(self, "response", response)
 
 
 @dataclass(frozen=True, slots=True)
@@ -267,6 +317,15 @@ def _serialize_network_policy_rule(rule: NetworkPolicyRule) -> JSONObject:
         result["transform"] = transforms
     if rule.forward_url is not None:
         result["forwardURL"] = rule.forward_url
+    if rule.response is not None:
+        response: JSONObject = {"statusCode": rule.response.status_code}
+        if rule.response.headers is not None:
+            response["headers"] = dict(rule.response.headers)
+        if rule.response.body is not None:
+            response["body"] = rule.response.body
+        if rule.response.content_type is not None:
+            response["contentType"] = rule.response.content_type
+        result["response"] = response
     return result
 
 
@@ -372,6 +431,10 @@ def _parse_normalized_network_policy(data: Mapping[str, Any]) -> NetworkPolicy:
             )
         )
 
+    # The API exposes responseRules in a sanitized form containing only status
+    # and match-dimension names. That is insufficient to reconstruct authored
+    # headers, bodies, or matchers, so do not manufacture a lossy public rule.
+
     allowed_cidrs = _optional_string_iterable(data.get("allowedCIDRs"), "allowedCIDRs")
     denied_cidrs = _optional_string_iterable(data.get("deniedCIDRs"), "deniedCIDRs")
     subnets = (
@@ -424,10 +487,37 @@ def _parse_network_policy_rule(value: object) -> NetworkPolicyRule:
                 )
             )
     forward_url = data.get("forwardURL", data.get("forwardUrl"))
+    response = data.get("response")
     return NetworkPolicyRule(
         transform=transforms,
         match=_parse_optional_request_matcher(data.get("match")),
         forward_url=None if forward_url is None else _string(forward_url, "forwardURL"),
+        response=None if response is None else _parse_network_policy_response(response),
+    )
+
+
+def _parse_network_policy_response(value: object) -> NetworkPolicyResponse:
+    data = _mapping(value, "network policy response")
+    status_code = data.get("statusCode")
+    if type(status_code) is not int:
+        raise TypeError("network policy response statusCode must be an integer")
+    headers = data.get("headers")
+    return NetworkPolicyResponse(
+        status_code=status_code,
+        headers=(
+            None
+            if headers is None
+            else {
+                _string(key, "response header name"): _string(value, "response header value")
+                for key, value in _mapping(headers, "response headers").items()
+            }
+        ),
+        body=None if "body" not in data else _string(data["body"], "response body"),
+        content_type=(
+            None
+            if "contentType" not in data
+            else _string(data["contentType"], "response contentType")
+        ),
     )
 
 
