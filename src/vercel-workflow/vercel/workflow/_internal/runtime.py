@@ -1152,6 +1152,23 @@ class WorkflowOrchestratorContext:
         # one.
         event = self.events[self.replay_index]
         self.replay_index += 1
+        if event.correlation_id in self.hooks:
+            registered_hook = self.hooks[event.correlation_id]
+            match event:
+                case (
+                    w.HookCreatedEvent(event_data=w.HookCreatedEventData(token=event_token))
+                    | w.HookConflictEvent(event_data=w.HookConflictEventData(token=event_token))
+                    | w.HookReceivedEvent(event_data=w.HookReceivedEventData(token=event_token))
+                ) if event_token is not None and event_token != registered_hook.token:
+                    self._fail_nondeterminism(
+                        registered_hook,
+                        NondeterminismError(
+                            f"workflow replay diverged at {registered_hook.correlation_id}: "
+                            f"recorded hook token {event_token!r}, but the body now uses "
+                            f"{registered_hook.token!r}"
+                        ),
+                    )
+                    return
         if event.correlation_id not in self.suspensions:
             match event:
                 case (

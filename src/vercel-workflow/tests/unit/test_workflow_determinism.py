@@ -7,6 +7,7 @@ loudly rather than silently returning the wrong value.
 """
 
 import asyncio
+import dataclasses
 import traceback
 from datetime import datetime, timezone
 from typing import Any
@@ -25,6 +26,11 @@ from vercel.workflow._internal import (
 
 async def _greet(*, name: str) -> str:
     return name
+
+
+@dataclasses.dataclass
+class _HookPayload:
+    value: str
 
 
 def _context(
@@ -120,6 +126,110 @@ async def test_created_event_without_suspension_raises_runtime_error() -> None:
 
     with pytest.raises(RuntimeError, match="has not registered its suspension"):
         ctx.resume()
+
+
+def _hook_registration_event(correlation_id: str, token: str, *, conflict: bool) -> w.Event:
+    if conflict:
+        return w.HookConflictEvent(
+            correlation_id=correlation_id,
+            event_data=w.HookConflictEventData(token=token),
+        )
+    return w.HookCreatedEventData(token=token).into_event(correlation_id)
+
+
+@pytest.mark.parametrize("conflict", [False, True], ids=["created", "conflict"])
+@pytest.mark.parametrize("disposed", [False, True])
+async def test_changed_hook_token_raises_nondeterminism(conflict: bool, disposed: bool) -> None:
+    ctx = _context([])
+    hook_event = ctx.create_hook("new-token", _HookPayload)
+    hook_id = hook_event._correlation_id
+    hook = ctx.hooks[hook_id]
+    ctx.events.append(_hook_registration_event(hook_id, "old-token", conflict=conflict))
+    if disposed:
+        ctx.dispose_hook(correlation_id=hook_id)
+
+    _resume_isolated(ctx)
+
+    assert isinstance(ctx.resume_exception, runtime.NondeterminismError)
+    assert "recorded hook token 'old-token'" in str(ctx.resume_exception)
+    assert "the body now uses 'new-token'" in str(ctx.resume_exception)
+    assert ctx.suspended
+    assert not hook.has_created_event
+    assert hook.conflict_error is None
+
+
+@pytest.mark.parametrize("conflict", [False, True], ids=["created", "conflict"])
+async def test_unchanged_hook_token_replays_normally(conflict: bool) -> None:
+    ctx = _context([])
+    hook_event = ctx.create_hook("same-token", _HookPayload)
+    hook_id = hook_event._correlation_id
+    hook = ctx.hooks[hook_id]
+    ctx.events.append(_hook_registration_event(hook_id, "same-token", conflict=conflict))
+
+    ctx.resume()
+
+    assert ctx.resume_exception is None
+    assert not ctx.suspended
+    if conflict:
+        assert not hook.has_created_event
+        assert hook.conflict_error is not None
+        assert hook.conflict_error.token == "same-token"
+    else:
+        assert hook.has_created_event
+        assert hook.conflict_error is None
+
+
+@pytest.mark.parametrize("token", ["old-token", ""])
+@pytest.mark.parametrize("disposed", [False, True])
+async def test_received_hook_token_mismatch_fails_before_delivery(
+    token: str, disposed: bool
+) -> None:
+    ctx = _context([])
+    hook_id = ctx.create_hook("current-token", _HookPayload)._correlation_id
+    ctx.events.append(
+        w.HookReceivedEventData(
+            token=token, payload=PLAIN_ENCODER.encode({"value": "payload"})
+        ).into_event(hook_id)
+    )
+    if disposed:
+        ctx.dispose_hook(correlation_id=hook_id)
+
+    _resume_isolated(ctx)
+
+    assert isinstance(ctx.resume_exception, runtime.NondeterminismError)
+    assert f"recorded hook token {token!r}" in str(ctx.resume_exception)
+    assert ctx.suspended
+    assert not ctx.hooks[hook_id].buffered_results
+
+
+@pytest.mark.parametrize("token", [None, "current-token"])
+async def test_received_hook_with_missing_or_matching_token_delivers_payload(
+    token: str | None,
+) -> None:
+    ctx = _context([])
+    hook_id = ctx.create_hook("current-token", _HookPayload)._correlation_id
+    ctx.events.append(
+        w.HookReceivedEventData(
+            token=token, payload=PLAIN_ENCODER.encode({"value": "payload"})
+        ).into_event(hook_id)
+    )
+
+    ctx.resume()
+
+    assert ctx.resume_exception is None
+    assert not ctx.suspended
+    assert await ctx.run_hook(correlation_id=hook_id) == _HookPayload(value="payload")
+
+
+async def test_hook_disposal_without_event_data_skips_token_validation() -> None:
+    ctx = _context([])
+    hook_id = ctx.create_hook("current-token", _HookPayload)._correlation_id
+    ctx.events.append(w.HookDisposedEvent(correlation_id=hook_id))
+
+    ctx.resume()
+
+    assert ctx.resume_exception is None
+    assert ctx.hooks[hook_id].has_dispose_event
 
 
 # --- concurrent delivery: the loop workflow + resume single-step -----------------
