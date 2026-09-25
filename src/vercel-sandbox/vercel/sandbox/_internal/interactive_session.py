@@ -32,6 +32,7 @@ _FRAME_BUFFER = 64
 _SEND_ERRORS = (HTTPXWSException, httpx.HTTPError, LocalProtocolError)
 _DRAIN_POLL_SECONDS = 0.05
 _DRAIN_JOIN_SECONDS = 5.0
+_READ_POLL_SECONDS = 0.2
 
 
 @dataclass(frozen=True, slots=True)
@@ -357,13 +358,22 @@ class SyncInteractiveTransport:
             return _CLOSED
         deadline = None if timeout is None else time.monotonic() + timeout
         while True:
+            if self._closed:
+                # Closed from another thread while this read was parked.
+                self._finished = True
+                return _CLOSED
             remaining = None if deadline is None else deadline - time.monotonic()
             if remaining is not None and remaining <= 0:
                 raise TimeoutError("No interactive frame arrived before the timeout")
+            # Read in slices rather than parking indefinitely, so a close on
+            # another thread is noticed instead of stranding this one.
+            slice_seconds = (
+                _READ_POLL_SECONDS if remaining is None else min(_READ_POLL_SECONDS, remaining)
+            )
             try:
-                frame = decode_frame(self._require_session().receive(remaining))
+                frame = decode_frame(self._require_session().receive(slice_seconds))
             except TimeoutError:
-                raise
+                continue
             except (
                 HTTPXWSException,
                 httpx.HTTPError,

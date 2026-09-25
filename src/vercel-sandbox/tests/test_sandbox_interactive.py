@@ -1,8 +1,10 @@
 import io
 import json
+import threading
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import cast
+from typing import Any, cast
 
 import anyio
 import httpx2 as httpx
@@ -11,6 +13,7 @@ from sandbox_fixtures import sandbox_service_options
 
 import vendor.respx as respx
 from vercel import sandbox
+from vercel._internal.core.iter_coroutine import iter_coroutine
 from vercel._internal.core.options import ServiceOptions
 from vercel.api import session
 from vercel.sandbox import sync as sandbox_sync
@@ -238,6 +241,32 @@ def test_sync_reader_reports_a_broken_connection() -> None:
     assert pty.stream.read(7) == b"partial"
     with pytest.raises(ConnectionError):
         pty.stream.read(1)
+
+
+def test_sync_reads_wake_when_closed_from_another_thread() -> None:
+    # The websocket parks a reader in a queue with no deadline, so closing on
+    # another thread has to be observable from inside a pending read.
+    class QuietSession:
+        def receive(self, timeout: float | None = None) -> object:
+            time.sleep(timeout or 0.01)
+            raise TimeoutError
+
+    transport = SyncInteractiveTransport(InteractiveSessionState(url="wss://h.test/ws", token="t"))
+    transport._session = cast(Any, QuietSession())
+
+    def close_soon() -> None:
+        time.sleep(0.3)
+        transport._closed = True
+
+    closer = threading.Thread(target=close_soon)
+    closer.start()
+    try:
+        started = time.monotonic()
+        frame = iter_coroutine(transport.receive())
+        assert frame.end
+        assert time.monotonic() - started < 5
+    finally:
+        closer.join()
 
 
 def test_empty_frames_are_not_end_of_stream() -> None:
