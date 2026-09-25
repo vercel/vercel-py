@@ -1,6 +1,7 @@
 """WebSocket transport for interactive PTY sessions."""
 
 import json
+import threading
 import time
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import ExitStack, asynccontextmanager
@@ -12,6 +13,7 @@ import httpx2 as httpx
 from httpx2.websockets import (
     AsyncWebSocketSession,
     HTTPXWSException,
+    WebSocketDisconnect,
     WebSocketSession,
 )
 from wsproto.utilities import LocalProtocolError
@@ -28,6 +30,8 @@ _HEALTH_ATTEMPTS = 5
 _HEALTH_BACKOFF_SECONDS = 0.1
 _FRAME_BUFFER = 64
 _SEND_ERRORS = (HTTPXWSException, httpx.HTTPError, LocalProtocolError)
+_DRAIN_POLL_SECONDS = 0.05
+_DRAIN_JOIN_SECONDS = 5.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +123,15 @@ def _parse_control(text: str) -> dict[str, JSONValue] | None:
     return cast(dict[str, JSONValue], message)
 
 
+def _unwrap_single(error: BaseException) -> BaseException:
+    """Unwrap exception groups that carry exactly one error."""
+    while True:
+        nested = getattr(error, "exceptions", None)
+        if not isinstance(nested, tuple) or len(nested) != 1:
+            return error
+        error = nested[0]
+
+
 class AsyncInteractiveTransport:
     """Async WebSocket transport for one interactive session.
 
@@ -126,6 +139,9 @@ class AsyncInteractiveTransport:
     it was entered on when a background task fails. The connection therefore
     runs in a task of its own so a dropped connection ends this stream instead
     of cancelling whatever the caller happens to be awaiting.
+
+    Terminal output is forwarded to readers while the exit status is tracked
+    separately, so waiting for the process never competes for output.
     """
 
     def __init__(self, state: InteractiveSessionState) -> None:
@@ -133,46 +149,64 @@ class AsyncInteractiveTransport:
         self._send, self._receive = anyio.create_memory_object_stream[Frame](_FRAME_BUFFER)
         self._scope = anyio.CancelScope()
         self._session: AsyncWebSocketSession | None = None
+        self._exited = anyio.Event()
+        self._returncode: int | None = None
+        self._failure: BaseException | None = None
         self._finished = False
+
+    @property
+    def failure(self) -> BaseException | None:
+        """Why the connection ended, when it did not end cleanly."""
+        return self._failure
+
+    @property
+    def returncode(self) -> int | None:
+        return self._returncode
 
     async def run(self, *, task_status: anyio.abc.TaskStatus[None]) -> None:
         """Own the connection until it ends or :meth:`close` is called."""
-        async with self._send:
-            with self._scope:
-                try:
-                    async with httpx.AsyncClient() as client:
-                        await self._await_health(client)
-                        async with client.websocket(
-                            self._state.url, params={"token": self._state.token}
-                        ) as session:
-                            self._session = session
-                            task_status.started()
-                            await self._pump(session)
-                except (HTTPXWSException, httpx.HTTPError, OSError) as exc:
-                    if self._session is None:
-                        raise SandboxInteractiveError(
-                            "Interactive session could not be established"
-                        ) from exc
-                except Exception:
-                    # After startup a failed connection just ends the stream.
-                    if self._session is None:
-                        raise
-                finally:
-                    self._session = None
+        try:
+            async with self._send:
+                with self._scope:
+                    try:
+                        async with httpx.AsyncClient() as client:
+                            await self._await_health(client)
+                            async with client.websocket(
+                                self._state.url, params={"token": self._state.token}
+                            ) as session:
+                                self._session = session
+                                task_status.started()
+                                await self._pump(session)
+                    except (HTTPXWSException, httpx.HTTPError, OSError) as exc:
+                        if self._session is None:
+                            raise SandboxInteractiveError(
+                                "Interactive session could not be established"
+                            ) from exc
+                        self._failure = exc
+                    except Exception as exc:
+                        if self._session is None:
+                            raise
+                        self._failure = exc
+                    finally:
+                        self._session = None
+        finally:
+            self._exited.set()
 
     async def _pump(self, session: AsyncWebSocketSession) -> None:
         while True:
             try:
                 frame = decode_frame(await session.receive())
-            except (HTTPXWSException, httpx.HTTPError, anyio.EndOfStream):
+            except (HTTPXWSException, httpx.HTTPError, anyio.EndOfStream) as exc:
+                self._failure = exc
                 return
             if frame is None:
                 continue
+            if frame.end:
+                self._returncode = frame.returncode
+                return
             try:
                 await self._send.send(frame)
             except anyio.BrokenResourceError:
-                return
-            if frame.end:
                 return
 
     async def _await_health(self, client: httpx.AsyncClient) -> None:
@@ -204,32 +238,28 @@ class AsyncInteractiveTransport:
         if self._finished:
             return _CLOSED
         try:
-            frame = await self._receive.receive()
+            return await self._receive.receive()
         except (anyio.EndOfStream, anyio.ClosedResourceError):
             self._finished = True
             return _CLOSED
-        if frame.end:
-            self._finished = True
-        return frame
+
+    async def wait(self) -> int | None:
+        """Wait for the process to exit, without consuming terminal output."""
+        await self._exited.wait()
+        if self._failure is not None:
+            raise anyio.BrokenResourceError from self._failure
+        return self._returncode
 
     async def close(self) -> None:
         self._finished = True
         self._scope.cancel()
         self._receive.close()
+        self._exited.set()
 
     def _require_session(self) -> AsyncWebSocketSession:
         if self._session is None:
             raise anyio.ClosedResourceError
         return self._session
-
-
-def _unwrap_single(error: BaseException) -> BaseException:
-    """Unwrap exception groups that carry exactly one error."""
-    while True:
-        nested = getattr(error, "exceptions", None)
-        if not isinstance(nested, tuple) or len(nested) != 1:
-            return error
-        error = nested[0]
 
 
 @asynccontextmanager
@@ -260,8 +290,23 @@ class SyncInteractiveTransport:
         self._state = state
         self._stack = ExitStack()
         self._session: WebSocketSession | None = None
+        self._returncode: int | None = None
+        self._failure: BaseException | None = None
         self._closed = False
         self._finished = False
+
+    @property
+    def failure(self) -> BaseException | None:
+        """Why the connection ended, when it did not end cleanly."""
+        return self._failure
+
+    @property
+    def returncode(self) -> int | None:
+        return self._returncode
+
+    @property
+    def finished(self) -> bool:
+        return self._finished
 
     async def connect(self) -> None:
         try:
@@ -317,17 +362,22 @@ class SyncInteractiveTransport:
                 raise TimeoutError("No interactive frame arrived before the timeout")
             try:
                 frame = decode_frame(self._require_session().receive(remaining))
+            except TimeoutError:
+                raise
             except (
                 HTTPXWSException,
                 httpx.HTTPError,
                 anyio.EndOfStream,
                 anyio.ClosedResourceError,
-            ):
+            ) as exc:
+                if not isinstance(exc, WebSocketDisconnect):
+                    self._failure = exc
                 self._finished = True
                 return _CLOSED
             if frame is None:
                 continue
             if frame.end:
+                self._returncode = frame.returncode
                 self._finished = True
             return frame
 
@@ -336,10 +386,39 @@ class SyncInteractiveTransport:
             return
         self._closed = True
         self._finished = True
+        stop = threading.Event()
+        drain = threading.Thread(
+            target=self._drain_until,
+            args=(stop,),
+            name="vercel-sandbox-interactive-drain",
+            daemon=True,
+        )
+        drain.start()
         try:
             self._stack.close()
         except Exception:
             pass
+        finally:
+            stop.set()
+            drain.join(_DRAIN_JOIN_SECONDS)
+
+    def _drain_until(self, stop: threading.Event) -> None:
+        """Keep the websocket's reader thread from parking during shutdown.
+
+        That thread blocks once its bounded queue fills, and shutdown joins it,
+        so closing without draining hangs whenever the caller stopped reading
+        before the process finished.
+        """
+        session = self._session
+        if session is None:
+            return
+        while not stop.is_set():
+            try:
+                session.receive(_DRAIN_POLL_SECONDS)
+            except TimeoutError:
+                continue
+            except Exception:
+                return
 
     def _require_session(self) -> WebSocketSession:
         if self._session is None:

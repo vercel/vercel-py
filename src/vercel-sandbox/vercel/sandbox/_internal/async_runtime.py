@@ -247,6 +247,7 @@ class InteractiveStream(anyio.abc.ByteStream):
             if not self._buffer:
                 data = await self._session._read()
                 if data is None:
+                    self._session._raise_for_failure()
                     raise anyio.EndOfStream
                 self._buffer = data
             chunk, self._buffer = self._buffer[:max_bytes], self._buffer[max_bytes:]
@@ -275,20 +276,19 @@ class InteractiveSession:
     after it closes.
     """
 
-    __slots__ = ("_returncode", "_transport", "stream")
+    __slots__ = ("_transport", "stream")
 
     stream: InteractiveStream
     """Raw terminal output and input."""
 
     def __init__(self, *, transport: AsyncInteractiveTransport) -> None:
         self._transport = transport
-        self._returncode: int | None = None
         self.stream = InteractiveStream(self)
 
     @property
     def returncode(self) -> int | None:
         """Exit code of the remote process, or ``None`` while it runs."""
-        return self._returncode
+        return self._transport.returncode
 
     async def resize(self, cols: int, rows: int) -> None:
         """Tell the remote terminal its new size in characters."""
@@ -299,16 +299,15 @@ class InteractiveSession:
     async def wait(self) -> int | None:
         """Wait for the remote process to exit and return its exit code.
 
-        Pending terminal output is discarded. Returns ``None`` when the
-        connection closed without reporting an exit code.
+        Terminal output is untouched, so this can run alongside a reader.
+        Returns ``None`` when the connection closed without reporting an exit
+        code.
+
+        Raises:
+            anyio.BrokenResourceError: If the connection failed before the
+                process reported an exit code.
         """
-        while self._returncode is None:
-            # Waiting consumes frames, so it contends with the stream just as
-            # two readers would.
-            with self.stream._read_guard:
-                if await self._read() is None:
-                    break
-        return self._returncode
+        return await self._transport.wait()
 
     async def aclose(self) -> None:
         """Close the session and release the connection."""
@@ -316,13 +315,12 @@ class InteractiveSession:
 
     async def _read(self) -> bytes | None:
         frame = await self._transport.receive()
-        if frame.data is not None:
-            return frame.data
-        # The exit frame is the last thing the service sends before dropping
-        # the connection, so it ends the output stream.
-        if frame.returncode is not None:
-            self._returncode = frame.returncode
-        return None
+        return frame.data
+
+    def _raise_for_failure(self) -> None:
+        failure = self._transport.failure
+        if failure is not None:
+            raise anyio.BrokenResourceError from failure
 
     async def _write(self, data: bytes) -> None:
         await self._transport.send_bytes(data)

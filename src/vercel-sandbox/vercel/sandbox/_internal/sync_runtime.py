@@ -257,6 +257,7 @@ class SyncInteractiveStream(io.RawIOBase):
         if not self._buffer:
             data = self._session._read()
             if data is None:
+                self._session._raise_for_failure()
                 return 0
             self._buffer = data
         count = min(len(view), len(self._buffer))
@@ -287,20 +288,19 @@ class SyncInteractiveSession:
     after it closes.
     """
 
-    __slots__ = ("_returncode", "_transport", "stream")
+    __slots__ = ("_transport", "stream")
 
     stream: SyncInteractiveStream
     """Raw terminal output and input."""
 
     def __init__(self, *, transport: SyncInteractiveTransport) -> None:
         self._transport = transport
-        self._returncode: int | None = None
         self.stream = SyncInteractiveStream(self)
 
     @property
     def returncode(self) -> int | None:
         """Exit code of the remote process, or ``None`` while it runs."""
-        return self._returncode
+        return self._transport.returncode
 
     def resize(self, cols: int, rows: int) -> None:
         """Tell the remote terminal its new size in characters."""
@@ -319,29 +319,29 @@ class SyncInteractiveSession:
 
         Raises:
             TimeoutError: If the process is still running at the deadline.
+            ConnectionError: If the connection failed before the process
+                reported an exit code.
         """
         deadline = None if timeout is None else time.monotonic() + timeout
-        while self._returncode is None:
+        while not self._transport.finished:
             remaining = None if deadline is None else deadline - time.monotonic()
             if remaining is not None and remaining <= 0:
                 raise TimeoutError("Interactive process did not exit before the timeout")
-            if self._read(timeout=remaining) is None:
-                break
-        return self._returncode
+            self._read(timeout=remaining)
+        self._raise_for_failure()
+        return self._transport.returncode
 
     def close(self) -> None:
         """Close the session and release the connection."""
         self.stream.close()
 
     def _read(self, timeout: float | None = None) -> bytes | None:
-        frame = iter_coroutine(self._transport.receive(timeout=timeout))
-        if frame.data is not None:
-            return frame.data
-        # The exit frame is the last thing the service sends before dropping
-        # the connection, so it ends the output stream.
-        if frame.returncode is not None:
-            self._returncode = frame.returncode
-        return None
+        return iter_coroutine(self._transport.receive(timeout=timeout)).data
+
+    def _raise_for_failure(self) -> None:
+        failure = self._transport.failure
+        if failure is not None:
+            raise ConnectionError("Interactive session connection failed") from failure
 
     def _write(self, data: bytes) -> None:
         iter_coroutine(self._transport.send_bytes(data))

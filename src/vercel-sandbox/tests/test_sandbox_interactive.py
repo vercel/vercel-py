@@ -18,6 +18,7 @@ from vercel.sandbox._internal import async_runtime, sync_runtime
 from vercel.sandbox._internal.interactive_session import (
     AsyncInteractiveTransport,
     Frame,
+    SyncInteractiveTransport,
     decode_frame,
     health_url,
     open_async_transport,
@@ -70,8 +71,19 @@ class _FakeTransport:
         self.closed = False
         self.receive_timeouts: list[float | None] = []
         self.running = False
+        self.failure: BaseException | None = None
         self.frames: list[Frame] = [Frame(data=b"hello"), Frame(returncode=0, end=True)]
+        self._returncode: int | None = None
+        self._finished = False
         _FakeTransport.instances.append(self)
+
+    @property
+    def returncode(self) -> int | None:
+        return self._returncode
+
+    @property
+    def finished(self) -> bool:
+        return self._finished
 
     async def connect(self) -> None:
         return None
@@ -84,15 +96,28 @@ class _FakeTransport:
 
     async def receive(self, timeout: float | None = None) -> Frame:
         self.receive_timeouts.append(timeout)
+        if self._finished:
+            return Frame(end=True)
         if self.frames:
-            return self.frames.pop(0)
+            frame = self.frames.pop(0)
+            if frame.end:
+                self._returncode = frame.returncode
+                self._finished = True
+            return frame
         if self.running:
             # A live terminal with nothing to say yet.
             raise TimeoutError
+        self._finished = True
         return Frame(end=True)
+
+    async def wait(self) -> int | None:
+        while not self._finished:
+            await self.receive()
+        return self._returncode
 
     async def close(self) -> None:
         self.closed = True
+        self._finished = True
 
 
 @asynccontextmanager
@@ -167,23 +192,52 @@ def test_exit_code_is_only_trusted_when_it_is_an_integer() -> None:
     assert exit_frame({"type": "exit", "code": True}) == Frame(returncode=None, end=True)
 
 
-async def test_waiting_conflicts_with_a_concurrent_reader() -> None:
-    # Waiting consumes frames, so letting it run alongside a reader would
-    # split the output between them without anyone noticing.
+async def test_waiting_does_not_consume_terminal_output() -> None:
+    # Waiting is lifecycle, not I/O: it must not take frames from a reader or
+    # block one that is already running.
     transport = _FakeTransport(InteractiveSessionState(url="wss://h.test/ws", token="t"))
-    transport.frames = [Frame(data=b"chatter")]
-    transport.running = True
+    transport.frames = [Frame(data=b"one"), Frame(data=b"two"), Frame(returncode=5, end=True)]
     pty = async_runtime.InteractiveSession(transport=cast(AsyncInteractiveTransport, transport))
 
+    seen: list[bytes] = []
+    codes: list[int | None] = []
     async with anyio.create_task_group() as task_group:
 
         async def reader() -> None:
-            with pytest.raises(anyio.BusyResourceError):
-                await pty.stream.receive()
+            async for chunk in pty.stream:
+                seen.append(chunk)
 
-        with pty.stream._read_guard:
-            task_group.start_soon(reader)
-            await anyio.sleep(0)
+        async def waiter() -> None:
+            codes.append(await pty.wait())
+
+        task_group.start_soon(reader)
+        task_group.start_soon(waiter)
+
+    assert seen == [b"one", b"two"]
+    assert codes == [5]
+
+
+async def test_reader_reports_a_broken_connection_instead_of_a_clean_end() -> None:
+    # A dropped connection must not look like the process exiting normally.
+    transport = _FakeTransport(InteractiveSessionState(url="wss://h.test/ws", token="t"))
+    transport.frames = [Frame(data=b"partial")]
+    transport.failure = OSError("connection reset")
+    pty = async_runtime.InteractiveSession(transport=cast(AsyncInteractiveTransport, transport))
+
+    assert await pty.stream.receive() == b"partial"
+    with pytest.raises(anyio.BrokenResourceError):
+        await pty.stream.receive()
+
+
+def test_sync_reader_reports_a_broken_connection() -> None:
+    transport = _FakeTransport(InteractiveSessionState(url="wss://h.test/ws", token="t"))
+    transport.frames = [Frame(data=b"partial")]
+    transport.failure = OSError("connection reset")
+    pty = sync_runtime.SyncInteractiveSession(transport=cast(SyncInteractiveTransport, transport))
+
+    assert pty.stream.read(7) == b"partial"
+    with pytest.raises(ConnectionError):
+        pty.stream.read(1)
 
 
 def test_empty_frames_are_not_end_of_stream() -> None:
