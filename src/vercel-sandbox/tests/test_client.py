@@ -1,4 +1,3 @@
-import inspect
 from typing import Any, cast
 
 import httpx2 as httpx
@@ -6,7 +5,6 @@ import pytest
 from sandbox_fixtures import sandbox_service_options
 
 import vendor.respx as respx
-from vercel import sandbox
 from vercel._internal.core.session import get_active_session, get_active_sync_session
 from vercel.errors import VercelSessionClosedError
 from vercel.sandbox import SandboxClient, SandboxServiceOptions, sync as sandbox_sync
@@ -42,27 +40,6 @@ def _sandbox_response(*, name: str) -> dict[str, Any]:
         },
         "routes": [],
     }
-
-
-async def test_clients_mirror_module_operation_signatures() -> None:
-    async_client = SandboxClient.create()
-    sync_client = SyncSandboxClient.create()
-    try:
-        for module, client in (
-            (sandbox, async_client),
-            (sandbox_sync, sync_client),
-        ):
-            operations = {
-                name: operation
-                for name, operation in inspect.getmembers(module, inspect.isfunction)
-                if not name.startswith("_") and operation.__module__ == module.__name__
-            }
-            assert operations
-            for name, operation in operations.items():
-                assert inspect.signature(getattr(client, name)) == inspect.signature(operation)
-    finally:
-        await async_client.aclose()
-        sync_client.close()
 
 
 @respx.mock

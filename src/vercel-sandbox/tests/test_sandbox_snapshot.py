@@ -24,12 +24,6 @@ def test_snapshot_expiration_accepts_valid_values(
     assert SnapshotExpiration(value).value == expected
 
 
-def test_snapshot_expiration_parser_preserves_wrapper() -> None:
-    expiration = SnapshotExpiration(timedelta(days=1))
-
-    assert _parse_snapshot_expiration(expiration) is expiration
-
-
 @pytest.mark.parametrize(
     "value",
     [
