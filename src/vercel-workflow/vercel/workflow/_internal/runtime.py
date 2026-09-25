@@ -1177,10 +1177,6 @@ class WorkflowOrchestratorContext:
                     # this body, so consume it and move on.
                     w.AttrSetEvent(correlation_id=None)
                     | w.AttrSetEvent(event_data=w.AttrSetEventData(writer=w.StepAttributeWriter()))
-                    # A hook received without being registered
-                    # means it has been disposed of. Nothing to do
-                    # but drop it.
-                    | w.HookReceivedEvent()
                 ):
                     return
                 case (
@@ -1219,6 +1215,7 @@ class WorkflowOrchestratorContext:
                     )
                     return
 
+        hook: BaseSuspension | None
         match event:
             case w.StepCreatedEvent(
                 event_data=w.StepCreatedEventData(step_name=name, input=recorded_input)
@@ -1346,7 +1343,10 @@ class WorkflowOrchestratorContext:
                             future.set_exception(conflict_error)
 
             case w.HookReceivedEvent(event_data=w.HookReceivedEventData(payload=data)):
-                hook = self.suspensions[event.correlation_id]
+                hook = self.suspensions.get(event.correlation_id)
+                if hook is None:
+                    # Disposed hooks no longer receive payloads.
+                    return
                 if isinstance(hook, Cancellation):
                     # A step cancellation already recorded: deregister it so
                     # the flush does not send it again.
