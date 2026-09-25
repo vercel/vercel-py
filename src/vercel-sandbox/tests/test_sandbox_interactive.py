@@ -251,6 +251,28 @@ async def test_reader_reports_a_broken_connection_instead_of_a_clean_end() -> No
         await pty.stream.receive()
 
 
+async def test_waiting_reports_a_broken_connection() -> None:
+    # A failure has to reach the wait as well as the reader, or a caller that
+    # only waits sees a clean exit that never happened.
+    transport = _FakeTransport(InteractiveSessionState(url="wss://h.test/ws", token="t"))
+    transport.frames = []
+    transport.failure = OSError("connection reset")
+    pty = async_runtime.InteractiveSession(transport=cast(AsyncInteractiveTransport, transport))
+
+    with pytest.raises((anyio.BrokenResourceError, ConnectionError)):
+        await pty.wait()
+
+
+def test_sync_waiting_reports_a_broken_connection() -> None:
+    transport = _FakeTransport(InteractiveSessionState(url="wss://h.test/ws", token="t"))
+    transport.frames = []
+    transport.failure = OSError("connection reset")
+    pty = sync_runtime.SyncInteractiveSession(transport=cast(SyncInteractiveTransport, transport))
+
+    with pytest.raises(ConnectionError):
+        pty.wait()
+
+
 def test_sync_reader_reports_a_broken_connection() -> None:
     transport = _FakeTransport(InteractiveSessionState(url="wss://h.test/ws", token="t"))
     transport.frames = [Frame(data=b"partial")]
