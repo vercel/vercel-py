@@ -6,10 +6,11 @@ import json
 import math
 import os
 import pathlib
+import sys
 import tempfile
 import threading
 import traceback
-from collections.abc import AsyncGenerator, AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Iterator, Sequence
 from contextlib import AbstractAsyncContextManager
 from datetime import datetime
 from typing import Any, TypeVar, cast
@@ -402,6 +403,34 @@ class LocalWorld(w.World):
         # converge on one lock without a separate guard lock.
         return self._run_locks.setdefault(run_id, threading.Lock())
 
+    @contextlib.contextmanager
+    def _hook_lifecycle_lock(self, hook_id: str) -> Iterator[None]:
+        """Serialize the disposal check and writes across local workers.
+
+        Keep the file in place: unlinking it could give concurrent workers
+        different lock inodes. The OS releases the lock if a worker exits.
+        """
+        path = self.data_dir / ".locks" / "hooks" / f"{hook_id}.lock"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a+b") as lock:
+            if sys.platform == "win32":
+                import msvcrt
+
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+                try:
+                    yield
+                finally:
+                    msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
     def _new_id(self, prefix: str) -> str:
         """A monotonic, lexicographically ordered id.
 
@@ -683,6 +712,9 @@ class LocalWorld(w.World):
         if run_id is None:
             return self._events_create_impl(run_id, data)
         with self._run_lock(run_id):
+            if isinstance(data, (w.HookCreatedEvent, w.HookDisposedEvent)):
+                with self._hook_lifecycle_lock(data.correlation_id):
+                    return self._events_create_impl(run_id, data)
             return self._events_create_impl(run_id, data)
 
     def _resilient_create_run(
@@ -1116,6 +1148,14 @@ class LocalWorld(w.World):
                 write_json(step_path, step, overwrite=True)
 
         elif data.event_type == "hook_created":
+            # A stale invocation can re-issue creation after another worker
+            # disposed this hook and released its token. The disposal marker
+            # outlives the entity and claim, so reject before touching either
+            # the now-free token or a successor's claim. The lifecycle lock
+            # keeps disposal from racing this check and the writes below.
+            dispose_lock = self.data_dir / ".locks" / "hooks" / f"{data.correlation_id}.disposed"
+            if dispose_lock.exists():
+                raise w.EntityConflictError(f'Hook "{data.correlation_id}" already disposed')
             hook_data = data.event_data
             hashed_token = hashlib.sha256(hook_data.token.encode()).hexdigest()
             constraint_path = self.data_dir / "hooks" / "tokens" / f"{hashed_token}.json"
@@ -1195,11 +1235,10 @@ class LocalWorld(w.World):
 
         elif data.event_type == "hook_disposed":
             # The existence check above already rejects an already-disposed hook
-            # with HookNotFoundError. This lock guards the narrow cross-process
-            # window where two invocations both still see the hook present: the
-            # loser gets EntityConflictError (swallowed by the runtime) instead
-            # of double-deleting and writing a duplicate hook_disposed event. The
-            # in-process run lock can't serialize separate processes.
+            # with HookNotFoundError. Keep this durable marker after removing
+            # the entity and token claim: future creates must still know this
+            # lifetime ended. Exclusive creation also guards against a duplicate
+            # disposal by older workers that do not take the lifecycle lock.
             dispose_lock = self.data_dir / ".locks" / "hooks" / f"{data.correlation_id}.disposed"
             if not write_exclusive(dispose_lock, ""):
                 raise w.EntityConflictError(f'Hook "{data.correlation_id}" already disposed')

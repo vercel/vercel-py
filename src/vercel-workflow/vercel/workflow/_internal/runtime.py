@@ -24,6 +24,7 @@ from collections.abc import (
     Sequence,
 )
 from datetime import datetime
+from itertools import chain
 from typing import Any, Generic, ParamSpec, TypeVar, overload
 from urllib.parse import parse_qsl, urlsplit
 
@@ -196,6 +197,8 @@ class Attributes(FutureSuspension[None]):
 @dataclasses.dataclass(kw_only=True)
 class Hook(BaseSuspension, Generic[T]):
     token: str
+    # User disposal and a historical disposal are distinct: replay may have
+    # consumed the latter before user code has claimed earlier payloads.
     disposed: bool = False
     has_dispose_event: bool = False
     has_conflict_awaiter: bool = False
@@ -828,6 +831,8 @@ class WorkflowOrchestratorContext:
         self.generate_nanoid = nanoid.custom_random(nanoid.URL_ALPHABET, 21, prng.random)
         self._user_random = random.Random(f"{seed}:random")
         self.suspensions: dict[str, BaseSuspension] = {}
+        # Payload subscriptions can end before their lifecycle history has
+        # replayed, so keep the complete hook registry through finalization.
         self.hooks: dict[str, Hook] = {}
         self.registry = registry
 
@@ -921,19 +926,22 @@ class WorkflowOrchestratorContext:
 
             token = self._ctx.set(self)
             try:
-                result = self.payload_encoder.encode(
-                    obj.codec.dump_return(
-                        _run_isolated(
-                            obj.func(*args, **kwargs),
-                            loop_factory=lambda: loop.WorkflowLoop(workflow=self),
+                try:
+                    result = self.payload_encoder.encode(
+                        obj.codec.dump_return(
+                            _run_isolated(
+                                obj.func(*args, **kwargs),
+                                loop_factory=lambda: loop.WorkflowLoop(workflow=self),
+                            )
                         )
                     )
-                )
+                finally:
+                    if not self.suspended:
+                        self._finish_replay()
             except BaseException as ex:
                 if self.resume_exception is not None:
-                    # Since resume_exception actually got raised on a
-                    # future, hopefully it has picked up a useful
-                    # traceback!
+                    # Active replay can also raise this through a future,
+                    # preserving a traceback into the workflow body.
                     raise self.resume_exception from None
                 # Turn suspended into a None return regardless of what the
                 # task actually did with it.
@@ -1104,23 +1112,33 @@ class WorkflowOrchestratorContext:
             fut = hook.futures.popleft()
             if not fut.done():
                 fut.set_exception(StopAsyncIteration)
+        hook.buffered_results.clear()
+        # Stop payload delivery, not lifecycle replay or registration.
         self.suspensions.pop(correlation_id, None)
 
-    def _fail_nondeterminism(self, sus: BaseSuspension, exc: Exception) -> None:
+    def _fail_nondeterminism(
+        self, sus: BaseSuspension | None, exc: Exception, *, deliver: bool
+    ) -> None:
         """Fail the run with a replay-divergence error the body cannot suppress.
 
-        The diverged suspension may not be what the body is currently blocked
-        on, so failing its future alone might never surface anywhere -- and a
-        body that is awaiting it could catch the error. So the exception is
-        also stashed for ``run_workflow`` to raise, and the run is suspended
-        so nothing else executes.
+        The matching suspension may be absent, or not be what the body is
+        currently blocked on, so failing its future alone might never surface
+        anywhere -- and a body that is awaiting it could catch the error. So
+        the exception is also stashed for ``run_workflow`` to raise. During
+        execution, suspend the run so nothing else executes; during
+        finalization, raise directly.
         """
-        sus.fail(exc)
         self.resume_exception = exc
+        if not deliver:
+            # Terminal replay runs after the isolated loop has shut down. Do
+            # not resolve its futures or cancel tasks in the caller's loop.
+            raise exc
+        if sus is not None:
+            sus.fail(exc)
         self.suspend()
 
     def resume(self) -> None:
-        """Run over the the event log and try to apply an event.
+        """Advance historical replay by one event while the workflow is running.
 
         The idea is that resume() will be run whenever everything else in the
         async event loop has paused.
@@ -1142,17 +1160,44 @@ class WorkflowOrchestratorContext:
             self.suspend()
             return
 
-        # NOTE: resume() does single-step delivery, so we resolve at most
-        # one suspension per invocation of resume().
-        #
-        # This makes sure that resume() gets interleaved directly one
-        # to one with event deliveries, instead of sometimes having
-        # multiple deliveries bunched up before a resume(), which could
-        # lead to mismatches between a recording trace and a replaying
-        # one.
+        self._replay_next_event(deliver=True)
+
+    def _finish_replay(self) -> None:
+        """Reconcile remaining history before committing a terminal outcome.
+
+        A body can return or raise without ever yielding to the workflow
+        loop's idle replay hook. The isolated loop, including task/generator
+        cleanup, has now finished: validate and apply its remaining history
+        through the same event handler, but do not deliver results to user
+        code or wait for new external events.
+        """
+        while self.replay_index < len(self.events):
+            self._replay_next_event(deliver=False)
+
+    def _replay_next_event(self, *, deliver: bool) -> None:
+        # During execution, WorkflowLoop interleaves each event with all the
+        # user code it wakes before asking for another. Terminal replay uses
+        # the same state transitions without waking any more user code.
         event = self.events[self.replay_index]
         self.replay_index += 1
-        if event.correlation_id not in self.suspensions:
+        if isinstance(event, (w.HookCreatedEvent, w.HookConflictEvent)):
+            registered_hook = self.hooks.get(event.correlation_id)
+            if registered_hook is not None and event.event_data.token != registered_hook.token:
+                self._fail_nondeterminism(
+                    registered_hook,
+                    NondeterminismError(
+                        f"workflow replay diverged at {registered_hook.correlation_id}: recorded "
+                        f"hook token {event.event_data.token!r}, but the body now uses "
+                        f"{registered_hook.token!r}"
+                    ),
+                    deliver=deliver,
+                )
+                return
+        is_known_hook_lifecycle = (
+            isinstance(event, (w.HookCreatedEvent, w.HookConflictEvent, w.HookDisposedEvent))
+            and event.correlation_id in self.hooks
+        )
+        if event.correlation_id not in self.suspensions and not is_known_hook_lifecycle:
             match event:
                 case (
                     # A step's attribute write. It answers no call in
@@ -1180,7 +1225,9 @@ class WorkflowOrchestratorContext:
                     # instead of yielding forever (the matching ID will never
                     # appear, so plain `return` would deadlock the run).
                     pos = _correlation_ulid(slot_id)
-                    for sus in self.suspensions.values():
+                    # Disposed hooks still occupy their positional slots even
+                    # though they no longer accept payload deliveries.
+                    for sus in chain(self.suspensions.values(), self.hooks.values()):
                         if _correlation_ulid(sus.correlation_id) == pos:
                             self._fail_nondeterminism(
                                 sus,
@@ -1190,12 +1237,18 @@ class WorkflowOrchestratorContext:
                                     f"issues a {_correlation_kind(sus.correlation_id)!r} call. "
                                     "The workflow body is non-deterministic."
                                 ),
+                                deliver=deliver,
                             )
                             return
-                    raise RuntimeError(
-                        f"workflow replay cannot deliver {slot_id!r}: "
-                        "the workflow body has not registered its suspension"
+                    self._fail_nondeterminism(
+                        None,
+                        NondeterminismError(
+                            f"workflow replay cannot deliver {slot_id!r}: "
+                            "the workflow body has not registered its suspension"
+                        ),
+                        deliver=deliver,
                     )
+                    return
 
         match event:
             case w.StepCreatedEvent(
@@ -1216,14 +1269,19 @@ class WorkflowOrchestratorContext:
                             f"step {name!r}, but the body now calls {sus.step.name!r} with "
                             "different arguments. The workflow body is non-deterministic."
                         ),
+                        deliver=deliver,
                     )
                     return
                 sus.has_created_event = True
 
             case w.HookCreatedEvent():
-                hook = self.suspensions[event.correlation_id]
+                hook = (
+                    self.hooks.get(event.correlation_id) or self.suspensions[event.correlation_id]
+                )
                 hook.has_created_event = True
                 if isinstance(hook, Hook):
+                    if not deliver:
+                        return
                     while hook.conflict_futures:
                         future = hook.conflict_futures.popleft()
                         if not future.cancelled():
@@ -1248,14 +1306,17 @@ class WorkflowOrchestratorContext:
                             f"{recorded_changes!r}, but the body now sets "
                             f"{attr_sus.changes!r}. The workflow body is non-deterministic."
                         ),
+                        deliver=deliver,
                     )
                     return
-                if not attr_sus.future.cancelled():
+                if deliver and not attr_sus.future.cancelled():
                     attr_sus.future.set_result(None)
 
             case w.StepCompletedEvent(event_data=w.StepCompletedEventData(result=data)):
                 sus = self.suspensions.pop(event.correlation_id)
                 assert isinstance(sus, Suspension)
+                if not deliver:
+                    return
                 result = ser.hydrate(
                     data,
                     what=f"the result of step {event.correlation_id}",
@@ -1272,12 +1333,14 @@ class WorkflowOrchestratorContext:
             case w.WaitCompletedEvent():
                 wait = self.suspensions.pop(event.correlation_id)
                 assert isinstance(wait, Wait)
-                if not wait.future.cancelled():
+                if deliver and not wait.future.cancelled():
                     wait.future.set_result(None)
 
             case w.StepFailedEvent(event_data=w.StepFailedEventData(error=data)):
                 sus = self.suspensions.pop(event.correlation_id)
                 assert isinstance(sus, Suspension)
+                if not deliver:
+                    return
                 what = f"the error of step {event.correlation_id}"
                 try:
                     failure = ser.hydrate_error(data, what=what, key=self.run_key)
@@ -1299,15 +1362,16 @@ class WorkflowOrchestratorContext:
                     conflicting_run_id=conflicting_run_id,
                 )
             ):
-                conflicting_hook = self.suspensions.get(event.correlation_id)
+                conflicting_hook = self.hooks.get(event.correlation_id)
                 if conflicting_hook is not None:
-                    self.suspensions.pop(event.correlation_id)
-                    assert isinstance(conflicting_hook, Hook)
+                    self.suspensions.pop(event.correlation_id, None)
                     conflict_error = errors.HookConflictError(token, conflicting_run_id)
                     conflicting_hook.conflict_error = conflict_error
                     conflicting_hook.conflicting_run = (
                         Run(conflicting_run_id) if conflicting_run_id else None
                     )
+                    if not deliver:
+                        return
                     while conflicting_hook.futures:
                         future = conflicting_hook.futures.popleft()
                         if not future.cancelled():
@@ -1332,6 +1396,8 @@ class WorkflowOrchestratorContext:
                     return
 
                 assert isinstance(hook, Hook)
+                if not deliver:
+                    return
                 try:
                     result = ser.hydrate(
                         data,
@@ -1345,7 +1411,10 @@ class WorkflowOrchestratorContext:
 
             case w.HookDisposedEvent():
                 self.hooks[event.correlation_id].has_dispose_event = True
-                self.dispose_hook(correlation_id=event.correlation_id)
+                # A historical release confirms storage state; it is not a
+                # dispose() call by this execution. Previously buffered payloads
+                # remain available until user code consumes or disposes them.
+                self.suspensions.pop(event.correlation_id, None)
 
 
 # ── lazy hook resume ───────────────────────────────────────────────────────
@@ -1717,6 +1786,86 @@ async def _send_cancellations(context: WorkflowOrchestratorContext) -> None:
             )
 
 
+async def _flush_hooks(context: WorkflowOrchestratorContext) -> tuple[bool, set[str]]:
+    """Commit hook lifecycles, preserving create/dispose/reuse order per token."""
+    world = w.get_world()
+    groups: dict[str, list[Hook]] = {}
+    for hook in context.hooks.values():
+        groups.setdefault(hook.token, []).append(hook)
+    events_created = False
+    replay_reasons: set[str] = set()
+
+    async def flush_group(hooks: list[Hook]) -> None:
+        nonlocal events_created
+        for hook in hooks:
+            if hook.has_dispose_event or hook.conflict_error is not None:
+                continue
+
+            if not hook.has_created_event:
+                try:
+                    result = await world.events_create(
+                        context.run_id,
+                        w.HookCreatedEventData(token=hook.token, metadata=hook.metadata).into_event(
+                            hook.correlation_id
+                        ),
+                    )
+                except w.EntityConflictError:
+                    logger.debug("Workflow hook %r has already been created", hook.correlation_id)
+                except w.RunExpiredError:
+                    return
+                else:
+                    if isinstance(result.event, w.HookConflictEvent):
+                        events_created = True
+                        replay_reasons.add("hook_conflict")
+                        # Registration did not acquire a hook; there is nothing
+                        # to release, even if workflow code requested disposal.
+                        continue
+                events_created = True
+                if hook.has_conflict_awaiter:
+                    replay_reasons.add("hook_created")
+
+            if hook.disposed:
+                try:
+                    await world.events_create(
+                        context.run_id,
+                        w.HookDisposedEvent(correlation_id=hook.correlation_id),
+                    )
+                except (w.EntityConflictError, w.HookNotFoundError):
+                    logger.debug("Workflow hook %r has already been disposed", hook.correlation_id)
+                except w.RunExpiredError:
+                    return
+                events_created = True
+
+    # Let independent token groups settle before retrying or writing a terminal
+    # event. A failure in one group must not abandon its siblings' writes.
+    failures: list[Exception] = []
+
+    async def settle_group(hooks: list[Hook]) -> None:
+        try:
+            await flush_group(hooks)
+        except Exception as error:
+            failures.append(error)
+
+    async with anyio.create_task_group() as tg:
+        for hooks in groups.values():
+            tg.start_soon(settle_group, hooks)
+    if failures:
+        raise failures[0]
+    return events_created, replay_reasons
+
+
+async def _drain_hooks(context: WorkflowOrchestratorContext) -> None:
+    # Match TS's final drain: storage failures must not replace the body's
+    # successful result or its original exception. Suspension flushes instead
+    # propagate failures so the queue can retry the unfinished run.
+    try:
+        await _flush_hooks(context)
+    except Exception:
+        logger.warning(
+            "Failed to flush hooks for terminating run %s", context.run_id, exc_info=True
+        )
+
+
 async def _workflow_replay_pass(
     *,
     req: w.WorkflowInvokePayload,
@@ -1832,6 +1981,8 @@ async def _workflow_replay_pass(
         error_message = "".join(traceback.format_exception_only(type(e), e)).strip()
         logger.exception("[Workflows] '%s' - workflow run failed: %s", run_id, error_message)
         await _send_cancellations(context)
+        if not isinstance(e, NondeterminismError):
+            await _drain_hooks(context)
         try:
             await world.events_create(
                 run_id,
@@ -1847,6 +1998,7 @@ async def _workflow_replay_pass(
     await _send_cancellations(context)
 
     if output is not None:
+        await _drain_hooks(context)
         try:
             await world.events_create(
                 run_id,
@@ -1856,38 +2008,16 @@ async def _workflow_replay_pass(
             logger.warning(f"Workflow run {run_id} was already completed")
         return None
 
-    events_created = False
-    immediate_replay_reasons: set[str] = set()
+    events_created, immediate_replay_reasons = await _flush_hooks(context)
 
-    # A hook token is not released until its disposal event is durable. Flush
-    # disposals before creating new hooks so a workflow can reuse a token in the
-    # same suspension without conflicting with its own previous hook.
-    async with anyio.create_task_group() as tg:
-        for hook in context.hooks.values():
-            if hook.disposed and not hook.has_dispose_event:
-
-                async def dispose_hook(h=hook):
-                    try:
-                        await world.events_create(
-                            run_id,
-                            w.HookDisposedEvent(correlation_id=h.correlation_id),
-                        )
-                    except (w.EntityConflictError, w.HookNotFoundError):
-                        logger.debug(
-                            f"Workflow hook {h.correlation_id!r} has already been disposed"
-                        )
-
-                tg.start_soon(dispose_hook)
-                events_created = True
-
-    # Now that the workflow is fully suspended and old hook tokens have been
-    # released, create all pending events in parallel. Steps are enqueued only
+    # Hook lifecycles have been committed. Create the other pending events in
+    # parallel. Steps are enqueued only
     # once every event is durable: a step may hand a hook's token to whoever
     # will resume it, so the hook has to exist by the time the step runs.
     steps_to_queue: list[Callable[[], Awaitable[str]]] = []
     async with anyio.create_task_group() as tg:
         for sus in context.suspensions.values():
-            if sus.has_created_event:
+            if sus.has_created_event or isinstance(sus, Hook):
                 pass
 
             elif isinstance(sus, Suspension):
@@ -1932,27 +2062,6 @@ async def _workflow_replay_pass(
                         logger.debug(f"Workflow wait {s.correlation_id!r} has already been created")
 
                 tg.start_soon(create_wait)
-                events_created = True
-
-            elif isinstance(sus, Hook):
-
-                async def create_hook(s=sus):
-                    hook_data = w.HookCreatedEventData(token=s.token, metadata=s.metadata)
-                    try:
-                        result = await world.events_create(
-                            run_id, hook_data.into_event(s.correlation_id)
-                        )
-                    except w.EntityConflictError:
-                        logger.debug(f"Workflow hook {s.correlation_id!r} has already been created")
-                        if s.has_conflict_awaiter:
-                            immediate_replay_reasons.add("hook_created")
-                    else:
-                        if isinstance(result.event, w.HookConflictEvent):
-                            immediate_replay_reasons.add("hook_conflict")
-                        elif s.has_conflict_awaiter:
-                            immediate_replay_reasons.add("hook_created")
-
-                tg.start_soon(create_hook)
                 events_created = True
 
             elif isinstance(sus, Attributes):
