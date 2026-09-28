@@ -3,6 +3,7 @@ import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import timedelta
+from types import SimpleNamespace
 
 import httpx2 as httpx
 import pytest
@@ -24,7 +25,6 @@ from vercel.sandbox._internal.api_client import (
     PLATFORM,
     VERSION,
     SandboxApiClient,
-    _SandboxUserAgent,
     _WriteFilesUpload,
 )
 from vercel.sandbox._internal.errors import SandboxApiError, SandboxResponseError
@@ -246,29 +246,39 @@ def _base_user_agent() -> str:
         ),
     ],
 )
-def test_user_agent_string(
+async def test_request_user_agent_serializes_fields(
+    monkeypatch: pytest.MonkeyPatch,
     python_version: str,
     platform_system: str,
     platform_machine: str,
     agent_name: str | None,
     expected: str,
 ) -> None:
-    user_agent = _SandboxUserAgent(
-        client_version="3.4.0",
-        python_version=python_version,
-        platform_system=platform_system,
-        platform_machine=platform_machine,
-        agent_name=agent_name,
-    )
+    from vercel.sandbox._internal import api_client
 
-    assert str(user_agent) == expected
+    monkeypatch.setattr(api_client, "VERSION", "3.4.0")
+    monkeypatch.setattr(api_client, "sys", SimpleNamespace(version=python_version))
+    monkeypatch.setattr(
+        api_client,
+        "PLATFORM",
+        SimpleNamespace(system=platform_system, machine=platform_machine),
+    )
+    monkeypatch.setattr(api_client, "detect_agent_name", lambda: agent_name)
+    monkeypatch.delenv("VERCEL_TELEMETRY_DISABLED", raising=False)
+    monkeypatch.delenv("VERCEL_SANDBOX_TELEMETRY_DISABLED", raising=False)
+
+    transport = RecordingJsonTransport(_command_response(exit_code=0))
+    await _sandbox_client(transport).get_command(session_id="sbx_1", command_id="cmd_1")
+
+    assert transport.headers is not None
+    assert transport.headers["user-agent"] == expected
 
 
 @pytest.mark.parametrize(
     "disabled_variable",
     ["VERCEL_TELEMETRY_DISABLED", "VERCEL_SANDBOX_TELEMETRY_DISABLED"],
 )
-def test_user_agent_from_environment_honors_opt_out(
+async def test_request_user_agent_honors_opt_out(
     monkeypatch: pytest.MonkeyPatch, disabled_variable: str
 ) -> None:
     monkeypatch.setenv("AI_AGENT", "codex")
@@ -276,38 +286,11 @@ def test_user_agent_from_environment_honors_opt_out(
     monkeypatch.delenv("VERCEL_SANDBOX_TELEMETRY_DISABLED", raising=False)
     monkeypatch.setenv(disabled_variable, "1")
 
-    assert _SandboxUserAgent.from_environment().agent_name is None
-    assert str(_SandboxUserAgent.from_environment()) == _base_user_agent()
-
-
-@pytest.mark.parametrize(
-    ("agent_name", "disabled_variable"),
-    [
-        (None, None),
-        ("claude-code_2-1-247_agent", None),
-        ("codex", "VERCEL_TELEMETRY_DISABLED"),
-        ("codex", "VERCEL_SANDBOX_TELEMETRY_DISABLED"),
-    ],
-)
-async def test_normal_request_user_agent(
-    monkeypatch: pytest.MonkeyPatch, agent_name: str | None, disabled_variable: str | None
-) -> None:
-    from vercel.sandbox._internal import api_client
-
-    monkeypatch.setattr(api_client, "detect_agent_name", lambda: agent_name)
-    monkeypatch.delenv("VERCEL_TELEMETRY_DISABLED", raising=False)
-    monkeypatch.delenv("VERCEL_SANDBOX_TELEMETRY_DISABLED", raising=False)
-    if disabled_variable:
-        monkeypatch.setenv(disabled_variable, "1")
-
     transport = RecordingJsonTransport(_command_response(exit_code=0))
     await _sandbox_client(transport).get_command(session_id="sbx_1", command_id="cmd_1")
 
     assert transport.headers is not None
-    expected = _base_user_agent()
-    if agent_name and not disabled_variable:
-        expected = expected.replace(" (Python/", f" agent/{agent_name} (Python/", 1)
-    assert transport.headers["user-agent"] == expected
+    assert transport.headers["user-agent"] == _base_user_agent()
 
 
 async def test_request_uses_agent_from_process_environment(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -319,7 +302,10 @@ async def test_request_uses_agent_from_process_environment(monkeypatch: pytest.M
     await _sandbox_client(transport).get_command(session_id="sbx_1", command_id="cmd_1")
 
     assert transport.headers is not None
-    assert " agent/claude-code_2-1-247_agent (Python/" in transport.headers["user-agent"]
+    expected = _base_user_agent().replace(
+        " (Python/", " agent/claude-code_2-1-247_agent (Python/", 1
+    )
+    assert transport.headers["user-agent"] == expected
 
 
 async def test_stream_and_upload_user_agents(monkeypatch: pytest.MonkeyPatch) -> None:
