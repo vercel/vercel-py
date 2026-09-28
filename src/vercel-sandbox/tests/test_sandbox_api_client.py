@@ -234,21 +234,30 @@ def _base_user_agent() -> str:
 
 
 @pytest.mark.parametrize(
-    ("agent_name", "expected"),
+    ("python_version", "platform_system", "platform_machine", "agent_name", "expected"),
     [
-        (None, "vercel-sandbox/3.4.0 (Python/3.12.0; Linux/x86_64)"),
+        ("3.12.0", "Linux", "x86_64", None, "vercel-sandbox/3.4.0 (Python/3.12.0; Linux/x86_64)"),
         (
+            "3.13.2",
+            "Darwin",
+            "arm64",
             "claude-code_2-1-247_agent",
-            "vercel-sandbox/3.4.0 agent/claude-code_2-1-247_agent (Python/3.12.0; Linux/x86_64)",
+            "vercel-sandbox/3.4.0 agent/claude-code_2-1-247_agent (Python/3.13.2; Darwin/arm64)",
         ),
     ],
 )
-def test_user_agent_string(agent_name: str | None, expected: str) -> None:
+def test_user_agent_string(
+    python_version: str,
+    platform_system: str,
+    platform_machine: str,
+    agent_name: str | None,
+    expected: str,
+) -> None:
     user_agent = _SandboxUserAgent(
         client_version="3.4.0",
-        python_version="3.12.0",
-        platform_system="Linux",
-        platform_machine="x86_64",
+        python_version=python_version,
+        platform_system=platform_system,
+        platform_machine=platform_machine,
         agent_name=agent_name,
     )
 
