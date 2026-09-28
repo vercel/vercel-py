@@ -243,7 +243,7 @@ def _base_user_agent() -> str:
         ),
     ],
 )
-def test_user_agent_serialization(agent_name: str | None, expected: str) -> None:
+def test_user_agent_string(agent_name: str | None, expected: str) -> None:
     user_agent = _SandboxUserAgent(
         client_version="3.4.0",
         python_version="3.12.0",
@@ -252,7 +252,7 @@ def test_user_agent_serialization(agent_name: str | None, expected: str) -> None
         agent_name=agent_name,
     )
 
-    assert user_agent.serialize() == expected
+    assert str(user_agent) == expected
 
 
 @pytest.mark.parametrize(
@@ -268,7 +268,7 @@ def test_user_agent_from_environment_honors_opt_out(
     monkeypatch.setenv(disabled_variable, "1")
 
     assert _SandboxUserAgent.from_environment().agent_name is None
-    assert _SandboxUserAgent.from_environment().serialize() == _base_user_agent()
+    assert str(_SandboxUserAgent.from_environment()) == _base_user_agent()
 
 
 @pytest.mark.parametrize(

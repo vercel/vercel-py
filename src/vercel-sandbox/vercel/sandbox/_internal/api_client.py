@@ -125,18 +125,17 @@ class _SandboxUserAgent:
             agent_name=agent_name,
         )
 
-    def serialize(self) -> str:
-        parts = [f"vercel-sandbox/{self.client_version}"]
-        if self.agent_name:
-            parts.append(f"agent/{self.agent_name}")
-        parts.append(
-            f"(Python/{self.python_version}; {self.platform_system}/{self.platform_machine})"
+    def __str__(self) -> str:
+        package_info = f"vercel-sandbox/{self.client_version}"
+        agent_info = f" agent/{self.agent_name}" if self.agent_name else ""
+        system_info = (
+            f"Python/{self.python_version}; {self.platform_system}/{self.platform_machine}"
         )
-        return " ".join(parts)
+        return f"{package_info}{agent_info} ({system_info})"
 
 
 def _user_agent() -> str:
-    return _SandboxUserAgent.from_environment().serialize()
+    return str(_SandboxUserAgent.from_environment())
 
 
 ResponseModelT = TypeVar("ResponseModelT", bound=BaseModel)
