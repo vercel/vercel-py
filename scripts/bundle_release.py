@@ -107,10 +107,14 @@ ANYIO_FROM_THREAD_SUBSTITUTION = (
 SHARED_ANYIO_SUBSTITUTIONS = (
     (r"import anyio\.abc", "from anyio import abc"),
     (r"import anyio\.streams\.tls", "from anyio.streams import tls"),
+    (
+        r'import_module\(f"anyio\._backends\._',
+        'import_module(f"vercel.internal._vendor.anyio._backends._',
+    ),
 )
 # Bump to force a republish of the shared vendored package when the vendoring
 # recipe changes without any change to the pinned requirements.
-SHARED_VENDOR_RECIPE_REVISION = 3
+SHARED_VENDOR_RECIPE_REVISION = 4
 
 
 @dataclass(frozen=True)
