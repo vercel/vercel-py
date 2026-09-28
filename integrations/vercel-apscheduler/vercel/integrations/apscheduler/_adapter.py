@@ -418,6 +418,13 @@ class SchedulerAdapter:
 
         return _preview_idle_timeout()
 
+    def _idle_bounded(self) -> bool:
+        """Whether this chain is subject to a preview idle deadline.
+
+        Configuration-derived, so racing publishers stamp identical payloads.
+        """
+        return self._preview_idle_timeout_seconds() is not None
+
     def _publish_start_if_needed(
         self,
         decision: StartDecision,
@@ -429,6 +436,7 @@ class SchedulerAdapter:
         payload = StartPayload(
             scheduler_id=self.identity.scheduler_id,
             generation=decision.generation,
+            idle_bounded=self._idle_bounded(),
         ).to_payload()
         idempotency_key = (
             f"{WAKEUP_KEY_PREFIX}:start:{self.scope}:"
@@ -465,6 +473,7 @@ class SchedulerAdapter:
         payload = WakeupPayload.from_token(
             self.identity.scheduler_id,
             token,
+            idle_bounded=self._idle_bounded(),
         ).to_payload()
         try:
             message_id = vqs_sync.send(

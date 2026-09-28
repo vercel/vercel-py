@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 
 from vercel.cache import get_cache
 
+from ..._options import resolve_environment
 from ..._time import as_utc
 from ..._types import (
     WAKE_REPAIR_GRACE_SECONDS,
@@ -83,6 +84,42 @@ class CacheDriver:
             sequence=int(current.get("sequence") or 0),
             logical_time=logical_time,
             status=str(current.get("status") or "pending"),
+        )
+
+    def _log_adoption(self, kind: str, doc: dict[str, Any], generation: int) -> None:
+        """Make eviction observable: adoption means the document was behind.
+
+        Under ``vercel dev`` the cache is per-process memory, so every
+        sidecar's first claim adopts; that is routine, not a loss signal.
+        """
+        missing = not doc
+        if resolve_environment().casefold() == "development":
+            LOGGER.debug(
+                'Adopted %s generation %s for scheduler "%s" from the message',
+                kind,
+                generation,
+                self.scheduler_id,
+            )
+            return
+        LOGGER.log(
+            logging.WARNING if missing else logging.INFO,
+            'Rebuilt the driver document for scheduler "%s" from a %s message '
+            "(generation %s): the local document was %s",
+            self.scheduler_id,
+            kind,
+            generation,
+            "missing (possible cache eviction)" if missing else "behind the chain",
+        )
+
+    def _log_idle_bounded_refusal(self, kind: str, generation: int) -> None:
+        LOGGER.warning(
+            'Refused to adopt %s generation %s for scheduler "%s": the chain '
+            "is idle-bounded but the local document carries no idle deadline "
+            "(possible cache eviction); the next request re-activates the "
+            "preview",
+            kind,
+            generation,
+            self.scheduler_id,
         )
 
     def _idle_lapsed(self, doc: dict[str, Any], now: datetime) -> bool:
@@ -286,7 +323,14 @@ class CacheDriver:
             doc["start_status"] = "published"
             self._write(doc, as_utc(now, name="now"))
 
-    def claim_start(self, generation: int, owner: str, now: datetime) -> ClaimResult:
+    def claim_start(
+        self,
+        generation: int,
+        owner: str,
+        now: datetime,
+        *,
+        idle_bounded: bool = False,
+    ) -> ClaimResult:
         """Claim a start delivery, adopting newer generations from the message.
 
         Cache documents are reconstructable hints — evictable in deployments,
@@ -294,6 +338,11 @@ class CacheDriver:
         chain progress. A generation ahead of the local document is adopted
         wholesale; ``paused`` fences only its own and older generations, so a
         resume (which mints a new generation) revives a paused document.
+
+        The one exception is an idle-bounded chain: its deadline lives only
+        in the document, so adopting it into a document without a deadline
+        would resurrect the chain unbounded. Absence fails stale instead;
+        the next real request re-activates the preview.
         """
         now = as_utc(now, name="now")
         doc = self._read()
@@ -316,6 +365,10 @@ class CacheDriver:
             doc["start_claimed_at"] = iso(now)
             self._write(doc, now)
             return ClaimResult(state="claimed", activation_time=activation_time)
+        if idle_bounded and from_iso(doc.get("idle_expires_at")) is None:
+            self._log_idle_bounded_refusal("start", generation)
+            return ClaimResult(state="stale")
+        self._log_adoption("start", doc, generation)
         doc.update(
             state="running",
             generation=generation,
@@ -389,13 +442,21 @@ class CacheDriver:
         expected = (token.generation, token.sequence, token.logical_time)
         return record if actual == expected else None
 
-    def claim_wake(self, token: WakeToken, owner: str, now: datetime) -> ClaimResult:
+    def claim_wake(
+        self,
+        token: WakeToken,
+        owner: str,
+        now: datetime,
+        *,
+        idle_bounded: bool = False,
+    ) -> ClaimResult:
         """Claim a wake delivery, adopting chain progress from the message.
 
         Same authority rule as ``claim_start``: the local document loses to a
         strictly newer ``(generation, sequence)``. An exact match claims the
         recorded token; anything older is stale. ``paused`` fences its own
-        generation only.
+        generation only. An idle-bounded chain refuses adoption into a
+        document without a deadline (see ``claim_start``).
         """
         now = as_utc(now, name="now")
         doc = self._read()
@@ -422,6 +483,10 @@ class CacheDriver:
         if token.generation == local_generation and doc.get("state") != "running":
             # Same-generation pause fences its remaining wakes.
             return ClaimResult(state="stale")
+        if idle_bounded and from_iso(doc.get("idle_expires_at")) is None:
+            self._log_idle_bounded_refusal("wake", token.generation)
+            return ClaimResult(state="stale")
+        self._log_adoption("wake", doc, token.generation)
         activation_time = from_iso(doc.get("activation_time")) or now
         doc.update(
             state="running",
