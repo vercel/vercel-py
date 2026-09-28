@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 import pytest
 from apscheduler.job import Job
-from apscheduler.jobstores.base import BaseJobStore, JobLookupError
+from apscheduler.jobstores.base import BaseJobStore
 from apscheduler.jobstores.memory import MemoryJobStore
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.schedulers.base import STATE_PAUSED, STATE_RUNNING
@@ -738,10 +738,10 @@ def test_preview_state_stays_deployment_scoped(
     assert adapter.scope == "dpl_test"
 
 
-def test_takeover_reconciles_declared_jobs_and_keeps_dynamic_ones(
+def test_takeover_reconciles_declared_jobs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A promote syncs code-declared jobs and never touches runtime jobs.
+    """A promote syncs the store to the new code's declarations.
 
     Environment-scoped production state outlives deployments, so the new
     deployment's first touch must delete undeclared jobs before any wake
@@ -760,12 +760,6 @@ def test_takeover_reconciles_declared_jobs_and_keeps_dynamic_ones(
         return_value="msg",
     ):
         first.start()
-        first.add_job(
-            durable_noop_job,
-            "date",
-            run_date=datetime.now(UTC) + timedelta(hours=2),
-            id="dynamic",
-        )
     store: Any = first._jobstores["default"]
     kept_run_time = store.lookup_job("keep").next_run_time
     changed_run_time = store.lookup_job("changed").next_run_time
@@ -793,7 +787,7 @@ def test_takeover_reconciles_declared_jobs_and_keeps_dynamic_ones(
         second.start()
 
     shared: Any = second._jobstores["default"]
-    assert {job.id for job in shared.get_all_jobs()} == {"keep", "changed", "dynamic"}
+    assert {job.id for job in shared.get_all_jobs()} == {"keep", "changed"}
     assert shared.lookup_job("keep").next_run_time == kept_run_time
     assert shared.lookup_job("changed").next_run_time != changed_run_time
     assert shared.lookup_job("changed").trigger.interval == timedelta(hours=2)
@@ -878,7 +872,6 @@ def test_stale_deployment_touches_are_inert(
     # No resurrection of "legacy" in the shared namespace.
     assert {job.id for job in store.get_all_jobs()} == {"kept"}
     assert stale_adapter.publish_pending_wakeup() is None
-    stale_adapter._lifecycle_called = True
     with pytest.raises(APSchedulerConfigurationError, match="no longer drives"):
         stale_adapter.prepare_runtime_mutation()
 
@@ -1079,7 +1072,69 @@ def test_start_with_no_jobs_becomes_dormant_without_wakeup() -> None:
     assert driver.current is None
 
 
-def test_runtime_add_rearms_dormant_chain_with_monotonic_sequence() -> None:
+def test_runtime_mutations_are_rejected() -> None:
+    """Durable inputs are code and time; the store is immutable at runtime."""
+    scheduler, _adapter, driver = scheduler_with_driver()
+    scheduler.add_job(
+        durable_noop_job,
+        "interval",
+        hours=2,
+        id="cleanup",
+        replace_existing=True,
+    )
+    register_scheduler(scheduler)
+    start_subscription = get_subscriptions()[0]
+
+    with patch(
+        "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+        return_value="msg_start",
+    ) as send:
+        scheduler.start()
+        start_payload = send.call_args.args[1]
+    with patch(
+        "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+        return_value="wake-1",
+    ):
+        start_subscription.func(
+            message(
+                start_payload,
+                message_id="start",
+                topic=start_subscription.topic,
+                consumer_group=start_subscription.consumer_group,
+            )
+        )
+    armed = driver.current
+    store: Any = scheduler._jobstores["default"]
+    persisted_run_time = store.lookup_job("cleanup").next_run_time
+
+    mutations = [
+        lambda: scheduler.modify_job("cleanup", name="renamed"),
+        lambda: scheduler.reschedule_job("cleanup", trigger="interval", minutes=5),
+        lambda: scheduler.pause_job("cleanup"),
+        lambda: scheduler.resume_job("cleanup"),
+        lambda: scheduler.remove_job("cleanup"),
+        scheduler.remove_all_jobs,
+    ]
+    for mutate in mutations:
+        with (
+            patch(
+                "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+                return_value="unused",
+            ),
+            pytest.raises(APSchedulerConfigurationError, match="immutable at runtime"),
+        ):
+            mutate()
+
+    # The declared job and the armed chain are untouched.
+    persisted = store.lookup_job("cleanup")
+    assert persisted is not None
+    assert persisted.next_run_time == persisted_run_time
+    assert persisted.trigger.interval == timedelta(hours=2)
+    assert driver.current == armed
+
+
+def test_runtime_job_creation_is_rejected() -> None:
+    """The managed store holds only code-declared jobs."""
     scheduler, _adapter, driver = scheduler_with_driver()
     register_scheduler(scheduler)
     start_subscription = get_subscriptions()[0]
@@ -1099,46 +1154,38 @@ def test_runtime_add_rearms_dormant_chain_with_monotonic_sequence() -> None:
         )
     )
 
-    with patch(
-        "vercel.integrations.apscheduler._adapter.vqs_sync.send",
-        return_value="wake-1",
-    ) as send:
+    with (
+        patch(
+            "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+            return_value="unused",
+        ),
+        pytest.raises(
+            APSchedulerConfigurationError,
+            match="holds only code-declared jobs",
+        ),
+    ):
         scheduler.add_job(
             durable_noop_job,
             "date",
             run_date=datetime.now(UTC) + timedelta(minutes=5),
-            id="first",
+            id="dynamic",
         )
 
-    first = driver.current
-    assert first is not None
-    assert first.sequence == 1
-    assert send.call_count == 1
-
-    assert driver.claim_wake(first, "owner", datetime.now(UTC)).state == "claimed"
-    terminal = driver.finish_wake(first, "owner", None, datetime.now(UTC))
-    assert terminal.state == "advanced"
-    assert terminal.wake is None
-
-    with patch(
-        "vercel.integrations.apscheduler._adapter.vqs_sync.send",
-        return_value="wake-2",
-    ) as send:
-        scheduler.add_job(
-            durable_noop_job,
-            "date",
-            run_date=datetime.now(UTC) + timedelta(minutes=10),
-            id="second",
-        )
-
-    second = driver.current
-    assert second is not None
-    assert second.sequence == 2
-    assert send.call_count == 1
+    store: Any = scheduler._jobstores["default"]
+    assert store.lookup_job("dynamic") is None
+    assert driver.current is None
 
 
-def test_failed_runtime_mutation_retry_repairs_pending_wake() -> None:
-    scheduler, _adapter, driver = scheduler_with_driver()
+def test_runtime_replace_existing_is_rejected() -> None:
+    """add_job(replace_existing=True) at runtime is a mutation and refuses."""
+    scheduler, _adapter, _driver = scheduler_with_driver()
+    scheduler.add_job(
+        durable_noop_job,
+        "interval",
+        hours=2,
+        id="cleanup",
+        replace_existing=True,
+    )
     register_scheduler(scheduler)
     start_subscription = get_subscriptions()[0]
 
@@ -1148,53 +1195,36 @@ def test_failed_runtime_mutation_retry_repairs_pending_wake() -> None:
     ) as send:
         scheduler.start()
         start_payload = send.call_args.args[1]
-    start_subscription.func(
-        message(
-            start_payload,
-            message_id="start",
-            topic=start_subscription.topic,
-            consumer_group=start_subscription.consumer_group,
+    with patch(
+        "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+        return_value="wake-1",
+    ):
+        start_subscription.func(
+            message(
+                start_payload,
+                message_id="start",
+                topic=start_subscription.topic,
+                consumer_group=start_subscription.consumer_group,
+            )
         )
-    )
 
-    # The add commits durably and arms a wake, but every publish fails.
-    run_date = datetime.now(UTC) + timedelta(minutes=5)
     with (
         patch(
             "vercel.integrations.apscheduler._adapter.vqs_sync.send",
-            side_effect=ConnectionError("queue unavailable"),
+            return_value="unused",
         ),
-        pytest.raises(ConnectionError),
+        pytest.raises(APSchedulerConfigurationError, match="immutable at runtime"),
     ):
         scheduler.add_job(
             durable_noop_job,
-            "date",
-            run_date=run_date,
-            id="repair",
+            "interval",
+            minutes=30,
+            id="cleanup",
+            replace_existing=True,
         )
-    armed = driver.current
-    assert armed is not None
-    assert armed.status == "pending"
 
-    # Retrying the same add fails on the conflicting id, but the retry must
-    # still publish the wake armed by the interrupted first attempt.
-    with (
-        patch(
-            "vercel.integrations.apscheduler._adapter.vqs_sync.send",
-            return_value="wake-repaired",
-        ) as send,
-        pytest.raises(APSchedulerConfigurationError, match="already exists"),
-    ):
-        scheduler.add_job(
-            durable_noop_job,
-            "date",
-            run_date=run_date,
-            id="repair",
-        )
-    assert send.call_count == 1
-    repaired = driver.current
-    assert repaired is not None
-    assert repaired.status == "published"
+    store: Any = scheduler._jobstores["default"]
+    assert store.lookup_job("cleanup").trigger.interval == timedelta(hours=2)
 
 
 def test_is_scheduler_subscriber_classifies_declared_objects() -> None:
@@ -1209,7 +1239,8 @@ def test_is_scheduler_subscriber_classifies_declared_objects() -> None:
     assert not is_scheduler_subscriber(TEST_SCHEDULER_MODULE, "plain")
 
 
-def test_runtime_mutation_requires_lifecycle_activation() -> None:
+def test_mutations_are_rejected_even_before_activation() -> None:
+    """The rejection is unconditional; it never suggests start() would help."""
     scheduler, adapter, _ = scheduler_with_driver()
 
     @scheduler.scheduled_job("interval", minutes=5, id="cleanup")
@@ -1218,7 +1249,7 @@ def test_runtime_mutation_requires_lifecycle_activation() -> None:
 
     with pytest.raises(
         APSchedulerConfigurationError,
-        match=r"call scheduler\.start\(\)",
+        match="immutable at runtime",
     ):
         scheduler.modify_job("cleanup", name="changed")
 
@@ -1374,10 +1405,15 @@ def test_mutations_do_not_fall_through_to_source_stores() -> None:
         scheduler.start()
 
         # jobstore=None is pinned to the default store instead of falling
-        # through to the source store's dispatch-on-remove.
-        with pytest.raises(JobLookupError):
+        # through to the source store's dispatch-on-remove, so the mutation
+        # is rejected as immutable rather than dispatching a source row.
+        with pytest.raises(APSchedulerConfigurationError, match="immutable at runtime"):
             scheduler.remove_job("sub-1")
 
+        with pytest.raises(APSchedulerConfigurationError, match="immutable at runtime"):
+            scheduler.remove_all_jobs()
+
+        # An explicitly targeted source store is rejected before that.
         with pytest.raises(
             APSchedulerConfigurationError,
             match='may only target the durable "default"',
@@ -1389,8 +1425,6 @@ def test_mutations_do_not_fall_through_to_source_stores() -> None:
             match='may only target the durable "default"',
         ):
             scheduler.pause_job("sub-1", "subscription")
-
-        scheduler.remove_all_jobs()
 
     assert source.dispatched == []
     assert source.updated == []

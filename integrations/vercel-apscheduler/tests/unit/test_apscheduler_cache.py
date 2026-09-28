@@ -38,7 +38,6 @@ from vercel.integrations.apscheduler._options import development_deployment_id
 from vercel.integrations.apscheduler._payload import StartPayload, WakeupPayload
 from vercel.integrations.apscheduler._subscriber import register_scheduler
 from vercel.integrations.apscheduler._types import (
-    PROVENANCE_DECLARED,
     APSchedulerConfigurationError,
     NamespaceFencedError,
     WakeToken,
@@ -464,7 +463,7 @@ def test_cache_end_to_end_start_activates_and_reserves_first_wake() -> None:
 
     jobs, undecodable = adapter.coordinator.get_all_jobs_with_revisions()
     assert undecodable == []
-    assert [(job.id, provenance) for job, _, provenance in jobs] == [("tick", PROVENANCE_DECLARED)]
+    assert [job.id for job, _revision in jobs] == ["tick"]
 
 
 def test_cache_end_to_end_wake_executes_job_and_reserves_successor() -> None:
@@ -632,7 +631,7 @@ def test_cache_eviction_self_heals_from_the_next_wake() -> None:
     assert successor.sequence == first_wake.sequence + 1
 
     jobs, _ = adapter.coordinator.get_all_jobs_with_revisions()
-    assert [job.id for job, _, _ in jobs] == ["tick"]
+    assert [job.id for job, _revision in jobs] == ["tick"]
 
 
 def test_cache_coordinator_cas_and_quarantine() -> None:
@@ -653,7 +652,7 @@ def test_cache_coordinator_cas_and_quarantine() -> None:
 
     coordinator = adapter.coordinator
     jobs, _ = coordinator.get_all_jobs_with_revisions()
-    (job, revision, _provenance) = jobs[0]
+    (job, revision) = jobs[0]
 
     assert not coordinator.cas_update_job(job, revision + 41)
     assert coordinator.cas_update_job(job, revision)
@@ -713,7 +712,7 @@ def test_cache_jobs_document_eviction_alone_triggers_reconcile() -> None:
 
     assert _EXECUTIONS == ["ran"]
     jobs, _ = adapter.coordinator.get_all_jobs_with_revisions()
-    assert [job.id for job, _, _ in jobs] == ["tick"]
+    assert [job.id for job, _revision in jobs] == ["tick"]
 
 
 def test_cache_dormant_finish_keeps_the_sequence_watermark() -> None:
@@ -815,6 +814,24 @@ def test_cache_demoted_deployment_job_writes_are_fenced() -> None:
 
     with pytest.raises(NamespaceFencedError):
         adapter.coordinator.remove_job("tick")
+
+
+def test_cache_coordinator_rejects_in_wake_mutations() -> None:
+    """An executing job's store writes bypass the patched scheduler methods,
+    so the coordinator's own gate must reject them."""
+    _scheduler, adapter, _payload = started_cache_scheduler()
+    job = adapter.coordinator.store.lookup_job("tick")
+    assert job is not None
+
+    adapter._suppress_wakeup = True  # wake processing marks itself this way
+    try:
+        assert adapter.is_wake_mutation
+        with pytest.raises(APSchedulerConfigurationError, match="immutable at runtime"):
+            adapter.coordinator.update_job(job)
+        with pytest.raises(APSchedulerConfigurationError, match="immutable at runtime"):
+            adapter.coordinator.remove_job("tick")
+    finally:
+        adapter._suppress_wakeup = False
 
 
 def test_cache_processing_claim_is_busy_until_the_grace_lapses() -> None:
