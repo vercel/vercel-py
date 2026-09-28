@@ -24,6 +24,7 @@ from vercel.sandbox._internal.api_client import (
     PLATFORM,
     VERSION,
     SandboxApiClient,
+    _SandboxUserAgent,
     _WriteFilesUpload,
 )
 from vercel.sandbox._internal.errors import SandboxApiError, SandboxResponseError
@@ -230,6 +231,44 @@ def _command_response(*, exit_code: int | None) -> dict[str, object]:
 
 def _base_user_agent() -> str:
     return f"vercel-sandbox/{VERSION} (Python/{sys.version}; {PLATFORM.system}/{PLATFORM.machine})"
+
+
+@pytest.mark.parametrize(
+    ("agent_name", "expected"),
+    [
+        (None, "vercel-sandbox/3.4.0 (Python/3.12.0; Linux/x86_64)"),
+        (
+            "claude-code_2-1-247_agent",
+            "vercel-sandbox/3.4.0 agent/claude-code_2-1-247_agent (Python/3.12.0; Linux/x86_64)",
+        ),
+    ],
+)
+def test_user_agent_serialization(agent_name: str | None, expected: str) -> None:
+    user_agent = _SandboxUserAgent(
+        client_version="3.4.0",
+        python_version="3.12.0",
+        platform_system="Linux",
+        platform_machine="x86_64",
+        agent_name=agent_name,
+    )
+
+    assert user_agent.serialize() == expected
+
+
+@pytest.mark.parametrize(
+    "disabled_variable",
+    ["VERCEL_TELEMETRY_DISABLED", "VERCEL_SANDBOX_TELEMETRY_DISABLED"],
+)
+def test_user_agent_from_environment_honors_opt_out(
+    monkeypatch: pytest.MonkeyPatch, disabled_variable: str
+) -> None:
+    monkeypatch.setenv("AI_AGENT", "codex")
+    monkeypatch.delenv("VERCEL_TELEMETRY_DISABLED", raising=False)
+    monkeypatch.delenv("VERCEL_SANDBOX_TELEMETRY_DISABLED", raising=False)
+    monkeypatch.setenv(disabled_variable, "1")
+
+    assert _SandboxUserAgent.from_environment().agent_name is None
+    assert _SandboxUserAgent.from_environment().serialize() == _base_user_agent()
 
 
 @pytest.mark.parametrize(

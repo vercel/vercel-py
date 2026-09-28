@@ -101,18 +101,42 @@ except PackageNotFoundError:
 PLATFORM = platform.uname()
 
 
+@dataclass(frozen=True, slots=True)
+class _SandboxUserAgent:
+    client_version: str
+    python_version: str
+    platform_system: str
+    platform_machine: str
+    agent_name: str | None = None
+
+    @classmethod
+    def from_environment(cls) -> "_SandboxUserAgent":
+        agent_name = None
+        if not (
+            os.environ.get("VERCEL_TELEMETRY_DISABLED")
+            or os.environ.get("VERCEL_SANDBOX_TELEMETRY_DISABLED")
+        ):
+            agent_name = detect_agent_name()
+        return cls(
+            client_version=VERSION,
+            python_version=sys.version,
+            platform_system=PLATFORM.system,
+            platform_machine=PLATFORM.machine,
+            agent_name=agent_name,
+        )
+
+    def serialize(self) -> str:
+        parts = [f"vercel-sandbox/{self.client_version}"]
+        if self.agent_name:
+            parts.append(f"agent/{self.agent_name}")
+        parts.append(
+            f"(Python/{self.python_version}; {self.platform_system}/{self.platform_machine})"
+        )
+        return " ".join(parts)
+
+
 def _user_agent() -> str:
-    agent = None
-    if not (
-        os.environ.get("VERCEL_TELEMETRY_DISABLED")
-        or os.environ.get("VERCEL_SANDBOX_TELEMETRY_DISABLED")
-    ):
-        agent = detect_agent_name()
-    suffix = f" agent/{agent}" if agent else ""
-    return (
-        f"vercel-sandbox/{VERSION}{suffix} "
-        f"(Python/{sys.version}; {PLATFORM.system}/{PLATFORM.machine})"
-    )
+    return _SandboxUserAgent.from_environment().serialize()
 
 
 ResponseModelT = TypeVar("ResponseModelT", bound=BaseModel)
