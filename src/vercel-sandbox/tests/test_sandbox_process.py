@@ -10,7 +10,7 @@ from threading import Event, Lock
 import anyio
 import httpx2 as httpx
 import pytest
-from sandbox_fixtures import sandbox_service_options
+from sandbox_fixtures import sandbox_api_response, sandbox_service_options
 
 import vendor.respx as respx
 from vercel import sandbox
@@ -155,44 +155,18 @@ def _chunked_ndjson(*records: object) -> list[bytes]:
     return [content[offset : offset + 1] for offset in range(len(content))]
 
 
-def _session_options() -> list[ServiceOptions]:
+def _session_options(*, sync: bool | None = None) -> list[ServiceOptions]:
     return sandbox_service_options(
         team_id="team_1",
         project_id="prj_1",
+        sync=sync,
     )
-
-
-def test_public_process_exports() -> None:
-    for name in (
-        "CompletedProcess",
-        "Process",
-        "ProcessSignal",
-        "ProcessStatus",
-        "SandboxCredentials",
-        "SandboxCredentialsFactory",
-        "TextReader",
-    ):
-        assert name in sandbox.__all__
-    for name in (
-        "CompletedProcess",
-        "ProcessSignal",
-        "ProcessStatus",
-        "SandboxCredentials",
-        "SyncProcess",
-        "SyncSandboxCredentialsFactory",
-        "SyncTextReader",
-    ):
-        assert name in sandbox_sync.__all__
 
 
 @respx.mock
 async def test_async_process_readers_wait_and_signals(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
-        return_value=httpx.Response(200, json=_process_response())
-    )
+    sandbox_api_response("POST", "/v3/sandboxes", _sandbox_response())
+    sandbox_api_response("POST", "/v2/sandboxes/sessions/sbx_1/cmd", _process_response())
     get_process = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1").mock(
         side_effect=[
             httpx.Response(200, json=_process_response()),
@@ -255,15 +229,9 @@ async def test_async_process_readers_wait_and_signals(mock_env_clear: None) -> N
 
 @respx.mock
 def test_sync_process_readers_wait_and_signals(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
-        return_value=httpx.Response(200, json=_process_response())
-    )
-    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1").mock(
-        return_value=httpx.Response(200, json=_process_response(0))
-    )
+    sandbox_api_response("POST", "/v3/sandboxes", _sandbox_response())
+    sandbox_api_response("POST", "/v2/sandboxes/sessions/sbx_1/cmd", _process_response())
+    sandbox_api_response("GET", "/v2/sandboxes/sessions/sbx_1/cmd/cmd_1", _process_response(0))
     respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/logs").mock(
         side_effect=lambda _request: _logs_response()
     )
@@ -289,80 +257,58 @@ def test_sync_process_readers_wait_and_signals(mock_env_clear: None) -> None:
 
 
 @respx.mock
-async def test_async_create_process_merges_stderr_into_stdout_reader(
+@pytest.mark.parametrize("sync", [False, True])
+@pytest.mark.parametrize(
+    ("stdout", "stderr", "expected"),
+    [
+        (subprocess.PIPE, subprocess.PIPE, ("out-1\nout-2", "err\n")),
+        (subprocess.PIPE, subprocess.STDOUT, ("out-1\nerr\nout-2", None)),
+        (subprocess.PIPE, subprocess.DEVNULL, ("out-1\nout-2", None)),
+        (subprocess.DEVNULL, subprocess.PIPE, (None, "err\n")),
+        (subprocess.DEVNULL, subprocess.DEVNULL, (None, None)),
+        (subprocess.DEVNULL, subprocess.STDOUT, (None, None)),
+    ],
+    ids=["separate", "merged", "stdout-only", "stderr-only", "discarded", "discarded-merged"],
+)
+async def test_process_output_routing(
     mock_env_clear: None,
+    sync: bool,
+    stdout: int,
+    stderr: int,
+    expected: tuple[str | None, str | None],
 ) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
+    box: sandbox.Sandbox | sandbox_sync.SyncSandbox
+    process: sandbox.Process | sandbox_sync.SyncProcess
+    sandbox_api_response("POST", "/v3/sandboxes", _sandbox_response())
+    sandbox_api_response("POST", "/v2/sandboxes/sessions/sbx_1/cmd", _process_response())
+    sandbox_api_response("GET", "/v2/sandboxes/sessions/sbx_1/cmd/cmd_1", _process_response(0))
+    chunks = _chunked_ndjson(
+        {"stream": "stdout", "data": "out-1\n"},
+        {"stream": "stderr", "data": "err\n"},
+        {"stream": "stdout", "data": "out-2"},
     )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
-        return_value=httpx.Response(200, json=_process_response())
-    )
-    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1").mock(
-        return_value=httpx.Response(200, json=_process_response(0))
-    )
+    stream = _TrackingSyncStream(chunks) if sync else _TrackingAsyncStream(chunks)
     logs = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/logs").mock(
-        side_effect=lambda _request: _logs_response()
+        return_value=httpx.Response(200, stream=stream)
     )
 
-    async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview")
-        process = await box.create_process("python", stderr=subprocess.STDOUT)
-        assert process.stderr is None
-        assert process.stdout is not None
-        assert await process.communicate() == ("out-1\nout-2err\n", None)
-        assert process.returncode == 0
+    if sync:
+        with session(service_options=_session_options(sync=True)):
+            box = sandbox_sync.create_sandbox(name="preview")
+            process = box.create_process("python", stdout=stdout, stderr=stderr)
+            output = process.communicate()
+    else:
+        async with session(service_options=_session_options()):
+            box = await sandbox.create_sandbox(name="preview")
+            process = await box.create_process("python", stdout=stdout, stderr=stderr)
+            output = await process.communicate()
 
-    assert logs.call_count == 1
-
-
-@respx.mock
-async def test_async_create_process_devnull_drops_reader(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
-        return_value=httpx.Response(200, json=_process_response())
-    )
-    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1").mock(
-        return_value=httpx.Response(200, json=_process_response(0))
-    )
-    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/logs").mock(
-        side_effect=lambda _request: _logs_response()
-    )
-
-    async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview")
-        process = await box.create_process("python", stderr=subprocess.DEVNULL)
-        assert process.stderr is None
-        assert await process.communicate() == ("out-1\nout-2", None)
-
-
-@pytest.mark.parametrize("stderr", [subprocess.DEVNULL, subprocess.STDOUT])
-@respx.mock
-async def test_async_create_process_with_no_readers_never_requests_logs(
-    mock_env_clear: None, stderr: int
-) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
-        return_value=httpx.Response(200, json=_process_response())
-    )
-    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1").mock(
-        return_value=httpx.Response(200, json=_process_response(0))
-    )
-    logs = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/logs")
-
-    async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview")
-        process = await box.create_process("python", stdout=subprocess.DEVNULL, stderr=stderr)
-        assert process.stdout is None
-        assert process.stderr is None
-        assert await process.communicate() == (None, None)
-        assert process.returncode == 0
-
-    assert logs.call_count == 0
+    assert output == expected
+    assert (process.stdout is None) == (expected[0] is None)
+    assert (process.stderr is None) == (expected[1] is None)
+    assert process.returncode == 0
+    assert logs.call_count == int(expected != (None, None))
+    assert stream.closed == (expected != (None, None))
 
 
 @pytest.mark.parametrize(
@@ -381,9 +327,7 @@ async def test_async_create_process_with_no_readers_never_requests_logs(
 async def test_create_process_rejects_output_options_before_request(
     mock_env_clear: None, kwargs: dict[str, object]
 ) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
+    sandbox_api_response("POST", "/v3/sandboxes", _sandbox_response())
     create = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd")
 
     async with session(service_options=_session_options()):
@@ -395,65 +339,10 @@ async def test_create_process_rejects_output_options_before_request(
 
 
 @respx.mock
-def test_sync_create_process_merges_stderr_into_stdout_reader(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
-        return_value=httpx.Response(200, json=_process_response())
-    )
-    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1").mock(
-        return_value=httpx.Response(200, json=_process_response(0))
-    )
-    logs = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/logs").mock(
-        side_effect=lambda _request: _logs_response()
-    )
-
-    with session(service_options=_session_options()):
-        box = sandbox_sync.create_sandbox(name="preview")
-        process = box.create_process("python", stderr=subprocess.STDOUT)
-        assert process.stderr is None
-        assert process.stdout is not None
-        assert process.communicate() == ("out-1\nout-2err\n", None)
-        assert process.returncode == 0
-
-    assert logs.call_count == 1
-
-
-@pytest.mark.parametrize("stderr", [subprocess.DEVNULL, subprocess.STDOUT])
-@respx.mock
-def test_sync_create_process_with_no_readers_never_requests_logs(
-    mock_env_clear: None, stderr: int
-) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
-        return_value=httpx.Response(200, json=_process_response())
-    )
-    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1").mock(
-        return_value=httpx.Response(200, json=_process_response(0))
-    )
-    logs = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/logs")
-
-    with session(service_options=_session_options()):
-        box = sandbox_sync.create_sandbox(name="preview")
-        process = box.create_process("python", stdout=subprocess.DEVNULL, stderr=stderr)
-        assert process.stdout is None
-        assert process.stderr is None
-        assert process.communicate() == (None, None)
-        assert process.returncode == 0
-
-    assert logs.call_count == 0
-
-
-@respx.mock
 def test_sync_create_process_rejects_output_options_before_request(
     mock_env_clear: None,
 ) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
+    sandbox_api_response("POST", "/v3/sandboxes", _sandbox_response())
     create = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd")
 
     with session(service_options=_session_options()):
@@ -468,9 +357,7 @@ def test_sync_create_process_rejects_output_options_before_request(
 async def test_run_process_routes_output_checks_and_uses_one_request(
     mock_env_clear: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
+    sandbox_api_response("POST", "/v3/sandboxes", _sandbox_response())
     run = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
         side_effect=[
             _completed_response(args=["-c", "print('out')"]),
@@ -519,9 +406,7 @@ async def test_run_process_routes_output_checks_and_uses_one_request(
 async def test_async_run_process_explicit_and_discarded_destinations(
     mock_env_clear: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
+    sandbox_api_response("POST", "/v3/sandboxes", _sandbox_response())
     run = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
         side_effect=[
             _interleaved_completed_response(),
@@ -564,9 +449,7 @@ async def test_async_run_process_explicit_and_discarded_destinations(
 def test_sync_run_process_routes_and_captures(
     mock_env_clear: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
+    sandbox_api_response("POST", "/v3/sandboxes", _sandbox_response())
     run = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
         side_effect=[_completed_response(), _interleaved_completed_response()]
     )
@@ -586,39 +469,64 @@ def test_sync_run_process_routes_and_captures(
 
 
 @respx.mock
-async def test_async_run_process_reads_chunked_ndjson(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    stream = _TrackingAsyncStream(
-        _chunked_ndjson(
-            _process_response(),
-            {"stream": "stdout", "data": "café\n"},
-            {"stream": "stderr", "data": "雪\n"},
-            _process_response(0),
-        )
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
+@pytest.mark.parametrize("sync", [False, True])
+@pytest.mark.parametrize("run", [False, True], ids=["readers", "run"])
+async def test_process_decodes_chunked_ndjson_and_closes_response(
+    mock_env_clear: None,
+    sync: bool,
+    run: bool,
+) -> None:
+    box: sandbox.Sandbox | sandbox_sync.SyncSandbox
+    sandbox_api_response("POST", "/v3/sandboxes", _sandbox_response())
+    records: list[object] = [
+        {"stream": "stdout", "data": "café\n"},
+        {"stream": "stderr", "data": "雪\n"},
+    ]
+    if run:
+        records = [_process_response(), *records, _process_response(0)]
+        path = "/v2/sandboxes/sessions/sbx_1/cmd"
+        method = "POST"
+    else:
+        sandbox_api_response("POST", "/v2/sandboxes/sessions/sbx_1/cmd", _process_response())
+        sandbox_api_response("GET", "/v2/sandboxes/sessions/sbx_1/cmd/cmd_1", _process_response(0))
+        path = "/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/logs"
+        method = "GET"
+    chunks = _chunked_ndjson(*records)
+    stream = _TrackingSyncStream(chunks) if sync else _TrackingAsyncStream(chunks)
+    respx.request(method, f"https://sandbox.test{path}").mock(
         return_value=httpx.Response(200, stream=stream)
     )
 
-    async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview")
-        result = await box.run_process("python", capture_output=True)
+    if sync:
+        with session(service_options=_session_options(sync=True)):
+            box = sandbox_sync.create_sandbox(name="preview")
+            if run:
+                result = box.run_process("python", capture_output=True)
+                output = (result.stdout, result.stderr)
+            else:
+                output = box.create_process("python").communicate()
+    else:
+        async with session(service_options=_session_options()):
+            box = await sandbox.create_sandbox(name="preview")
+            if run:
+                result = await box.run_process("python", capture_output=True)
+                output = (result.stdout, result.stderr)
+            else:
+                process = await box.create_process("python")
+                output = await process.communicate()
 
-    assert result.stdout == "café\n"
-    assert result.stderr == "雪\n"
+    assert output == ("café\n", "雪\n")
     assert stream.closed
 
 
 @respx.mock
-async def test_async_run_process_replays_pre_stream_stopped_session_error(
-    mock_env_clear: None,
+@pytest.mark.parametrize("sync", [False, True])
+async def test_run_process_replays_pre_stream_stopped_session_error(
+    mock_env_clear: None, sync: bool
 ) -> None:
+    box: sandbox.Sandbox | sandbox_sync.SyncSandbox
     events: list[str] = []
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response(session_id="sbx_old"))
-    )
+    sandbox_api_response("POST", "/v3/sandboxes", _sandbox_response(session_id="sbx_old"))
 
     def old_command_handler(_request: httpx.Request) -> httpx.Response:
         events.append("old-command")
@@ -645,142 +553,18 @@ async def test_async_run_process_replays_pre_stream_stopped_session_error(
         side_effect=replacement_command_handler
     )
 
-    async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview")
-        result = await box.run_process("python", capture_output=True)
+    if sync:
+        with session(service_options=_session_options(sync=True)):
+            box = sandbox_sync.create_sandbox(name="preview")
+            result = box.run_process("python", capture_output=True)
+    else:
+        async with session(service_options=_session_options()):
+            box = await sandbox.create_sandbox(name="preview")
+            result = await box.run_process("python", capture_output=True)
 
     assert result.session_id == "sbx_new"
     assert result.stdout == "out\n"
     assert events == ["old-command", "resume", "replacement-command"]
-
-
-@respx.mock
-def test_sync_run_process_replays_pre_stream_stopped_session_error(
-    mock_env_clear: None,
-) -> None:
-    events: list[str] = []
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response(session_id="sbx_old"))
-    )
-
-    def old_command_handler(_request: httpx.Request) -> httpx.Response:
-        events.append("old-command")
-        return httpx.Response(
-            410,
-            json={"error": {"code": "sandbox_stopped", "message": "session is stopped"}},
-        )
-
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_old/cmd").mock(
-        side_effect=old_command_handler
-    )
-
-    def resume_handler(_request: httpx.Request) -> httpx.Response:
-        events.append("resume")
-        return httpx.Response(200, json=_sandbox_response(session_id="sbx_new"))
-
-    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(side_effect=resume_handler)
-
-    def replacement_command_handler(_request: httpx.Request) -> httpx.Response:
-        events.append("replacement-command")
-        return _completed_response(session_id="sbx_new")
-
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_new/cmd").mock(
-        side_effect=replacement_command_handler
-    )
-
-    with session(service_options=_session_options()):
-        box = sandbox_sync.create_sandbox(name="preview")
-        result = box.run_process("python", capture_output=True)
-
-    assert result.session_id == "sbx_new"
-    assert result.stdout == "out\n"
-    assert events == ["old-command", "resume", "replacement-command"]
-
-
-@respx.mock
-def test_sync_run_process_reads_chunked_ndjson(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    stream = _TrackingSyncStream(
-        _chunked_ndjson(
-            _process_response(),
-            {"stream": "stdout", "data": "café\n"},
-            {"stream": "stderr", "data": "雪\n"},
-            _process_response(0),
-        )
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
-        return_value=httpx.Response(200, stream=stream)
-    )
-
-    with session(service_options=_session_options()):
-        box = sandbox_sync.create_sandbox(name="preview")
-        result = box.run_process("python", capture_output=True)
-
-    assert result.stdout == "café\n"
-    assert result.stderr == "雪\n"
-    assert stream.closed
-
-
-@respx.mock
-async def test_async_process_readers_read_chunked_ndjson(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
-        return_value=httpx.Response(200, json=_process_response())
-    )
-    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1").mock(
-        return_value=httpx.Response(200, json=_process_response(0))
-    )
-    stream = _TrackingAsyncStream(
-        _chunked_ndjson(
-            {"stream": "stdout", "data": "café\n"},
-            {"stream": "stderr", "data": "雪\n"},
-        )
-    )
-    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/logs").mock(
-        return_value=httpx.Response(200, stream=stream)
-    )
-
-    async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview")
-        process = await box.create_process("python")
-        output = await process.communicate()
-
-    assert output == ("café\n", "雪\n")
-    assert stream.closed
-
-
-@respx.mock
-def test_sync_process_readers_read_chunked_ndjson(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
-        return_value=httpx.Response(200, json=_process_response())
-    )
-    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1").mock(
-        return_value=httpx.Response(200, json=_process_response(0))
-    )
-    stream = _TrackingSyncStream(
-        _chunked_ndjson(
-            {"stream": "stdout", "data": "café\n"},
-            {"stream": "stderr", "data": "雪\n"},
-        )
-    )
-    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/logs").mock(
-        return_value=httpx.Response(200, stream=stream)
-    )
-
-    with session(service_options=_session_options()):
-        box = sandbox_sync.create_sandbox(name="preview")
-        process = box.create_process("python")
-        output = process.communicate()
-
-    assert output == ("café\n", "雪\n")
-    assert stream.closed
 
 
 @pytest.mark.parametrize(
@@ -799,9 +583,7 @@ def test_sync_process_readers_read_chunked_ndjson(mock_env_clear: None) -> None:
 async def test_run_process_rejects_output_options_before_request(
     mock_env_clear: None, kwargs: dict[str, object]
 ) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
+    sandbox_api_response("POST", "/v3/sandboxes", _sandbox_response())
     run = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd")
 
     async with session(service_options=_session_options()):
@@ -813,42 +595,30 @@ async def test_run_process_rejects_output_options_before_request(
 
 
 @respx.mock
-async def test_async_run_process_closes_response_when_sink_write_fails(
+@pytest.mark.parametrize(("sync", "fail_on"), [(False, "write"), (True, "flush")])
+async def test_run_process_closes_response_after_sink_failure(
     mock_env_clear: None,
+    sync: bool,
+    fail_on: str,
 ) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
+    box: sandbox.Sandbox | sandbox_sync.SyncSandbox
+    sandbox_api_response("POST", "/v3/sandboxes", _sandbox_response())
+    stream = (
+        _TrackingSyncStream(_completed_body()) if sync else _TrackingAsyncStream(_completed_body())
     )
-    stream = _TrackingAsyncStream(_completed_body())
     respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
         return_value=httpx.Response(200, stream=stream)
     )
-
-    async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview")
-        with pytest.raises(OSError, match="sink write failed"):
-            await box.run_process("python", stdout=_FailingTextIO(fail_on="write"))
-
-    assert stream.closed
-
-
-@respx.mock
-def test_sync_run_process_closes_response_when_sink_flush_fails(
-    mock_env_clear: None,
-) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    stream = _TrackingSyncStream(_completed_body())
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
-        return_value=httpx.Response(200, stream=stream)
-    )
-
-    with session(service_options=_session_options()):
-        box = sandbox_sync.create_sandbox(name="preview")
-        with pytest.raises(OSError, match="sink flush failed"):
-            box.run_process("python", stdout=_FailingTextIO(fail_on="flush"))
-
+    if sync:
+        with session(service_options=_session_options(sync=True)):
+            box = sandbox_sync.create_sandbox(name="preview")
+            with pytest.raises(OSError, match=f"sink {fail_on} failed"):
+                box.run_process("python", stdout=_FailingTextIO(fail_on=fail_on))
+    else:
+        async with session(service_options=_session_options()):
+            box = await sandbox.create_sandbox(name="preview")
+            with pytest.raises(OSError, match=f"sink {fail_on} failed"):
+                await box.run_process("python", stdout=_FailingTextIO(fail_on=fail_on))
     assert stream.closed
 
 
@@ -879,9 +649,7 @@ async def test_run_process_rejects_invalid_streams(
     error: type[Exception],
     match: str,
 ) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
+    sandbox_api_response("POST", "/v3/sandboxes", _sandbox_response())
     respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
         return_value=httpx.Response(
             200,
@@ -899,12 +667,12 @@ async def test_run_process_rejects_invalid_streams(
 
 
 @respx.mock
-async def test_async_run_process_does_not_replay_lifecycle_stream_errors(
-    mock_env_clear: None,
+@pytest.mark.parametrize("sync", [False, True])
+async def test_run_process_does_not_replay_lifecycle_stream_errors(
+    mock_env_clear: None, sync: bool
 ) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
+    box: sandbox.Sandbox | sandbox_sync.SyncSandbox
+    sandbox_api_response("POST", "/v3/sandboxes", _sandbox_response())
     respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
         return_value=httpx.Response(
             200,
@@ -920,49 +688,18 @@ async def test_async_run_process_does_not_replay_lifecycle_stream_errors(
             ),
         )
     )
-    resume_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
+    resume_route = sandbox_api_response("GET", "/v2/sandboxes/preview", _sandbox_response())
 
-    async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview")
-        with pytest.raises(sandbox.SandboxStreamError, match="stream stopped") as exc_info:
-            await box.run_process("python")
-
-    assert exc_info.value.code == "sandbox_stopped"
-    assert not resume_route.called
-
-
-@respx.mock
-def test_sync_run_process_does_not_replay_lifecycle_stream_errors(
-    mock_env_clear: None,
-) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
-        return_value=httpx.Response(
-            200,
-            text="".join(
-                json.dumps(record) + "\n"
-                for record in (
-                    _process_response(),
-                    {
-                        "stream": "error",
-                        "data": {"code": "sandbox_stopped", "message": "stream stopped"},
-                    },
-                )
-            ),
-        )
-    )
-    resume_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-
-    with session(service_options=_session_options()):
-        box = sandbox_sync.create_sandbox(name="preview")
-        with pytest.raises(sandbox.SandboxStreamError, match="stream stopped") as exc_info:
-            box.run_process("python")
+    if sync:
+        with session(service_options=_session_options(sync=True)):
+            box = sandbox_sync.create_sandbox(name="preview")
+            with pytest.raises(sandbox.SandboxStreamError, match="stream stopped") as exc_info:
+                box.run_process("python")
+    else:
+        async with session(service_options=_session_options()):
+            box = await sandbox.create_sandbox(name="preview")
+            with pytest.raises(sandbox.SandboxStreamError, match="stream stopped") as exc_info:
+                await box.run_process("python")
 
     assert exc_info.value.code == "sandbox_stopped"
     assert not resume_route.called

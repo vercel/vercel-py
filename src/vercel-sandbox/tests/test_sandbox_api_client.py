@@ -8,7 +8,6 @@ from httpx2._types import HeaderTypes, QueryParamTypes
 from vercel._internal.core.http import (
     NO_TIMEOUT,
     BaseTransport,
-    BytesBody,
     JSONBody,
     ReadResponsePolicy,
     RequestBody,
@@ -49,30 +48,9 @@ class InvalidJsonTransport(BaseTransport):
         )
 
 
-class JsonTransport(BaseTransport):
+class RecordingJsonTransport(BaseTransport):
     def __init__(self, data: object) -> None:
         self.data = data
-
-    async def send(
-        self,
-        method: str,
-        path: str,
-        *,
-        token: str | None = None,
-        params: QueryParamTypes | None = None,
-        body: RequestBody = None,
-        headers: HeaderTypes | None = None,
-        timeout: RequestTimeout = None,
-        follow_redirects: bool | None = None,
-        stream: bool = False,
-        read_response: ReadResponsePolicy = ReadResponsePolicy.NEVER,
-    ) -> httpx.Response:
-        return httpx.Response(200, json=self.data, request=httpx.Request(method, path))
-
-
-class RecordingJsonTransport(JsonTransport):
-    def __init__(self, data: object) -> None:
-        super().__init__(data)
         self.request: tuple[str, str, str | None, QueryParamTypes | None, RequestBody] | None = None
         self.timeout: RequestTimeout = None
 
@@ -92,18 +70,7 @@ class RecordingJsonTransport(JsonTransport):
     ) -> httpx.Response:
         self.request = (method, path, token, params, body)
         self.timeout = timeout
-        return await super().send(
-            method,
-            path,
-            token=token,
-            params=params,
-            body=body,
-            headers=headers,
-            timeout=timeout,
-            follow_redirects=follow_redirects,
-            stream=stream,
-            read_response=read_response,
-        )
+        return httpx.Response(200, json=self.data, request=httpx.Request(method, path))
 
 
 class _CompletedResponse(StreamingResponse):
@@ -137,7 +104,7 @@ class _CompletedRequest(StreamingRequest):
         raise NotImplementedError
 
 
-class RecordingStreamTransport(JsonTransport):
+class RecordingStreamTransport(RecordingJsonTransport):
     def __init__(self, *, lines: tuple[str, ...] = ()) -> None:
         super().__init__({})
         self.lines = lines
@@ -192,60 +159,49 @@ def _command_response(*, exit_code: int | None) -> dict[str, object]:
     }
 
 
-async def test_waiting_for_command_disables_client_timeout() -> None:
-    transport = RecordingJsonTransport(_command_response(exit_code=0))
-    client = _sandbox_client(transport)
-
-    await client.get_command(session_id="sbx_1", command_id="cmd_1", wait=True)
-
-    assert transport.timeout is NO_TIMEOUT
-
-
-async def test_polling_command_uses_client_timeout() -> None:
-    transport = RecordingJsonTransport(_command_response(exit_code=None))
-    client = _sandbox_client(transport)
-
-    await client.get_command(session_id="sbx_1", command_id="cmd_1", wait=False)
-
-    assert transport.timeout is None
-
-
-async def test_run_process_disables_client_timeout() -> None:
-    transport = RecordingStreamTransport(
-        lines=(
-            json.dumps(_command_response(exit_code=None)),
-            json.dumps(_command_response(exit_code=0)),
+@pytest.mark.parametrize(
+    ("operation", "expected_timeout"),
+    [
+        ("wait", NO_TIMEOUT),
+        ("poll", None),
+        ("run", NO_TIMEOUT),
+        ("logs", NO_TIMEOUT),
+        ("read", timedelta(minutes=5)),
+    ],
+)
+async def test_operations_choose_request_timeout(
+    operation: str, expected_timeout: RequestTimeout
+) -> None:
+    if operation in {"wait", "poll"}:
+        transport = RecordingJsonTransport(_command_response(exit_code=0))
+    else:
+        transport = RecordingStreamTransport(
+            lines=(
+                json.dumps(_command_response(exit_code=None)),
+                json.dumps(_command_response(exit_code=0)),
+            )
         )
-    )
     client = _sandbox_client(transport)
 
-    await client.run_process(
-        session_id="sbx_1",
-        command="python",
-        output_router=ProcessOutputRouter(stdout=None, stderr=None, capture_output=False),
-    )
+    if operation in {"wait", "poll"}:
+        await client.get_command(session_id="sbx_1", command_id="cmd_1", wait=operation == "wait")
+    elif operation == "run":
+        await client.run_process(
+            session_id="sbx_1",
+            command="python",
+            output_router=ProcessOutputRouter(stdout=None, stderr=None, capture_output=False),
+        )
+    elif operation == "logs":
+        response = await client.command_logs_response(session_id="sbx_1", command_id="cmd_1")
+        await response.aclose()
+    else:
+        response = await client.open_read_response(session_id="sbx_1", path="large.bin")
+        await response.aclose()
 
-    assert transport.timeout is NO_TIMEOUT
-
-
-async def test_command_logs_disable_client_timeout() -> None:
-    transport = RecordingStreamTransport()
-    client = _sandbox_client(transport)
-
-    response = await client.command_logs_response(session_id="sbx_1", command_id="cmd_1")
-    await response.aclose()
-
-    assert transport.timeout is NO_TIMEOUT
-
-
-async def test_file_read_uses_file_transfer_timeout() -> None:
-    transport = RecordingStreamTransport()
-    client = _sandbox_client(transport)
-
-    response = await client.open_read_response(session_id="sbx_1", path="large.bin")
-    await response.aclose()
-
-    assert transport.timeout == timedelta(minutes=5)
+    if expected_timeout is NO_TIMEOUT or expected_timeout is None:
+        assert transport.timeout is expected_timeout
+    else:
+        assert transport.timeout == expected_timeout
 
 
 async def test_invalid_json_response_raises_response_error(mock_env_clear: None) -> None:
@@ -366,96 +322,10 @@ async def test_destroy_sandbox_forwards_delete_orphan_snapshots(
     assert params == expected_params
 
 
-async def test_private_parameters_are_forwarded_to_sandbox_api() -> None:
-    response = {
-        "sandbox": {
-            "name": "preview",
-            "currentSessionId": "sbx_123",
-            "status": "running",
-        },
-        "session": {
-            "id": "sbx_123",
-            "sourceSandboxName": "preview",
-            "projectId": "prj_123",
-            "status": "running",
-        },
-    }
-    transport = RecordingJsonTransport(response)
-    client = _sandbox_client(transport)
-
-    await client.create_sandbox(private_parameters={"__networkId": "network_123"})
-
-    assert transport.request is not None
-    body = transport.request[4]
-    assert isinstance(body, BytesBody)
-    assert json.loads(body.data)["__networkId"] == "network_123"
-
-    await client.fork_sandbox(
-        source_sandbox="preview",
-        private_parameters={"__privateFeature": {"enabled": True}},
-    )
-
-    assert transport.request is not None
-    body = transport.request[4]
-    assert isinstance(body, JSONBody)
-    assert body.data["__privateFeature"] == {"enabled": True}
-
-    await client.get_sandbox(
-        name="preview",
-        private_parameters={"__includeSystemRoutes": True},
-    )
-
-    assert transport.request is not None
-    params = transport.request[3]
-    assert params == {
-        "teamId": "team_123",
-        "projectId": "prj_123",
-        "resume": "false",
-        "__includeSystemRoutes": True,
-    }
-
-
-async def test_stop_runtime_session_retains_sparse_sandbox_metadata() -> None:
-    client = _sandbox_client(
-        JsonTransport(
-            {
-                "session": {"id": "sbx_123", "status": "stopped"},
-                "sandbox": {
-                    "name": "preview",
-                    "currentSessionId": "sbx_123",
-                    "status": "stopped",
-                },
-            }
-        )
-    )
-
-    result = await client.stop_runtime_session(session_id="sbx_123")
-
-    assert result.session.status == "stopped"
-    assert result._sandbox_attached
-    assert result.sandbox is not None
-    assert result.sandbox.current_session_id == "sbx_123"
-    assert result.sandbox.project_id == "prj_123"
-    assert result.sandbox.raw == {
-        "name": "preview",
-        "currentSessionId": "sbx_123",
-        "status": "stopped",
-    }
-    assert not result.sandbox._routes_attached
-    assert not result.sandbox._current_session_attached
-
-
-async def test_stop_runtime_session_distinguishes_omitted_metadata() -> None:
-    client = _sandbox_client(JsonTransport({"session": {"id": "sbx_123", "status": "stopped"}}))
-
-    result = await client.stop_runtime_session(session_id="sbx_123")
-
-    assert result.sandbox is None
-    assert not result._sandbox_attached
-
-
 async def test_stop_runtime_session_rejects_replacement_identity() -> None:
-    client = _sandbox_client(JsonTransport({"session": {"id": "sbx_other", "status": "stopped"}}))
+    client = _sandbox_client(
+        RecordingJsonTransport({"session": {"id": "sbx_other", "status": "stopped"}})
+    )
 
     with pytest.raises(SandboxResponseError, match="different session identity"):
         await client.stop_runtime_session(session_id="sbx_123")

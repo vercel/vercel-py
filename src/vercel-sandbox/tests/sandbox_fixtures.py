@@ -1,9 +1,20 @@
 """Shared helpers for Sandbox tests."""
 
+import httpx2 as httpx
 import sniffio
 
+import vendor.respx as respx
 from vercel._internal.core.options import ServiceOptions
 from vercel.sandbox import SandboxCredentials, SandboxServiceOptions, sync as sandbox_sync
+
+
+def sandbox_api_response(
+    method: str, path: str, payload: object, *, status: int = 200
+) -> respx.Route:
+    """Stub one JSON response, keeping its request history available to assertions."""
+    return respx.request(method, f"https://sandbox.test{path}").mock(
+        return_value=httpx.Response(status, json=payload)
+    )
 
 
 def sandbox_service_options(
