@@ -1,4 +1,7 @@
 import json
+import sys
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import timedelta
 
 import httpx2 as httpx
@@ -17,7 +20,12 @@ from vercel._internal.core.http import (
     StreamingResponse,
 )
 from vercel._internal.core.url import format_url_path
-from vercel.sandbox._internal.api_client import SandboxApiClient, _WriteFilesUpload
+from vercel.sandbox._internal.api_client import (
+    PLATFORM,
+    VERSION,
+    SandboxApiClient,
+    _WriteFilesUpload,
+)
 from vercel.sandbox._internal.errors import SandboxApiError, SandboxResponseError
 from vercel.sandbox._internal.options import SandboxCredentials
 from vercel.sandbox._internal.process_output import ProcessOutputRouter
@@ -75,6 +83,7 @@ class RecordingJsonTransport(JsonTransport):
         super().__init__(data)
         self.request: tuple[str, str, str | None, QueryParamTypes | None, RequestBody] | None = None
         self.timeout: RequestTimeout = None
+        self.headers: httpx.Headers | None = None
 
     async def send(
         self,
@@ -92,6 +101,7 @@ class RecordingJsonTransport(JsonTransport):
     ) -> httpx.Response:
         self.request = (method, path, token, params, body)
         self.timeout = timeout
+        self.headers = httpx.Headers(headers)
         return await super().send(
             method,
             path,
@@ -142,6 +152,7 @@ class RecordingStreamTransport(JsonTransport):
         super().__init__({})
         self.lines = lines
         self.timeout: RequestTimeout = None
+        self.headers: httpx.Headers | None = None
 
     async def open_response_stream(
         self,
@@ -158,8 +169,33 @@ class RecordingStreamTransport(JsonTransport):
         chunk_size: int | None = None,
     ) -> StreamingResponse:
         self.timeout = timeout
+        self.headers = httpx.Headers(headers)
         response = httpx.Response(200, request=httpx.Request(method, path))
         return _CompletedResponse(response, lines=self.lines)
+
+
+class RecordingUploadTransport(JsonTransport):
+    def __init__(self) -> None:
+        super().__init__({})
+        self.headers: httpx.Headers | None = None
+
+    @asynccontextmanager
+    async def request_stream(
+        self,
+        method: str,
+        path: str,
+        *,
+        token: str | None = None,
+        params: QueryParamTypes | None = None,
+        headers: HeaderTypes | None = None,
+        timeout: RequestTimeout = None,
+        follow_redirects: bool | None = None,
+        read_response: ReadResponsePolicy = ReadResponsePolicy.NON_SUCCESS_ONLY,
+        response_chunk_size: int | None = None,
+    ) -> AsyncIterator[StreamingRequest]:
+        self.headers = httpx.Headers(headers)
+        response = httpx.Response(200, request=httpx.Request(method, path))
+        yield _CompletedRequest(_CompletedResponse(response))
 
 
 def _sandbox_client(transport: BaseTransport) -> SandboxApiClient:
@@ -190,6 +226,76 @@ def _command_response(*, exit_code: int | None) -> dict[str, object]:
             "startedAt": 1,
         }
     }
+
+
+def _base_user_agent() -> str:
+    return f"vercel-sandbox/{VERSION} (Python/{sys.version}; {PLATFORM.system}/{PLATFORM.machine})"
+
+
+@pytest.mark.parametrize(
+    ("agent_name", "disabled_variable"),
+    [
+        (None, None),
+        ("claude-code_2-1-247_agent", None),
+        ("codex", "VERCEL_TELEMETRY_DISABLED"),
+        ("codex", "VERCEL_SANDBOX_TELEMETRY_DISABLED"),
+    ],
+)
+async def test_normal_request_user_agent(
+    monkeypatch: pytest.MonkeyPatch, agent_name: str | None, disabled_variable: str | None
+) -> None:
+    from vercel.sandbox._internal import api_client
+
+    monkeypatch.setattr(api_client, "detect_agent_name", lambda: agent_name)
+    monkeypatch.delenv("VERCEL_TELEMETRY_DISABLED", raising=False)
+    monkeypatch.delenv("VERCEL_SANDBOX_TELEMETRY_DISABLED", raising=False)
+    if disabled_variable:
+        monkeypatch.setenv(disabled_variable, "1")
+
+    transport = RecordingJsonTransport(_command_response(exit_code=0))
+    await _sandbox_client(transport).get_command(session_id="sbx_1", command_id="cmd_1")
+
+    assert transport.headers is not None
+    expected = _base_user_agent()
+    if agent_name and not disabled_variable:
+        expected = expected.replace(" (Python/", f" agent/{agent_name} (Python/", 1)
+    assert transport.headers["user-agent"] == expected
+
+
+async def test_request_uses_agent_from_process_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AI_AGENT", "claude-code_2-1-247_agent")
+    monkeypatch.delenv("VERCEL_TELEMETRY_DISABLED", raising=False)
+    monkeypatch.delenv("VERCEL_SANDBOX_TELEMETRY_DISABLED", raising=False)
+
+    transport = RecordingJsonTransport(_command_response(exit_code=0))
+    await _sandbox_client(transport).get_command(session_id="sbx_1", command_id="cmd_1")
+
+    assert transport.headers is not None
+    assert " agent/claude-code_2-1-247_agent (Python/" in transport.headers["user-agent"]
+
+
+async def test_stream_and_upload_user_agents(monkeypatch: pytest.MonkeyPatch) -> None:
+    from vercel.sandbox._internal import api_client
+
+    monkeypatch.setattr(api_client, "detect_agent_name", lambda: "codex")
+    monkeypatch.delenv("VERCEL_TELEMETRY_DISABLED", raising=False)
+    monkeypatch.delenv("VERCEL_SANDBOX_TELEMETRY_DISABLED", raising=False)
+
+    stream_transport = RecordingStreamTransport()
+    response = await _sandbox_client(stream_transport).open_read_response(
+        session_id="sbx_1", path="file.txt"
+    )
+    await response.aclose()
+
+    upload_transport = RecordingUploadTransport()
+    async with _sandbox_client(upload_transport).write_files_request(session_id="sbx_1"):
+        pass
+
+    expected = _base_user_agent().replace(" (Python/", " agent/codex (Python/", 1)
+    assert stream_transport.headers is not None
+    assert upload_transport.headers is not None
+    assert stream_transport.headers["user-agent"] == expected
+    assert upload_transport.headers["user-agent"] == expected
 
 
 async def test_waiting_for_command_disables_client_timeout() -> None:

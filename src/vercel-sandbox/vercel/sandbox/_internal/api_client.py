@@ -1,6 +1,7 @@
 """Internal Sandbox API client."""
 
 import json
+import os
 import platform
 import sys
 from collections.abc import AsyncIterator, Mapping, Sequence
@@ -22,6 +23,7 @@ from pydantic import (
     field_validator,
 )
 
+from vercel._internal.core.detect_agent import detect_agent_name
 from vercel._internal.core.http import (
     NO_TIMEOUT,
     BaseTransport,
@@ -97,9 +99,22 @@ except PackageNotFoundError:
         VERSION = "development"
 
 PLATFORM = platform.uname()
-USER_AGENT = (
-    f"vercel-sandbox/{VERSION} (Python/{sys.version}; {PLATFORM.system}/{PLATFORM.machine})"
-)
+
+
+def _user_agent() -> str:
+    agent = None
+    if not (
+        os.environ.get("VERCEL_TELEMETRY_DISABLED")
+        or os.environ.get("VERCEL_SANDBOX_TELEMETRY_DISABLED")
+    ):
+        agent = detect_agent_name()
+    suffix = f" agent/{agent}" if agent else ""
+    return (
+        f"vercel-sandbox/{VERSION}{suffix} "
+        f"(Python/{sys.version}; {PLATFORM.system}/{PLATFORM.machine})"
+    )
+
+
 ResponseModelT = TypeVar("ResponseModelT", bound=BaseModel)
 
 
@@ -955,7 +970,7 @@ class SandboxApiClient:
             ),
         )
         request_headers = {
-            "user-agent": USER_AGENT,
+            "user-agent": _user_agent(),
             **dict(headers or {}),
         }
         response = await self._transport.send(
@@ -996,7 +1011,7 @@ class SandboxApiClient:
             ),
         )
         request_headers = {
-            "user-agent": USER_AGENT,
+            "user-agent": _user_agent(),
             **dict(headers or {}),
         }
         response = await self._transport.open_response_stream(
@@ -1866,7 +1881,7 @@ class SandboxApiClient:
             token=credentials.token,
             params=query,
             headers={
-                "user-agent": USER_AGENT,
+                "user-agent": _user_agent(),
                 "x-cwd": "/",
                 "content-type": "application/gzip",
             },
