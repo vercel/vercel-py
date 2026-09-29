@@ -346,6 +346,7 @@ def _authored_network_policy() -> NetworkPolicy:
                     transform=[NetworkPolicyTransform(headers={"X-Fallback": "fallback"})]
                 ),
                 NetworkPolicyRule(
+                    match=matcher,
                     response=NetworkPolicyResponse(
                         status_code=403,
                         headers={"X-Policy": "blocked"},
@@ -910,6 +911,22 @@ async def test_network_policy_async_public_flow(mock_env_clear: None) -> None:
                 },
                 {"transform": [{"headers": {"X-Fallback": "fallback"}}]},
                 {
+                    "match": {
+                        "path": {"startsWith": "/v1/"},
+                        "method": ["POST"],
+                        "queryString": [
+                            {
+                                "key": {"exact": "stream"},
+                                "value": {"regex": "^(true|false)$"},
+                            }
+                        ],
+                        "headers": [
+                            {
+                                "key": {"exact": "authorization"},
+                                "value": {"startsWith": "Bearer "},
+                            }
+                        ],
+                    },
                     "response": {
                         "statusCode": 403,
                         "headers": {"X-Policy": "blocked"},
@@ -1009,6 +1026,22 @@ def test_network_policy_sync_public_parity(mock_env_clear: None) -> None:
                 },
                 {"transform": [{"headers": {"X-Fallback": "fallback"}}]},
                 {
+                    "match": {
+                        "path": {"startsWith": "/v1/"},
+                        "method": ["POST"],
+                        "queryString": [
+                            {
+                                "key": {"exact": "stream"},
+                                "value": {"regex": "^(true|false)$"},
+                            }
+                        ],
+                        "headers": [
+                            {
+                                "key": {"exact": "authorization"},
+                                "value": {"startsWith": "Bearer "},
+                            }
+                        ],
+                    },
                     "response": {
                         "statusCode": 403,
                         "headers": {"X-Policy": "blocked"},
