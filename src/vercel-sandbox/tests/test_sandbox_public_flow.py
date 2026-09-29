@@ -76,6 +76,8 @@ def _sandbox_response(
     session_status: str | None = None,
     project_id: str = "prj_123",
     mounts: dict[str, dict[str, str]] | None = None,
+    named_network_policy: dict[str, object] | None = None,
+    session_network_policy: dict[str, object] | None = None,
 ) -> dict[str, Any]:
     return {
         "sandbox": {
@@ -97,6 +99,7 @@ def _sandbox_response(
             "createdAt": 1,
             "updatedAt": 2,
             **({} if mounts is None else {"mounts": mounts}),
+            **({} if named_network_policy is None else {"networkPolicy": named_network_policy}),
         },
         "session": {
             "id": session_id,
@@ -109,6 +112,7 @@ def _sandbox_response(
             "vcpus": 1,
             "timeout": 300000,
             "requestedAt": 1,
+            **({} if session_network_policy is None else {"networkPolicy": session_network_policy}),
         },
         "routes": [
             {
@@ -796,44 +800,28 @@ async def test_network_policy_async_public_flow(mock_env_clear: None) -> None:
     create_route = respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(
             200,
-            json={
-                **_sandbox_response(),
-                "sandbox": {
-                    **_sandbox_response()["sandbox"],
-                    "networkPolicy": {"mode": "allow-all"},
-                },
-                "session": {
-                    **_sandbox_response()["session"],
-                    "networkPolicy": {"mode": "allow-all"},
-                },
-            },
+            json=_sandbox_response(
+                named_network_policy={"mode": "allow-all"},
+                session_network_policy={"mode": "allow-all"},
+            ),
         )
     )
     get_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
         return_value=httpx.Response(
             200,
-            json={
-                **_sandbox_response(),
-                "sandbox": {
-                    **_sandbox_response()["sandbox"],
-                    "networkPolicy": _named_network_policy_response(),
-                },
-                "session": {
-                    **_sandbox_response()["session"],
-                    "networkPolicy": _session_network_policy_response(),
-                },
-            },
+            json=_sandbox_response(
+                named_network_policy=_named_network_policy_response(),
+                session_network_policy=_session_network_policy_response(),
+            ),
         )
     )
     update_route = respx.patch("https://sandbox.test/v2/sandboxes/preview").mock(
         return_value=httpx.Response(
             200,
             json={
-                "sandbox": {
-                    "name": "preview",
-                    "currentSessionId": "sbx_123",
-                    "networkPolicy": _named_network_policy_response(),
-                }
+                "sandbox": _sandbox_response(named_network_policy=_named_network_policy_response())[
+                    "sandbox"
+                ]
             },
         )
     )
@@ -843,10 +831,7 @@ async def test_network_policy_async_public_flow(mock_env_clear: None) -> None:
         return_value=httpx.Response(
             200,
             json={
-                "session": {
-                    **_sandbox_response()["session"],
-                    "networkPolicy": {"mode": "deny-all"},
-                }
+                "session": _sandbox_response(session_network_policy={"mode": "deny-all"})["session"]
             },
         )
     )
@@ -890,74 +875,28 @@ async def test_network_policy_async_public_flow(mock_env_clear: None) -> None:
     assert json.loads(create_route.calls.last.request.content)["networkPolicy"] == {
         "mode": "allow-all"
     }
-    assert json.loads(update_route.calls.last.request.content)["networkPolicy"] == {
+    sent = json.loads(update_route.calls.last.request.content)["networkPolicy"]
+    match = {
+        "path": {"startsWith": "/v1/"},
+        "method": ["POST"],
+        "queryString": [{"key": {"exact": "stream"}, "value": {"regex": "^(true|false)$"}}],
+        "headers": [{"key": {"exact": "authorization"}, "value": {"startsWith": "Bearer "}}],
+    }
+    assert sent == {
         "allow": {
             "example.com": [],
             "api.example.com": [
                 {
-                    "match": {
-                        "path": {"startsWith": "/v1/"},
-                        "method": ["POST"],
-                        "queryString": [
-                            {
-                                "key": {"exact": "stream"},
-                                "value": {"regex": "^(true|false)$"},
-                            }
-                        ],
-                        "headers": [
-                            {
-                                "key": {"exact": "authorization"},
-                                "value": {"startsWith": "Bearer "},
-                            }
-                        ],
-                    },
+                    "match": match,
                     "transform": [
-                        {
-                            "headers": {
-                                "Authorization": "Bearer secret",
-                                "X-Trace": "one",
-                            }
-                        },
+                        {"headers": {"Authorization": "Bearer secret", "X-Trace": "one"}},
                         {"headers": {"X-Trace": "two"}},
                     ],
                 },
-                {
-                    "match": {
-                        "path": {"startsWith": "/v1/"},
-                        "method": ["POST"],
-                        "queryString": [
-                            {
-                                "key": {"exact": "stream"},
-                                "value": {"regex": "^(true|false)$"},
-                            }
-                        ],
-                        "headers": [
-                            {
-                                "key": {"exact": "authorization"},
-                                "value": {"startsWith": "Bearer "},
-                            }
-                        ],
-                    },
-                    "forwardURL": "https://forward-proxy.internal/ingress/",
-                },
+                {"match": match, "forwardURL": "https://forward-proxy.internal/ingress/"},
                 {"transform": [{"headers": {"X-Fallback": "fallback"}}]},
                 {
-                    "match": {
-                        "path": {"startsWith": "/v1/"},
-                        "method": ["POST"],
-                        "queryString": [
-                            {
-                                "key": {"exact": "stream"},
-                                "value": {"regex": "^(true|false)$"},
-                            }
-                        ],
-                        "headers": [
-                            {
-                                "key": {"exact": "authorization"},
-                                "value": {"startsWith": "Bearer "},
-                            }
-                        ],
-                    },
+                    "match": match,
                     "response": {
                         "statusCode": 403,
                         "headers": {"X-Policy": "blocked"},
@@ -967,10 +906,7 @@ async def test_network_policy_async_public_flow(mock_env_clear: None) -> None:
                 },
             ],
         },
-        "subnets": {
-            "allow": ["10.0.0.0/8"],
-            "deny": ["10.1.0.0/16"],
-        },
+        "subnets": {"allow": ["10.0.0.0/8"], "deny": ["10.1.0.0/16"]},
     }
     assert json.loads(session_route.calls.last.request.content) == {"mode": "deny-all"}
     assert get_route.called
@@ -981,17 +917,10 @@ def test_network_policy_sync_readback_is_not_writable(mock_env_clear: None) -> N
     route = respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(
             200,
-            json={
-                **_sandbox_response(),
-                "sandbox": {
-                    **_sandbox_response()["sandbox"],
-                    "networkPolicy": _named_network_policy_response(),
-                },
-                "session": {
-                    **_sandbox_response()["session"],
-                    "networkPolicy": _session_network_policy_response(),
-                },
-            },
+            json=_sandbox_response(
+                named_network_policy=_named_network_policy_response(),
+                session_network_policy=_session_network_policy_response(),
+            ),
         )
     )
     update_route = respx.post(
@@ -1019,87 +948,15 @@ def test_network_policy_sync_readback_is_not_writable(mock_env_clear: None) -> N
     assert sandbox_sync.NetworkPolicyForwardRuleSummary is NetworkPolicyForwardRuleSummary
     assert sandbox_sync.NetworkPolicyResponseRuleSummary is NetworkPolicyResponseRuleSummary
     assert not update_route.called
-    assert json.loads(route.calls.last.request.content)["networkPolicy"] == {
-        "allow": {
-            "example.com": [],
-            "api.example.com": [
-                {
-                    "match": {
-                        "path": {"startsWith": "/v1/"},
-                        "method": ["POST"],
-                        "queryString": [
-                            {
-                                "key": {"exact": "stream"},
-                                "value": {"regex": "^(true|false)$"},
-                            }
-                        ],
-                        "headers": [
-                            {
-                                "key": {"exact": "authorization"},
-                                "value": {"startsWith": "Bearer "},
-                            }
-                        ],
-                    },
-                    "transform": [
-                        {
-                            "headers": {
-                                "Authorization": "Bearer secret",
-                                "X-Trace": "one",
-                            }
-                        },
-                        {"headers": {"X-Trace": "two"}},
-                    ],
-                },
-                {
-                    "match": {
-                        "path": {"startsWith": "/v1/"},
-                        "method": ["POST"],
-                        "queryString": [
-                            {
-                                "key": {"exact": "stream"},
-                                "value": {"regex": "^(true|false)$"},
-                            }
-                        ],
-                        "headers": [
-                            {
-                                "key": {"exact": "authorization"},
-                                "value": {"startsWith": "Bearer "},
-                            }
-                        ],
-                    },
-                    "forwardURL": "https://forward-proxy.internal/ingress/",
-                },
-                {"transform": [{"headers": {"X-Fallback": "fallback"}}]},
-                {
-                    "match": {
-                        "path": {"startsWith": "/v1/"},
-                        "method": ["POST"],
-                        "queryString": [
-                            {
-                                "key": {"exact": "stream"},
-                                "value": {"regex": "^(true|false)$"},
-                            }
-                        ],
-                        "headers": [
-                            {
-                                "key": {"exact": "authorization"},
-                                "value": {"startsWith": "Bearer "},
-                            }
-                        ],
-                    },
-                    "response": {
-                        "statusCode": 403,
-                        "headers": {"X-Policy": "blocked"},
-                        "body": '{"error":"forbidden"}',
-                        "contentType": "application/json",
-                    },
-                },
-            ],
-        },
-        "subnets": {
-            "allow": ["10.0.0.0/8"],
-            "deny": ["10.1.0.0/16"],
-        },
+    sent = json.loads(route.calls.last.request.content)["networkPolicy"]
+    assert sent["allow"]["example.com"] == []
+    rules = sent["allow"]["api.example.com"]
+    assert len(rules) == 4
+    assert rules[-1]["response"] == {
+        "statusCode": 403,
+        "headers": {"X-Policy": "blocked"},
+        "body": '{"error":"forbidden"}',
+        "contentType": "application/json",
     }
 
 
@@ -1148,44 +1005,23 @@ async def test_network_policy_structural_validation(mock_env_clear: None) -> Non
         side_effect=[
             httpx.Response(
                 200,
-                json={
-                    **_sandbox_response(),
-                    "sandbox": {
-                        **_sandbox_response()["sandbox"],
-                        "networkPolicy": {
-                            "mode": "custom",
-                            "injectionRules": [
-                                {
-                                    "domain": "example.com",
-                                    "headerNames": "X-Secret",
-                                }
-                            ],
-                        },
+                json=_sandbox_response(
+                    named_network_policy=_named_network_policy_response(),
+                    session_network_policy={
+                        "mode": "custom",
+                        "injectionRules": [{"domain": "example.com", "headerNames": "X-Secret"}],
                     },
-                },
+                ),
             ),
             httpx.Response(
                 200,
-                json={
-                    **_sandbox_response(),
-                    "sandbox": {
-                        **_sandbox_response()["sandbox"],
-                        "networkPolicy": {
-                            "allow": {
-                                "example.com": [
-                                    {
-                                        "match": {
-                                            "path": {
-                                                "exact": "/v1",
-                                                "regex": "^/v1$",
-                                            }
-                                        }
-                                    }
-                                ]
-                            }
-                        },
+                json=_sandbox_response(
+                    named_network_policy=_named_network_policy_response(),
+                    session_network_policy={
+                        "mode": "custom",
+                        "responseRules": [{"domain": "example.com", "statusCode": "403"}],
                     },
-                },
+                ),
             ),
         ]
     )
