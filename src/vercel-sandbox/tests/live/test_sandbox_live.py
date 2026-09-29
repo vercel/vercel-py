@@ -86,6 +86,8 @@ def _assert_network_policy(result: NetworkPolicyObservation) -> None:
         allow_all_created=True,
         custom_returned=True,
         header_names_redacted=True,
+        response_rule_summarized=True,
+        named_readback_is_partial=True,
         deny_all_returned=True,
         resources_cleaned_up=True,
     )

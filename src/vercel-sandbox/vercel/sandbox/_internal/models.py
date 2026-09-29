@@ -130,24 +130,18 @@ class NetworkPolicyRequestMatcher:
 
 @dataclass(frozen=True, slots=True)
 class NetworkPolicyTransform:
-    """Inject authored headers or describe redacted response header names."""
+    """Inject authored headers into matching requests."""
 
     headers: Mapping[str, str] | None = None
-    header_names: tuple[str, ...] | None = None
     __hash__ = None  # type: ignore[assignment]
 
     def __init__(
         self,
         *,
         headers: Mapping[str, str] | None = None,
-        header_names: Iterable[str] | None = None,
     ) -> None:
         normalized_headers = None if headers is None else MappingProxyType(dict(headers))
-        normalized_header_names = None if header_names is None else tuple(header_names)
-        if normalized_headers is not None and normalized_header_names is not None:
-            raise ValueError("network policy transform cannot set headers and header_names")
         object.__setattr__(self, "headers", normalized_headers)
-        object.__setattr__(self, "header_names", normalized_header_names)
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,6 +219,15 @@ NetworkPolicyMatchDimension: TypeAlias = Literal["path", "method", "query", "hea
 
 
 @dataclass(frozen=True, slots=True)
+class NetworkPolicyInjectionRuleSummary:
+    """Redacted header-injection rule metadata returned by the Sandbox API."""
+
+    domain: str
+    header_names: tuple[str, ...] = ()
+    match_dimensions: tuple[NetworkPolicyMatchDimension, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class NetworkPolicyForwardRuleSummary:
     """Redacted forward rule metadata returned by the Sandbox API."""
 
@@ -266,13 +269,11 @@ class NetworkPolicySubnets:
 
 @dataclass(frozen=True, slots=True)
 class NetworkPolicy:
-    """Immutable outbound policy with redacted rule summaries observed from the API."""
+    """Complete outbound policy authored for submission to the Sandbox API."""
 
     mode: Literal["allow-all", "deny-all", "custom"]
     allow: Mapping[str, tuple[NetworkPolicyRule, ...]]
     subnets: NetworkPolicySubnets | None = None
-    forward_rules: tuple[NetworkPolicyForwardRuleSummary, ...] = ()
-    response_rules: tuple[NetworkPolicyResponseRuleSummary, ...] = ()
     __hash__ = None  # type: ignore[assignment]
 
     @classmethod
@@ -302,17 +303,25 @@ class NetworkPolicy:
                 "allow",
                 MappingProxyType({domain: tuple(rules) for domain, rules in self.allow.items()}),
             )
-        if self.mode != "custom" and (
-            self.allow or self.subnets is not None or self.forward_rules or self.response_rules
-        ):
+        if self.mode != "custom" and (self.allow or self.subnets is not None):
             raise ValueError("simple network policy modes cannot include custom rules")
+
+
+@dataclass(frozen=True, slots=True)
+class NetworkPolicyReadback:
+    """Incomplete policy metadata; cannot be submitted as a network policy."""
+
+    mode: Literal["allow-all", "deny-all", "custom"]
+    allowed_domains: tuple[str, ...] = ()
+    subnets: NetworkPolicySubnets | None = None
+    injection_rules: tuple[NetworkPolicyInjectionRuleSummary, ...] = ()
+    forward_rules: tuple[NetworkPolicyForwardRuleSummary, ...] = ()
+    response_rules: tuple[NetworkPolicyResponseRuleSummary, ...] = ()
 
 
 def _serialize_network_policy(network_policy: NetworkPolicy) -> JSONObject:
     if not isinstance(network_policy, NetworkPolicy):
         raise TypeError("network_policy must be a NetworkPolicy")
-    if network_policy.forward_rules or network_policy.response_rules:
-        raise ValueError("redacted network policy rule summaries cannot be submitted to the API")
     if network_policy.mode != "custom":
         return {"mode": network_policy.mode}
 
@@ -337,10 +346,6 @@ def _serialize_network_policy_rule(rule: NetworkPolicyRule) -> JSONObject:
     if rule.transform:
         transforms: list[JSONValue] = []
         for transform in rule.transform:
-            if transform.header_names is not None:
-                raise ValueError(
-                    "redacted network policy transforms cannot be submitted to the API"
-                )
             transform_data: JSONObject = {}
             if transform.headers is not None:
                 transform_data["headers"] = dict(transform.headers)
@@ -387,8 +392,8 @@ def _serialize_matcher(matcher: NetworkPolicyMatcher) -> JSONObject:
     return {key: matcher.value}
 
 
-def _parse_network_policy(value: object) -> NetworkPolicy | None:
-    if value is None or isinstance(value, NetworkPolicy):
+def _parse_network_policy(value: object) -> NetworkPolicyReadback | None:
+    if value is None or isinstance(value, NetworkPolicyReadback):
         return value
     data = _mapping(value, "network policy")
     if "allow" in data or "subnets" in data:
@@ -396,29 +401,27 @@ def _parse_network_policy(value: object) -> NetworkPolicy | None:
 
     mode = data.get("mode")
     if mode == "allow-all":
-        return NetworkPolicy.allow_all()
+        return NetworkPolicyReadback(mode="allow-all")
     if mode == "deny-all":
-        return NetworkPolicy.deny_all()
+        return NetworkPolicyReadback(mode="deny-all")
     if mode != "custom":
         raise ValueError("network policy mode must be allow-all, deny-all, or custom")
     return _parse_normalized_network_policy(data)
 
 
-def _parse_domain_map_network_policy(data: Mapping[str, Any]) -> NetworkPolicy:
+def _parse_domain_map_network_policy(data: Mapping[str, Any]) -> NetworkPolicyReadback:
     raw_allow = data.get("allow", {})
-    allow: list[tuple[str, tuple[NetworkPolicyRule, ...]]] = []
     if isinstance(raw_allow, Mapping):
+        domains: list[str] = []
         for domain, raw_rules in raw_allow.items():
-            rules = tuple(
+            domains.append(_string(domain, "network policy domain"))
+            for item in _iterable(raw_rules, f"network policy rules for {domain!r}"):
                 _parse_network_policy_rule(item)
-                for item in _iterable(raw_rules, f"network policy rules for {domain!r}")
-            )
-            allow.append((_string(domain, "network policy domain"), rules))
     else:
-        allow.extend(
-            (_string(domain, "network policy domain"), ())
+        domains = [
+            _string(domain, "network policy domain")
             for domain in _iterable(raw_allow, "network policy allow")
-        )
+        ]
 
     subnets = None
     if "subnets" in data:
@@ -427,24 +430,20 @@ def _parse_domain_map_network_policy(data: Mapping[str, Any]) -> NetworkPolicy:
             allow=_optional_string_iterable(raw_subnets.get("allow"), "subnet allow"),
             deny=_optional_string_iterable(raw_subnets.get("deny"), "subnet deny"),
         )
-    return NetworkPolicy.custom(allow, subnets=subnets)
+    return NetworkPolicyReadback(mode="custom", allowed_domains=tuple(domains), subnets=subnets)
 
 
-def _parse_normalized_network_policy(data: Mapping[str, Any]) -> NetworkPolicy:
-    grouped: dict[str, list[NetworkPolicyRule]] = {}
+def _parse_normalized_network_policy(data: Mapping[str, Any]) -> NetworkPolicyReadback:
+    domains: dict[str, None] = {}
     for domain in _optional_string_iterable(data.get("allowedDomains"), "allowedDomains") or ():
-        grouped.setdefault(domain, [])
+        domains.setdefault(domain, None)
 
-    for raw_rule in _iterable(data.get("injectionRules", ()), "injectionRules"):
-        rule_data = _mapping(raw_rule, "injection rule")
-        domain = _string(rule_data.get("domain"), "injection rule domain")
-        transform = _parse_normalized_transform(rule_data)
-        grouped.setdefault(domain, []).append(
-            NetworkPolicyRule(
-                transform=(transform,),
-                match=_parse_optional_request_matcher(rule_data.get("match")),
-            )
-        )
+    injection_rules = tuple(
+        _parse_injection_rule_summary(raw_rule)
+        for raw_rule in _iterable(data.get("injectionRules", ()), "injectionRules")
+    )
+    for rule in injection_rules:
+        domains.setdefault(rule.domain, None)
 
     forward_rules = tuple(
         _parse_forward_rule_summary(raw_rule)
@@ -458,9 +457,9 @@ def _parse_normalized_network_policy(data: Mapping[str, Any]) -> NetworkPolicy:
         for raw_rule in _iterable(data.get("responseRules", ()), "responseRules")
     )
     for forward_rule in forward_rules:
-        grouped.setdefault(forward_rule.domain, [])
+        domains.setdefault(forward_rule.domain, None)
     for response_rule in response_rules:
-        grouped.setdefault(response_rule.domain, [])
+        domains.setdefault(response_rule.domain, None)
 
     allowed_cidrs = _optional_string_iterable(data.get("allowedCIDRs"), "allowedCIDRs")
     denied_cidrs = _optional_string_iterable(data.get("deniedCIDRs"), "deniedCIDRs")
@@ -469,12 +468,31 @@ def _parse_normalized_network_policy(data: Mapping[str, Any]) -> NetworkPolicy:
         if allowed_cidrs is None and denied_cidrs is None
         else NetworkPolicySubnets(allow=allowed_cidrs, deny=denied_cidrs)
     )
-    return NetworkPolicy(
+    return NetworkPolicyReadback(
         mode="custom",
-        allow=MappingProxyType({domain: tuple(rules) for domain, rules in grouped.items()}),
+        allowed_domains=tuple(domains),
         subnets=subnets,
+        injection_rules=injection_rules,
         forward_rules=forward_rules,
         response_rules=response_rules,
+    )
+
+
+def _parse_injection_rule_summary(value: object) -> NetworkPolicyInjectionRuleSummary:
+    data = _mapping(value, "injection rule")
+    if "headers" in data and "headerNames" in data:
+        raise ValueError("injection rule cannot set headers and headerNames")
+    if "headerNames" in data:
+        names = _string_iterable(data["headerNames"], "headerNames")
+    else:
+        names = tuple(
+            _string(key, "header name")
+            for key in _mapping(data.get("headers", {}), "injection rule headers")
+        )
+    return NetworkPolicyInjectionRuleSummary(
+        domain=_string(data.get("domain"), "injection rule domain"),
+        header_names=names,
+        match_dimensions=_parse_match_dimensions(data.get("matchDimensions")),
     )
 
 
@@ -515,22 +533,6 @@ def _parse_match_dimensions(value: object) -> tuple[NetworkPolicyMatchDimension,
     return tuple(normalized)
 
 
-def _parse_normalized_transform(data: Mapping[str, Any]) -> NetworkPolicyTransform:
-    if "headers" in data and "headerNames" in data:
-        raise ValueError("injection rule cannot set headers and headerNames")
-    if "headerNames" in data:
-        return NetworkPolicyTransform(
-            header_names=_string_iterable(data["headerNames"], "headerNames")
-        )
-    headers = _mapping(data.get("headers", {}), "injection rule headers")
-    return NetworkPolicyTransform(
-        headers={
-            _string(key, "header name"): _string(value, "header value")
-            for key, value in headers.items()
-        }
-    )
-
-
 def _parse_network_policy_rule(value: object) -> NetworkPolicyRule:
     data = _mapping(value, "network policy rule")
     transforms: list[NetworkPolicyTransform] = []
@@ -538,24 +540,15 @@ def _parse_network_policy_rule(value: object) -> NetworkPolicyRule:
         transform_data = _mapping(raw_transform, "network policy transform")
         if "headers" in transform_data and "headerNames" in transform_data:
             raise ValueError("network policy transform cannot set headers and headerNames")
-        if "headerNames" in transform_data:
-            transforms.append(
-                NetworkPolicyTransform(
-                    header_names=_string_iterable(
-                        transform_data["headerNames"], "transform headerNames"
-                    )
-                )
+        headers = _mapping(transform_data.get("headers", {}), "transform headers")
+        transforms.append(
+            NetworkPolicyTransform(
+                headers={
+                    _string(key, "header name"): _string(value, "header value")
+                    for key, value in headers.items()
+                }
             )
-        else:
-            headers = _mapping(transform_data.get("headers", {}), "transform headers")
-            transforms.append(
-                NetworkPolicyTransform(
-                    headers={
-                        _string(key, "header name"): _string(value, "header value")
-                        for key, value in headers.items()
-                    }
-                )
-            )
+        )
     forward_url = data.get("forwardURL", data.get("forwardUrl"))
     response = data.get("response")
     return NetworkPolicyRule(

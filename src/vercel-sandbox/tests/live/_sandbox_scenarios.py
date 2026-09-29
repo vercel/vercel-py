@@ -13,11 +13,14 @@ from pathlib import Path
 from typing import Any, cast
 
 import anyio
+import pytest
 
 from vercel import sandbox
 from vercel.api import session
 from vercel.sandbox import (
     NetworkPolicy,
+    NetworkPolicyReadback,
+    NetworkPolicyResponse,
     NetworkPolicyRule,
     NetworkPolicySubnets,
     NetworkPolicyTransform,
@@ -199,6 +202,8 @@ class NetworkPolicyObservation:
     allow_all_created: bool
     custom_returned: bool
     header_names_redacted: bool
+    response_rule_summarized: bool
+    named_readback_is_partial: bool
     deny_all_returned: bool
     resources_cleaned_up: bool
 
@@ -968,11 +973,13 @@ async def network_policy_flow(driver: _ScenarioDriver, name: str) -> NetworkPoli
     allow_all_created = False
     custom_returned = False
     header_names_redacted = False
+    response_rule_summarized = False
+    named_readback_is_partial = False
     deny_all_returned = False
     cleanup_complete = False
     custom = NetworkPolicy.custom(
         allow={
-            "example.com": (),
+            "example.com": [NetworkPolicyRule(response=NetworkPolicyResponse(status_code=403))],
             "api.github.com": [
                 NetworkPolicyRule(
                     transform=[NetworkPolicyTransform(headers={"X-Sandbox-Live": "configured"})]
@@ -988,31 +995,51 @@ async def network_policy_flow(driver: _ScenarioDriver, name: str) -> NetworkPoli
     async with driver.session():
         try:
             box = await driver.create_with_network_policy(name, NetworkPolicy.allow_all())
-            allow_all_created = box.network_policy == NetworkPolicy.allow_all()
+            allow_all_created = box.network_policy == NetworkPolicyReadback(mode="allow-all")
 
             session = await driver.update_network_policy(box, custom)
             returned = session.network_policy
             custom_returned = (
                 returned is not None
                 and returned.mode == "custom"
-                and tuple(returned.allow) == ("example.com", "api.github.com")
+                and returned.allowed_domains == ("example.com", "api.github.com")
                 and returned.subnets
                 == NetworkPolicySubnets(
                     allow=["1.1.1.1/32"],
                     deny=["192.0.2.0/24"],
                 )
             )
-            transform = (
-                None if returned is None else returned.allow["api.github.com"][0].transform[0]
-            )
             header_names_redacted = (
-                transform is not None
-                and transform.headers is None
-                and transform.header_names == ("X-Sandbox-Live",)
+                returned is not None
+                and len(returned.injection_rules) == 1
+                and returned.injection_rules[0].header_names == ("X-Sandbox-Live",)
+            )
+            response_rule_summarized = (
+                returned is not None
+                and len(returned.response_rules) == 1
+                and returned.response_rules[0].domain == "example.com"
+                and returned.response_rules[0].status_code == 403
             )
 
+            inspected = await driver.get_sandbox(name)
+            named = inspected.network_policy
+            named_readback_is_partial = (
+                isinstance(named, NetworkPolicyReadback)
+                and named.allowed_domains == ("example.com", "api.github.com")
+                and not named.injection_rules
+                and not named.response_rules
+            )
+            with pytest.raises(TypeError, match="must be a NetworkPolicy"):
+                await driver.update_network_policy(inspected, named)  # type: ignore[arg-type]
+            with pytest.raises(TypeError, match="must be a NetworkPolicy"):
+                await driver.update_network_policy(box, returned)  # type: ignore[arg-type]
+            unchanged = await driver.get_sandbox(name)
+            assert unchanged.network_policy == named
+            assert unchanged.current_session is not None
+            assert unchanged.current_session.network_policy == returned
+
             session = await driver.update_network_policy(box, NetworkPolicy.deny_all())
-            deny_all_returned = session.network_policy == NetworkPolicy.deny_all()
+            deny_all_returned = session.network_policy == NetworkPolicyReadback(mode="deny-all")
         finally:
             if box is not None:
                 await driver.destroy(box)
@@ -1022,6 +1049,8 @@ async def network_policy_flow(driver: _ScenarioDriver, name: str) -> NetworkPoli
         allow_all_created=allow_all_created,
         custom_returned=custom_returned,
         header_names_redacted=header_names_redacted,
+        response_rule_summarized=response_rule_summarized,
+        named_readback_is_partial=named_readback_is_partial,
         deny_all_returned=deny_all_returned,
         resources_cleaned_up=cleanup_complete,
     )
