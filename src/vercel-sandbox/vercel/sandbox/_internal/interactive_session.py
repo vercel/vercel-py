@@ -14,7 +14,6 @@ import httpx2 as httpx
 from httpx2.websockets import (
     AsyncWebSocketSession,
     HTTPXWSException,
-    WebSocketDisconnect,
     WebSocketSession,
 )
 from wsproto.utilities import LocalProtocolError
@@ -424,7 +423,9 @@ class SyncInteractiveTransport:
         if event is None:
             return
         if isinstance(event, BaseException):
-            if not isinstance(event, WebSocketDisconnect) and not self._closed:
+            # Any disconnect before the exit frame is a failure, so a caller
+            # holding only the stream can tell it from a clean exit.
+            if not self._closed:
                 self._failure = event
             self._completed = True
         else:

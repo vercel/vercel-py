@@ -369,6 +369,31 @@ def test_sync_transport_reports_disconnect_after_buffered_output() -> None:
         iter_coroutine(transport.wait())
 
 
+def test_sync_transport_treats_a_clean_disconnect_as_a_failure() -> None:
+    # A caller holding only the stream must be able to tell a dropped
+    # connection from the process exiting; the async side already does.
+    from httpx2.websockets import WebSocketDisconnect
+
+    transport = _sync_transport(_ScriptedSocket([_BytesEvent(b"tail"), WebSocketDisconnect(1000)]))
+    pty = sync_runtime.SyncInteractiveSession(transport=transport)
+
+    assert pty.stream.read(4) == b"tail"
+    with pytest.raises(ConnectionError):
+        pty.stream.read(1)
+    with pytest.raises(ConnectionError):
+        pty.wait()
+
+
+def test_sync_transport_local_close_is_not_a_failure() -> None:
+    from httpx2.websockets import WebSocketDisconnect
+
+    transport = _sync_transport(_ScriptedSocket([WebSocketDisconnect(1000)]))
+    iter_coroutine(transport.close())
+
+    assert iter_coroutine(transport.receive()).end
+    assert iter_coroutine(transport.wait()) is None
+
+
 def test_sync_transport_close_releases_a_parked_websocket_reader() -> None:
     # httpx2's reader blocks on a bounded queue with no way to be woken, and
     # its shutdown joins that thread. Closing must drain enough for it to

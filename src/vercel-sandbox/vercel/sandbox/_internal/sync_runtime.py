@@ -312,8 +312,9 @@ class SyncInteractiveSession:
         Output that arrives meanwhile is buffered for :attr:`stream` rather
         than discarded. The buffer is bounded, so with more output pending
         than it holds this blocks until a reader makes room; sequential code
-        should read to the end of the stream first. Returns ``None`` when the
-        connection closed without reporting an exit code.
+        should read to the end of the stream first. Returns ``None`` if the
+        session was closed locally first, or if the service reported an exit
+        code that is not an integer.
 
         Args:
             timeout: Seconds to wait before giving up. Waits indefinitely
@@ -321,8 +322,8 @@ class SyncInteractiveSession:
 
         Raises:
             TimeoutError: If the process is still running at the deadline.
-            ConnectionError: If the connection failed before the process
-                reported an exit code.
+            ConnectionError: If the connection ended, including a clean
+                disconnect, before the process reported its exit.
         """
         return iter_coroutine(self._transport.wait(timeout))
 

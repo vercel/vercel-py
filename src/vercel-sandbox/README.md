@@ -270,8 +270,10 @@ with sandbox.create_sandbox() as box:
 
 `TERM` defaults to `xterm-256color` so full-screen programs render correctly;
 override it through `env`. The stream ends when the process exits, and
-`wait()` returns its exit code, or `None` if the connection closed without
-reporting one. Output that arrives while waiting is kept for the stream, up
+`wait()` returns its exit code. If the connection ends before the process
+reports its exit, even cleanly, reading the stream and `wait()` both raise
+(`anyio.BrokenResourceError` asynchronously, `ConnectionError`
+synchronously) rather than looking like a normal end. Output that arrives while waiting is kept for the stream, up
 to a bounded buffer; with more pending than that, `wait()` blocks until the
 stream is read, so sequential code should read to the end of the stream
 before waiting.

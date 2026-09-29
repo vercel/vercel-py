@@ -300,12 +300,12 @@ class InteractiveSession:
         """Wait for the remote process to exit and return its exit code.
 
         Terminal output is untouched, so this can run alongside a reader.
-        Returns ``None`` when the connection closed without reporting an exit
-        code.
+        Returns ``None`` if the session was closed locally first, or if the
+        service reported an exit code that is not an integer.
 
         Raises:
-            anyio.BrokenResourceError: If the connection failed before the
-                process reported an exit code.
+            anyio.BrokenResourceError: If the connection ended, including a
+                clean disconnect, before the process reported its exit.
         """
         return await self._transport.wait()
 
