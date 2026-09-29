@@ -24,6 +24,7 @@ from collections.abc import (
     Sequence,
 )
 from datetime import datetime
+from itertools import chain
 from typing import Any, Generic, ParamSpec, TypeVar, overload
 from urllib.parse import parse_qsl, urlsplit
 
@@ -1106,17 +1107,18 @@ class WorkflowOrchestratorContext:
                 fut.set_exception(StopAsyncIteration)
         self.suspensions.pop(correlation_id, None)
 
-    def _fail_nondeterminism(self, sus: BaseSuspension, exc: Exception) -> None:
+    def _fail_nondeterminism(self, sus: BaseSuspension | None, exc: Exception) -> None:
         """Fail the run with a replay-divergence error the body cannot suppress.
 
-        The diverged suspension may not be what the body is currently blocked
+        The diverged suspension may be absent or not be what the body is blocked
         on, so failing its future alone might never surface anywhere -- and a
         body that is awaiting it could catch the error. So the exception is
         also stashed for ``run_workflow`` to raise, and the run is suspended
         so nothing else executes.
         """
-        sus.fail(exc)
         self.resume_exception = exc
+        if sus is not None:
+            sus.fail(exc)
         self.suspend()
 
     def resume(self) -> None:
@@ -1152,17 +1154,30 @@ class WorkflowOrchestratorContext:
         # one.
         event = self.events[self.replay_index]
         self.replay_index += 1
-        if event.correlation_id not in self.suspensions:
+        if event.correlation_id in self.hooks:
+            registered_hook = self.hooks[event.correlation_id]
+            match event:
+                case (
+                    w.HookCreatedEvent(event_data=w.HookCreatedEventData(token=event_token))
+                    | w.HookConflictEvent(event_data=w.HookConflictEventData(token=event_token))
+                    | w.HookReceivedEvent(event_data=w.HookReceivedEventData(token=event_token))
+                ) if event_token is not None and event_token != registered_hook.token:
+                    self._fail_nondeterminism(
+                        registered_hook,
+                        NondeterminismError(
+                            f"workflow replay diverged at {registered_hook.correlation_id}: "
+                            f"recorded hook token {event_token!r}, but the body now uses "
+                            f"{registered_hook.token!r}"
+                        ),
+                    )
+                    return
+        elif event.correlation_id not in self.suspensions:
             match event:
                 case (
                     # A step's attribute write. It answers no call in
                     # this body, so consume it and move on.
                     w.AttrSetEvent(correlation_id=None)
                     | w.AttrSetEvent(event_data=w.AttrSetEventData(writer=w.StepAttributeWriter()))
-                    # A hook received without being registered
-                    # means it has been disposed of. Nothing to do
-                    # but drop it.
-                    | w.HookReceivedEvent()
                 ):
                     return
                 case (
@@ -1180,7 +1195,7 @@ class WorkflowOrchestratorContext:
                     # instead of yielding forever (the matching ID will never
                     # appear, so plain `return` would deadlock the run).
                     pos = _correlation_ulid(slot_id)
-                    for sus in self.suspensions.values():
+                    for sus in chain(self.suspensions.values(), self.hooks.values()):
                         if _correlation_ulid(sus.correlation_id) == pos:
                             self._fail_nondeterminism(
                                 sus,
@@ -1192,11 +1207,16 @@ class WorkflowOrchestratorContext:
                                 ),
                             )
                             return
-                    raise RuntimeError(
-                        f"workflow replay cannot deliver {slot_id!r}: "
-                        "the workflow body has not registered its suspension"
+                    self._fail_nondeterminism(
+                        None,
+                        NondeterminismError(
+                            f"workflow replay cannot deliver {slot_id!r}: "
+                            "the workflow body has not registered its suspension"
+                        ),
                     )
+                    return
 
+        hook: BaseSuspension | None
         match event:
             case w.StepCreatedEvent(
                 event_data=w.StepCreatedEventData(step_name=name, input=recorded_input)
@@ -1221,7 +1241,10 @@ class WorkflowOrchestratorContext:
                 sus.has_created_event = True
 
             case w.HookCreatedEvent():
-                hook = self.suspensions[event.correlation_id]
+                hook = self.hooks.get(event.correlation_id)
+                if hook is None:
+                    # Internal step-cancellation hooks only live in suspensions.
+                    hook = self.suspensions[event.correlation_id]
                 hook.has_created_event = True
                 if isinstance(hook, Hook):
                     while hook.conflict_futures:
@@ -1299,10 +1322,9 @@ class WorkflowOrchestratorContext:
                     conflicting_run_id=conflicting_run_id,
                 )
             ):
-                conflicting_hook = self.suspensions.get(event.correlation_id)
+                conflicting_hook = self.hooks.get(event.correlation_id)
                 if conflicting_hook is not None:
-                    self.suspensions.pop(event.correlation_id)
-                    assert isinstance(conflicting_hook, Hook)
+                    self.suspensions.pop(event.correlation_id, None)
                     conflict_error = errors.HookConflictError(token, conflicting_run_id)
                     conflicting_hook.conflict_error = conflict_error
                     conflicting_hook.conflicting_run = (
@@ -1324,7 +1346,10 @@ class WorkflowOrchestratorContext:
                             future.set_exception(conflict_error)
 
             case w.HookReceivedEvent(event_data=w.HookReceivedEventData(payload=data)):
-                hook = self.suspensions[event.correlation_id]
+                hook = self.suspensions.get(event.correlation_id)
+                if hook is None:
+                    # Disposed hooks no longer receive payloads.
+                    return
                 if isinstance(hook, Cancellation):
                     # A step cancellation already recorded: deregister it so
                     # the flush does not send it again.

@@ -4019,10 +4019,6 @@ async def test_drive_mount_validates_known_conflicts_and_defers_project_names(
     async with session(service_options=_session_options(project_id="project-name", region="iad1")):
         with pytest.raises(ValueError, match="region"):
             await sandbox.create_sandbox(region="cle1", mounts={"/cache": drive})
-        with pytest.raises(ValueError, match="failover"):
-            await sandbox.create_sandbox(
-                region="sfo1", failover_regions=["cle1"], mounts={"/cache": drive}
-            )
         with pytest.raises(ValueError, match="region"):
             await sandbox.get_or_create_sandbox(name="with-drive", mounts={"/cache": drive})
         with pytest.raises(ValueError, match="region"):
@@ -4032,6 +4028,28 @@ async def test_drive_mount_validates_known_conflicts_and_defers_project_names(
 
     assert create_route.call_count == 1
     assert not fork_route.called
+
+
+@respx.mock
+async def test_drive_mounts_serialize_with_failover_regions(mock_env_clear: None) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes/drives/cache").mock(
+        return_value=httpx.Response(200, json=_drive_response(region="sfo1"))
+    )
+    create_route = respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+
+    async with session(service_options=_session_options()):
+        drive, _ = await sandbox.get_or_create_drive(name="cache", region="sfo1")
+        await sandbox.create_sandbox(
+            region="sfo1", failover_regions=["cle1"], mounts={"/cache": drive}
+        )
+
+    assert create_route.call_count == 1
+    payload = json.loads(create_route.calls.last.request.content)
+    assert payload["region"] == "sfo1"
+    assert payload["failoverRegions"] == ["cle1"]
+    assert payload["mounts"] == {"/cache": {"drive": "cache", "mode": "read-write"}}
 
 
 @respx.mock

@@ -75,6 +75,21 @@ async def pending_step() -> str:
     return "done"
 
 
+@registry.step
+async def gate_step() -> str:
+    return "ready"
+
+
+@registry.workflow
+async def dispose_hook_after_parallel_step() -> str:
+    pending = asyncio.create_task(pending_step())
+    await gate_step()
+    approval = Approval.wait(token=TOKEN)
+    await pending
+    approval.dispose()
+    return await pending_step()
+
+
 @registry.workflow
 async def create_then_step_then_await() -> dict[str, object]:
     approval = Approval.wait(token=TOKEN)
@@ -154,6 +169,84 @@ async def test_hook_is_registered_when_the_run_first_suspends(world) -> None:
         ["run_created", "run_started", "step_created", "hook_created"]
     )
     assert (await world.hooks_get_by_token(TOKEN)).run_id == run_id
+
+
+@pytest.mark.parametrize("conflicted", [False, True])
+async def test_step_completion_before_hook_registration_can_replay(
+    world, monkeypatch, conflicted: bool
+) -> None:
+    if conflicted:
+        owner_id = await _create_run(world, create_then_step_then_await.workflow_id)
+        await _invoke(owner_id, create_then_step_then_await.workflow_id)
+
+    run_id = await _create_run(world, dispose_hook_after_parallel_step.workflow_id)
+    await _invoke(run_id, dispose_hook_after_parallel_step.workflow_id)
+    events = (await world.events_list(run_id)).data
+    steps = {
+        event.event_data.step_name: event.correlation_id
+        for event in events
+        if isinstance(event, w.StepCreatedEvent)
+    }
+    pending_id = steps[pending_step.name]
+
+    async def finish_step(step_id: str, step_name: str) -> None:
+        await runtime.workflow_handler(
+            w.WorkflowInvokePayload(run_id=run_id, step_id=step_id, step_name=step_name).model_dump(
+                by_alias=True
+            ),
+            attempt=1,
+            queue_name=w.get_queue_name(dispose_hook_after_parallel_step.workflow_id),
+            message_id="msg_step",
+            registry=registry,
+        )
+
+    await finish_step(steps[gate_step.name], gate_step.name)
+
+    create_event = world.events_create
+
+    async def complete_step_before_registering_hook(run_id, event):
+        if isinstance(event, w.HookCreatedEvent):
+            # The earlier step finishes after the replay snapshot was loaded,
+            # but before this invocation persists its newly created hook.
+            await finish_step(pending_id, pending_step.name)
+        return await create_event(run_id, event)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(world, "events_create", complete_step_before_registering_hook)
+        await _invoke(run_id, dispose_hook_after_parallel_step.workflow_id)
+
+    events = (await world.events_list(run_id)).data
+    completion_index = next(
+        index
+        for index, event in enumerate(events)
+        if isinstance(event, w.StepCompletedEvent) and event.correlation_id == pending_id
+    )
+    registration_index = next(
+        index
+        for index, event in enumerate(events)
+        if isinstance(event, w.HookConflictEvent if conflicted else w.HookCreatedEvent)
+    )
+    assert completion_index < registration_index
+
+    await _invoke(run_id, dispose_hook_after_parallel_step.workflow_id)
+    assert (await world.runs_get(run_id)).status == "running"
+    events = (await world.events_list(run_id)).data
+    final_step_id = next(
+        event.correlation_id
+        for event in events
+        if isinstance(event, w.StepCreatedEvent)
+        and event.event_data.step_name == pending_step.name
+        and event.correlation_id != pending_id
+    )
+    await finish_step(final_step_id, pending_step.name)
+    await _invoke(run_id, dispose_hook_after_parallel_step.workflow_id)
+
+    assert await Run(run_id).return_value() == "done"
+    if conflicted:
+        assert (await world.hooks_get_by_token(TOKEN)).run_id == owner_id
+    else:
+        with pytest.raises(w.HookNotFoundError):
+            await world.hooks_get_by_token(TOKEN)
 
 
 @pytest.mark.parametrize(

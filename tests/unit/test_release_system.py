@@ -2089,6 +2089,31 @@ def test_shared_vendoring_config_normalizes_anyio_dotted_imports(tmp_path: Path)
         assert json.dumps(replace) in pyproject
 
 
+def test_shared_vendoring_rewrites_anyio_backend_import(tmp_path: Path) -> None:
+    from vendoring.tasks.vendor import rewrite_file_imports
+
+    plan = bundle_release._shared_vendored_plan()  # noqa: SLF001
+    transformations = bundle_release._vendoring_transformations(plan)  # noqa: SLF001
+    path = tmp_path / "_eventloop.py"
+    path.write_text(
+        "from importlib import import_module\n"
+        "def get_async_backend(asynclib_name):\n"
+        '    module = import_module(f"anyio._backends._{asynclib_name}")\n',
+        encoding="utf-8",
+    )
+
+    rewrite_file_imports(
+        path,
+        plan.config.namespace,
+        sorted(bundle_release.SHARED_VENDORED_LIBS),
+        [{"match": match, "replace": replace} for match, replace in transformations.substitutions],
+    )
+    rewritten = path.read_text(encoding="utf-8")
+
+    assert 'import_module(f"vercel.internal._vendor.anyio._backends._{asynclib_name}")' in rewritten
+    assert 'import_module(f"anyio._backends.' not in rewritten
+
+
 def test_shared_deps_fingerprint_includes_recipe_revision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
