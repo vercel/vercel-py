@@ -1,7 +1,8 @@
 """Proxy responses."""
 
+import re
 import urllib.parse
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping, MutableMapping
 from typing import ClassVar
 
 from starlette import responses
@@ -27,25 +28,75 @@ _RESERVED_PREFIX = "x-middleware-"
 _DESTINATION_SAFE = "/:@!$&'()*+,;=?#%[]"
 
 
-def _check_name(name: str) -> None:
+# Characters allowed in an HTTP header name.
+_RESPONSE_HEADER_NAME = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
+
+# Characters Vercel accepts in the name of a forwarded request header.
+_REQUEST_HEADER_NAME = re.compile(r"[A-Za-z0-9_-]+")
+
+
+def _check_reserved(name: str) -> None:
     if name.lower().startswith(_RESERVED_PREFIX):
         raise ValueError(f'invalid header "{name}": x-middleware-* headers are reserved')
 
 
-class _CheckedHeaders(MutableHeaders):
-    """Response headers that reject reserved names as they are added."""
+def _check_response_name(name: str) -> None:
+    if not _RESPONSE_HEADER_NAME.fullmatch(name):
+        raise ValueError(f'invalid header "{name}": not a valid header name')
+    _check_reserved(name)
+
+
+def _check_request_name(name: str) -> None:
+    if not _REQUEST_HEADER_NAME.fullmatch(name):
+        raise ValueError(
+            f'invalid request header "{name}": may only contain letters, digits, "-" and "_"'
+        )
+    _check_reserved(name)
+
+
+class _ResponseHeaders(MutableHeaders):
+    """Response headers that reject reserved names."""
 
     def __setitem__(self, key: str, value: str) -> None:
-        _check_name(key)
+        _check_response_name(key)
         super().__setitem__(key, value)
 
     def setdefault(self, key: str, value: str) -> str:
-        _check_name(key)
+        _check_response_name(key)
         return super().setdefault(key, value)
 
     def append(self, key: str, value: str) -> None:
-        _check_name(key)
+        _check_response_name(key)
         super().append(key, value)
+
+
+class _RequestHeaders(MutableMapping[str, str | None]):
+    """Request header changes that reject reserved names."""
+
+    def __init__(self, headers: Mapping[str, str | None]) -> None:
+        self._headers: dict[str, str | None] = {}
+        self.update(headers)
+
+    def __getitem__(self, key: str) -> str | None:
+        return self._headers[key.lower()]
+
+    def __setitem__(self, key: str, value: str | None) -> None:
+        _check_request_name(key)
+        if value is not None:
+            value.encode("latin-1")
+        self._headers[key.lower()] = value
+
+    def __delitem__(self, key: str) -> None:
+        del self._headers[key.lower()]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._headers)
+
+    def __len__(self) -> int:
+        return len(self._headers)
+
+    def __repr__(self) -> str:
+        return repr(self._headers)
 
 
 class Response(responses.Response):
@@ -60,13 +111,13 @@ class Response(responses.Response):
 
     def init_headers(self, headers: Mapping[str, str] | None = None) -> None:
         for name in headers or {}:
-            _check_name(name)
+            _check_response_name(name)
         super().init_headers(headers)
 
     @property
     def headers(self) -> MutableHeaders:
-        """The response headers."""
-        return _CheckedHeaders(raw=self.raw_headers)
+        """The headers added to the response. Names are case-insensitive."""
+        return _ResponseHeaders(raw=self.raw_headers)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         """Send the response.
@@ -122,13 +173,23 @@ class ContinueResponse(Response):
 
         *headers* are added to the response.
 
-        *request_headers* sets headers on the forwarded request. A ``None``
-        value removes that header. Omit to forward the headers unchanged.
+        *request_headers* are set on the forwarded request. A ``None`` value
+        removes that header. Omit to forward the headers unchanged.
         """
         super().__init__(headers=headers)
-        self.request_headers: dict[str, str | None] = dict(request_headers or {})
-        for name in self.request_headers:
-            _check_name(name)
+        self.request_headers = request_headers or {}
+
+    @property
+    def request_headers(self) -> MutableMapping[str, str | None]:
+        """The headers set on the forwarded request.
+
+        Names are case-insensitive. A ``None`` value removes that header.
+        """
+        return self._request_headers
+
+    @request_headers.setter
+    def request_headers(self, value: Mapping[str, str | None]) -> None:
+        self._request_headers = _RequestHeaders(value)
 
     @property
     def status_code(self) -> int:
@@ -156,14 +217,11 @@ class ContinueResponse(Response):
         control = MutableHeaders()
         header, destination = self._destination_header()
         control[header] = destination
-        if self.request_headers:
-            for name in self.request_headers:
-                _check_name(name)
-            names = ",".join(name.lower() for name in self.request_headers)
-            control["x-middleware-override-headers-diff"] = names
-            for name, value in self.request_headers.items():
+        if self._request_headers:
+            control["x-middleware-override-headers-diff"] = ",".join(self._request_headers)
+            for name, value in self._request_headers.items():
                 if value is not None:
-                    control[f"x-middleware-request-{name.lower()}"] = value
+                    control[f"x-middleware-request-{name}"] = value
         await send(
             {
                 "type": "http.response.start",
@@ -196,8 +254,8 @@ class RewriteResponse(ContinueResponse):
 
         *headers* are added to the response.
 
-        *request_headers* sets headers on the forwarded request. A ``None``
-        value removes that header. Omit to forward the headers unchanged.
+        *request_headers* are set on the forwarded request. A ``None`` value
+        removes that header. Omit to forward the headers unchanged.
         """
         super().__init__(headers=headers, request_headers=request_headers)
         self.destination = destination

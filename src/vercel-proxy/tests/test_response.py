@@ -181,6 +181,30 @@ def test_header_changes_reject_reserved(
     assert res.raw_headers == before
 
 
+_INVALID_HEADER_NAMES = {
+    "comma": "a,b",
+    "space": "bad name",
+    "colon": "a:b",
+    "empty": "",
+    "non-ascii": "caf\u00e9",
+}
+
+
+@pytest.mark.parametrize("name", _INVALID_HEADER_NAMES.values(), ids=list(_INVALID_HEADER_NAMES))
+@pytest.mark.parametrize("factory", _FACTORIES.values(), ids=list(_FACTORIES))
+def test_headers_reject_invalid_names(factory: Factory, name: str) -> None:
+    with pytest.raises(ValueError, match="not a valid header name"):
+        factory({name: "1"})
+    res = factory({})
+    with pytest.raises(ValueError, match="not a valid header name"):
+        res.headers[name] = "1"
+
+
+def test_headers_accept_any_token_name() -> None:
+    res = Response(headers={"x.trace!#$%&'*+^_`|~": "1"})
+    assert res.headers["x.trace!#$%&'*+^_`|~"] == "1"
+
+
 def test_headers_reject_non_latin1() -> None:
     with pytest.raises(UnicodeEncodeError):
         Response(headers={"x-a": "\u20ac"})
@@ -240,6 +264,22 @@ def test_continue_request_headers() -> None:
     assert res.request_headers == {"x-tenant": "acme", "authorization": None}
 
 
+def test_continue_request_headers_lowercased_last_wins() -> None:
+    res = ContinueResponse(request_headers={"X-Foo": "a", "x-foo": None, "X-Bar": "b"})
+    assert res.request_headers == {"x-foo": None, "x-bar": "b"}
+
+
+async def test_continue_request_headers_changed_case_last_wins() -> None:
+    res = ContinueResponse(request_headers={"x-foo": "a"})
+    res.request_headers["X-Foo"] = None
+    messages = await send_response(res)
+    assert messages[0]["headers"] == [
+        (b"x-middleware-next", b"1"),
+        (b"x-middleware-override-headers-diff", b"x-foo"),
+        (b"content-length", b"0"),
+    ]
+
+
 def test_continue_request_headers_not_shared_with_caller() -> None:
     request_headers: dict[str, str | None] = {"x-a": "1"}
     res = ContinueResponse(request_headers=request_headers)
@@ -259,11 +299,73 @@ def test_continue_request_headers_reject_reserved(name: str) -> None:
         ContinueResponse(request_headers={name: "1"})
 
 
-async def test_continue_request_headers_changed_to_reserved_rejected_on_send() -> None:
+_REQUEST_HEADER_CHANGES: dict[str, Callable[[ContinueResponse, str], object]] = {
+    "setitem": lambda res, name: res.request_headers.__setitem__(name, "1"),
+    "setdefault": lambda res, name: res.request_headers.setdefault(name, "1"),
+    "update": lambda res, name: res.request_headers.update({name: "1"}),
+    "replace": lambda res, name: setattr(res, "request_headers", {name: "1"}),
+}
+
+
+@pytest.mark.parametrize(
+    "change", _REQUEST_HEADER_CHANGES.values(), ids=list(_REQUEST_HEADER_CHANGES)
+)
+def test_continue_request_header_changes_reject_reserved(
+    change: Callable[[ContinueResponse, str], object],
+) -> None:
+    res = ContinueResponse(request_headers={"x-a": "1"})
+    with pytest.raises(ValueError, match='invalid header "X-Middleware-A": .* reserved'):
+        change(res, "X-Middleware-A")
+    assert res.request_headers == {"x-a": "1"}
+
+
+_INVALID_REQUEST_HEADER_NAMES = {
+    "comma": "a,b",
+    "dot": "x.trace",
+    "space": "bad name",
+    "empty": "",
+}
+
+
+@pytest.mark.parametrize(
+    "name", _INVALID_REQUEST_HEADER_NAMES.values(), ids=list(_INVALID_REQUEST_HEADER_NAMES)
+)
+def test_continue_request_headers_reject_invalid_names(name: str) -> None:
+    match = 'may only contain letters, digits, "-" and "_"'
+    with pytest.raises(ValueError, match=match):
+        ContinueResponse(request_headers={name: "1"})
     res = ContinueResponse()
-    res.request_headers["x-middleware-a"] = "1"
-    with pytest.raises(ValueError, match='invalid header "x-middleware-a": .* reserved'):
-        await send_response(res)
+    with pytest.raises(ValueError, match=match):
+        res.request_headers[name] = "1"
+
+
+def test_continue_request_headers_reject_non_latin1() -> None:
+    with pytest.raises(UnicodeEncodeError):
+        ContinueResponse(request_headers={"x-a": "\u20ac"})
+    res = ContinueResponse()
+    with pytest.raises(UnicodeEncodeError):
+        res.request_headers["x-a"] = "\u20ac"
+    assert res.request_headers == {}
+
+
+def test_continue_request_headers_accept_latin1() -> None:
+    res = ContinueResponse(request_headers={"x_a-1": "caf\u00e9"})
+    assert res.request_headers == {"x_a-1": "caf\u00e9"}
+
+
+def test_continue_request_headers_case_insensitive() -> None:
+    res = ContinueResponse(request_headers={"X-Foo": "a", "x-foo": "b"})
+    assert len(res.request_headers) == 1
+    assert res.request_headers["X-FOO"] == "b"
+    del res.request_headers["x-Foo"]
+    assert res.request_headers == {}
+
+
+def test_continue_request_headers_replaced() -> None:
+    res = ContinueResponse(request_headers={"x-a": "1"})
+    res.request_headers = {"X-B": "2", "x-b": None}
+    assert res.request_headers == {"x-b": None}
+    assert repr(res.request_headers) == "{'x-b': None}"
 
 
 def test_continue_status_code_is_hidden() -> None:
