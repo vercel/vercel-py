@@ -1,6 +1,7 @@
-"""Lifecycle parity through public download handles and faulting streams."""
+"""Download lifecycle behavior through public APIs and faulting HTTP streams."""
 
 from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import AsyncExitStack, ExitStack
 from typing import Literal
 
 import anyio
@@ -8,16 +9,13 @@ import httpx2 as httpx
 import pytest
 
 from vercel import blob
-from vercel._internal.core.errors import VercelSessionClosedError
-from vercel._internal.core.http.transport import StreamingResponse
-from vercel._internal.core.iter_coroutine import iter_coroutine
 from vercel.api import session
-from vercel.blob._internal.download import AsyncBlobDownload, SyncBlobDownload
-from vercel.blob.errors import BlobStreamError
-from vercel.blob.models import DownloadMetadata
+from vercel.blob import BlobStreamError, DownloadMetadata
+from vercel.errors import VercelSessionClosedError
 
 _URL = "https://localstore.public.blob.vercel-storage.com/core.bin"
-_METADATA = DownloadMetadata(url=_URL, status_code=200)
+_CHUNK = b"a" * (64 * 1024)
+_HEADERS = {"content-type": "application/octet-stream", "etag": "lifecycle-etag"}
 _Scenario = Literal["eof", "explicit", "eof-close-error", "explicit-close-error", "read", "session"]
 _SCENARIOS: tuple[_Scenario, ...] = (
     "eof",
@@ -33,162 +31,246 @@ class _ReadFailure(BaseException):
     pass
 
 
-class _FaultingResponse(StreamingResponse):
-    def __init__(self, *, read_error: BaseException | None = None, close_error: bool = False):
-        self.response = httpx.Response(200)
+class _FaultingStream(httpx.SyncByteStream, httpx.AsyncByteStream):
+    def __init__(
+        self,
+        *,
+        read_error: BaseException | None = None,
+        close_error: bool = False,
+        checkpoint: bool = False,
+        tail: bytes = b"b",
+    ) -> None:
+        self.tail = tail
         self.read_error = read_error
         self.close_error = close_error
+        self.checkpoint = checkpoint
         self.close_calls = 0
         self.read_calls = 0
+        self.cleanup_completed = False
         self.on_close: Callable[[], None] | None = None
         self.on_read: Callable[[], None] | None = None
 
-    async def __anext__(self) -> bytes:
+    def __iter__(self) -> Iterator[bytes]:
         self.read_calls += 1
         if self.on_read is not None:
             self.on_read()
         if self.read_error is not None:
             raise self.read_error
-        if self.read_calls == 1:
-            return b"chunk"
-        raise StopAsyncIteration
-
-    async def aclose(self) -> None:
-        self.close_calls += 1
-        if self.on_close is not None:
-            self.on_close()
-        if self.close_error:
-            raise RuntimeError("close failure")
-
-    def aiter_lines(self) -> AsyncIterator[str]:
-        raise NotImplementedError
-
-
-async def _next(download: AsyncBlobDownload | SyncBlobDownload) -> bytes:
-    if isinstance(download, SyncBlobDownload):
-        return next(download)
-    return await anext(download)
-
-
-async def _close(download: AsyncBlobDownload | SyncBlobDownload) -> None:
-    if isinstance(download, SyncBlobDownload):
-        download.close()
-    else:
-        await download.aclose()
-
-
-async def _check_lifecycle(
-    handle_type: type[AsyncBlobDownload] | type[SyncBlobDownload], scenario: _Scenario
-) -> None:
-    primary = _ReadFailure("read failure")
-    session_error = VercelSessionClosedError("session failure")
-    session_closed = False
-
-    def check_session() -> None:
-        if session_closed:
-            raise session_error
-
-    stream = _FaultingResponse(
-        read_error=primary if scenario == "read" else None,
-        close_error=scenario not in ("eof", "explicit"),
-    )
-    download = handle_type(stream, _METADATA, check_session=check_session)
-
-    def check_closed_before_cleanup() -> None:
-        assert download.is_closed
-
-    stream.on_close = check_closed_before_cleanup
-    assert download.metadata is _METADATA
-    assert not download.is_closed
-    iterator = iter(download) if isinstance(download, SyncBlobDownload) else aiter(download)
-    assert iterator is not download
-    with pytest.raises(BlobStreamError, match="consumed once"):
-        if isinstance(download, SyncBlobDownload):
-            iter(download)
-        else:
-            aiter(download)
-
-    if scenario.startswith("explicit"):
-        if scenario == "explicit-close-error":
-            with pytest.raises(RuntimeError, match="close failure"):
-                await _close(download)
-        else:
-            await _close(download)
-    elif scenario in ("read", "session"):
-        session_closed = scenario == "session"
-        error = session_error if session_closed else primary
-        with pytest.raises(type(error)) as caught:
-            await _next(download)
-        assert caught.value is error
-        assert stream.read_calls == (0 if session_closed else 1)
-    else:
-        assert await _next(download) == b"chunk"
-        if scenario == "eof-close-error":
-            with pytest.raises(RuntimeError, match="close failure"):
-                await _next(download)
-        elif isinstance(download, SyncBlobDownload):
-            with pytest.raises(StopIteration):
-                next(download)
-        else:
-            with pytest.raises(StopAsyncIteration):
-                await anext(download)
-
-    assert download.is_closed
-    assert not download._reading
-    await _close(download)
-    await _close(download)
-    assert stream.close_calls == 1
-    with pytest.raises(BlobStreamError, match="closed download"):
-        await _next(download)
-    with pytest.raises(BlobStreamError, match="closed download"):
-        if isinstance(download, SyncBlobDownload):
-            iter(download)
-        else:
-            aiter(download)
-
-
-@pytest.mark.parametrize("scenario", _SCENARIOS)
-def test_sync_lifecycle_outside_event_loop(scenario: _Scenario) -> None:
-    iter_coroutine(_check_lifecycle(SyncBlobDownload, scenario))
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize("scenario", _SCENARIOS)
-async def test_async_lifecycle(scenario: _Scenario) -> None:
-    await _check_lifecycle(AsyncBlobDownload, scenario)
-
-
-class _HTTPStream(httpx.SyncByteStream, httpx.AsyncByteStream):
-    def __init__(self) -> None:
-        self.close_calls = 0
-
-    def __iter__(self) -> Iterator[bytes]:
-        yield b"a" * (64 * 1024)
-        yield b"b"
+        yield _CHUNK
+        self.read_calls += 1
+        yield self.tail
+        self.read_calls += 1
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
+        if self.checkpoint:
+            await anyio.lowlevel.checkpoint()
         for chunk in self:
             yield chunk
 
     def close(self) -> None:
         self.close_calls += 1
+        if self.on_close is not None:
+            self.on_close()
+        self.cleanup_completed = True
+        if self.close_error:
+            raise RuntimeError("close failure")
 
     async def aclose(self) -> None:
-        await anyio.lowlevel.checkpoint()
+        if self.checkpoint:
+            await anyio.lowlevel.checkpoint()
         self.close()
 
 
+def _response(stream: _FaultingStream) -> httpx.Response:
+    return httpx.Response(
+        200,
+        headers=_HEADERS,
+        stream=stream,
+    )
+
+
+@pytest.mark.parametrize("scenario", _SCENARIOS)
+def test_sync_lifecycle_outside_event_loop(scenario: _Scenario) -> None:
+    primary = _ReadFailure("read failure")
+    stream = _FaultingStream(
+        read_error=primary if scenario == "read" else None,
+        close_error=scenario not in ("eof", "explicit"),
+        tail=b"b" * (64 * 1024),
+    )
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return _response(stream)
+
+    with ExitStack() as sessions:
+        sessions.enter_context(
+            session(
+                httpx_client_factory=lambda: httpx.Client(transport=httpx.MockTransport(handler))
+            )
+        )
+        with blob.sync.get(_URL, access="public") as download:
+            metadata = download.metadata
+            assert metadata == DownloadMetadata(
+                url=_URL,
+                status_code=200,
+                content_type="application/octet-stream",
+                etag="lifecycle-etag",
+                headers=_HEADERS,
+            )
+            assert not download.is_closed
+            assert stream.read_calls == 0
+            iterator = iter(download)
+            assert iterator is not download
+            assert iter(iterator) is iterator
+            with pytest.raises(BlobStreamError, match="consumed once"):
+                iter(download)
+
+            def assert_closed() -> None:
+                assert download.is_closed
+
+            if scenario.startswith("explicit"):
+                stream.on_close = assert_closed
+                if scenario == "explicit-close-error":
+                    with pytest.raises(RuntimeError, match="close failure"):
+                        download.close()
+                else:
+                    download.close()
+                assert stream.read_calls == 0
+            elif scenario in ("read", "session"):
+                if scenario == "session":
+                    sessions.close()
+                    stream.on_close = assert_closed
+                    with pytest.raises(VercelSessionClosedError, match="session is closed"):
+                        next(download)
+                    assert stream.read_calls == 0
+                else:
+                    with pytest.raises(_ReadFailure) as caught:
+                        next(download)
+                    assert caught.value is primary
+                    assert stream.read_calls == 1
+            else:
+                assert next(download) == _CHUNK
+                assert next(download) == stream.tail
+                if scenario == "eof-close-error":
+                    with pytest.raises(RuntimeError, match="close failure"):
+                        next(download)
+                else:
+                    with pytest.raises(StopIteration):
+                        next(download)
+                assert stream.read_calls == 3
+
+            assert download.is_closed
+            assert download.metadata is metadata
+            download.close()
+            download.close()
+            assert stream.close_calls == 1
+            with pytest.raises(BlobStreamError, match="closed download"):
+                next(download)
+            with pytest.raises(BlobStreamError, match="closed download"):
+                iter(download)
+    assert stream.close_calls == 1
+    assert len(requests) == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("scenario", _SCENARIOS)
+async def test_async_lifecycle(scenario: _Scenario) -> None:
+    primary = _ReadFailure("read failure")
+    stream = _FaultingStream(
+        read_error=primary if scenario == "read" else None,
+        close_error=scenario not in ("eof", "explicit"),
+        tail=b"b" * (64 * 1024),
+    )
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return _response(stream)
+
+    async with AsyncExitStack() as sessions:
+        await sessions.enter_async_context(
+            session(
+                httpx_client_factory=lambda: httpx.AsyncClient(
+                    transport=httpx.MockTransport(handler)
+                )
+            )
+        )
+        async with blob.get(_URL, access="public") as download:
+            metadata = download.metadata
+            assert metadata == DownloadMetadata(
+                url=_URL,
+                status_code=200,
+                content_type="application/octet-stream",
+                etag="lifecycle-etag",
+                headers=_HEADERS,
+            )
+            assert not download.is_closed
+            assert stream.read_calls == 0
+            iterator = aiter(download)
+            assert iterator is not download
+            assert aiter(iterator) is iterator
+            with pytest.raises(BlobStreamError, match="consumed once"):
+                aiter(download)
+
+            def assert_closed() -> None:
+                assert download.is_closed
+
+            if scenario.startswith("explicit"):
+                stream.on_close = assert_closed
+                if scenario == "explicit-close-error":
+                    with pytest.raises(RuntimeError, match="close failure"):
+                        await download.aclose()
+                else:
+                    await download.aclose()
+                assert stream.read_calls == 0
+            elif scenario in ("read", "session"):
+                if scenario == "session":
+                    await sessions.aclose()
+                    stream.on_close = assert_closed
+                    with pytest.raises(VercelSessionClosedError, match="session is closed"):
+                        await anext(download)
+                    assert stream.read_calls == 0
+                else:
+                    with pytest.raises(_ReadFailure) as caught:
+                        await anext(download)
+                    assert caught.value is primary
+                    assert stream.read_calls == 1
+            else:
+                assert await anext(download) == _CHUNK
+                assert await anext(download) == stream.tail
+                if scenario == "eof-close-error":
+                    with pytest.raises(RuntimeError, match="close failure"):
+                        await anext(download)
+                else:
+                    with pytest.raises(StopAsyncIteration):
+                        await anext(download)
+                assert stream.read_calls == 3
+
+            assert download.is_closed
+            assert download.metadata is metadata
+            await download.aclose()
+            await download.aclose()
+            assert stream.close_calls == 1
+            with pytest.raises(BlobStreamError, match="closed download"):
+                await anext(download)
+            with pytest.raises(BlobStreamError, match="closed download"):
+                aiter(download)
+    assert stream.close_calls == 1
+    assert len(requests) == 1
+
+
 def test_public_sync_handle_eof_and_idempotency() -> None:
-    stream = _HTTPStream()
+    stream = _FaultingStream()
     with session(
         httpx_client_factory=lambda: httpx.Client(
-            transport=httpx.MockTransport(lambda _: httpx.Response(200, stream=stream))
+            transport=httpx.MockTransport(lambda _: _response(stream))
         )
     ):
         with blob.sync.get(_URL, access="public") as download:
             iterator = iter(download)
             assert iter(iterator) is iterator
-            assert list(iterator) == [b"a" * (64 * 1024), b"b"]
+            assert list(iterator) == [_CHUNK, b"b"]
             assert download.is_closed
             download.close()
     assert stream.close_calls == 1
@@ -196,36 +278,19 @@ def test_public_sync_handle_eof_and_idempotency() -> None:
 
 @pytest.mark.anyio
 async def test_public_async_handle_eof_and_idempotency() -> None:
-    stream = _HTTPStream()
+    stream = _FaultingStream()
     async with session(
         httpx_client_factory=lambda: httpx.AsyncClient(
-            transport=httpx.MockTransport(lambda _: httpx.Response(200, stream=stream))
+            transport=httpx.MockTransport(lambda _: _response(stream))
         )
     ):
         async with blob.get(_URL, access="public") as download:
             iterator = aiter(download)
             assert aiter(iterator) is iterator
-            assert [chunk async for chunk in iterator] == [b"a" * (64 * 1024), b"b"]
+            assert [chunk async for chunk in iterator] == [_CHUNK, b"b"]
             assert download.is_closed
             await download.aclose()
     assert stream.close_calls == 1
-
-
-class _CheckpointResponse(_FaultingResponse):
-    def __init__(self, *, close_error: bool = False) -> None:
-        super().__init__(close_error=close_error)
-        self.cleanup_completed = False
-
-    async def __anext__(self) -> bytes:
-        await anyio.lowlevel.checkpoint()
-        return await super().__anext__()
-
-    async def aclose(self) -> None:
-        assert self.on_close is not None
-        self.on_close()
-        await anyio.lowlevel.checkpoint()
-        self.cleanup_completed = True
-        await super().aclose()
 
 
 @pytest.mark.anyio
@@ -234,49 +299,64 @@ class _CheckpointResponse(_FaultingResponse):
 async def test_async_cleanup_checkpoints_under_cancellation(
     close_error: bool, explicit: bool
 ) -> None:
-    stream = _CheckpointResponse(close_error=close_error)
-    download = AsyncBlobDownload(stream, _METADATA)
+    stream = _FaultingStream(close_error=close_error, checkpoint=True)
+    async with session(
+        httpx_client_factory=lambda: httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda _: _response(stream))
+        )
+    ):
+        async with blob.get(_URL, access="public") as download:
 
-    def assert_closed() -> None:
-        assert download.is_closed
+            def assert_closed() -> None:
+                assert download.is_closed
 
-    stream.on_close = assert_closed
-    with anyio.CancelScope() as scope:
-        scope.cancel()
-        if explicit:
-            if close_error:
-                with pytest.raises(RuntimeError, match="close failure"):
-                    await download.aclose()
-            else:
-                await download.aclose()
-        else:
-            with pytest.raises(anyio.get_cancelled_exc_class()):
+            if explicit:
+                stream.on_close = assert_closed
+            with anyio.CancelScope() as scope:
+                scope.cancel()
+                if explicit:
+                    if close_error:
+                        with pytest.raises(RuntimeError, match="close failure"):
+                            await download.aclose()
+                    else:
+                        await download.aclose()
+                else:
+                    with pytest.raises(anyio.get_cancelled_exc_class()):
+                        await anext(download)
+
+            assert stream.cleanup_completed
+            assert download.is_closed
+            await download.aclose()
+            assert stream.close_calls == 1
+            with pytest.raises(BlobStreamError, match="closed download"):
                 await anext(download)
-
-    assert stream.cleanup_completed
-    assert download.is_closed
-    assert not download._reading
-    await download.aclose()
     assert stream.close_calls == 1
 
 
 def test_sync_overlap_rejection_preserves_first_read() -> None:
-    stream = _FaultingResponse()
-    download = SyncBlobDownload(stream, _METADATA)
+    stream = _FaultingStream()
+    with session(
+        httpx_client_factory=lambda: httpx.Client(
+            transport=httpx.MockTransport(lambda _: _response(stream))
+        )
+    ):
+        with blob.sync.get(_URL, access="public") as download:
 
-    def overlap() -> None:
-        with pytest.raises(BlobStreamError, match="Concurrent reads"):
-            next(download)
-        assert not download.is_closed
-        assert stream.close_calls == 0
+            def overlap() -> None:
+                with pytest.raises(BlobStreamError, match="Concurrent reads"):
+                    next(download)
+                assert not download.is_closed
+                assert stream.close_calls == 0
 
-    stream.on_read = overlap
-    assert next(download) == b"chunk"
-    assert not download._reading
-    stream.on_read = None
-    with pytest.raises(StopIteration):
-        next(download)
-    assert stream.close_calls == 1
+            stream.on_read = overlap
+            assert next(download) == _CHUNK
+            assert not download.is_closed
+            stream.on_read = None
+            assert next(download) == b"b"
+            with pytest.raises(StopIteration):
+                next(download)
+            assert download.is_closed
+            assert stream.close_calls == 1
 
 
 @pytest.mark.anyio
@@ -284,30 +364,39 @@ async def test_async_overlap_rejection_preserves_first_read() -> None:
     entered = anyio.Event()
     release = anyio.Event()
 
-    class BlockingResponse(_FaultingResponse):
-        async def __anext__(self) -> bytes:
+    class BlockingStream(_FaultingStream):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
             entered.set()
             await release.wait()
-            return await super().__anext__()
+            async for chunk in super().__aiter__():
+                yield chunk
 
-    stream = BlockingResponse()
-    download = AsyncBlobDownload(stream, _METADATA)
+    stream = BlockingStream()
     received: list[bytes] = []
+    async with session(
+        httpx_client_factory=lambda: httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda _: _response(stream))
+        )
+    ):
+        async with blob.get(_URL, access="public") as download:
 
-    async def first_read() -> None:
-        received.append(await anext(download))
+            async def first_read() -> None:
+                received.append(await anext(download))
 
-    async with anyio.create_task_group() as tasks:
-        tasks.start_soon(first_read)
-        await entered.wait()
-        with pytest.raises(BlobStreamError, match="Concurrent reads"):
-            await anext(download)
-        assert not download.is_closed
-        assert stream.close_calls == 0
-        release.set()
+            async with anyio.create_task_group() as tasks:
+                tasks.start_soon(first_read)
+                await entered.wait()
+                try:
+                    with pytest.raises(BlobStreamError, match="Concurrent reads"):
+                        await anext(download)
+                    assert not download.is_closed
+                    assert stream.close_calls == 0
+                finally:
+                    release.set()
 
-    assert received == [b"chunk"]
-    assert not download._reading
-    with pytest.raises(StopAsyncIteration):
-        await anext(download)
-    assert stream.close_calls == 1
+            assert received == [_CHUNK]
+            assert await anext(download) == b"b"
+            with pytest.raises(StopAsyncIteration):
+                await anext(download)
+            assert download.is_closed
+            assert stream.close_calls == 1

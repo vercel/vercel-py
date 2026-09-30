@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
+from pathlib import Path
 from typing import Any
 
 import anyio
@@ -13,7 +14,6 @@ import pytest
 from hypothesis import example, given, settings, strategies as st
 
 from vercel import blob
-from vercel._internal.core.errors import VercelSessionClosedError
 from vercel.api import session
 from vercel.blob import (
     BlobAccessError,
@@ -32,9 +32,10 @@ from vercel.blob import (
     DownloadMetadata,
     HeadResult,
     PutResult,
+    SyncBlobCredentialsFactory,
 )
-from vercel.blob.models import SyncBlobCredentialsFactory
 from vercel.blob.sync import SyncBlobServiceOptions
+from vercel.errors import VercelSessionClosedError
 
 
 class _TrackingSyncStream(httpx.SyncByteStream):
@@ -938,24 +939,35 @@ def test_sync_malformed_get_metadata_closes_response(
 
 @pytest.mark.anyio
 async def test_explicit_close_errors_preserved() -> None:
-    from vercel.blob._internal.download import AsyncBlobDownload, SyncBlobDownload
-
-    class FailingCloseStreamingResponse:
+    class FailingCloseAsyncStream(_TrackingAsyncStream):
         async def aclose(self) -> None:
+            await super().aclose()
             raise OSError("disk flush failure on close")
 
-    meta = DownloadMetadata(
-        url="https://teststore123.public.blob.vercel-storage.com/f.txt", status_code=200
-    )
-    async_dl = AsyncBlobDownload(FailingCloseStreamingResponse(), meta)  # type: ignore[arg-type]
+    stream = FailingCloseAsyncStream([b"unread"])
+    async with _async_session(lambda _: httpx.Response(200, stream=stream)):
+        async with blob.get(_URL, access="public") as download:
+            with pytest.raises(OSError, match="disk flush failure"):
+                await download.aclose()
+            assert download.is_closed
+            assert stream.closed
+            assert stream.yielded_count == 0
 
-    # Explicit aclose must NOT swallow the OSError!
-    with pytest.raises(OSError, match="disk flush failure"):
-        await async_dl.aclose()
 
-    sync_dl = SyncBlobDownload(FailingCloseStreamingResponse(), meta)  # type: ignore[arg-type]
-    with pytest.raises(OSError, match="disk flush failure"):
-        sync_dl.close()
+def test_sync_explicit_close_errors_preserved() -> None:
+    class FailingCloseSyncStream(_TrackingSyncStream):
+        def close(self) -> None:
+            super().close()
+            raise OSError("disk flush failure on close")
+
+    stream = FailingCloseSyncStream([b"unread"])
+    with _sync_session(lambda _: httpx.Response(200, stream=stream)):
+        with blob.sync.get(_URL, access="public") as download:
+            with pytest.raises(OSError, match="disk flush failure"):
+                download.close()
+            assert download.is_closed
+            assert stream.closed
+            assert stream.yielded_count == 0
 
 
 def test_blob_error_public_and_credentials_repr() -> None:
@@ -1101,24 +1113,74 @@ async def test_oidc_private_get_headers(store_id: str, normalized: str) -> None:
     assert request.url.host == f"{normalized.lower()}.private.blob.vercel-storage.com"
 
 
-def test_default_credentials_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    from vercel.blob._internal.credentials import default_sync_credentials
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("has_credentials", [True, False], ids=["read-write", "missing"])
+async def test_default_credentials_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, asynchronous: bool, has_credentials: bool
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    token = "vercel_blob_rw_envstore123_sec999"
+    for variable in (
+        "BLOB_READ_WRITE_TOKEN",
+        "BLOB_STORE_ID",
+        "VERCEL_BLOB_READ_WRITE_TOKEN",
+        "VERCEL_OIDC_TOKEN",
+    ):
+        monkeypatch.delenv(variable, raising=False)
+    if has_credentials:
+        monkeypatch.setenv("BLOB_READ_WRITE_TOKEN", token)
 
-    # 1. BLOB_READ_WRITE_TOKEN
-    monkeypatch.setenv("BLOB_READ_WRITE_TOKEN", "vercel_blob_rw_envstore123_sec999")
-    monkeypatch.delenv("BLOB_STORE_ID", raising=False)
-    monkeypatch.delenv("VERCEL_BLOB_READ_WRITE_TOKEN", raising=False)
+    requests: list[httpx.Request] = []
+    stream = _TrackingAsyncStream([b"data"]) if asynchronous else _TrackingSyncStream([b"data"])
+    expected_url = "https://envstore123.private.blob.vercel-storage.com/env.txt"
 
-    creds = default_sync_credentials()
-    assert creds.store_id == "envstore123"
-    assert creds.token == "vercel_blob_rw_envstore123_sec999"
-    assert creds.kind == blob.CredentialKind.READ_WRITE
+    def handler(request: httpx.Request) -> httpx.Response:
+        if not has_credentials:
+            pytest.fail("Missing credentials must fail before HTTP")
+        requests.append(request)
+        assert request.method == "GET"
+        assert str(request.url) == expected_url
+        assert request.headers["authorization"] == f"Bearer {token}"
+        assert request.headers["x-api-version"] == "12"
+        assert "x-vercel-blob-store-id" not in request.headers
+        return httpx.Response(200, stream=stream)
 
-    # 2. Missing credentials
-    monkeypatch.delenv("BLOB_READ_WRITE_TOKEN", raising=False)
-    monkeypatch.delenv("VERCEL_OIDC_TOKEN", raising=False)
-    with pytest.raises(BlobCredentialsError, match="Missing Blob credentials"):
-        default_sync_credentials()
+    if asynchronous:
+        async with session(
+            service_options=[BlobServiceOptions()],
+            httpx_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        ):
+            if has_credentials:
+                async with blob.get("env.txt", access="private") as download:
+                    assert download.metadata.url == expected_url
+                    assert b"".join([chunk async for chunk in download]) == b"data"
+                assert download.is_closed
+            else:
+                with pytest.raises(BlobCredentialsError, match="Missing Blob credentials"):
+                    async with blob.get("env.txt", access="private"):
+                        pass
+    else:
+        with session(
+            service_options=[SyncBlobServiceOptions()],
+            httpx_client_factory=lambda: httpx.Client(transport=httpx.MockTransport(handler)),
+        ):
+            if has_credentials:
+                with blob.sync.get("env.txt", access="private") as sync_download:
+                    assert sync_download.metadata.url == expected_url
+                    assert b"".join(sync_download) == b"data"
+                assert sync_download.is_closed
+            else:
+                with pytest.raises(BlobCredentialsError, match="Missing Blob credentials"):
+                    with blob.sync.get("env.txt", access="private"):
+                        pass
+
+    assert len(requests) == int(has_credentials)
+    assert stream.yielded_count == int(has_credentials)
+    assert stream.closed == has_credentials
 
 
 @pytest.mark.anyio
