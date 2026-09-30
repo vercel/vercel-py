@@ -1,299 +1,111 @@
-"""Tests for vercel.proxy.Response."""
+"""Tests for the vercel.proxy response classes."""
 
-import json
-import types
 from collections.abc import Callable, Mapping
-from typing import Any, cast
 
 import pytest
-from starlette.datastructures import Headers
+from starlette import responses
+from starlette.datastructures import Headers, MutableHeaders
+from starlette.types import Message
 
-from vercel.proxy import Kind, Response
+from vercel.proxy import (
+    ContinueResponse,
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+    RedirectResponse,
+    Response,
+    RewriteResponse,
+)
 
 # Each factory builds a response with the given headers.
 Factory = Callable[[Mapping[str, str]], Response]
 
-_CONTINUING_FACTORIES: dict[str, Factory] = {
-    "next": lambda headers: Response.next(headers=headers),
-    "rewrite": lambda headers: Response.rewrite("/x", headers=headers),
+_FACTORIES: dict[str, Factory] = {
+    "response": lambda headers: Response(headers=headers),
+    "html": lambda headers: HTMLResponse("", headers=headers),
+    "plain_text": lambda headers: PlainTextResponse("", headers=headers),
+    "json": lambda headers: JSONResponse({}, headers=headers),
+    "redirect": lambda headers: RedirectResponse("/x", headers=headers),
+    "continue": lambda headers: ContinueResponse(headers=headers),
+    "rewrite": lambda headers: RewriteResponse("/x", headers=headers),
 }
 
-_TERMINATING_FACTORIES: dict[str, Factory] = {
-    "redirect": lambda headers: Response.redirect("/x", headers=headers),
-    "json": lambda headers: Response.json({}, headers=headers),
-    "respond": lambda headers: Response.respond(status=200, headers=headers),
+# Each change adds a header with the given name.
+_HEADER_CHANGES: dict[str, Callable[[MutableHeaders, str], object]] = {
+    "setitem": lambda headers, name: headers.__setitem__(name, "1"),
+    "setdefault": lambda headers, name: headers.setdefault(name, "1"),
+    "append": lambda headers, name: headers.append(name, "1"),
+    "update": lambda headers, name: headers.update({name: "1"}),
+    "ior": lambda headers, name: headers.__ior__({name: "1"}),
 }
 
-_FACTORIES: dict[str, Factory] = {**_CONTINUING_FACTORIES, **_TERMINATING_FACTORIES}
 
-# ---------------------------------------------------------------------------
-# Response.next()
-# ---------------------------------------------------------------------------
+async def send_response(response: Response) -> list[Message]:
+    messages: list[Message] = []
 
+    async def receive() -> Message:
+        raise AssertionError("response must not read the request")
 
-def test_next_kind() -> None:
-    assert Response.next().kind == Kind.CONTINUING
+    async def send(message: Message) -> None:
+        messages.append(message)
 
-
-def test_next_destination_none() -> None:
-    assert Response.next().destination is None
-
-
-def test_next_status_200() -> None:
-    assert Response.next().status == 200
-
-
-def test_next_body_empty() -> None:
-    assert Response.next().body == b""
-
-
-def test_next_headers_empty_by_default() -> None:
-    assert dict(Response.next().headers) == {}
-
-
-def test_next_headers_with_value() -> None:
-    res = Response.next(headers={"x-tenant": "acme"})
-    assert dict(res.headers) == {"x-tenant": "acme"}
-
-
-def test_next_request_headers_empty_by_default() -> None:
-    assert dict(Response.next().request_headers) == {}
-
-
-def test_next_request_headers_with_value() -> None:
-    res = Response.next(request_headers={"x-tenant": "acme"})
-    assert dict(res.request_headers) == {"x-tenant": "acme"}
-
-
-def test_next_request_headers_none_value_signals_drop() -> None:
-    res = Response.next(request_headers={"authorization": None})
-    assert dict(res.request_headers) == {"authorization": None}
-
-
-def test_next_headers_and_request_headers_are_separate() -> None:
-    res = Response.next(headers={"x-a": "1"}, request_headers={"x-b": "2"})
-    assert (dict(res.headers), dict(res.request_headers)) == ({"x-a": "1"}, {"x-b": "2"})
-
-
-def test_next_headers_returns_mapping_proxy() -> None:
-    res = Response.next(headers={"k": "v"})
-    assert isinstance(res.headers, types.MappingProxyType)
-
-
-def test_next_headers_mapping_proxy_is_immutable() -> None:
-    res = Response.next(headers={"k": "v"})
-    with pytest.raises(TypeError):
-        cast(Any, res.headers)["k"] = "new"
-
-
-def test_next_request_headers_mapping_proxy_is_immutable() -> None:
-    res = Response.next(request_headers={"k": "v"})
-    assert isinstance(res.request_headers, types.MappingProxyType)
-    with pytest.raises(TypeError):
-        cast(Any, res.request_headers)["k"] = "new"
+    await response({"type": "http"}, receive, send)
+    return messages
 
 
 # ---------------------------------------------------------------------------
-# Response.rewrite()
+# Starlette classes
 # ---------------------------------------------------------------------------
 
 
-def test_rewrite_kind() -> None:
-    assert Response.rewrite("/api").kind == Kind.CONTINUING
+@pytest.mark.parametrize(
+    ("cls", "base"),
+    [
+        (Response, responses.Response),
+        (HTMLResponse, responses.HTMLResponse),
+        (PlainTextResponse, responses.PlainTextResponse),
+        (JSONResponse, responses.JSONResponse),
+        (RedirectResponse, responses.RedirectResponse),
+    ],
+)
+def test_subclasses_starlette(cls: type[Response], base: type[responses.Response]) -> None:
+    assert issubclass(cls, Response)
+    assert issubclass(cls, base)
 
 
-def test_rewrite_destination() -> None:
-    assert Response.rewrite("/api/v2").destination == "/api/v2"
+def test_continue_response_is_response() -> None:
+    assert isinstance(ContinueResponse(), Response)
 
 
-def test_rewrite_absolute_destination() -> None:
-    dest = "https://internal.example.com/api"
-    assert Response.rewrite(dest).destination == dest
+def test_rewrite_response_is_continue_response() -> None:
+    assert isinstance(RewriteResponse("/x"), ContinueResponse)
 
 
-def test_rewrite_status_200() -> None:
-    assert Response.rewrite("/x").status == 200
+def test_response_body_and_status() -> None:
+    res = Response(b"tea", status_code=418)
+    assert (res.status_code, res.body) == (418, b"tea")
 
 
-def test_rewrite_body_empty() -> None:
-    assert Response.rewrite("/x").body == b""
-
-
-def test_rewrite_headers_empty_by_default() -> None:
-    assert dict(Response.rewrite("/x").headers) == {}
-
-
-def test_rewrite_headers_set() -> None:
-    res = Response.rewrite("/x", headers={"x-tenant": "acme"})
-    assert dict(res.headers) == {"x-tenant": "acme"}
-
-
-def test_rewrite_request_headers_empty_by_default() -> None:
-    assert dict(Response.rewrite("/x").request_headers) == {}
-
-
-def test_rewrite_request_headers_set() -> None:
-    res = Response.rewrite("/x", request_headers={"x-tenant": "acme"})
-    assert dict(res.request_headers) == {"x-tenant": "acme"}
-
-
-def test_rewrite_request_headers_none_value_signals_drop() -> None:
-    res = Response.rewrite("/x", request_headers={"authorization": None})
-    assert dict(res.request_headers) == {"authorization": None}
-
-
-# ---------------------------------------------------------------------------
-# Response.redirect()
-# ---------------------------------------------------------------------------
-
-
-def test_redirect_kind() -> None:
-    assert Response.redirect("/login").kind == Kind.TERMINATING
-
-
-def test_redirect_destination() -> None:
-    assert Response.redirect("/login").destination == "/login"
-
-
-def test_redirect_default_status_307() -> None:
-    assert Response.redirect("/login").status == 307
-
-
-def test_redirect_custom_status_301() -> None:
-    assert Response.redirect("/login", status=301).status == 301
-
-
-def test_redirect_boundary_300() -> None:
-    assert Response.redirect("/x", status=300).status == 300
-
-
-def test_redirect_boundary_399() -> None:
-    assert Response.redirect("/x", status=399).status == 399
-
-
-def test_redirect_status_200_raises() -> None:
-    with pytest.raises(ValueError, match="3xx"):
-        Response.redirect("/login", status=200)
-
-
-def test_redirect_status_400_raises() -> None:
-    with pytest.raises(ValueError, match="3xx"):
-        Response.redirect("/login", status=400)
-
-
-def test_redirect_body_empty() -> None:
-    assert Response.redirect("/login").body == b""
-
-
-def test_redirect_headers_empty_by_default() -> None:
-    assert dict(Response.redirect("/login").headers) == {}
-
-
-def test_redirect_headers_set() -> None:
-    res = Response.redirect("/login", headers={"set-cookie": "s=; Max-Age=0"})
-    assert dict(res.headers) == {"set-cookie": "s=; Max-Age=0"}
-
-
-# ---------------------------------------------------------------------------
-# Response.json()
-# ---------------------------------------------------------------------------
-
-
-def test_json_kind() -> None:
-    assert Response.json({}).kind == Kind.TERMINATING
-
-
-def test_json_destination_none() -> None:
-    assert Response.json({}).destination is None
-
-
-def test_json_default_status_200() -> None:
-    assert Response.json({}).status == 200
-
-
-def test_json_custom_status() -> None:
-    assert Response.json({}, status=201).status == 201
-
-
-def test_json_body_encoded() -> None:
-    assert json.loads(Response.json({"k": "v"}).body) == {"k": "v"}
-
-
-def test_json_body_nested() -> None:
-    data = {"users": [{"id": 1}]}
-    assert json.loads(Response.json(data).body) == data
-
-
-def test_json_body_utf8() -> None:
-    assert Response.json({"k": "café"}).body == '{"k":"café"}'.encode()
-
-
-@pytest.mark.parametrize("value", [float("nan"), float("inf")], ids=["nan", "inf"])
-def test_json_rejects_non_finite_float(value: float) -> None:
-    with pytest.raises(ValueError):
-        Response.json({"k": value})
-
-
-def test_json_rejects_unserializable() -> None:
-    with pytest.raises(TypeError):
-        Response.json({1, 2})
-
-
-def test_json_content_type_set() -> None:
-    assert Response.json({}).headers["content-type"] == "application/json"
-
-
-def test_json_content_type_overrides_caller_value() -> None:
-    res = Response.json({}, headers={"content-type": "text/plain"})
+def test_json_response() -> None:
+    res = JSONResponse({"ok": True, "name": "caf\u00e9"}, status_code=403)
+    assert res.status_code == 403
+    assert res.body == '{"ok":true,"name":"caf\u00e9"}'.encode()
     assert res.headers["content-type"] == "application/json"
 
 
-def test_json_content_type_overrides_caller_value_any_case() -> None:
-    res = Response.json({}, headers={"Content-Type": "text/plain"})
-    assert dict(res.headers) == {"content-type": "application/json"}
+def test_redirect_response() -> None:
+    res = RedirectResponse("/caf\u00e9 menu")
+    assert res.status_code == 307
+    assert res.headers["location"] == "/caf%C3%A9%20menu"
 
 
-def test_json_extra_headers_preserved() -> None:
-    res = Response.json({}, headers={"x-trace": "abc"})
-    assert dict(res.headers) == {"x-trace": "abc", "content-type": "application/json"}
-
-
-# ---------------------------------------------------------------------------
-# Response.respond()
-# ---------------------------------------------------------------------------
-
-
-def test_respond_kind() -> None:
-    assert Response.respond(status=200).kind == Kind.TERMINATING
-
-
-def test_respond_destination_none() -> None:
-    assert Response.respond(status=200).destination is None
-
-
-def test_respond_status() -> None:
-    assert Response.respond(status=204).status == 204
-
-
-def test_respond_default_body_empty() -> None:
-    assert Response.respond(status=204).body == b""
-
-
-def test_respond_body_set() -> None:
-    assert Response.respond(status=200, body=b"hello").body == b"hello"
-
-
-def test_respond_headers_empty_by_default() -> None:
-    assert dict(Response.respond(status=204).headers) == {}
-
-
-def test_respond_headers_set() -> None:
-    res = Response.respond(status=200, headers={"x-foo": "bar"})
-    assert dict(res.headers) == {"x-foo": "bar"}
+def test_text_responses_content_type() -> None:
+    assert PlainTextResponse("hi").headers["content-type"] == "text/plain; charset=utf-8"
+    assert HTMLResponse("<p>").headers["content-type"] == "text/html; charset=utf-8"
 
 
 # ---------------------------------------------------------------------------
-# Header mappings
+# Headers
 # ---------------------------------------------------------------------------
 
 
@@ -309,99 +121,166 @@ def test_headers_accept_starlette_headers(factory: Factory) -> None:
 
 
 @pytest.mark.parametrize("factory", _FACTORIES.values(), ids=list(_FACTORIES))
+def test_headers_can_be_changed(factory: Factory) -> None:
+    res = factory({"x-a": "1", "x-b": "2"})
+    res.headers["x-a"] = "3"
+    res.headers.append("x-c", "4")
+    res.headers.setdefault("x-d", "5")
+    del res.headers["x-b"]
+    assert res.headers["x-a"] == "3"
+    assert res.headers["x-c"] == "4"
+    assert res.headers["x-d"] == "5"
+    assert "x-b" not in res.headers
+
+
+def test_headers_case_insensitive() -> None:
+    res = Response(headers={"X-A": "1"})
+    res.headers["x-a"] = "2"
+    assert res.headers.getlist("X-A") == ["2"]
+
+
+def test_headers_not_shared_with_caller() -> None:
+    headers = {"x-a": "1"}
+    res = Response(headers=headers)
+    headers["x-a"] = "2"
+    assert res.headers["x-a"] == "1"
+
+
+@pytest.mark.parametrize("factory", _FACTORIES.values(), ids=list(_FACTORIES))
 @pytest.mark.parametrize("name", ["x-middleware-next", "X-Middleware-Rewrite"])
 def test_headers_reject_reserved(factory: Factory, name: str) -> None:
-    with pytest.raises(ValueError, match="reserved"):
+    with pytest.raises(ValueError, match=f'invalid header "{name}": .* reserved'):
         factory({name: "1"})
 
 
+@pytest.mark.parametrize("change", _HEADER_CHANGES.values(), ids=list(_HEADER_CHANGES))
+@pytest.mark.parametrize("factory", _FACTORIES.values(), ids=list(_FACTORIES))
+def test_header_changes_reject_reserved(
+    change: Callable[[MutableHeaders, str], object], factory: Factory
+) -> None:
+    res = factory({})
+    before = list(res.raw_headers)
+    with pytest.raises(ValueError, match='invalid header "x-middleware-a": .* reserved'):
+        change(res.headers, "x-middleware-a")
+    assert res.raw_headers == before
+
+
+def test_headers_reject_non_latin1() -> None:
+    with pytest.raises(UnicodeEncodeError):
+        Response(headers={"x-a": "\u20ac"})
+    res = Response()
+    with pytest.raises(UnicodeEncodeError):
+        res.headers["x-a"] = "\u20ac"
+
+
+# ---------------------------------------------------------------------------
+# Cookies
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("factory", _FACTORIES.values(), ids=list(_FACTORIES))
+def test_set_cookie(factory: Factory) -> None:
+    res = factory({})
+    res.set_cookie("a", "1")
+    res.set_cookie("b", "2")
+    assert res.headers.getlist("set-cookie") == [
+        "a=1; Path=/; SameSite=lax",
+        "b=2; Path=/; SameSite=lax",
+    ]
+
+
+def test_delete_cookie() -> None:
+    res = ContinueResponse()
+    res.delete_cookie("a", path="/app")
+    cookie = res.headers["set-cookie"]
+    assert cookie.startswith('a=""; expires=')
+    assert cookie.endswith("; Max-Age=0; Path=/app; SameSite=lax")
+
+
+# ---------------------------------------------------------------------------
+# ContinueResponse and RewriteResponse
+# ---------------------------------------------------------------------------
+
+
+def test_continue_defaults() -> None:
+    res = ContinueResponse()
+    assert res.request_headers == {}
+    assert (res.status_code, res.body) == (200, b"")
+
+
+def test_rewrite_request_headers() -> None:
+    res = RewriteResponse("/x", request_headers={"x-a": "1"})
+    assert res.request_headers == {"x-a": "1"}
+
+
+def test_rewrite_destination() -> None:
+    assert RewriteResponse("https://internal.example.com/api").destination == (
+        "https://internal.example.com/api"
+    )
+
+
+def test_continue_request_headers() -> None:
+    res = ContinueResponse(request_headers={"x-tenant": "acme", "authorization": None})
+    assert res.request_headers == {"x-tenant": "acme", "authorization": None}
+
+
+def test_continue_request_headers_not_shared_with_caller() -> None:
+    request_headers: dict[str, str | None] = {"x-a": "1"}
+    res = ContinueResponse(request_headers=request_headers)
+    request_headers["x-a"] = "2"
+    assert res.request_headers == {"x-a": "1"}
+
+
+def test_continue_headers_and_request_headers_are_separate() -> None:
+    res = ContinueResponse(headers={"x-a": "1"}, request_headers={"x-b": "2"})
+    assert res.headers.get("x-b") is None
+    assert res.request_headers == {"x-b": "2"}
+
+
 @pytest.mark.parametrize("name", ["x-middleware-next", "X-Middleware-Rewrite"])
-def test_request_headers_reject_reserved(name: str) -> None:
-    with pytest.raises(ValueError, match="reserved"):
-        Response.next(request_headers={name: "1"})
-    with pytest.raises(ValueError, match="reserved"):
-        Response.rewrite("/x", request_headers={name: "1"})
+def test_continue_request_headers_reject_reserved(name: str) -> None:
+    with pytest.raises(ValueError, match=f'invalid header "{name}": .* reserved'):
+        ContinueResponse(request_headers={name: "1"})
 
 
-@pytest.mark.parametrize(
-    "factory", _TERMINATING_FACTORIES.values(), ids=list(_TERMINATING_FACTORIES)
-)
-def test_terminating_request_headers_empty(factory: Factory) -> None:
-    assert dict(factory({"x-a": "1"}).request_headers) == {}
+async def test_continue_request_headers_changed_to_reserved_rejected_on_send() -> None:
+    res = ContinueResponse()
+    res.request_headers["x-middleware-a"] = "1"
+    with pytest.raises(ValueError, match='invalid header "x-middleware-a": .* reserved'):
+        await send_response(res)
 
 
-# ---------------------------------------------------------------------------
-# Immutability
-# ---------------------------------------------------------------------------
+def test_continue_status_code_is_hidden() -> None:
+    res = ContinueResponse()
+    res.status_code = 200
+    with pytest.raises(RuntimeError, match="continue responses always have status 200"):
+        res.status_code = 404
+    assert res.status_code == 200
 
 
-def test_immutability_setattr_raises() -> None:
-    res = Response.next()
-    with pytest.raises(AttributeError, match="immutable"):
-        cast(Any, res)._kind = Kind.TERMINATING
+def test_continue_body_is_hidden() -> None:
+    res = ContinueResponse()
+    res.body = b""
+    with pytest.raises(RuntimeError, match="continue responses cannot have a body"):
+        res.body = b"x"
+    assert res.body == b""
 
 
-def test_immutability_delattr_raises() -> None:
-    res = Response.next()
-    with pytest.raises(AttributeError, match="immutable"):
-        del cast(Any, res)._kind
-
-
-def test_immutability_public_property_raises() -> None:
-    res = Response.next()
-    with pytest.raises(AttributeError, match="immutable"):
-        cast(Any, res).status = 404
-
-
-# ---------------------------------------------------------------------------
-# Kind
-# ---------------------------------------------------------------------------
-
-
-def test_kind_continuing_value() -> None:
-    assert Kind.CONTINUING.value == "continuing"
-
-
-def test_kind_terminating_value() -> None:
-    assert Kind.TERMINATING.value == "terminating"
-
-
-# ---------------------------------------------------------------------------
-# __repr__
-# ---------------------------------------------------------------------------
-
-
-def test_repr_next() -> None:
-    assert repr(Response.next()) == "Response(kind=<Kind.CONTINUING: 'continuing'>)"
-
-
-def test_repr_next_with_headers() -> None:
-    assert repr(Response.next(headers={"x-a": "1"}, request_headers={"x-b": None})) == (
-        "Response(kind=<Kind.CONTINUING: 'continuing'>, headers={'x-a': '1'}, "
-        "request_headers={'x-b': None})"
-    )
-
-
-def test_repr_rewrite() -> None:
-    assert repr(Response.rewrite("/api")) == (
-        "Response(kind=<Kind.CONTINUING: 'continuing'>, destination='/api')"
-    )
-
-
-def test_repr_redirect() -> None:
-    assert repr(Response.redirect("/x", status=301)) == (
-        "Response(kind=<Kind.TERMINATING: 'terminating'>, destination='/x', status=301)"
-    )
-
-
-def test_repr_json() -> None:
-    assert repr(Response.json({"k": "v"})) == (
-        "Response(kind=<Kind.TERMINATING: 'terminating'>, body=b'{\"k\":\"v\"}', "
-        "headers={'content-type': 'application/json'})"
-    )
-
-
-def test_repr_respond() -> None:
-    assert repr(Response.respond(status=204, body=b"hi")) == (
-        "Response(kind=<Kind.TERMINATING: 'terminating'>, status=204, body=b'hi')"
-    )
+async def test_continue_sends_changed_request_headers() -> None:
+    res = RewriteResponse("/v2")
+    res.request_headers["x-a"] = "1"
+    res.request_headers["cookie"] = None
+    messages = await send_response(res)
+    assert messages == [
+        {
+            "type": "http.response.start",
+            "status": 200,
+            "headers": [
+                (b"x-middleware-rewrite", b"/v2"),
+                (b"x-middleware-override-headers-diff", b"x-a,cookie"),
+                (b"x-middleware-request-x-a", b"1"),
+                (b"content-length", b"0"),
+            ],
+        },
+        {"type": "http.response.body", "body": b""},
+    ]

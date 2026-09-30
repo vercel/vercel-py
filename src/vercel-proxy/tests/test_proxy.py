@@ -5,12 +5,22 @@ import threading
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 import pytest
+import starlette.responses
 from starlette.types import Message
 
-from vercel.proxy import Handler, Proxy, Request, Response
+from vercel.proxy import (
+    ContinueResponse,
+    Handler,
+    JSONResponse,
+    Proxy,
+    RedirectResponse,
+    Request,
+    Response,
+    RewriteResponse,
+)
 
 
 @dataclass
@@ -60,7 +70,7 @@ async def call(proxy: Proxy, scope: dict[str, Any]) -> Sent:
 
 
 async def not_found(req: Request) -> Response:
-    return Response.respond(status=404)
+    return Response(status_code=404)
 
 
 def capture(seen: list[Any], value: Callable[[Request], Any]) -> Handler:
@@ -68,7 +78,7 @@ def capture(seen: list[Any], value: Callable[[Request], Any]) -> Handler:
 
     def handler(req: Request) -> Response:
         seen.append(value(req))
-        return Response.next()
+        return ContinueResponse()
 
     return handler
 
@@ -80,7 +90,7 @@ def capture(seen: list[Any], value: Callable[[Request], Any]) -> Handler:
 
 async def test_next_emits_middleware_next() -> None:
     proxy = Proxy()
-    proxy.route("/")(lambda req: Response.next())
+    proxy.route("/")(lambda req: ContinueResponse())
     sent = await call(proxy, make_scope())
     assert (sent.status, sent.body) == (200, b"")
     assert sent.headers == [(b"x-middleware-next", b"1"), (b"content-length", b"0")]
@@ -89,7 +99,7 @@ async def test_next_emits_middleware_next() -> None:
 async def test_next_with_request_headers_emits_override() -> None:
     proxy = Proxy()
     proxy.route("/")(
-        lambda req: Response.next(request_headers={"X-Tenant": "acme", "Cookie": None})
+        lambda req: ContinueResponse(request_headers={"X-Tenant": "acme", "Cookie": None})
     )
     sent = await call(proxy, make_scope())
     assert sent.headers == [
@@ -102,7 +112,9 @@ async def test_next_with_request_headers_emits_override() -> None:
 
 async def test_next_with_headers_emits_response_headers() -> None:
     proxy = Proxy()
-    proxy.route("/")(lambda req: Response.next(headers={"X-A": "1"}, request_headers={"x-b": "2"}))
+    proxy.route("/")(
+        lambda req: ContinueResponse(headers={"X-A": "1"}, request_headers={"x-b": "2"})
+    )
     sent = await call(proxy, make_scope())
     assert sent.headers == [
         (b"x-middleware-next", b"1"),
@@ -113,9 +125,30 @@ async def test_next_with_headers_emits_response_headers() -> None:
     ]
 
 
+async def test_changed_headers_and_cookies_emitted() -> None:
+    def handler(req: Request) -> Response:
+        res = ContinueResponse(headers={"x-a": "1"})
+        res.headers["x-b"] = "2"
+        res.set_cookie("a", "1")
+        res.set_cookie("b", "2")
+        return res
+
+    proxy = Proxy()
+    proxy.route("/")(handler)
+    sent = await call(proxy, make_scope())
+    assert sent.headers == [
+        (b"x-middleware-next", b"1"),
+        (b"x-a", b"1"),
+        (b"content-length", b"0"),
+        (b"x-b", b"2"),
+        (b"set-cookie", b"a=1; Path=/; SameSite=lax"),
+        (b"set-cookie", b"b=2; Path=/; SameSite=lax"),
+    ]
+
+
 async def test_rewrite_emits_middleware_rewrite() -> None:
     proxy = Proxy()
-    proxy.route("/")(lambda req: Response.rewrite("https://internal.example.com/api?a=1"))
+    proxy.route("/")(lambda req: RewriteResponse("https://internal.example.com/api?a=1"))
     sent = await call(proxy, make_scope())
     assert (sent.status, sent.body) == (200, b"")
     assert sent.headers == [
@@ -126,30 +159,28 @@ async def test_rewrite_emits_middleware_rewrite() -> None:
 
 async def test_caller_content_length_not_overridden() -> None:
     proxy = Proxy()
-    proxy.route("/")(
-        lambda req: Response.respond(status=200, body=b"abc", headers={"Content-Length": "3"})
-    )
+    proxy.route("/")(lambda req: Response(b"abc", status_code=200, headers={"Content-Length": "3"}))
     sent = await call(proxy, make_scope())
     assert sent.headers == [(b"content-length", b"3")]
 
 
 async def test_rewrite_encodes_destination() -> None:
     proxy = Proxy()
-    proxy.route("/")(lambda req: Response.rewrite("/caf\u00e9 menu"))
+    proxy.route("/")(lambda req: RewriteResponse("/caf\u00e9 menu"))
     sent = await call(proxy, make_scope())
     assert sent.header_dict["x-middleware-rewrite"] == "/caf%C3%A9%20menu"
 
 
 async def test_rewrite_does_not_double_encode() -> None:
     proxy = Proxy()
-    proxy.route("/")(lambda req: Response.rewrite("/a%20b"))
+    proxy.route("/")(lambda req: RewriteResponse("/a%20b"))
     sent = await call(proxy, make_scope())
     assert sent.header_dict["x-middleware-rewrite"] == "/a%20b"
 
 
 async def test_rewrite_with_request_headers_emits_override() -> None:
     proxy = Proxy()
-    proxy.route("/")(lambda req: Response.rewrite("/v2", request_headers={"x-a": "1"}))
+    proxy.route("/")(lambda req: RewriteResponse("/v2", request_headers={"x-a": "1"}))
     sent = await call(proxy, make_scope())
     assert sent.headers == [
         (b"x-middleware-rewrite", b"/v2"),
@@ -161,7 +192,7 @@ async def test_rewrite_with_request_headers_emits_override() -> None:
 
 async def test_rewrite_with_headers_emits_response_headers() -> None:
     proxy = Proxy()
-    proxy.route("/")(lambda req: Response.rewrite("/v2", headers={"x-a": "1"}))
+    proxy.route("/")(lambda req: RewriteResponse("/v2", headers={"x-a": "1"}))
     sent = await call(proxy, make_scope())
     assert sent.headers == [
         (b"x-middleware-rewrite", b"/v2"),
@@ -170,29 +201,29 @@ async def test_rewrite_with_headers_emits_response_headers() -> None:
     ]
 
 
-async def test_redirect_emits_status_and_destination() -> None:
+async def test_redirect_emits_status_and_location() -> None:
     proxy = Proxy()
-    proxy.route("/")(lambda req: Response.redirect("/login", status=302, headers={"x-a": "1"}))
+    proxy.route("/")(lambda req: RedirectResponse("/login", status_code=302, headers={"x-a": "1"}))
     sent = await call(proxy, make_scope())
     assert (sent.status, sent.body) == (302, b"")
     assert sent.headers == [
-        (b"x-middleware-redirect", b"/login"),
         (b"x-a", b"1"),
         (b"content-length", b"0"),
+        (b"location", b"/login"),
     ]
 
 
 async def test_json_emits_body_and_headers() -> None:
     proxy = Proxy()
-    proxy.route("/")(lambda req: Response.json({"ok": True}, status=403))
+    proxy.route("/")(lambda req: JSONResponse({"ok": True}, status_code=403))
     sent = await call(proxy, make_scope())
     assert (sent.status, sent.body) == (403, b'{"ok":true}')
-    assert sent.headers == [(b"content-type", b"application/json"), (b"content-length", b"11")]
+    assert sent.headers == [(b"content-length", b"11"), (b"content-type", b"application/json")]
 
 
 async def test_respond_emits_raw_response() -> None:
     proxy = Proxy()
-    proxy.route("/")(lambda req: Response.respond(status=418, body=b"tea", headers={"X-A": "1"}))
+    proxy.route("/")(lambda req: Response(b"tea", status_code=418, headers={"X-A": "1"}))
     sent = await call(proxy, make_scope())
     assert (sent.status, sent.body) == (418, b"tea")
     assert sent.headers == [(b"x-a", b"1"), (b"content-length", b"3")]
@@ -214,7 +245,7 @@ async def test_request_app_is_proxy() -> None:
 
 async def test_path_matches_whole_path() -> None:
     proxy = Proxy(fallback=not_found)
-    proxy.route("/about")(lambda req: Response.respond(status=200))
+    proxy.route("/about")(lambda req: Response(status_code=200))
     assert (await call(proxy, make_scope("/about/team"))).status == 404
 
 
@@ -233,6 +264,15 @@ async def test_path_matches_whole_path() -> None:
         ("/users/{id}", "/users/1/", {"id": "1"}),
         ("/dashboard/{path:path}", "/dashboard", {"path": ""}),
         ("/dashboard/{path:path}", "/dashboard/a/", {"path": "a/"}),
+    ],
+    ids=[
+        "exact",
+        "add-slash",
+        "strip-slash",
+        "exact-slash",
+        "param-add-slash",
+        "path-param-empty",
+        "path-param-keeps-slash",
     ],
 )
 async def test_trailing_slash_optional(pattern: str, path: str, expected: dict[str, Any]) -> None:
@@ -253,28 +293,28 @@ async def test_trailing_slash_request_path_unchanged() -> None:
 
 async def test_trailing_slash_exact_match_wins() -> None:
     proxy = Proxy()
-    proxy.route("/about")(lambda req: Response.respond(status=201))
-    proxy.route("/about/")(lambda req: Response.respond(status=202))
+    proxy.route("/about")(lambda req: Response(status_code=201))
+    proxy.route("/about/")(lambda req: Response(status_code=202))
     assert (await call(proxy, make_scope("/about"))).status == 201
     assert (await call(proxy, make_scope("/about/"))).status == 202
 
 
 async def test_trailing_slash_only_one_optional() -> None:
     proxy = Proxy(fallback=not_found)
-    proxy.route("/about")(lambda req: Response.respond(status=200))
+    proxy.route("/about")(lambda req: Response(status_code=200))
     assert (await call(proxy, make_scope("/about//"))).status == 404
 
 
 async def test_trailing_slash_root_route() -> None:
     proxy = Proxy(fallback=not_found)
-    proxy.route("/")(lambda req: Response.respond(status=200))
+    proxy.route("/")(lambda req: Response(status_code=200))
     assert (await call(proxy, make_scope("/"))).status == 200
     assert (await call(proxy, make_scope("//"))).status == 200
 
 
 async def test_trailing_slash_with_root_path() -> None:
     proxy = Proxy(fallback=not_found)
-    proxy.route("/users")(lambda req: Response.respond(status=200))
+    proxy.route("/users")(lambda req: Response(status_code=200))
     scope = make_scope("/app/users/")
     scope["root_path"] = "/app"
     assert (await call(proxy, scope)).status == 200
@@ -282,14 +322,14 @@ async def test_trailing_slash_with_root_path() -> None:
 
 async def test_trailing_slash_respects_host() -> None:
     proxy = Proxy(fallback=not_found)
-    proxy.route("/about", host="a.example.com")(lambda req: Response.respond(status=200))
+    proxy.route("/about", host="a.example.com")(lambda req: Response(status_code=200))
     assert (await call(proxy, make_scope("/about/", host="a.example.com"))).status == 200
     assert (await call(proxy, make_scope("/about/", host="b.example.com"))).status == 404
 
 
 async def test_trailing_slash_respects_methods() -> None:
     proxy = Proxy(fallback=not_found)
-    proxy.route("/about", methods=["POST"])(lambda req: Response.respond(status=200))
+    proxy.route("/about", methods=["POST"])(lambda req: Response(status_code=200))
     assert (await call(proxy, make_scope("/about/", method="POST"))).status == 200
     assert (await call(proxy, make_scope("/about/", method="GET"))).status == 404
 
@@ -302,10 +342,11 @@ async def test_trailing_slash_respects_methods() -> None:
         ("/users/{id}", "/users/1", "/users/1/"),
         ("/dashboard/{path:path}", "/dashboard/", "/dashboard"),
     ],
+    ids=["no-slash", "slash", "param", "path-param"],
 )
 async def test_strict_requires_exact_match(pattern: str, exact: str, other: str) -> None:
     proxy = Proxy(fallback=not_found, strict=True)
-    proxy.route(pattern)(lambda req: Response.respond(status=200))
+    proxy.route(pattern)(lambda req: Response(status_code=200))
     assert (await call(proxy, make_scope(exact))).status == 200
     assert (await call(proxy, make_scope(other))).status == 404
 
@@ -347,14 +388,14 @@ async def test_path_params_converted(pattern: str, path: str, expected: dict[str
 )
 async def test_path_param_mismatch_falls_through(pattern: str, path: str) -> None:
     proxy = Proxy(fallback=not_found)
-    proxy.route(pattern)(lambda req: Response.next())
+    proxy.route(pattern)(lambda req: ContinueResponse())
     assert (await call(proxy, make_scope(path))).status == 404
 
 
 async def test_first_matching_route_wins() -> None:
     proxy = Proxy()
-    proxy.route("/users/{id:int}")(lambda req: Response.respond(status=201))
-    proxy.route("/users/{name}")(lambda req: Response.respond(status=202))
+    proxy.route("/users/{id:int}")(lambda req: Response(status_code=201))
+    proxy.route("/users/{name}")(lambda req: Response(status_code=202))
     assert (await call(proxy, make_scope("/users/7"))).status == 201
     assert (await call(proxy, make_scope("/users/bob"))).status == 202
 
@@ -366,7 +407,7 @@ async def test_first_matching_route_wins() -> None:
 
 async def test_methods_filter() -> None:
     proxy = Proxy(fallback=not_found)
-    proxy.route("/", methods=["post", "PUT"])(lambda req: Response.respond(status=200))
+    proxy.route("/", methods=["post", "PUT"])(lambda req: Response(status_code=200))
     assert (await call(proxy, make_scope(method="POST"))).status == 200
     assert (await call(proxy, make_scope(method="PUT"))).status == 200
     assert (await call(proxy, make_scope(method="GET"))).status == 404
@@ -374,14 +415,14 @@ async def test_methods_filter() -> None:
 
 async def test_methods_omitted_matches_all() -> None:
     proxy = Proxy(fallback=not_found)
-    proxy.route("/")(lambda req: Response.respond(status=200))
+    proxy.route("/")(lambda req: Response(status_code=200))
     for method in ["GET", "HEAD", "POST", "PROPFIND"]:
         assert (await call(proxy, make_scope(method=method))).status == 200
 
 
 async def test_get_route_also_matches_head() -> None:
     proxy = Proxy(fallback=not_found)
-    proxy.route("/", methods=["GET"])(lambda req: Response.respond(status=200))
+    proxy.route("/", methods=["GET"])(lambda req: Response(status_code=200))
     assert (await call(proxy, make_scope(method="HEAD"))).status == 200
     assert (await call(proxy, make_scope(method="POST"))).status == 404
 
@@ -393,32 +434,32 @@ async def test_get_route_also_matches_head() -> None:
 
 async def test_host_literal() -> None:
     proxy = Proxy(fallback=not_found)
-    proxy.route("/", host="api.example.com")(lambda req: Response.respond(status=200))
+    proxy.route("/", host="api.example.com")(lambda req: Response(status_code=200))
     assert (await call(proxy, make_scope(host="api.example.com"))).status == 200
     assert (await call(proxy, make_scope(host="www.example.com"))).status == 404
 
 
 async def test_host_ignores_port() -> None:
     proxy = Proxy(fallback=not_found)
-    proxy.route("/", host="api.example.com")(lambda req: Response.respond(status=200))
+    proxy.route("/", host="api.example.com")(lambda req: Response(status_code=200))
     assert (await call(proxy, make_scope(host="api.example.com:8443"))).status == 200
 
 
 async def test_host_is_case_sensitive() -> None:
     proxy = Proxy(fallback=not_found)
-    proxy.route("/", host="api.example.com")(lambda req: Response.respond(status=200))
+    proxy.route("/", host="api.example.com")(lambda req: Response(status_code=200))
     assert (await call(proxy, make_scope(host="API.example.com"))).status == 404
 
 
 async def test_host_ipv6_literal() -> None:
     proxy = Proxy(fallback=not_found)
-    proxy.route("/", host="[::1]")(lambda req: Response.respond(status=200))
+    proxy.route("/", host="[::1]")(lambda req: Response(status_code=200))
     assert (await call(proxy, make_scope(host="[::1]:8080"))).status == 200
 
 
 async def test_host_found_among_other_headers() -> None:
     proxy = Proxy(fallback=not_found)
-    proxy.route("/", host="api.example.com")(lambda req: Response.respond(status=200))
+    proxy.route("/", host="api.example.com")(lambda req: Response(status_code=200))
     scope = make_scope(host=None)
     scope["headers"] = [(b"accept", b"*/*"), (b"host", b"api.example.com")]
     assert (await call(proxy, scope)).status == 200
@@ -426,13 +467,13 @@ async def test_host_found_among_other_headers() -> None:
 
 async def test_host_route_needs_host_header() -> None:
     proxy = Proxy(fallback=not_found)
-    proxy.route("/", host="server.internal")(lambda req: Response.respond(status=200))
+    proxy.route("/", host="server.internal")(lambda req: Response(status_code=200))
     assert (await call(proxy, make_scope(host=None))).status == 404
 
 
 async def test_path_matched_after_root_path() -> None:
     proxy = Proxy(fallback=not_found)
-    proxy.route("/users")(lambda req: Response.respond(status=200))
+    proxy.route("/users")(lambda req: Response(status_code=200))
     scope = make_scope("/app/users")
     scope["root_path"] = "/app"
     assert (await call(proxy, scope)).status == 200
@@ -488,8 +529,8 @@ def test_unknown_convertor_rejected() -> None:
 
 def test_methods_accepts_any_collection() -> None:
     proxy = Proxy()
-    proxy.route("/a", methods=("GET",))(lambda req: Response.next())
-    proxy.route("/b", methods={"POST"})(lambda req: Response.next())
+    proxy.route("/a", methods=("GET",))(lambda req: ContinueResponse())
+    proxy.route("/b", methods={"POST"})(lambda req: ContinueResponse())
 
 
 def test_methods_string_rejected() -> None:
@@ -504,7 +545,7 @@ def test_methods_empty_rejected() -> None:
 
 def test_route_returns_handler_unchanged() -> None:
     def handler(req: Request) -> Response:
-        return Response.next()
+        return ContinueResponse()
 
     assert Proxy().route("/")(handler) is handler
 
@@ -520,7 +561,7 @@ async def test_default_fallback_is_next() -> None:
 
 
 async def test_fallback_response() -> None:
-    sent = await call(Proxy(fallback=Response.respond(status=404)), make_scope())
+    sent = await call(Proxy(fallback=Response(status_code=404)), make_scope())
     assert sent.status == 404
 
 
@@ -533,16 +574,16 @@ async def test_fallback_handler_in_constructor() -> None:
 
 
 async def test_sync_fallback_handler() -> None:
-    proxy = Proxy(fallback=lambda req: Response.respond(status=410))
+    proxy = Proxy(fallback=lambda req: Response(status_code=410))
     assert (await call(proxy, make_scope())).status == 410
 
 
 async def test_fallback_decorator_overrides_constructor() -> None:
-    proxy = Proxy(fallback=Response.respond(status=500))
+    proxy = Proxy(fallback=Response(status_code=500))
 
     @proxy.fallback
     async def fallback(req: Request) -> Response:
-        return Response.respond(status=404)
+        return Response(status_code=404)
 
     assert (await call(proxy, make_scope())).status == 404
 
@@ -567,7 +608,7 @@ async def test_handler_cannot_read_body() -> None:
     @proxy.route("/")
     async def handler(req: Request) -> Response:
         await req.body()
-        return Response.next()
+        return ContinueResponse()
 
     with pytest.raises(RuntimeError, match="request body is not available"):
         await call(proxy, make_scope())
@@ -580,7 +621,7 @@ async def test_async_handler_runs_on_event_loop_thread() -> None:
     @proxy.route("/")
     async def handler(req: Request) -> Response:
         threads.append(threading.get_ident())
-        return Response.next()
+        return ContinueResponse()
 
     await call(proxy, make_scope())
     assert threads == [threading.get_ident()]
@@ -593,7 +634,7 @@ async def test_sync_handler_runs_in_worker_thread() -> None:
     @proxy.route("/")
     def handler(req: Request) -> Response:
         threads.append(threading.get_ident())
-        return Response.next()
+        return ContinueResponse()
 
     await call(proxy, make_scope())
     assert len(threads) == 1
@@ -602,7 +643,7 @@ async def test_sync_handler_runs_in_worker_thread() -> None:
 
 async def test_async_partial_handler() -> None:
     async def handler(req: Request, status: int) -> Response:
-        return Response.respond(status=status)
+        return Response(status_code=status)
 
     proxy = Proxy()
     proxy.route("/")(functools.partial(handler, status=204))
@@ -612,7 +653,7 @@ async def test_async_partial_handler() -> None:
 async def test_async_callable_object_handler() -> None:
     class Handler:
         async def __call__(self, req: Request) -> Response:
-            return Response.respond(status=205)
+            return Response(status_code=205)
 
     proxy = Proxy()
     proxy.route("/")(Handler())
@@ -626,7 +667,17 @@ async def test_handler_returning_non_response_raises() -> None:
         return {"not": "a response"}
 
     proxy.route("/")(handler)
-    with pytest.raises(TypeError, match="expected Response, got dict"):
+    with pytest.raises(TypeError, match="expected vercel.proxy.Response, got builtins.dict"):
+        await call(proxy, make_scope())
+
+
+async def test_handler_returning_starlette_response_raises() -> None:
+    proxy = Proxy()
+    proxy.route("/")(lambda req: cast(Any, starlette.responses.JSONResponse({})))
+    with pytest.raises(
+        TypeError,
+        match="expected vercel.proxy.Response, got starlette.responses.JSONResponse",
+    ):
         await call(proxy, make_scope())
 
 

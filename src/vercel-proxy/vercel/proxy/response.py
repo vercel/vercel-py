@@ -1,52 +1,95 @@
-"""Proxy response factories."""
+"""Proxy responses."""
 
-import enum
-import types
+import urllib.parse
 from collections.abc import Mapping
-from typing import final
 
-from starlette.responses import JSONResponse
+from starlette import responses
+from starlette.datastructures import MutableHeaders
+from starlette.types import Receive, Scope, Send
 
-__all__ = ["Kind", "Response"]
+__all__ = [
+    "ContinueResponse",
+    "HTMLResponse",
+    "JSONResponse",
+    "PlainTextResponse",
+    "RedirectResponse",
+    "Response",
+    "RewriteResponse",
+]
 
 # Response headers with this prefix are proxy control headers.
 _RESERVED_PREFIX = "x-middleware-"
 
-
-class Kind(enum.Enum):
-    """Whether a response lets the request continue or ends it."""
-
-    CONTINUING = "continuing"
-    TERMINATING = "terminating"
+# Characters left unescaped when a destination URL is written into a
+# x-middleware-* header. Covers every valid URI character, plus "%" so
+# already-encoded destinations are not double-encoded.
+_DESTINATION_SAFE = "/:@!$&'()*+,;=?#%[]"
 
 
-@final
-class Response:
-    """The result of a proxy handler.
+def _check_name(name: str) -> None:
+    if name.lower().startswith(_RESERVED_PREFIX):
+        raise ValueError(f'invalid header "{name}": x-middleware-* headers are reserved')
 
-    Create one with ``next``, ``rewrite``, ``redirect``, ``json`` or
-    ``respond``.
+
+class _CheckedHeaders(MutableHeaders):
+    """Response headers that reject reserved names as they are added."""
+
+    def __setitem__(self, key: str, value: str) -> None:
+        _check_name(key)
+        super().__setitem__(key, value)
+
+    def setdefault(self, key: str, value: str) -> str:
+        _check_name(key)
+        return super().setdefault(key, value)
+
+    def append(self, key: str, value: str) -> None:
+        _check_name(key)
+        super().append(key, value)
+
+
+class Response(responses.Response):
+    """A response that answers the request directly.
+
+    Works like Starlette's ``Response``. Header names starting with
+    ``x-middleware-`` are reserved.
     """
 
-    __slots__ = ("_body", "_destination", "_headers", "_kind", "_request_headers", "_status")
+    def init_headers(self, headers: Mapping[str, str] | None = None) -> None:
+        for name in headers or {}:
+            _check_name(name)
+        super().init_headers(headers)
 
-    _kind: Kind
-    _destination: str | None
-    _status: int
-    _body: bytes
-    _headers: dict[str, str]
-    _request_headers: dict[str, str | None]
+    @property
+    def headers(self) -> MutableHeaders:
+        """The response headers."""
+        return _CheckedHeaders(raw=self.raw_headers)
 
-    # ------------------------------------------------------------------
-    # Public factories
-    # ------------------------------------------------------------------
 
-    @staticmethod
-    def next(
+class HTMLResponse(Response, responses.HTMLResponse):
+    """A response with an HTML body. Works like Starlette's ``HTMLResponse``."""
+
+
+class PlainTextResponse(Response, responses.PlainTextResponse):
+    """A response with a plain text body. Works like Starlette's ``PlainTextResponse``."""
+
+
+class JSONResponse(Response, responses.JSONResponse):
+    """A response with a JSON body. Works like Starlette's ``JSONResponse``."""
+
+
+class RedirectResponse(Response, responses.RedirectResponse):
+    """A response that redirects the client. Works like Starlette's ``RedirectResponse``."""
+
+
+class ContinueResponse(Response):
+    """A response that lets the request continue to its destination."""
+
+    def __init__(
+        self,
         *,
         headers: Mapping[str, str] | None = None,
         request_headers: Mapping[str, str | None] | None = None,
-    ) -> "Response":
+    ) -> None:
         """Let the request continue to its destination.
 
         *headers* are added to the response.
@@ -54,16 +97,72 @@ class Response:
         *request_headers* sets headers on the forwarded request. A ``None``
         value removes that header. Omit to forward the headers unchanged.
         """
-        return Response._make(Kind.CONTINUING, None, 200, b"", headers or {}, request_headers or {})
+        super().__init__(headers=headers)
+        self.request_headers: dict[str, str | None] = dict(request_headers or {})
+        for name in self.request_headers:
+            _check_name(name)
 
-    @staticmethod
-    def rewrite(
+    @property
+    def status_code(self) -> int:
+        return 200
+
+    @status_code.setter
+    def status_code(self, value: int) -> None:
+        if value != 200:
+            raise RuntimeError("continue responses always have status 200")
+
+    @property
+    def body(self) -> bytes:
+        return b""
+
+    @body.setter
+    def body(self, value: bytes | memoryview) -> None:
+        if value:
+            raise RuntimeError("continue responses cannot have a body")
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Send the response.
+
+        *scope*, *receive* and *send* are the standard ASGI arguments.
+        """
+        control = MutableHeaders()
+        header, destination = self._destination_header()
+        control[header] = destination
+        if self.request_headers:
+            for name in self.request_headers:
+                _check_name(name)
+            names = ",".join(name.lower() for name in self.request_headers)
+            control["x-middleware-override-headers-diff"] = names
+            for name, value in self.request_headers.items():
+                if value is not None:
+                    control[f"x-middleware-request-{name.lower()}"] = value
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [*control.raw, *self.raw_headers],
+            }
+        )
+        await send({"type": "http.response.body", "body": b""})
+
+    def _destination_header(self) -> tuple[str, str]:
+        return "x-middleware-next", "1"
+
+
+class RewriteResponse(ContinueResponse):
+    """A response that serves the request from another URL.
+
+    The URL the client sees does not change.
+    """
+
+    def __init__(
+        self,
         destination: str,
         *,
         headers: Mapping[str, str] | None = None,
         request_headers: Mapping[str, str | None] | None = None,
-    ) -> "Response":
-        """Serve the request from *destination* without changing the URL the client sees.
+    ) -> None:
+        """Serve the request from *destination*.
 
         *destination* is the URL to serve the request from.
 
@@ -72,151 +171,8 @@ class Response:
         *request_headers* sets headers on the forwarded request. A ``None``
         value removes that header. Omit to forward the headers unchanged.
         """
-        return Response._make(
-            Kind.CONTINUING, destination, 200, b"", headers or {}, request_headers or {}
-        )
+        super().__init__(headers=headers, request_headers=request_headers)
+        self.destination = destination
 
-    @staticmethod
-    def redirect(
-        destination: str,
-        *,
-        status: int = 307,
-        headers: Mapping[str, str] | None = None,
-    ) -> "Response":
-        """Redirect the client to *destination*.
-
-        *destination* is the URL to redirect to.
-
-        *status* is the redirect status code and must be 3xx. Defaults to 307.
-
-        *headers* are added to the response.
-        """
-        if not (300 <= status <= 399):
-            raise ValueError(f"invalid redirect status {status}: must be a 3xx code")
-        return Response._make(Kind.TERMINATING, destination, status, b"", headers or {}, {})
-
-    @staticmethod
-    def json(
-        data: object,
-        *,
-        status: int = 200,
-        headers: Mapping[str, str] | None = None,
-    ) -> "Response":
-        """Answer the request with a JSON body.
-
-        *data* is any value that can be serialized to JSON.
-
-        *status* is the HTTP status code. Defaults to 200.
-
-        *headers* are added to the response. ``Content-Type`` is always
-        ``application/json``.
-        """
-        body = bytes(JSONResponse(data).body)
-        out = {k: v for k, v in (headers or {}).items() if k.lower() != "content-type"}
-        out["content-type"] = "application/json"
-        return Response._make(Kind.TERMINATING, None, status, body, out, {})
-
-    @staticmethod
-    def respond(
-        *,
-        status: int,
-        body: bytes = b"",
-        headers: Mapping[str, str] | None = None,
-    ) -> "Response":
-        """Answer the request with a raw HTTP response.
-
-        *status* is the HTTP status code.
-
-        *body* is the response body. Defaults to empty.
-
-        *headers* are added to the response.
-        """
-        return Response._make(Kind.TERMINATING, None, status, body, headers or {}, {})
-
-    # ------------------------------------------------------------------
-    # Read-only properties
-    # ------------------------------------------------------------------
-
-    @property
-    def kind(self) -> Kind:
-        """Whether the request continues or ends here."""
-        return self._kind
-
-    @property
-    def destination(self) -> str | None:
-        """The URL for ``rewrite`` and ``redirect`` responses."""
-        return self._destination
-
-    @property
-    def status(self) -> int:
-        """The HTTP status code."""
-        return self._status
-
-    @property
-    def body(self) -> bytes:
-        """The response body."""
-        return self._body
-
-    @property
-    def headers(self) -> Mapping[str, str]:
-        """The headers added to the response."""
-        return types.MappingProxyType(self._headers)
-
-    @property
-    def request_headers(self) -> Mapping[str, str | None]:
-        """The headers set on the forwarded request.
-
-        A ``None`` value means the header is removed. Always empty for
-        ``redirect``, ``json`` and ``respond``.
-        """
-        return types.MappingProxyType(self._request_headers)
-
-    # ------------------------------------------------------------------
-    # Immutability
-    # ------------------------------------------------------------------
-
-    def __setattr__(self, name: str, value: object) -> None:
-        raise AttributeError(f"{type(self).__name__!r} object is immutable")
-
-    def __delattr__(self, name: str) -> None:
-        raise AttributeError(f"{type(self).__name__!r} object is immutable")
-
-    # ------------------------------------------------------------------
-    # Internal constructor
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _make(
-        kind: Kind,
-        destination: str | None,
-        status: int,
-        body: bytes,
-        headers: Mapping[str, str],
-        request_headers: Mapping[str, str | None],
-    ) -> "Response":
-        names = [*headers, *request_headers]
-        if any(name.lower().startswith(_RESERVED_PREFIX) for name in names):
-            raise ValueError("invalid headers: x-middleware-* headers are reserved")
-        obj = object.__new__(Response)
-        object.__setattr__(obj, "_kind", kind)
-        object.__setattr__(obj, "_destination", destination)
-        object.__setattr__(obj, "_status", status)
-        object.__setattr__(obj, "_body", body)
-        # Copy so later mutation of the caller's dicts cannot leak in.
-        object.__setattr__(obj, "_headers", dict(headers))
-        object.__setattr__(obj, "_request_headers", dict(request_headers))
-        return obj
-
-    def __repr__(self) -> str:
-        parts = [f"kind={self._kind!r}"]
-        if self._destination is not None:
-            parts.append(f"destination={self._destination!r}")
-        if self._status != 200:
-            parts.append(f"status={self._status!r}")
-        if self._body:
-            parts.append(f"body={self._body!r}")
-        if self._headers:
-            parts.append(f"headers={self._headers!r}")
-        if self._request_headers:
-            parts.append(f"request_headers={self._request_headers!r}")
-        return f"{type(self).__name__}({', '.join(parts)})"
+    def _destination_header(self) -> tuple[str, str]:
+        return "x-middleware-rewrite", urllib.parse.quote(self.destination, safe=_DESTINATION_SAFE)

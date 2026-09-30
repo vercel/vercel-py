@@ -2,18 +2,16 @@
 
 import functools
 import inspect
-import urllib.parse
 from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
 from typing import Any, TypeAlias, TypeVar
 
 from starlette.concurrency import run_in_threadpool
-from starlette.responses import Response as StarletteResponse
 from starlette.routing import Host, Match, Route, Router
 from starlette.types import Receive, Scope, Send
 
 from vercel.proxy.request import Request
-from vercel.proxy.response import Kind, Response
+from vercel.proxy.response import ContinueResponse, Response
 
 __all__ = ["Handler", "Proxy"]
 
@@ -21,11 +19,6 @@ Handler: TypeAlias = Callable[[Request], Response | Awaitable[Response]]
 """A sync or async function that takes a request and returns a response."""
 
 _H = TypeVar("_H", bound=Handler)
-
-# Characters left unescaped when a destination URL is written into a
-# x-middleware-* header. Covers every valid URI character, plus "%" so
-# already-encoded destinations are not double-encoded.
-_DESTINATION_SAFE = "/:@!$&'()*+,;=?#%[]"
 
 
 @dataclass(frozen=True)
@@ -42,8 +35,8 @@ class Proxy:
     route in the order they were registered. Requests that match no route go
     to the fallback.
 
-    A handler returns a ``Response`` that lets the request continue,
-    rewrites it, redirects it or answers it directly. If a handler raises an
+    A handler returns a ``ContinueResponse`` or ``RewriteResponse`` to let
+    the request continue, or another ``Response`` to answer it directly. If a handler raises an
     exception, the request fails with a 500 error.
     """
 
@@ -52,13 +45,13 @@ class Proxy:
 
         *fallback* handles requests that match no route. Pass a ``Response``
         to always return it, or a handler to decide per request. Defaults to
-        ``Response.next()``, which lets the request continue unchanged.
+        ``ContinueResponse()``, which lets the request continue unchanged.
 
         *strict* requires paths to match routes exactly. Defaults to
         ``False``, which makes a trailing slash optional.
         """
         if fallback is None:
-            fallback = Response.next()
+            fallback = ContinueResponse()
         self._routes: list[_Route] = []
         self._strict = strict
         self._fallback = _respond_with(fallback) if isinstance(fallback, Response) else fallback
@@ -139,7 +132,7 @@ class Proxy:
             raise RuntimeError(f'unsupported ASGI scope type "{scope["type"]}": expected "http"')
 
         response = await self._dispatch(scope)
-        await _send_response(response, scope, receive, send)
+        await response(scope, receive, send)
 
     async def _dispatch(self, scope: Scope) -> Response:
         matched = self._match(scope)
@@ -192,32 +185,7 @@ async def _call(handler: Handler, request: Request) -> Response:
         result = await result
     if not isinstance(result, Response):
         raise TypeError(
-            f"invalid return value from proxy handler: expected Response, got "
-            f"{type(result).__name__}"
+            "invalid return value from proxy handler: expected vercel.proxy.Response, "
+            f"got {type(result).__module__}.{type(result).__qualname__}"
         )
     return result
-
-
-def _encode_destination(destination: str) -> str:
-    return urllib.parse.quote(destination, safe=_DESTINATION_SAFE)
-
-
-async def _send_response(response: Response, scope: Scope, receive: Receive, send: Send) -> None:
-    headers: dict[str, str] = {}
-    if response.kind == Kind.CONTINUING:
-        if response.destination is None:
-            headers["x-middleware-next"] = "1"
-        else:
-            headers["x-middleware-rewrite"] = _encode_destination(response.destination)
-        if response.request_headers:
-            names = ",".join(name.lower() for name in response.request_headers)
-            headers["x-middleware-override-headers-diff"] = names
-            for name, value in response.request_headers.items():
-                if value is not None:
-                    headers[f"x-middleware-request-{name.lower()}"] = value
-    elif response.destination is not None:
-        headers["x-middleware-redirect"] = _encode_destination(response.destination)
-    headers.update(response.headers)
-
-    asgi_response = StarletteResponse(response.body, status_code=response.status, headers=headers)
-    await asgi_response(scope, receive, send)
