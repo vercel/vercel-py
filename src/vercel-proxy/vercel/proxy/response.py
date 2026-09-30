@@ -27,6 +27,9 @@ _RESERVED_PREFIX = "x-middleware-"
 # already-encoded destinations are not double-encoded.
 _DESTINATION_SAFE = "/:@!$&'()*+,;=?#%[]"
 
+# Statuses Vercel follows as redirects.
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+
 
 # Characters allowed in an HTTP header name.
 _RESPONSE_HEADER_NAME = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
@@ -156,6 +159,17 @@ class RedirectResponse(Response, responses.RedirectResponse):
 
     # Vercel follows redirects through their Location header.
     is_terminating = False
+
+    @property
+    def status_code(self) -> int:
+        """The redirect status code. It must be 301, 302, 303, 307 or 308."""
+        return self._status_code
+
+    @status_code.setter
+    def status_code(self, value: int) -> None:
+        if value not in _REDIRECT_STATUSES:
+            raise ValueError(f"invalid redirect status {value}: must be 301, 302, 303, 307 or 308")
+        self._status_code = value
 
 
 class ContinueResponse(Response):

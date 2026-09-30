@@ -115,6 +115,28 @@ def test_redirect_response() -> None:
     assert res.headers["location"] == "/caf%C3%A9%20menu"
 
 
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+def test_redirect_accepts_3xx(status: int) -> None:
+    assert RedirectResponse("/x", status_code=status).status_code == status
+
+
+@pytest.mark.parametrize("status", [200, 300, 304, 305, 306, 399, 404])
+def test_redirect_rejects_non_3xx(status: int) -> None:
+    with pytest.raises(
+        ValueError, match=f"invalid redirect status {status}: must be 301, 302, 303, 307 or 308"
+    ):
+        RedirectResponse("/x", status_code=status)
+
+
+def test_redirect_rejects_non_3xx_after_creation() -> None:
+    res = RedirectResponse("/x")
+    with pytest.raises(
+        ValueError, match="invalid redirect status 200: must be 301, 302, 303, 307 or 308"
+    ):
+        res.status_code = 200
+    assert res.status_code == 307
+
+
 def test_text_responses_content_type() -> None:
     assert PlainTextResponse("hi").headers["content-type"] == "text/plain; charset=utf-8"
     assert HTMLResponse("<p>").headers["content-type"] == "text/html; charset=utf-8"
