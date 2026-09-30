@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.0 - 2026-09-30
+
+### Features
+
+- Support `/var/run/secrets/vercel.com/token` as an OIDC fallback with expiration-aware caching and automatic rereads for rotated tokens. (#408)
+
 ## 0.9.0 - 2026-09-14
 
 ### Features

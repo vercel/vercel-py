@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.11.1 - 2026-09-30
+
+### Bug Fixes
+
+- Fix missing workflow operations during replay being reported as runtime errors instead of nondeterminism errors. (#416)
+- Fix workflow replay failures when a hook is disposed before its recorded registration is replayed. (#419)
+- Fail workflow replay when a hook's token differs from a token carried by its recorded events. (#418)
+
 ## 0.11.0 - 2026-09-23
 
 ### Features

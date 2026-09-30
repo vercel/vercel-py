@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.1 - 2026-09-30
+
+### Internal
+
+- Add shared environment-based coding-agent detection for SDK request attribution. (#424)
+
 ## 0.2.0 - 2026-09-14
 
 ### Features
