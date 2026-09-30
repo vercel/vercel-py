@@ -28,7 +28,6 @@ from .validation import (
     validate_pathname,
     validate_url_or_pathname,
 )
-from .wire import PutRequest
 
 
 class BlobService:
@@ -69,17 +68,17 @@ class BlobService:
         cache_control_max_age: int | None = None,
     ) -> PutResult:
         self.check_open()
-        request = PutRequest.from_input(
-            pathname=pathname,
-            body=body,
+        credentials = await self._get_credentials()
+        return await self._api_client.put(
+            pathname,
+            body,
             access=access,
+            credentials=credentials,
             add_random_suffix=add_random_suffix,
             allow_overwrite=allow_overwrite,
             content_type=content_type,
             cache_control_max_age=cache_control_max_age,
         )
-        credentials = await self._get_credentials()
-        return await self._api_client.put(request, credentials=credentials)
 
     async def head(self, url_or_pathname: str) -> HeadResult:
         self.check_open()

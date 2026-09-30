@@ -63,6 +63,36 @@ def validate_put_body(body: object) -> bytes:
     return body
 
 
+def validate_bool_flag(value: object, *, name: str) -> bool:
+    if not isinstance(value, bool):
+        raise TypeError(f"{name} must be bool, got {type(value).__name__}")
+    return value
+
+
+def validate_content_type(content_type: object) -> str | None:
+    if content_type is None:
+        return None
+    if not isinstance(content_type, str):
+        raise ValueError("content_type must be a string")
+    if not content_type:
+        raise ValueError("content_type cannot be empty")
+    if not content_type.isascii():
+        raise ValueError("content_type must be ASCII")
+    if has_control_character(content_type):
+        raise ValueError("content_type cannot contain control characters")
+    return content_type
+
+
+def validate_cache_control_max_age(cache_control_max_age: object) -> int | None:
+    if cache_control_max_age is None:
+        return None
+    if isinstance(cache_control_max_age, bool) or not isinstance(cache_control_max_age, int):
+        raise TypeError("cache_control_max_age must be an integer, not bool")
+    if cache_control_max_age < 0:
+        raise ValueError("cache_control_max_age must be nonnegative")
+    return cache_control_max_age
+
+
 def is_url(value: str) -> bool:
     if not isinstance(value, str):
         return False

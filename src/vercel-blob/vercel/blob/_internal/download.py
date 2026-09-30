@@ -7,24 +7,16 @@ from types import TracebackType
 
 import anyio
 
-from vercel._internal.core.errors import VercelSessionClosedError
 from vercel._internal.core.http.transport import StreamingResponse
 from vercel._internal.core.iter_coroutine import iter_coroutine
 from vercel.blob.errors import BlobStreamError
 from vercel.blob.models import DownloadMetadata
 
 
-class AsyncBlobDownload:
-    """Asynchronous streaming download entered via an async context manager."""
+class _BlobDownloadCore:
+    """Own consumption, read exclusion, and cleanup for a download stream."""
 
-    __slots__ = (
-        "_stream",
-        "_metadata",
-        "_closed",
-        "_consumed",
-        "_reading",
-        "_check_session",
-    )
+    __slots__ = ("_stream", "_metadata", "_closed", "_consumed", "_reading", "_check_session")
 
     def __init__(
         self,
@@ -48,7 +40,7 @@ class AsyncBlobDownload:
     def is_closed(self) -> bool:
         return self._closed
 
-    def __aiter__(self) -> AsyncIterator[bytes]:
+    def _begin_iteration(self) -> None:
         if self._closed:
             raise BlobStreamError("Cannot read from closed download")
         if self._consumed:
@@ -56,6 +48,46 @@ class AsyncBlobDownload:
         if self._check_session is not None:
             self._check_session()
         self._consumed = True
+
+    async def _next_chunk(self) -> bytes:
+        if self._closed:
+            raise BlobStreamError("Cannot read from closed download")
+        if self._reading:
+            raise BlobStreamError("Concurrent reads on the same download stream are not permitted")
+        self._reading = True
+        try:
+            if self._check_session is not None:
+                self._check_session()
+            return await self._stream.__anext__()
+        except StopAsyncIteration:
+            await self._close()
+            raise
+        except BaseException:
+            try:
+                await self._close()
+            except BaseException:
+                pass
+            raise
+        finally:
+            self._reading = False
+
+    async def _close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        await self._close_stream()
+
+    async def _close_stream(self) -> None:
+        await self._stream.aclose()
+
+
+class AsyncBlobDownload(_BlobDownloadCore):
+    """Asynchronous streaming download entered via an async context manager."""
+
+    __slots__ = ()
+
+    def __aiter__(self) -> AsyncIterator[bytes]:
+        self._begin_iteration()
         return self._chunks()
 
     async def _chunks(self) -> AsyncIterator[bytes]:
@@ -67,91 +99,23 @@ class AsyncBlobDownload:
             yield chunk
 
     async def __anext__(self) -> bytes:
-        if self._closed:
-            raise BlobStreamError("Cannot read from closed download")
-        if self._check_session is not None:
-            try:
-                self._check_session()
-            except VercelSessionClosedError:
-                with anyio.CancelScope(shield=True):
-                    try:
-                        await self._stream.aclose()
-                    except BaseException:
-                        pass
-                self._closed = True
-                raise
-
-        if self._reading:
-            raise BlobStreamError("Concurrent reads on the same download stream are not permitted")
-        self._reading = True
-        try:
-            return await self._stream.__anext__()
-        except StopAsyncIteration:
-            self._closed = True
-            with anyio.CancelScope(shield=True):
-                await self._stream.aclose()
-            raise
-        except BaseException:
-            self._closed = True
-            with anyio.CancelScope(shield=True):
-                try:
-                    await self._stream.aclose()
-                except BaseException:
-                    pass
-            raise
-        finally:
-            self._reading = False
+        return await self._next_chunk()
 
     async def aclose(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
+        await self._close()
+
+    async def _close_stream(self) -> None:
         with anyio.CancelScope(shield=True):
-            await self._stream.aclose()
+            await super()._close_stream()
 
 
-class SyncBlobDownload:
+class SyncBlobDownload(_BlobDownloadCore):
     """Synchronous streaming download entered via a standard context manager."""
 
-    __slots__ = (
-        "_stream",
-        "_metadata",
-        "_closed",
-        "_consumed",
-        "_reading",
-        "_check_session",
-    )
-
-    def __init__(
-        self,
-        stream: StreamingResponse,
-        metadata: DownloadMetadata,
-        *,
-        check_session: Callable[[], None] | None = None,
-    ) -> None:
-        self._stream = stream
-        self._metadata = metadata
-        self._closed = False
-        self._consumed = False
-        self._reading = False
-        self._check_session = check_session
-
-    @property
-    def metadata(self) -> DownloadMetadata:
-        return self._metadata
-
-    @property
-    def is_closed(self) -> bool:
-        return self._closed
+    __slots__ = ()
 
     def __iter__(self) -> Iterator[bytes]:
-        if self._closed:
-            raise BlobStreamError("Cannot read from closed download")
-        if self._consumed:
-            raise BlobStreamError("Download stream can only be consumed once")
-        if self._check_session is not None:
-            self._check_session()
-        self._consumed = True
+        self._begin_iteration()
         return self._chunks()
 
     def _chunks(self) -> Iterator[bytes]:
@@ -163,43 +127,13 @@ class SyncBlobDownload:
             yield chunk
 
     def __next__(self) -> bytes:
-        if self._closed:
-            raise BlobStreamError("Cannot read from closed download")
-        if self._check_session is not None:
-            try:
-                self._check_session()
-            except VercelSessionClosedError:
-                self._closed = True
-                try:
-                    iter_coroutine(self._stream.aclose())
-                except BaseException:
-                    pass
-                raise
-
-        if self._reading:
-            raise BlobStreamError("Concurrent reads on the same download stream are not permitted")
-        self._reading = True
         try:
-            return iter_coroutine(self._stream.__anext__())
+            return iter_coroutine(self._next_chunk())
         except StopAsyncIteration:
-            self._closed = True
-            iter_coroutine(self._stream.aclose())
             raise StopIteration from None
-        except BaseException:
-            self._closed = True
-            try:
-                iter_coroutine(self._stream.aclose())
-            except BaseException:
-                pass
-            raise
-        finally:
-            self._reading = False
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        iter_coroutine(self._stream.aclose())
+        iter_coroutine(self._close())
 
 
 class AsyncDownloadContext:

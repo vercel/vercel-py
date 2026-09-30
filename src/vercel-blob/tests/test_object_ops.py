@@ -211,6 +211,47 @@ def test_sync_put_success() -> None:
     assert req.headers["x-allow-overwrite"] == "0"
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize("cache_age", [None, 0, 60])
+async def test_put_valid_input_boundaries(cache_age: int | None) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["pathname"] == "valid.bin"
+        assert request.content == b""
+        assert "x-content-type" not in request.headers
+        if cache_age is None:
+            assert "x-cache-control-max-age" not in request.headers
+        else:
+            assert request.headers["x-cache-control-max-age"] == str(cache_age)
+        return httpx.Response(200, json=_object_json("valid.bin"))
+
+    async with _async_session(handler):
+        result = await blob.put(
+            "/valid.bin", b"", access="public", content_type=None, cache_control_max_age=cache_age
+        )
+
+    assert result.pathname == "valid.bin"
+
+
+@pytest.mark.parametrize("cache_age", [None, 0, 60])
+def test_sync_put_valid_input_boundaries(cache_age: int | None) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["pathname"] == "valid.bin"
+        assert request.content == b""
+        assert "x-content-type" not in request.headers
+        if cache_age is None:
+            assert "x-cache-control-max-age" not in request.headers
+        else:
+            assert request.headers["x-cache-control-max-age"] == str(cache_age)
+        return httpx.Response(200, json=_object_json("valid.bin"))
+
+    with _sync_session(handler):
+        result = blob.sync.put(
+            "/valid.bin", b"", access="public", content_type=None, cache_control_max_age=cache_age
+        )
+
+    assert result.pathname == "valid.bin"
+
+
 _INVALID_PUT_INPUTS = [
     pytest.param({"body": "not bytes"}, TypeError, "put body must be bytes", id="str-body"),
     pytest.param(
@@ -236,13 +277,21 @@ _INVALID_PUT_INPUTS = [
         "cache_control_max_age must be an integer, not bool",
         id="bool-age",
     ),
-    pytest.param({"cache_control_max_age": -1}, TypeError, "must be an integer", id="negative-age"),
+    pytest.param(
+        {"cache_control_max_age": -1}, ValueError, "must be nonnegative", id="negative-age"
+    ),
     pytest.param({"cache_control_max_age": 1.5}, TypeError, "must be an integer", id="float-age"),
+    pytest.param({"cache_control_max_age": "1"}, TypeError, "must be an integer", id="str-age"),
+    pytest.param({"add_random_suffix": "true"}, TypeError, "must be bool", id="str-suffix"),
+    pytest.param({"allow_overwrite": None}, TypeError, "must be bool", id="null-overwrite"),
     pytest.param({"content_type": 123}, ValueError, "must be a string", id="non-string-type"),
     pytest.param(
         {"content_type": "text/plain\r\n"}, ValueError, "control characters", id="control-type"
     ),
     pytest.param({"content_type": ""}, ValueError, "content_type cannot be empty", id="empty-type"),
+    pytest.param(
+        {"content_type": "text/plain\x7f"}, ValueError, "control characters", id="delete-type"
+    ),
     pytest.param(
         {"content_type": "text/plain; café=1"},
         ValueError,
@@ -254,11 +303,15 @@ _INVALID_PUT_INPUTS = [
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("invalid,error,message", _INVALID_PUT_INPUTS)
-async def test_put_invalid_input_zero_io(
+async def test_put_invalid_input_resolves_credentials_without_http(
     invalid: dict[str, Any], error: type[Exception], message: str
 ) -> None:
+    credentials_calls = 0
+
     def credentials() -> BlobCredentials:
-        pytest.fail("Invalid arguments must not resolve credentials")
+        nonlocal credentials_calls
+        credentials_calls += 1
+        return _credentials()
 
     def handler(request: httpx.Request) -> httpx.Response:
         pytest.fail("Invalid arguments must not send HTTP requests")
@@ -268,13 +321,19 @@ async def test_put_invalid_input_zero_io(
         with pytest.raises(error, match=message):
             await blob.put(**arguments)
 
+    assert credentials_calls == 1
+
 
 @pytest.mark.parametrize("invalid,error,message", _INVALID_PUT_INPUTS)
-def test_sync_put_invalid_input_zero_io(
+def test_sync_put_invalid_input_resolves_credentials_without_http(
     invalid: dict[str, Any], error: type[Exception], message: str
 ) -> None:
+    credentials_calls = 0
+
     def credentials() -> BlobCredentials:
-        pytest.fail("Invalid arguments must not resolve credentials")
+        nonlocal credentials_calls
+        credentials_calls += 1
+        return _credentials()
 
     def handler(request: httpx.Request) -> httpx.Response:
         pytest.fail("Invalid arguments must not send HTTP requests")
@@ -283,6 +342,8 @@ def test_sync_put_invalid_input_zero_io(
         arguments = {"pathname": "valid.bin", "body": b"123", "access": "public"} | invalid
         with pytest.raises(error, match=message):
             blob.sync.put(**arguments)
+
+    assert credentials_calls == 1
 
 
 @pytest.mark.anyio
