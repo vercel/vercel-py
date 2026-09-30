@@ -2,10 +2,11 @@
 
 import urllib.parse
 from collections.abc import Mapping
+from typing import ClassVar
 
 from starlette import responses
 from starlette.datastructures import MutableHeaders
-from starlette.types import Receive, Scope, Send
+from starlette.types import Message, Receive, Scope, Send
 
 __all__ = [
     "ContinueResponse",
@@ -54,6 +55,9 @@ class Response(responses.Response):
     ``x-middleware-`` are reserved.
     """
 
+    # Whether Vercel should send this response to the client as is.
+    is_terminating: ClassVar[bool] = True
+
     def init_headers(self, headers: Mapping[str, str] | None = None) -> None:
         for name in headers or {}:
             _check_name(name)
@@ -63,6 +67,25 @@ class Response(responses.Response):
     def headers(self) -> MutableHeaders:
         """The response headers."""
         return _CheckedHeaders(raw=self.raw_headers)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Send the response.
+
+        *scope*, *receive* and *send* are the standard ASGI arguments.
+        """
+        if not self.is_terminating:
+            await super().__call__(scope, receive, send)
+            return
+
+        # Vercel only treats a response as final on its own when it has no
+        # Location header, so mark it explicitly to keep its body.
+        async def send_final(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                headers = [*message["headers"], (b"x-middleware-refresh", b"1")]
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await super().__call__(scope, receive, send_final)
 
 
 class HTMLResponse(Response, responses.HTMLResponse):
@@ -80,9 +103,14 @@ class JSONResponse(Response, responses.JSONResponse):
 class RedirectResponse(Response, responses.RedirectResponse):
     """A response that redirects the client. Works like Starlette's ``RedirectResponse``."""
 
+    # Vercel follows redirects through their Location header.
+    is_terminating = False
+
 
 class ContinueResponse(Response):
     """A response that lets the request continue to its destination."""
+
+    is_terminating = False
 
     def __init__(
         self,

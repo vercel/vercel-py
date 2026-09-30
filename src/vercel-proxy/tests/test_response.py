@@ -73,6 +73,22 @@ def test_subclasses_starlette(cls: type[Response], base: type[responses.Response
     assert issubclass(cls, base)
 
 
+@pytest.mark.parametrize(
+    ("cls", "expected"),
+    [
+        (Response, True),
+        (HTMLResponse, True),
+        (PlainTextResponse, True),
+        (JSONResponse, True),
+        (RedirectResponse, False),
+        (ContinueResponse, False),
+        (RewriteResponse, False),
+    ],
+)
+def test_is_terminating(cls: type[Response], expected: bool) -> None:
+    assert cls.is_terminating is expected
+
+
 def test_continue_response_is_response() -> None:
     assert isinstance(ContinueResponse(), Response)
 

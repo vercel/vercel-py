@@ -161,7 +161,7 @@ async def test_caller_content_length_not_overridden() -> None:
     proxy = Proxy()
     proxy.route("/")(lambda req: Response(b"abc", status_code=200, headers={"Content-Length": "3"}))
     sent = await call(proxy, make_scope())
-    assert sent.headers == [(b"content-length", b"3")]
+    assert sent.headers == [(b"content-length", b"3"), (b"x-middleware-refresh", b"1")]
 
 
 async def test_rewrite_encodes_destination() -> None:
@@ -218,7 +218,11 @@ async def test_json_emits_body_and_headers() -> None:
     proxy.route("/")(lambda req: JSONResponse({"ok": True}, status_code=403))
     sent = await call(proxy, make_scope())
     assert (sent.status, sent.body) == (403, b'{"ok":true}')
-    assert sent.headers == [(b"content-length", b"11"), (b"content-type", b"application/json")]
+    assert sent.headers == [
+        (b"content-length", b"11"),
+        (b"content-type", b"application/json"),
+        (b"x-middleware-refresh", b"1"),
+    ]
 
 
 async def test_respond_emits_raw_response() -> None:
@@ -226,7 +230,37 @@ async def test_respond_emits_raw_response() -> None:
     proxy.route("/")(lambda req: Response(b"tea", status_code=418, headers={"X-A": "1"}))
     sent = await call(proxy, make_scope())
     assert (sent.status, sent.body) == (418, b"tea")
-    assert sent.headers == [(b"x-a", b"1"), (b"content-length", b"3")]
+    assert sent.headers == [
+        (b"x-a", b"1"),
+        (b"content-length", b"3"),
+        (b"x-middleware-refresh", b"1"),
+    ]
+
+
+async def test_response_with_location_marked_final() -> None:
+    proxy = Proxy()
+    proxy.route("/")(
+        lambda req: JSONResponse({"id": 1}, status_code=201, headers={"location": "/items/1"})
+    )
+    sent = await call(proxy, make_scope())
+    assert (sent.status, sent.body) == (201, b'{"id":1}')
+    assert sent.header_dict["location"] == "/items/1"
+    assert sent.header_dict["x-middleware-refresh"] == "1"
+
+
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+async def test_redirect_not_marked_final(status: int) -> None:
+    proxy = Proxy()
+    proxy.route("/")(lambda req: RedirectResponse("/login", status_code=status))
+    sent = await call(proxy, make_scope())
+    assert "x-middleware-refresh" not in sent.header_dict
+
+
+async def test_hand_built_redirect_marked_final() -> None:
+    proxy = Proxy()
+    proxy.route("/")(lambda req: Response(status_code=302, headers={"location": "/login"}))
+    sent = await call(proxy, make_scope())
+    assert sent.header_dict["x-middleware-refresh"] == "1"
 
 
 # ---------------------------------------------------------------------------
