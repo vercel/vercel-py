@@ -135,30 +135,38 @@ class Proxy:
         await response(scope, receive, send)
 
     async def _dispatch(self, scope: Scope) -> Response:
-        matched = self._match(scope)
-        # An exact match wins, so the other trailing slash form is tried
-        # only when no route matches the path as given.
-        if matched is None and not self._strict:
-            path = scope["path"]
-            toggled = path[:-1] if path.endswith("/") else f"{path}/"
-            matched = self._match({**scope, "path": toggled})
-        handler, path_params = matched or (self._fallback, {})
+        handler, path_params = self._match(scope) or (self._fallback, {})
         # The handler sees the path as the client sent it.
         request = Request({**scope, "app": self, "path_params": path_params})
         return await _call(handler, request)
 
     def _match(self, scope: Scope) -> tuple[Handler, dict[str, Any]] | None:
+        candidates = [scope]
+        if not self._strict:
+            path = scope["path"]
+            toggled = path[:-1] if path.endswith("/") else f"{path}/"
+            candidates.append({**scope, "path": toggled})
+        # Each route tries both slash forms before the next route, so the
+        # first matching route wins.
         for route in self._routes:
-            matched_scope = scope
-            if route.host is not None:
-                match, child_scope = route.host.matches(matched_scope)
-                if match != Match.FULL:
-                    continue
-                matched_scope = {**matched_scope, "path_params": child_scope["path_params"]}
-            match, child_scope = route.path.matches(matched_scope)
-            if match == Match.FULL:
-                return route.handler, child_scope["path_params"]
+            for candidate in candidates:
+                path_params = _match_route(route, candidate)
+                if path_params is not None:
+                    return route.handler, path_params
         return None
+
+
+def _match_route(route: _Route, scope: Scope) -> dict[str, Any] | None:
+    if route.host is not None:
+        match, child_scope = route.host.matches(scope)
+        if match != Match.FULL:
+            return None
+        scope = {**scope, "path_params": child_scope["path_params"]}
+    match, child_scope = route.path.matches(scope)
+    if match != Match.FULL:
+        return None
+    path_params: dict[str, Any] = child_scope["path_params"]
+    return path_params
 
 
 def _respond_with(response: Response) -> Handler:

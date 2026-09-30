@@ -325,12 +325,26 @@ async def test_trailing_slash_request_path_unchanged() -> None:
     assert seen == ["/about/"]
 
 
-async def test_trailing_slash_exact_match_wins() -> None:
+async def test_trailing_slash_first_route_wins() -> None:
     proxy = Proxy()
     proxy.route("/about")(lambda req: Response(status_code=201))
     proxy.route("/about/")(lambda req: Response(status_code=202))
     assert (await call(proxy, make_scope("/about"))).status == 201
-    assert (await call(proxy, make_scope("/about/"))).status == 202
+    assert (await call(proxy, make_scope("/about/"))).status == 201
+
+
+async def test_trailing_slash_keeps_route_order() -> None:
+    proxy = Proxy()
+    proxy.route("/users/{id}")(lambda req: Response(status_code=201))
+    proxy.route("/{path:path}")(lambda req: Response(status_code=202))
+    assert (await call(proxy, make_scope("/users/1/"))).status == 201
+
+
+async def test_strict_keeps_route_order() -> None:
+    proxy = Proxy(strict=True)
+    proxy.route("/users/{id}")(lambda req: Response(status_code=201))
+    proxy.route("/{path:path}")(lambda req: Response(status_code=202))
+    assert (await call(proxy, make_scope("/users/1/"))).status == 202
 
 
 async def test_trailing_slash_only_one_optional() -> None:
