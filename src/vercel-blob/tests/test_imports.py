@@ -36,6 +36,12 @@ def test_blob_packages_import() -> None:
         "BlobUnknownError",
     }
 
+    for module in (blob, sync_blob):
+        for name in expected_common:
+            assert hasattr(module, name), f"{name} missing from {module.__name__}"
+
+    assert hasattr(blob, "BlobServiceOptions")
+    assert hasattr(sync_blob, "SyncBlobServiceOptions")
     assert expected_common.issubset(set(blob.__all__))
     assert "BlobServiceOptions" in blob.__all__
     assert "sync" in blob.__all__
