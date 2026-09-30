@@ -32,6 +32,7 @@ def _examples() -> list[Path]:
 
 
 @pytest.mark.parametrize("script", _examples(), ids=lambda path: path.name)
+@pytest.mark.usefixtures("store")
 def test_example(script: Path) -> None:
     result = subprocess.run(
         [sys.executable, str(script)], capture_output=True, text=True, timeout=120

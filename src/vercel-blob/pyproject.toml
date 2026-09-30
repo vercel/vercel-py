@@ -20,6 +20,7 @@ dependencies = [
     "vercel-oidc>=0.8.0",
     "anyio>=4.0.0,<5",
     "httpx2>=2",
+    "pydantic>=2.7.0,<3",
 ]
 
 [tool.uv.sources]

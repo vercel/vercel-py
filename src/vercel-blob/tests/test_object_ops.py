@@ -236,6 +236,12 @@ _INVALID_PUT_INPUTS = [
         "cache_control_max_age must be an integer, not bool",
         id="bool-age",
     ),
+    pytest.param({"cache_control_max_age": -1}, TypeError, "must be an integer", id="negative-age"),
+    pytest.param({"cache_control_max_age": 1.5}, TypeError, "must be an integer", id="float-age"),
+    pytest.param({"content_type": 123}, ValueError, "must be a string", id="non-string-type"),
+    pytest.param(
+        {"content_type": "text/plain\r\n"}, ValueError, "control characters", id="control-type"
+    ),
     pytest.param({"content_type": ""}, ValueError, "content_type cannot be empty", id="empty-type"),
     pytest.param(
         {"content_type": "text/plain; café=1"},
@@ -593,7 +599,7 @@ async def test_delete_success() -> None:
         return httpx.Response(200, json={})
 
     async with _async_session(handler):
-        assert await blob.delete("f.txt") is None
+        await blob.delete("f.txt")
     assert len(captured) == 1
     assert captured[0].method == "POST"
     assert captured[0].url.path.endswith("/delete")
@@ -671,6 +677,7 @@ async def test_error_mappings(
     assert caught.value.status_code == status
     assert caught.value.code == code
     if retry_after is not None:
+        assert isinstance(caught.value, BlobServiceRateLimited)
         assert caught.value.retry_after == retry_after
     else:
         assert "backend failure" in str(caught.value)
@@ -732,8 +739,32 @@ async def test_credentials_factory_store_id_divergence_fails() -> None:
 @pytest.mark.parametrize(
     "operation,field,value,message",
     [
-        pytest.param("put", "url", 12345, "must be a string", id="put-url"),
-        pytest.param("head", "size", True, "invalid size", id="head-size"),
+        pytest.param(operation, field, 12345, "must be a string", id=f"{operation}-{field}")
+        for operation, fields in (
+            (
+                "put",
+                ("url", "downloadUrl", "pathname", "contentType", "contentDisposition", "etag"),
+            ),
+            (
+                "head",
+                (
+                    "url",
+                    "downloadUrl",
+                    "pathname",
+                    "etag",
+                    "contentType",
+                    "contentDisposition",
+                    "cacheControl",
+                ),
+            ),
+        )
+        for field in fields
+    ]
+    + [
+        pytest.param("head", "size", True, "invalid size", id="head-bool-size"),
+        pytest.param("head", "size", -1, "invalid size", id="head-negative-size"),
+        pytest.param("head", "uploadedAt", 12345, "uploadedAt", id="head-numeric-date"),
+        pytest.param("head", "uploadedAt", "not-a-date", "uploadedAt", id="head-invalid-date"),
     ],
 )
 async def test_strict_json_parsing(operation: str, field: str, value: object, message: str) -> None:
@@ -749,14 +780,71 @@ async def test_strict_json_parsing(operation: str, field: str, value: object, me
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("access", ["public", "private"])
+@pytest.mark.parametrize("operation", ["put", "head"])
 @pytest.mark.parametrize(
-    "headers,message",
+    "content,message",
     [
-        pytest.param({"content-length": "not_a_number"}, "invalid content-length", id="length"),
-        pytest.param({"last-modified": "garbage-date"}, "invalid last-modified", id="modified"),
+        pytest.param(b"not-json", "not valid JSON", id="invalid-json"),
+        pytest.param(b"[]", "JSON object", id="array"),
+        pytest.param(b"null", "JSON object", id="null"),
+        pytest.param(b"{}", "must be a string", id="missing-fields"),
     ],
 )
+async def test_invalid_response_payload(operation: str, content: bytes, message: str) -> None:
+    async with _async_session(lambda _: httpx.Response(200, content=content)):
+        with pytest.raises(BlobStreamError, match=message):
+            if operation == "put":
+                await blob.put("f.txt", b"x", access="public")
+            else:
+                await blob.head("f.txt")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("operation", ["put", "head"])
+@pytest.mark.parametrize("encoding", ["utf-8-sig", "utf-16", "utf-32"])
+async def test_response_json_encoding_compatibility(operation: str, encoding: str) -> None:
+    content = json.dumps(_object_json("f.txt", size=1)).encode(encoding)
+    result: PutResult | HeadResult
+    async with _async_session(lambda _: httpx.Response(200, content=content)):
+        if operation == "put":
+            result = await blob.put("f.txt", b"x", access="public")
+        else:
+            result = await blob.head("f.txt")
+    assert result.pathname == "f.txt"
+    assert result.etag == "etag"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "uploaded_at",
+    ["2026-09-29T12:00:00.000Z", "2026-09-29T12:00:00+00:00", "2026-09-29T12:00:00", "2026-09-29"],
+)
+async def test_head_preserves_timestamp_formats_and_optional_defaults(uploaded_at: str) -> None:
+    payload = _object_json("f.txt", size=1)
+    payload["uploadedAt"] = uploaded_at
+    payload["futureField"] = "ignored"
+    for field in ("contentType", "contentDisposition", "cacheControl"):
+        del payload[field]
+    async with _async_session(lambda _: httpx.Response(200, json=payload)):
+        result = await blob.head("f.txt")
+    assert result.uploaded_at.year == 2026
+    assert result.uploaded_at.month == 9
+    assert result.uploaded_at.day == 29
+    assert result.content_type is None
+    assert result.content_disposition == ""
+    assert result.cache_control == ""
+
+
+_INVALID_DOWNLOAD_HEADERS = [
+    pytest.param({"content-length": "not_a_number"}, "invalid content-length", id="length"),
+    pytest.param({"content-length": "-1"}, "invalid content-length", id="negative-length"),
+    pytest.param({"last-modified": "garbage-date"}, "invalid last-modified", id="modified"),
+]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("access", ["public", "private"])
+@pytest.mark.parametrize("headers,message", _INVALID_DOWNLOAD_HEADERS)
 async def test_malformed_get_metadata_closes_response(
     access: blob.Access, headers: dict[str, str], message: str
 ) -> None:
@@ -764,6 +852,22 @@ async def test_malformed_get_metadata_closes_response(
     async with _async_session(lambda _: httpx.Response(200, headers=headers, stream=stream)):
         with pytest.raises(BlobStreamError, match=message):
             async with blob.get(
+                f"https://{TEST_STORE}.{access}.blob.vercel-storage.com/f.txt", access=access
+            ):
+                pass
+    assert stream.closed
+    assert stream.yielded_count == 0
+
+
+@pytest.mark.parametrize("access", ["public", "private"])
+@pytest.mark.parametrize("headers,message", _INVALID_DOWNLOAD_HEADERS)
+def test_sync_malformed_get_metadata_closes_response(
+    access: blob.Access, headers: dict[str, str], message: str
+) -> None:
+    stream = _TrackingSyncStream([b"data"])
+    with _sync_session(lambda _: httpx.Response(200, headers=headers, stream=stream)):
+        with pytest.raises(BlobStreamError, match=message):
+            with blob.sync.get(
                 f"https://{TEST_STORE}.{access}.blob.vercel-storage.com/f.txt", access=access
             ):
                 pass
@@ -811,6 +915,7 @@ def _lifecycle_handler(
     storage: dict[str, bytes], *, asynchronous: bool
 ) -> Callable[[httpx.Request], httpx.Response]:
     def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["x-api-version"] == "12"
         if request.method == "PUT":
             pathname = request.url.params["pathname"]
             storage[pathname] = request.content

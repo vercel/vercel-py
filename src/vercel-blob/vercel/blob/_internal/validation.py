@@ -37,36 +37,6 @@ def validate_access(access: object) -> Literal["public", "private"]:
     raise BlobError("access must be 'public' or 'private'")
 
 
-def validate_bool_flag(name: str, value: object) -> bool:
-    if type(value) is not bool:
-        raise TypeError(f"{name} must be bool, got {type(value).__name__}")
-    return value
-
-
-def validate_cache_control_max_age(value: object) -> int | None:
-    if value is None:
-        return None
-    if type(value) is bool or not isinstance(value, int) or value < 0:
-        raise TypeError("cache_control_max_age must be an integer, not bool")
-    return value
-
-
-def validate_content_type(content_type: object) -> str | None:
-    if content_type is None:
-        return None
-    if not isinstance(content_type, str):
-        raise ValueError("content_type must be a string")
-    if not content_type:
-        raise ValueError("content_type cannot be empty")
-    try:
-        content_type.encode("ascii")
-    except UnicodeEncodeError:
-        raise ValueError("content_type must be ASCII") from None
-    if has_control_character(content_type):
-        raise ValueError("content_type cannot contain control characters")
-    return content_type
-
-
 def validate_pathname(pathname: object) -> str:
     if not isinstance(pathname, str):
         raise BlobError("pathname must be a string")

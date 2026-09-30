@@ -11,7 +11,6 @@ from vercel._internal.core.session import get_active_sync_session
 from .._internal.download import SyncBlobDownload, SyncDownloadContext
 from .._internal.options import SyncBlobServiceOptions
 from .._internal.service import get_sync_blob_service
-from .._internal.wire import validate_and_parse_download_response
 from ..errors import (
     BlobAccessError,
     BlobContentTypeNotAllowedError,
@@ -75,12 +74,7 @@ def get(
 
     def opener() -> SyncBlobDownload:
         service = get_sync_blob_service(session)
-        stream, target_url = iter_coroutine(service.open_download(url_or_pathname, access=access))
-        try:
-            metadata = validate_and_parse_download_response(target_url, stream.response)
-        except BaseException:
-            iter_coroutine(stream.aclose())
-            raise
+        stream, metadata = iter_coroutine(service.open_download(url_or_pathname, access=access))
         return SyncBlobDownload(stream, metadata, check_session=service.check_open)
 
     return SyncDownloadContext(opener)

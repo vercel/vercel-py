@@ -1,4 +1,4 @@
-"""Wire protocol encoding, response parsing, and error mapping for Vercel Blob."""
+"""Pydantic wire models, format codecs, and error mapping for Vercel Blob."""
 
 from __future__ import annotations
 
@@ -6,8 +6,21 @@ import math
 from collections.abc import Mapping
 from datetime import datetime
 from email.utils import parsedate_to_datetime
+from typing import Annotated, TypeVar
 
 import httpx2 as httpx
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StringConstraints,
+    ValidationError,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 from vercel.blob.errors import (
     BlobAccessError,
@@ -24,7 +37,230 @@ from vercel.blob.errors import (
     BlobStreamError,
     BlobUnknownError,
 )
-from vercel.blob.models import DownloadMetadata, HeadResult, PutResult
+from vercel.blob.models import Access, DownloadMetadata, HeadResult, PutResult
+
+from .validation import validate_access, validate_pathname, validate_put_body
+
+
+class _ApiModel(BaseModel):
+    model_config = ConfigDict(extra="ignore", frozen=True, strict=True)
+
+
+class PutRequest(_ApiModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    pathname: Annotated[str, BeforeValidator(validate_pathname)]
+    body: Annotated[bytes, BeforeValidator(validate_put_body)]
+    access: Annotated[Access, BeforeValidator(validate_access)] = Field(
+        serialization_alias="x-vercel-blob-access"
+    )
+    add_random_suffix: StrictBool = Field(default=True, serialization_alias="x-add-random-suffix")
+    allow_overwrite: StrictBool = Field(default=False, serialization_alias="x-allow-overwrite")
+    content_type: (
+        Annotated[str, StringConstraints(min_length=1, pattern=r"^[\x20-\x7e]+$")] | None
+    ) = Field(default=None, serialization_alias="x-content-type")
+    cache_control_max_age: Annotated[int, Field(ge=0)] | None = Field(
+        default=None, serialization_alias="x-cache-control-max-age"
+    )
+
+    @classmethod
+    def from_input(cls, **values: object) -> PutRequest:
+        try:
+            return cls.model_validate(values)
+        except ValidationError as exc:
+            error = exc.errors()[0]
+            field = error["loc"][0]
+            if field in ("add_random_suffix", "allow_overwrite"):
+                raise TypeError(
+                    f"{field} must be bool, got {type(error['input']).__name__}"
+                ) from exc
+            if field == "cache_control_max_age":
+                raise TypeError("cache_control_max_age must be an integer, not bool") from exc
+            if field == "content_type":
+                if error["type"] == "string_too_short":
+                    message = "content_type cannot be empty"
+                elif error["type"] == "string_type":
+                    message = "content_type must be a string"
+                elif isinstance(error["input"], str) and not error["input"].isascii():
+                    message = "content_type must be ASCII"
+                else:
+                    message = "content_type cannot contain control characters"
+                raise ValueError(message) from exc
+            raise
+
+    @field_serializer("add_random_suffix", "allow_overwrite")
+    def _serialize_bool(self, value: bool) -> str:
+        return "1" if value else "0"
+
+    @field_serializer("cache_control_max_age")
+    def _serialize_cache_age(self, value: int | None) -> str | None:
+        return str(value) if value is not None else None
+
+    def to_headers(self) -> dict[str, str]:
+        return {
+            name: str(value)
+            for name, value in self.model_dump(
+                by_alias=True, exclude={"pathname", "body"}, exclude_none=True
+            ).items()
+        }
+
+
+class DeleteRequest(_ApiModel):
+    urls: list[str]
+
+
+class _PutResponse(_ApiModel):
+    url: str
+    download_url: str = Field(alias="downloadUrl")
+    pathname: str
+    content_type: str = Field(alias="contentType")
+    content_disposition: str = Field(alias="contentDisposition")
+    etag: str
+
+    def to_result(self) -> PutResult:
+        return PutResult(
+            url=self.url,
+            download_url=self.download_url,
+            pathname=self.pathname,
+            content_type=self.content_type,
+            content_disposition=self.content_disposition,
+            etag=self.etag,
+        )
+
+
+class _HeadResponse(_ApiModel):
+    url: str
+    download_url: str = Field(alias="downloadUrl")
+    pathname: str
+    size: int = Field(ge=0)
+    etag: str
+    uploaded_at: datetime = Field(alias="uploadedAt")
+    content_type: str | None = Field(default=None, alias="contentType")
+    content_disposition: str = Field(default="", alias="contentDisposition")
+    cache_control: str = Field(default="", alias="cacheControl")
+
+    @field_validator("uploaded_at", mode="before")
+    @classmethod
+    def _parse_uploaded_at(cls, value: object) -> datetime:
+        if not isinstance(value, str):
+            raise ValueError("uploadedAt must be a string")
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+    def to_result(self) -> HeadResult:
+        return HeadResult(
+            url=self.url,
+            download_url=self.download_url,
+            pathname=self.pathname,
+            size=self.size,
+            etag=self.etag,
+            uploaded_at=self.uploaded_at,
+            content_type=self.content_type,
+            content_disposition=self.content_disposition,
+            cache_control=self.cache_control,
+        )
+
+
+def _parse_http_date(value: str) -> datetime:
+    try:
+        return parsedate_to_datetime(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("invalid HTTP date") from exc
+
+
+class _DownloadHeaders(_ApiModel):
+    size: Annotated[int, BeforeValidator(int), Field(ge=0)] | None = Field(
+        default=None, alias="content-length"
+    )
+    content_type: str | None = Field(default=None, alias="content-type")
+    content_disposition: str | None = Field(default=None, alias="content-disposition")
+    cache_control: str | None = Field(default=None, alias="cache-control")
+    etag: str | None = None
+    last_modified: Annotated[datetime, BeforeValidator(_parse_http_date)] | None = Field(
+        default=None, alias="last-modified"
+    )
+
+    def to_metadata(
+        self, url: str, status_code: int, headers: Mapping[str, str]
+    ) -> DownloadMetadata:
+        return DownloadMetadata(
+            url=url,
+            status_code=status_code,
+            size=self.size,
+            content_type=self.content_type,
+            content_disposition=self.content_disposition,
+            cache_control=self.cache_control,
+            etag=self.etag,
+            last_modified=self.last_modified,
+            headers=headers,
+        )
+
+
+class _ApiError(_ApiModel):
+    code: str | None = None
+    message: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _unwrap_error(cls, value: object) -> object:
+        return value.get("error", value) if isinstance(value, dict) else value
+
+    @field_validator("code", "message", mode="before")
+    @classmethod
+    def _optional_string(cls, value: object) -> str | None:
+        return value if isinstance(value, str) else None
+
+
+_ResponseT = TypeVar("_ResponseT", bound=_ApiModel)
+
+
+def _parse_response(
+    response: httpx.Response, model: type[_ResponseT], operation: str
+) -> _ResponseT:
+    try:
+        data = response.json()
+    except Exception as exc:
+        raise BlobStreamError(f"Blob {operation} response is not valid JSON") from exc
+    try:
+        return model.model_validate(data)
+    except ValidationError as exc:
+        error = exc.errors()[0]
+        field = error["loc"][0] if error["loc"] else None
+        if field is None:
+            message = f"Blob {operation} response must be a JSON object"
+        elif field == "size":
+            message = "Blob HEAD response has invalid size field"
+        elif field == "uploadedAt":
+            if error["type"] == "missing" or not isinstance(error["input"], str):
+                message = "Blob HEAD response 'uploadedAt' must be a string"
+            else:
+                message = "Invalid uploadedAt date"
+        elif field == "contentType" and operation == "HEAD":
+            message = "Blob HEAD response 'contentType' must be a string or null"
+        else:
+            message = f"Blob {operation} response '{field}' must be a string"
+        raise BlobStreamError(message) from exc
+
+
+def parse_put_response(response: httpx.Response) -> PutResult:
+    return _parse_response(response, _PutResponse, "PUT").to_result()
+
+
+def parse_head_response(response: httpx.Response) -> HeadResult:
+    return _parse_response(response, _HeadResponse, "HEAD").to_result()
+
+
+def validate_and_parse_download_response(url: str, response: httpx.Response) -> DownloadMetadata:
+    if not response.is_success:
+        raise map_http_error(response)
+    headers = dict(response.headers)
+    try:
+        parsed = _DownloadHeaders.model_validate(headers)
+    except ValidationError as exc:
+        field = exc.errors()[0]["loc"][0]
+        raise BlobStreamError(
+            f"Blob GET response has invalid {field} header: {headers[str(field)]!r}"
+        ) from exc
+    return parsed.to_metadata(url, response.status_code, headers)
 
 
 def parse_retry_after(value: str) -> int | None:
@@ -43,18 +279,11 @@ def parse_retry_after(value: str) -> int | None:
 def map_http_error(response: httpx.Response) -> Exception:
     code: str | None = None
     message = f"Blob request failed with HTTP {response.status_code}"
-
     try:
-        payload = response.json()
-        if isinstance(payload, dict):
-            err_obj = payload.get("error", payload)
-            if isinstance(err_obj, dict):
-                raw_code = err_obj.get("code")
-                if isinstance(raw_code, str):
-                    code = raw_code
-                msg = err_obj.get("message")
-                if isinstance(msg, str):
-                    message = msg
+        error = _ApiError.model_validate(response.json())
+        code = error.code
+        if error.message is not None:
+            message = error.message
     except Exception:
         pass
 
@@ -65,7 +294,6 @@ def map_http_error(response: httpx.Response) -> Exception:
     if "the file length cannot be greater than" in message:
         code = "file_too_large"
 
-    # Map explicit backend error codes first
     if code == "store_not_found":
         return BlobStoreNotFoundError(message, status_code=response.status_code, code=code)
     if code == "store_suspended":
@@ -85,11 +313,9 @@ def map_http_error(response: httpx.Response) -> Exception:
     if code == "service_unavailable":
         return BlobServiceNotAvailable(message, status_code=response.status_code, code=code)
     if code == "rate_limited":
-        retry_after = response.headers.get("retry-after", "")
-        seconds = parse_retry_after(retry_after)
+        seconds = parse_retry_after(response.headers.get("retry-after", ""))
         return BlobServiceRateLimited(seconds, status_code=response.status_code, code=code)
 
-    # Status code fallbacks
     if response.status_code == 404:
         return BlobNotFoundError(message, status_code=404, code="blob_not_found")
     if response.status_code in (401, 403):
@@ -97,170 +323,10 @@ def map_http_error(response: httpx.Response) -> Exception:
     if response.status_code == 412:
         return BlobPreconditionFailedError(message, status_code=412, code="precondition_failed")
     if response.status_code == 429:
-        retry_after = response.headers.get("retry-after", "")
-        seconds = parse_retry_after(retry_after)
+        seconds = parse_retry_after(response.headers.get("retry-after", ""))
         return BlobServiceRateLimited(seconds, status_code=429, code="rate_limited")
     if response.status_code == 503:
         return BlobServiceNotAvailable(message, status_code=503, code="service_unavailable")
     if response.status_code == 400:
         return BlobError(message, status_code=400, code="bad_request")
-
     return BlobUnknownError(message, status_code=response.status_code, code=code)
-
-
-def parse_put_response(response: httpx.Response) -> PutResult:
-    try:
-        data = response.json()
-    except Exception as exc:
-        raise BlobStreamError("Blob PUT response is not valid JSON") from exc
-
-    if not isinstance(data, dict):
-        raise BlobStreamError("Blob PUT response must be a JSON object")
-
-    url = data.get("url")
-    if not isinstance(url, str):
-        raise BlobStreamError("Blob PUT response 'url' must be a string")
-
-    download_url = data.get("downloadUrl")
-    if not isinstance(download_url, str):
-        raise BlobStreamError("Blob PUT response 'downloadUrl' must be a string")
-
-    pathname = data.get("pathname")
-    if not isinstance(pathname, str):
-        raise BlobStreamError("Blob PUT response 'pathname' must be a string")
-
-    content_type = data.get("contentType")
-    if not isinstance(content_type, str):
-        raise BlobStreamError("Blob PUT response 'contentType' must be a string")
-
-    content_disposition = data.get("contentDisposition")
-    if not isinstance(content_disposition, str):
-        raise BlobStreamError("Blob PUT response 'contentDisposition' must be a string")
-
-    etag = data.get("etag")
-    if not isinstance(etag, str):
-        raise BlobStreamError("Blob PUT response 'etag' must be a string")
-
-    return PutResult(
-        url=url,
-        download_url=download_url,
-        pathname=pathname,
-        content_type=content_type,
-        content_disposition=content_disposition,
-        etag=etag,
-    )
-
-
-def parse_head_response(response: httpx.Response) -> HeadResult:
-    try:
-        data = response.json()
-    except Exception as exc:
-        raise BlobStreamError("Blob HEAD response is not valid JSON") from exc
-
-    if not isinstance(data, dict):
-        raise BlobStreamError("Blob HEAD response must be a JSON object")
-
-    url = data.get("url")
-    if not isinstance(url, str):
-        raise BlobStreamError("Blob HEAD response 'url' must be a string")
-
-    download_url = data.get("downloadUrl")
-    if not isinstance(download_url, str):
-        raise BlobStreamError("Blob HEAD response 'downloadUrl' must be a string")
-
-    pathname = data.get("pathname")
-    if not isinstance(pathname, str):
-        raise BlobStreamError("Blob HEAD response 'pathname' must be a string")
-
-    size = data.get("size")
-    if type(size) is not int or size < 0:
-        raise BlobStreamError("Blob HEAD response has invalid size field")
-
-    etag = data.get("etag")
-    if not isinstance(etag, str):
-        raise BlobStreamError("Blob HEAD response 'etag' must be a string")
-
-    uploaded_at_raw = data.get("uploadedAt")
-    if not isinstance(uploaded_at_raw, str):
-        raise BlobStreamError("Blob HEAD response 'uploadedAt' must be a string")
-
-    try:
-        uploaded_at = datetime.fromisoformat(uploaded_at_raw.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise BlobStreamError(f"Invalid uploadedAt date: {uploaded_at_raw!r}") from exc
-
-    content_type = data.get("contentType")
-    if content_type is not None and not isinstance(content_type, str):
-        raise BlobStreamError("Blob HEAD response 'contentType' must be a string or null")
-
-    content_disposition = data.get("contentDisposition", "")
-    if not isinstance(content_disposition, str):
-        raise BlobStreamError("Blob HEAD response 'contentDisposition' must be a string")
-
-    cache_control = data.get("cacheControl", "")
-    if not isinstance(cache_control, str):
-        raise BlobStreamError("Blob HEAD response 'cacheControl' must be a string")
-
-    return HeadResult(
-        url=url,
-        download_url=download_url,
-        pathname=pathname,
-        size=size,
-        etag=etag,
-        uploaded_at=uploaded_at,
-        content_type=content_type,
-        content_disposition=content_disposition,
-        cache_control=cache_control,
-    )
-
-
-def parse_download_metadata(url: str, response: httpx.Response) -> DownloadMetadata:
-    headers: Mapping[str, str] = dict(response.headers)
-    status_code = response.status_code
-
-    size: int | None = None
-    if "content-length" in headers:
-        raw_cl = headers["content-length"]
-        try:
-            parsed_size = int(raw_cl)
-            if parsed_size < 0:
-                raise ValueError
-            size = parsed_size
-        except ValueError as exc:
-            raise BlobStreamError(
-                f"Blob GET response has invalid content-length header: {raw_cl!r}"
-            ) from exc
-
-    content_type = headers.get("content-type")
-    content_disposition = headers.get("content-disposition")
-    cache_control = headers.get("cache-control")
-    etag = headers.get("etag")
-
-    last_modified: datetime | None = None
-    if "last-modified" in headers:
-        raw_lm = headers["last-modified"]
-        try:
-            last_modified = parsedate_to_datetime(raw_lm)
-        except (TypeError, ValueError, OverflowError) as exc:
-            raise BlobStreamError(
-                f"Blob GET response has invalid last-modified header: {raw_lm!r}"
-            ) from exc
-
-    return DownloadMetadata(
-        url=url,
-        status_code=status_code,
-        size=size,
-        content_type=content_type,
-        content_disposition=content_disposition,
-        cache_control=cache_control,
-        etag=etag,
-        last_modified=last_modified,
-        headers=headers,
-    )
-
-
-def validate_and_parse_download_response(url: str, response: httpx.Response) -> DownloadMetadata:
-    """Validate status and parse response headers into DownloadMetadata."""
-    if not response.is_success:
-        raise map_http_error(response)
-    return parse_download_metadata(url, response)

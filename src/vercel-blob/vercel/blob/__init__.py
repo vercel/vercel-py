@@ -5,15 +5,12 @@ from __future__ import annotations
 from contextlib import AbstractAsyncContextManager
 from typing import Literal
 
-import anyio
-
 from vercel._internal.core.session import get_active_session
 
 from . import sync
 from ._internal.download import AsyncBlobDownload, AsyncDownloadContext
 from ._internal.options import BlobServiceOptions
 from ._internal.service import get_blob_service
-from ._internal.wire import validate_and_parse_download_response
 from .errors import (
     BlobAccessError,
     BlobContentTypeNotAllowedError,
@@ -75,13 +72,7 @@ def get(
 
     async def opener() -> AsyncBlobDownload:
         service = get_blob_service(session)
-        stream, target_url = await service.open_download(url_or_pathname, access=access)
-        try:
-            metadata = validate_and_parse_download_response(target_url, stream.response)
-        except BaseException:
-            with anyio.CancelScope(shield=True):
-                await stream.aclose()
-            raise
+        stream, metadata = await service.open_download(url_or_pathname, access=access)
         return AsyncBlobDownload(stream, metadata, check_session=service.check_open)
 
     return AsyncDownloadContext(opener)
