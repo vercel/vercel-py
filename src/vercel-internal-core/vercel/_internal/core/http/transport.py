@@ -5,8 +5,17 @@ from __future__ import annotations
 import abc
 import json
 import queue
+import sys
 import threading
-from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterator,
+    Callable,
+    Generator,
+    Iterator,
+    Mapping,
+    Sequence,
+)
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from datetime import timedelta
@@ -16,6 +25,7 @@ from typing import Any, Final, TypeAlias, cast, final
 import anyio
 import httpx2 as httpx
 from anyio.abc import ObjectReceiveStream, ObjectSendStream
+from httpx2._client import BoundAsyncStream, BoundSyncStream
 
 from vercel._internal.core.http._compat import is_async_http_client
 from vercel._internal.core.polyfills import StrEnum
@@ -398,10 +408,115 @@ class _SyncStreamingRequest(StreamingRequest):
                 pass
 
 
+class _ResponseCleanup:
+    """Own cleanup once, deferring its failure until primary reads have finished.
+
+    HTTPX closes in iterator finally blocks. Raising there would replace a read
+    error and (on async streams) cancellation could leave a closed response with
+    incomplete cleanup. The byte-stream boundary records failures instead.
+    """
+
+    def __init__(self) -> None:
+        self.closed = False
+        self.error: BaseException | None = None
+
+    def record(self, error: BaseException) -> None:
+        if self.error is None:
+            self.error = error
+
+    def raise_error(self) -> None:
+        if self.error is not None:
+            raise self.error
+
+
+class _OwnedSyncStream(httpx.SyncByteStream, _ResponseCleanup):
+    def __init__(self, stream: httpx.SyncByteStream) -> None:
+        _ResponseCleanup.__init__(self)
+        self._stream = stream
+        self._iterator: Iterator[bytes] | None = None
+
+    def __iter__(self) -> Iterator[bytes]:
+        self._iterator = iter(self._stream)
+        return self
+
+    def __next__(self) -> bytes:
+        assert self._iterator is not None
+        return next(self._iterator)
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        try:
+            close = getattr(self._iterator, "close", None)
+            if close is not None:
+                close()
+        except BaseException as exc:
+            self.record(exc)
+        try:
+            self._stream.close()
+        except BaseException as exc:
+            self.record(exc)
+
+
+class _OwnedAsyncStream(httpx.AsyncByteStream, _ResponseCleanup):
+    def __init__(self, stream: httpx.AsyncByteStream) -> None:
+        _ResponseCleanup.__init__(self)
+        self._stream = stream
+        self._iterator: AsyncIterator[bytes] | None = None
+
+    def __aiter__(self) -> AsyncIterator[bytes]:
+        # Return an ordinary iterator so HTTPX cannot finalize the underlying
+        # generator outside our shield before calling response.aclose().
+        self._iterator = self._stream.__aiter__()
+        return self
+
+    async def __anext__(self) -> bytes:
+        assert self._iterator is not None
+        return await anext(self._iterator)
+
+    async def aclose(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        with anyio.CancelScope(shield=True):
+            try:
+                close = getattr(self._iterator, "aclose", None)
+                if close is not None:
+                    await close()
+            except BaseException as exc:
+                self.record(exc)
+            try:
+                await self._stream.aclose()
+            except BaseException as exc:
+                self.record(exc)
+
+
+def _owned_stream(owner: type[Any], stream: Any) -> Any:
+    # Explicitly supplied legacy clients require their own ByteStream base in
+    # Response's isinstance checks. Keep that optional dependency lazy.
+    legacy = sys.modules.get("httpx")
+    if legacy is not None:
+        base = legacy.SyncByteStream if owner is _OwnedSyncStream else legacy.AsyncByteStream
+        if isinstance(stream, base):
+            owner = type(owner.__name__, (owner, base), {})
+    return owner(stream)
+
+
 class _SyncStreamingResponse(StreamingResponse):
     def __init__(self, response: httpx.Response, chunk_size: int | None) -> None:
         self.response = response
-        self._iterator = response.iter_bytes(chunk_size)
+        stream = response.stream
+        if isinstance(stream, BoundSyncStream):
+            # Own the actual body inside HTTPX's elapsed-time wrapper. Its
+            # iterator can otherwise finalize the body before response.close.
+            self._cleanup = _OwnedSyncStream(stream._stream)
+            stream._stream = self._cleanup
+        else:
+            self._cleanup = _owned_stream(_OwnedSyncStream, stream)
+            response.stream = self._cleanup
+        self._cleanup.closed = response.is_closed
+        self._iterator = cast(Generator[bytes, None, None], response.iter_bytes(chunk_size))
         self._closed = False
 
     async def __anext__(self) -> bytes:
@@ -413,27 +528,48 @@ class _SyncStreamingResponse(StreamingResponse):
             await self.aclose()
             raise StopAsyncIteration from None
         except BaseException:
-            await self.aclose()
+            await self._close(primary=True)
             raise
 
     async def aiter_lines(self) -> AsyncIterator[str]:
+        lines = cast(Generator[str, None, None], self.response.iter_lines())
+        primary = False
         try:
-            lines = self.response.iter_lines()
             while not self._closed:
                 try:
                     yield next(lines)
                 except StopIteration:
                     return
+        except GeneratorExit:
+            raise
+        except BaseException:
+            primary = True
+            raise
         finally:
-            await self.aclose()
+            try:
+                lines.close()
+            except BaseException as exc:
+                self._cleanup.record(exc)
+            await self._close(primary=primary)
+
+    async def _close(self, *, primary: bool = False) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._iterator.close()
+        except BaseException as exc:
+            self._cleanup.record(exc)
+        try:
+            self.response.close()
+        except BaseException as exc:
+            self._cleanup.record(exc)
+        self._cleanup.close()
+        if not primary:
+            self._cleanup.raise_error()
 
     async def aclose(self) -> None:
-        if not self._closed:
-            self._closed = True
-            try:
-                self.response.close()
-            except BaseException:
-                pass
+        await self._close()
 
 
 class _AsyncRequestBody:
@@ -573,6 +709,14 @@ class _AsyncStreamingRequest(StreamingRequest):
 class _AsyncStreamingResponse(StreamingResponse):
     def __init__(self, response: httpx.Response, chunk_size: int | None) -> None:
         self.response = response
+        stream = response.stream
+        if isinstance(stream, BoundAsyncStream):
+            self._cleanup = _OwnedAsyncStream(stream._stream)
+            stream._stream = self._cleanup
+        else:
+            self._cleanup = _owned_stream(_OwnedAsyncStream, stream)
+            response.stream = self._cleanup
+        self._cleanup.closed = response.is_closed
         self._iterator = response.aiter_bytes(chunk_size)
         self._closed = False
 
@@ -585,30 +729,50 @@ class _AsyncStreamingResponse(StreamingResponse):
             await self.aclose()
             raise
         except BaseException:
-            with anyio.CancelScope(shield=True):
-                await self.aclose()
+            await self._close(primary=True)
             raise
 
     async def aiter_lines(self) -> AsyncIterator[str]:
+        lines = cast(AsyncGenerator[str, None], self.response.aiter_lines())
+        primary = False
         try:
-            lines = self.response.aiter_lines()
             while not self._closed:
                 try:
                     yield await anext(lines)
                 except StopAsyncIteration:
                     return
+        except GeneratorExit:
+            raise
+        except BaseException:
+            primary = True
+            raise
         finally:
             with anyio.CancelScope(shield=True):
-                await self.aclose()
+                try:
+                    await lines.aclose()
+                except BaseException as exc:
+                    self._cleanup.record(exc)
+                await self._close(primary=primary)
+
+    async def _close(self, *, primary: bool = False) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        with anyio.CancelScope(shield=True):
+            try:
+                await self._iterator.aclose()
+            except BaseException as exc:
+                self._cleanup.record(exc)
+            try:
+                await self.response.aclose()
+            except BaseException as exc:
+                self._cleanup.record(exc)
+            await self._cleanup.aclose()
+        if not primary:
+            self._cleanup.raise_error()
 
     async def aclose(self) -> None:
-        if not self._closed:
-            self._closed = True
-            try:
-                with anyio.CancelScope(shield=True):
-                    await self.response.aclose()
-            except BaseException:
-                pass
+        await self._close()
 
 
 class SyncTransport(BaseTransport):

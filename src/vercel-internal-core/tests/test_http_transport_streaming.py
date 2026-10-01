@@ -1,4 +1,6 @@
+import gzip
 import threading
+from collections.abc import AsyncGenerator, AsyncIterator, Iterator
 from typing import cast
 
 import anyio
@@ -546,3 +548,413 @@ async def test_async_response_line_stream_closes_on_failure() -> None:
         [line async for line in stream.aiter_lines()]
     assert exc_info.value is error
     assert body.closed
+
+
+class _CleanupSyncStream(httpx.SyncByteStream):
+    def __init__(self, read_error: BaseException | None = None) -> None:
+        self.read_error = read_error
+        self.close_error = RuntimeError("cleanup failed")
+        self.close_calls = 0
+        self.completed = False
+        self.yielded = 0
+
+    def __iter__(self):  # type: ignore[no-untyped-def]
+        self.yielded += 1
+        yield b"first\n"
+        if self.read_error is not None:
+            raise self.read_error
+        self.yielded += 1
+        yield b"last"
+
+    def close(self) -> None:
+        self.close_calls += 1
+        self.completed = True
+        raise self.close_error
+
+
+class _CleanupAsyncStream(httpx.AsyncByteStream):
+    def __init__(self, read_error: BaseException | None = None, *, block: bool = False) -> None:
+        self.read_error = read_error
+        self.block = block
+        self.started = anyio.Event()
+        self.cancelled: BaseException | None = None
+        self.close_error = RuntimeError("cleanup failed")
+        self.close_calls = 0
+        self.completed = False
+        self.yielded = 0
+
+    async def __aiter__(self):  # type: ignore[no-untyped-def]
+        self.yielded += 1
+        yield b"first\n"
+        if self.block:
+            self.started.set()
+            try:
+                await anyio.sleep_forever()
+            except anyio.get_cancelled_exc_class() as exc:
+                self.cancelled = exc
+                raise
+        if self.read_error is not None:
+            raise self.read_error
+        self.yielded += 1
+        yield b"last"
+
+    async def aclose(self) -> None:
+        self.close_calls += 1
+        await anyio.lowlevel.checkpoint()
+        self.completed = True
+        raise self.close_error
+
+
+@pytest.mark.parametrize("mode", ["close", "partial", "read", "eof", "lines"])
+def test_sync_cleanup_exception_policy(mode: str) -> None:
+    primary = RuntimeError("read failed") if mode in ("read", "lines") else None
+    body = _CleanupSyncStream(primary)
+    transport = SyncTransport(
+        httpx.Client(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, stream=body))
+        )
+    )
+
+    async def operation() -> None:
+        stream = await transport.open_response_stream("GET", "https://example.com/result")
+        if mode == "partial":
+            assert await anext(stream) == b"first\n"
+        with pytest.raises(RuntimeError) as caught:
+            if mode in ("close", "partial"):
+                await stream.aclose()
+            elif mode == "lines":
+                [line async for line in stream.aiter_lines()]
+            else:
+                await stream.read()
+        assert caught.value is (primary or body.close_error)
+        await stream.aclose()
+
+    iter_coroutine(operation())
+    assert body.completed
+    assert body.close_calls == 1
+    assert body.yielded == (0 if mode == "close" else 2 if mode == "eof" else 1)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["close", "partial", "read", "eof", "lines"])
+async def test_async_cleanup_exception_policy(mode: str) -> None:
+    primary = RuntimeError("read failed") if mode in ("read", "lines") else None
+    body = _CleanupAsyncStream(primary)
+    transport = AsyncTransport(
+        httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, stream=body))
+        )
+    )
+    stream = await transport.open_response_stream("GET", "https://example.com/result")
+    if mode == "partial":
+        assert await anext(stream) == b"first\n"
+    with pytest.raises(RuntimeError) as caught:
+        if mode in ("close", "partial"):
+            await stream.aclose()
+        elif mode == "lines":
+            [line async for line in stream.aiter_lines()]
+        else:
+            await stream.read()
+    assert caught.value is (primary or body.close_error)
+    await stream.aclose()
+    assert body.completed
+    assert body.close_calls == 1
+    assert body.yielded == (0 if mode == "close" else 2 if mode == "eof" else 1)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("lines", [False, True])
+async def test_async_read_cancellation_completes_cleanup(lines: bool) -> None:
+    body = _CleanupAsyncStream(block=True)
+    transport = AsyncTransport(
+        httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, stream=body))
+        )
+    )
+    stream = await transport.open_response_stream("GET", "https://example.com/result")
+    cancelled = []
+
+    async def read() -> None:
+        with anyio.CancelScope() as scope:
+            scopes.append(scope)
+            try:
+                if lines:
+                    [line async for line in stream.aiter_lines()]
+                else:
+                    await stream.read()
+            except anyio.get_cancelled_exc_class() as exc:
+                cancelled.append(exc)
+                raise
+
+    scopes: list[anyio.CancelScope] = []
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(read)
+        await body.started.wait()
+        scopes[0].cancel()
+    assert len(cancelled) == 1
+    assert cancelled[0] is body.cancelled
+    assert body.completed
+    assert body.close_calls == 1
+    await stream.aclose()
+
+
+class _FinalizingSyncStream(_CleanupSyncStream):
+    def __iter__(self) -> Iterator[bytes]:
+        owner = self
+
+        class Chunks:
+            def __init__(self) -> None:
+                self.chunks = iter([b"first", b"unread"])
+
+            def __iter__(self) -> "Chunks":
+                return self
+
+            def __next__(self) -> bytes:
+                return next(self.chunks)
+
+            def close(self) -> None:
+                owner.finalize_calls += 1
+                raise owner.finalize_error
+
+        return Chunks()
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.finalize_calls = 0
+        self.finalize_error = RuntimeError("iterator finalization failed")
+
+
+class _FinalizingAsyncStream(_CleanupAsyncStream):
+    def __aiter__(self) -> AsyncIterator[bytes]:  # type: ignore[override]
+        owner = self
+
+        class Chunks:
+            def __init__(self) -> None:
+                self.chunks = iter([b"first", b"unread"])
+
+            def __aiter__(self) -> "Chunks":
+                return self
+
+            async def __anext__(self) -> bytes:
+                try:
+                    return next(self.chunks)
+                except StopIteration:
+                    raise StopAsyncIteration from None
+
+            async def aclose(self) -> None:
+                owner.finalize_calls += 1
+                await anyio.lowlevel.checkpoint()
+                raise owner.finalize_error
+
+        return Chunks()
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.finalize_calls = 0
+        self.finalize_error = RuntimeError("iterator finalization failed")
+
+
+def test_sync_iterator_finalization_failure_still_releases_stream() -> None:
+    body = _FinalizingSyncStream()
+    transport = SyncTransport(
+        httpx.Client(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, stream=body))
+        )
+    )
+
+    async def operation() -> None:
+        stream = await transport.open_response_stream("GET", "https://example.com/result")
+        assert await anext(stream) == b"first"
+        with pytest.raises(RuntimeError) as caught:
+            await stream.aclose()
+        assert caught.value is body.finalize_error
+        await stream.aclose()
+
+    iter_coroutine(operation())
+    assert body.finalize_calls == body.close_calls == 1
+    assert body.completed
+
+
+@pytest.mark.anyio
+async def test_async_iterator_finalization_failure_still_releases_stream() -> None:
+    body = _FinalizingAsyncStream()
+    transport = AsyncTransport(
+        httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, stream=body))
+        )
+    )
+    stream = await transport.open_response_stream("GET", "https://example.com/result")
+    assert await anext(stream) == b"first"
+    with pytest.raises(RuntimeError) as caught:
+        await stream.aclose()
+    assert caught.value is body.finalize_error
+    await stream.aclose()
+    assert body.finalize_calls == body.close_calls == 1
+    assert body.completed
+
+
+@pytest.mark.parametrize("invalid", [False, True])
+def test_sync_content_decoding_cleanup(invalid: bool) -> None:
+    class Body(_CleanupSyncStream):
+        def __iter__(self) -> Iterator[bytes]:
+            yield b"invalid gzip" if invalid else gzip.compress(b"abcdefg")
+
+    body = Body()
+    transport = SyncTransport(
+        httpx.Client(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200, headers={"content-encoding": "gzip"}, stream=body
+                )
+            )
+        )
+    )
+
+    async def operation() -> None:
+        stream = await transport.open_response_stream(
+            "GET", "https://example.com/result", chunk_size=3
+        )
+        assert body.close_calls == 0
+        if invalid:
+            with pytest.raises(httpx.DecodingError):
+                await stream.read()
+        else:
+            assert await anext(stream) == b"abc"
+            assert await anext(stream) == b"def"
+            assert await anext(stream) == b"g"
+            with pytest.raises(RuntimeError) as caught:
+                await anext(stream)
+            assert caught.value is body.close_error
+        await stream.aclose()
+
+    iter_coroutine(operation())
+    assert body.completed
+    assert body.close_calls == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("invalid", [False, True])
+async def test_async_content_decoding_cleanup(invalid: bool) -> None:
+    class Body(_CleanupAsyncStream):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            yield b"invalid gzip" if invalid else gzip.compress(b"abcdefg")
+
+    body = Body()
+    transport = AsyncTransport(
+        httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200, headers={"content-encoding": "gzip"}, stream=body
+                )
+            )
+        )
+    )
+    stream = await transport.open_response_stream("GET", "https://example.com/result", chunk_size=3)
+    assert body.close_calls == 0
+    if invalid:
+        with pytest.raises(httpx.DecodingError):
+            await stream.read()
+    else:
+        assert await anext(stream) == b"abc"
+        assert await anext(stream) == b"def"
+        assert await anext(stream) == b"g"
+        with pytest.raises(RuntimeError) as caught:
+            await anext(stream)
+        assert caught.value is body.close_error
+    await stream.aclose()
+    assert body.completed
+    assert body.close_calls == 1
+
+
+@pytest.mark.anyio
+async def test_async_line_iterator_early_close_surfaces_cleanup_failure() -> None:
+    body = _CleanupAsyncStream()
+    transport = AsyncTransport(
+        httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, stream=body))
+        )
+    )
+    stream = await transport.open_response_stream("GET", "https://example.com/result")
+    lines = cast(AsyncGenerator[str, None], stream.aiter_lines())
+    assert await anext(lines) == "first"
+    with pytest.raises(RuntimeError) as caught:
+        await lines.aclose()
+    assert caught.value is body.close_error
+    await stream.aclose()
+    assert body.completed
+    assert body.close_calls == 1
+
+
+def test_sync_line_iterator_early_close_surfaces_cleanup_failure() -> None:
+    body = _CleanupSyncStream()
+    transport = SyncTransport(
+        httpx.Client(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, stream=body))
+        )
+    )
+
+    async def operation() -> None:
+        stream = await transport.open_response_stream("GET", "https://example.com/result")
+        lines = cast(AsyncGenerator[str, None], stream.aiter_lines())
+        assert await anext(lines) == "first"
+        with pytest.raises(RuntimeError) as caught:
+            await lines.aclose()
+        assert caught.value is body.close_error
+        await stream.aclose()
+
+    iter_coroutine(operation())
+    assert body.completed
+    assert body.close_calls == 1
+
+
+@pytest.mark.parametrize("policy", [ReadResponsePolicy.NEVER, ReadResponsePolicy.ALWAYS])
+def test_sync_preconsumed_response_cleanup_runs_once(policy: ReadResponsePolicy) -> None:
+    class Body(_SyncChunks):
+        close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+            super().close()
+
+    body = Body([b"abcdefg"])
+    transport = SyncTransport(
+        httpx.Client(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, stream=body))
+        )
+    )
+
+    async def operation() -> None:
+        stream = await transport.open_response_stream(
+            "GET", "https://example.com/result", read_response=policy, chunk_size=3
+        )
+        assert [chunk async for chunk in stream] == [b"abc", b"def", b"g"]
+        assert stream.response.elapsed.total_seconds() >= 0
+        await stream.aclose()
+
+    iter_coroutine(operation())
+    assert body.close_calls == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("policy", [ReadResponsePolicy.NEVER, ReadResponsePolicy.ALWAYS])
+async def test_async_preconsumed_response_cleanup_runs_once(policy: ReadResponsePolicy) -> None:
+    class Body(_AsyncChunks):
+        close_calls = 0
+
+        async def aclose(self) -> None:
+            self.close_calls += 1
+            await super().aclose()
+
+    body = Body([b"abcdefg"])
+    transport = AsyncTransport(
+        httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, stream=body))
+        )
+    )
+    stream = await transport.open_response_stream(
+        "GET", "https://example.com/result", read_response=policy, chunk_size=3
+    )
+    assert [chunk async for chunk in stream] == [b"abc", b"def", b"g"]
+    assert stream.response.elapsed.total_seconds() >= 0
+    await stream.aclose()
+    assert body.close_calls == 1
