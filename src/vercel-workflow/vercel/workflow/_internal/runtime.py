@@ -1841,6 +1841,18 @@ async def _flush_hooks(context: WorkflowOrchestratorContext) -> tuple[bool, set[
     return events_created, replay_reasons
 
 
+async def _drain_hooks(context: WorkflowOrchestratorContext) -> None:
+    # Match TS's final drain: storage failures must not replace the body's
+    # successful result or its original exception. Suspension flushes instead
+    # propagate failures so the queue can retry the unfinished run.
+    try:
+        await _flush_hooks(context)
+    except Exception:
+        logger.warning(
+            "Failed to flush hooks for terminating run %s", context.run_id, exc_info=True
+        )
+
+
 async def _workflow_replay_pass(
     *,
     req: w.WorkflowInvokePayload,
@@ -1956,6 +1968,8 @@ async def _workflow_replay_pass(
         error_message = "".join(traceback.format_exception_only(type(e), e)).strip()
         logger.exception("[Workflows] '%s' - workflow run failed: %s", run_id, error_message)
         await _send_cancellations(context)
+        if not isinstance(e, NondeterminismError):
+            await _drain_hooks(context)
         try:
             await world.events_create(
                 run_id,
@@ -1971,6 +1985,7 @@ async def _workflow_replay_pass(
     await _send_cancellations(context)
 
     if output is not None:
+        await _drain_hooks(context)
         try:
             await world.events_create(
                 run_id,
