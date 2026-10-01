@@ -47,7 +47,7 @@
 - Allow Sandbox process waits and log streams to remain idle longer than the session HTTP timeout. (#307)
 - Expose Linux process signals consistently on every SDK host platform. (#352)
 
-- Read `VERCEL_REGION` directly so Sandbox does not depend on the unavailable `vercel-env` distribution. (#388)
+- Read `VERCEL_REGION` directly from the process environment. (#388)
 
 ### Internal
 

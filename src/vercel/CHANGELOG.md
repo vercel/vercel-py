@@ -29,7 +29,7 @@
 - Start a workflow run even when its queue message arrives before the
   `run_created` event has landed. (#284)
 
-- Restore `vercel.env` to the main SDK after dropping the standalone `vercel-env` distribution. (#388)
+- Restore `vercel.env` to the main SDK. (#388)
 
 ### Internal
 
