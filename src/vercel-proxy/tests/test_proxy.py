@@ -686,18 +686,6 @@ async def test_handler_receives_vercel_request() -> None:
     assert seen[0].query_params["a"] == "1"
 
 
-async def test_handler_cannot_read_body() -> None:
-    proxy = Proxy()
-
-    @proxy.route("/")
-    async def handler(req: Request) -> Response:
-        await req.body()
-        return ContinueResponse()
-
-    with pytest.raises(RuntimeError, match="request body is not available"):
-        await call(proxy, make_scope())
-
-
 async def test_async_handler_runs_on_event_loop_thread() -> None:
     threads: list[int] = []
     proxy = Proxy()
@@ -776,6 +764,24 @@ async def test_handler_exception_propagates() -> None:
         await call(proxy, make_scope())
 
 
+async def test_handler_reads_body() -> None:
+    async def receive() -> Message:
+        return {"type": "http.request", "body": b"secret", "more_body": False}
+
+    async def handler(req: Request) -> Response:
+        return PlainTextResponse(await req.body())
+
+    proxy = Proxy()
+    proxy.route("/", methods=["POST"])(handler)
+    messages: list[Message] = []
+
+    async def send(message: Message) -> None:
+        messages.append(message)
+
+    await proxy(make_scope(method="POST"), receive, send)
+    assert messages[1]["body"] == b"secret"
+
+
 # ---------------------------------------------------------------------------
 # ASGI scopes
 # ---------------------------------------------------------------------------
@@ -831,6 +837,16 @@ async def call_websocket(proxy: Proxy, scope: dict[str, Any]) -> Sent:
         "websocket.http.response.body",
     ]
     return Sent(messages[0]["status"], messages[0]["headers"], messages[1]["body"])
+
+
+async def test_websocket_body_is_empty() -> None:
+    async def handler(req: Request) -> Response:
+        return PlainTextResponse(f"[{(await req.body()).decode()}]")
+
+    proxy = Proxy()
+    proxy.route("/chat")(handler)
+    sent = await call_websocket(proxy, make_websocket_scope("/chat"))
+    assert sent.body == b"[]"
 
 
 async def test_websocket_continue() -> None:

@@ -1,11 +1,12 @@
 """Tests for vercel.proxy.Request."""
 
 import uuid
-from typing import Any, cast
+from typing import Any
 
 import pytest
 import starlette.requests
 from starlette.datastructures import URL, Headers, QueryParams
+from starlette.types import Message, Receive
 
 from vercel.proxy import Request
 
@@ -43,21 +44,13 @@ def test_is_starlette_request() -> None:
     assert isinstance(Request(make_scope()), starlette.requests.Request)
 
 
-def test_rejects_receive_argument() -> None:
-    async def receive() -> dict[str, Any]:
-        return {"type": "http.request", "body": b"secret"}
-
-    with pytest.raises(TypeError):
-        cast(Any, Request)(make_scope(), receive)
-
-
 def test_rejects_non_http_scope() -> None:
     with pytest.raises(AssertionError):
         Request({**make_scope(), "type": "websocket"})
 
 
 # ---------------------------------------------------------------------------
-# Non-body API
+# Request data
 # ---------------------------------------------------------------------------
 
 
@@ -116,46 +109,27 @@ def test_client() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Body access blocked
+# Body
 # ---------------------------------------------------------------------------
 
-BODY_UNAVAILABLE = "request body is not available in proxy handlers"
+
+def receive_body(body: bytes) -> Receive:
+    async def receive() -> Message:
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    return receive
 
 
-async def test_receive_raises() -> None:
-    with pytest.raises(RuntimeError, match=BODY_UNAVAILABLE):
-        await Request(make_scope()).receive()
+async def test_body() -> None:
+    assert await Request(make_scope(method="POST"), receive_body(b"hello")).body() == b"hello"
 
 
-async def test_stream_raises() -> None:
-    with pytest.raises(RuntimeError, match=BODY_UNAVAILABLE):
-        async for _ in Request(make_scope()).stream():
-            pass
+async def test_json() -> None:
+    request = Request(make_scope(method="POST"), receive_body(b'{"a": 1}'))
+    assert await request.json() == {"a": 1}
 
 
-async def test_body_raises() -> None:
-    with pytest.raises(RuntimeError, match=BODY_UNAVAILABLE):
-        await Request(make_scope()).body()
-
-
-async def test_json_raises() -> None:
-    with pytest.raises(RuntimeError, match=BODY_UNAVAILABLE):
-        await Request(make_scope()).json()
-
-
-@pytest.mark.parametrize(
-    "content_type", [b"application/x-www-form-urlencoded", b"multipart/form-data; boundary=x"]
-)
-async def test_form_raises(content_type: bytes) -> None:
-    request = Request(make_scope(method="POST", headers=[(b"content-type", content_type)]))
-    with pytest.raises(RuntimeError, match=BODY_UNAVAILABLE):
-        await request.form()
-
-
-async def test_form_without_form_content_type_is_empty() -> None:
-    assert dict(await Request(make_scope()).form()) == {}
-
-
-async def test_is_disconnected_raises() -> None:
-    with pytest.raises(RuntimeError, match=BODY_UNAVAILABLE):
-        await Request(make_scope()).is_disconnected()
+async def test_form() -> None:
+    headers = [(b"content-type", b"application/x-www-form-urlencoded")]
+    request = Request(make_scope(method="POST", headers=headers), receive_body(b"a=1&b=2"))
+    assert dict(await request.form()) == {"a": "1", "b": "2"}

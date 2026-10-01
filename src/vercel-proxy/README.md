@@ -102,9 +102,6 @@ def fallback(request: Request) -> Response:
 `query_params`, `cookies`, `path_params` and `client` to decide how to route
 it.
 
-The request body is forwarded to the destination unread. `body()`, `json()`, `form()`, `stream()`, `receive` and
-`is_disconnected()` raise `RuntimeError`.
-
 WebSocket upgrades are routed like `GET` requests, and the destination accepts
 the socket. Check `request.headers.get("upgrade")` to tell them apart.
 

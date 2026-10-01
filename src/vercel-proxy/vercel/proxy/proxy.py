@@ -131,19 +131,19 @@ class Proxy:
             await Router().lifespan(scope, receive, send)
             return
         if scope["type"] == "websocket":
-            scope, send = _upgrade_as_http(scope, send)
+            scope, receive, send = _upgrade_as_http(scope, send)
         elif scope["type"] != "http":
             raise RuntimeError(
                 f'unsupported ASGI scope type "{scope["type"]}": expected "http" or "websocket"'
             )
 
-        response = await self._dispatch(scope)
+        response = await self._dispatch(scope, receive)
         await response(scope, receive, send)
 
-    async def _dispatch(self, scope: Scope) -> Response:
+    async def _dispatch(self, scope: Scope, receive: Receive) -> Response:
         handler, path_params = self._match(scope) or (self._fallback, {})
         # The handler sees the path as the client sent it.
-        request = Request({**scope, "app": self, "path_params": path_params})
+        request = Request({**scope, "app": self, "path_params": path_params}, receive)
         return await _call(handler, request)
 
     def _match(self, scope: Scope) -> tuple[Handler, dict[str, Any]] | None:
@@ -175,19 +175,24 @@ def _match_route(route: _Route, scope: Scope) -> dict[str, Any] | None:
     return path_params
 
 
-def _upgrade_as_http(scope: Scope, send: Send) -> tuple[Scope, Send]:
+async def _empty_receive() -> Message:
+    return {"type": "http.request", "body": b"", "more_body": False}
+
+
+def _upgrade_as_http(scope: Scope, send: Send) -> tuple[Scope, Receive, Send]:
     if _WEBSOCKET_DENIAL not in (scope.get("extensions") or {}):
         raise RuntimeError("server does not support the ASGI websocket denial response extension")
 
     # An upgrade is a GET with Upgrade headers. Route it like any other
-    # request and answer with plain HTTP. The destination accepts the socket.
+    # request with no body and answer with plain HTTP. The destination
+    # accepts the socket.
     scheme = "https" if scope.get("scheme") == "wss" else "http"
     http_scope = {**scope, "type": "http", "method": "GET", "scheme": scheme}
 
     async def denial_send(message: Message) -> None:
         await send({**message, "type": f"websocket.{message['type']}"})
 
-    return http_scope, denial_send
+    return http_scope, _empty_receive, denial_send
 
 
 def _respond_with(response: Response) -> Handler:
