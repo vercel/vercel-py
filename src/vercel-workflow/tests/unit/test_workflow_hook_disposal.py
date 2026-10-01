@@ -9,6 +9,8 @@ EntityConflictError instead of double-deleting and writing a duplicate event.
 
 from __future__ import annotations
 
+import pytest
+
 from tests.payloads import PLAIN_ENCODER
 from vercel.workflow._internal import world as w
 from vercel.workflow._internal.worlds import local as local_mod
@@ -66,3 +68,34 @@ async def test_concurrent_dispose_loser_gets_entity_conflict(tmp_path, monkeypat
         pass
     else:
         raise AssertionError("losing the dispose lock should raise EntityConflictError")
+
+
+@pytest.mark.parametrize("successor_run_id", [None, RUN_ID, "wrun_successor"])
+@pytest.mark.parametrize("reload_world", [False, True])
+async def test_disposed_hook_cannot_be_recreated(
+    tmp_path, monkeypatch, successor_run_id, reload_world
+) -> None:
+    world = _world(tmp_path, monkeypatch)
+    created = w.HookCreatedEventData(token=TOKEN).into_event("hook_1")
+    await world.events_create(RUN_ID, created)
+    await world.events_create(RUN_ID, w.HookDisposedEvent(correlation_id="hook_1"))
+    if successor_run_id is not None:
+        await world.events_create(
+            successor_run_id, w.HookCreatedEventData(token=TOKEN).into_event("hook_successor")
+        )
+    before = (await world.events_list(RUN_ID)).data
+
+    if reload_world:
+        world = _world(tmp_path, monkeypatch)
+    with pytest.raises(w.EntityConflictError):
+        await world.events_create(RUN_ID, created)
+
+    assert (await world.events_list(RUN_ID)).data == before
+    assert not (world.data_dir / "hooks" / "hook_1.json").exists()
+    if successor_run_id is None:
+        with pytest.raises(w.HookNotFoundError):
+            await world.hooks_get_by_token(TOKEN)
+        await world.events_create(
+            RUN_ID, w.HookCreatedEventData(token=TOKEN).into_event("hook_successor")
+        )
+    assert (await world.hooks_get_by_token(TOKEN)).hook_id == "hook_successor"

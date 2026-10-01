@@ -1116,6 +1116,9 @@ class LocalWorld(w.World):
                 write_json(step_path, step, overwrite=True)
 
         elif data.event_type == "hook_created":
+            dispose_lock = self.data_dir / ".locks" / "hooks" / f"{data.correlation_id}.disposed"
+            if dispose_lock.exists():
+                raise w.EntityConflictError(f'Hook "{data.correlation_id}" already disposed')
             hook_data = data.event_data
             hashed_token = hashlib.sha256(hook_data.token.encode()).hexdigest()
             constraint_path = self.data_dir / "hooks" / "tokens" / f"{hashed_token}.json"
