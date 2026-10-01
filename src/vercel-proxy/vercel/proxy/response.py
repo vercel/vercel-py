@@ -236,6 +236,8 @@ class ContinueResponse(Response):
             for name, value in self._request_headers.items():
                 if value is not None:
                     control[f"x-middleware-request-{name}"] = value
+        if cookies := [value for name, value in self.raw_headers if name == b"set-cookie"]:
+            control.raw.append((b"x-middleware-set-cookie", b",".join(cookies)))
         await send(
             {
                 "type": "http.response.start",

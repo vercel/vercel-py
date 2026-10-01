@@ -15,6 +15,7 @@ from vercel.proxy import (
     ContinueResponse,
     Handler,
     JSONResponse,
+    PlainTextResponse,
     Proxy,
     RedirectResponse,
     Request,
@@ -138,12 +139,47 @@ async def test_changed_headers_and_cookies_emitted() -> None:
     sent = await call(proxy, make_scope())
     assert sent.headers == [
         (b"x-middleware-next", b"1"),
+        (
+            b"x-middleware-set-cookie",
+            b"a=1; Path=/; SameSite=lax,b=2; Path=/; SameSite=lax",
+        ),
         (b"x-a", b"1"),
         (b"content-length", b"0"),
         (b"x-b", b"2"),
         (b"set-cookie", b"a=1; Path=/; SameSite=lax"),
         (b"set-cookie", b"b=2; Path=/; SameSite=lax"),
     ]
+
+
+async def test_rewrite_emits_middleware_set_cookie() -> None:
+    def handler(req: Request) -> Response:
+        res = RewriteResponse("/app")
+        res.set_cookie("a", "1")
+        return res
+
+    proxy = Proxy()
+    proxy.route("/")(handler)
+    sent = await call(proxy, make_scope())
+    assert sent.headers == [
+        (b"x-middleware-rewrite", b"/app"),
+        (b"x-middleware-set-cookie", b"a=1; Path=/; SameSite=lax"),
+        (b"content-length", b"0"),
+        (b"set-cookie", b"a=1; Path=/; SameSite=lax"),
+    ]
+
+
+async def test_answered_response_omits_middleware_set_cookie() -> None:
+    def handler(req: Request) -> Response:
+        res = PlainTextResponse("ok")
+        res.set_cookie("a", "1")
+        return res
+
+    proxy = Proxy()
+    proxy.route("/")(handler)
+    sent = await call(proxy, make_scope())
+    names = [name for name, _ in sent.headers]
+    assert b"set-cookie" in names
+    assert b"x-middleware-set-cookie" not in names
 
 
 async def test_rewrite_emits_middleware_rewrite() -> None:
