@@ -152,10 +152,10 @@ class Proxy:
             path = scope["path"]
             toggled = path[:-1] if path.endswith("/") else f"{path}/"
             candidates.append({**scope, "path": toggled})
-        # Each route tries both slash forms before the next route, so the
-        # first matching route wins.
-        for route in self._routes:
-            for candidate in candidates:
+        # Like Starlette, every route tries the path as sent before any tries
+        # the other slash form.
+        for candidate in candidates:
+            for route in self._routes:
                 path_params = _match_route(route, candidate)
                 if path_params is not None:
                     return route.handler, path_params

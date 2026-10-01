@@ -57,8 +57,8 @@ The following placeholders are available:
   or `uuid`.
 - `{name:path}` captures any part of the path, including `/`.
 
-Trailing slashes are optional by default. Pass `strict=True` to `Proxy()` to
-require exact matches.
+Trailing slashes are optional by default, but a route that matches the path
+exactly is preferred. Pass `strict=True` to `Proxy()` to require exact matches.
 
 A route can also be limited to certain methods or hosts.
 
