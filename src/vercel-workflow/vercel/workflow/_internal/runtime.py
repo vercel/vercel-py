@@ -1077,6 +1077,8 @@ class WorkflowOrchestratorContext:
             if isinstance(result, Exception):
                 raise result
             return result[0]
+        if hook.has_dispose_event:
+            raise StopAsyncIteration
 
         fut = asyncio.Future[T]()
         hook.futures.append(fut)
@@ -1101,11 +1103,15 @@ class WorkflowOrchestratorContext:
     def dispose_hook(self, *, correlation_id: str) -> None:
         hook = self.hooks[correlation_id]
         hook.disposed = True
+        hook.buffered_results.clear()
+        self._unsubscribe_hook(hook)
+
+    def _unsubscribe_hook(self, hook: Hook) -> None:
         while hook.futures:
             fut = hook.futures.popleft()
             if not fut.done():
                 fut.set_exception(StopAsyncIteration)
-        self.suspensions.pop(correlation_id, None)
+        self.suspensions.pop(hook.correlation_id, None)
 
     def _fail_nondeterminism(self, sus: BaseSuspension | None, exc: Exception) -> None:
         """Fail the run with a replay-divergence error the body cannot suppress.
@@ -1369,8 +1375,9 @@ class WorkflowOrchestratorContext:
                     hook.set_result(result)
 
             case w.HookDisposedEvent():
-                self.hooks[event.correlation_id].has_dispose_event = True
-                self.dispose_hook(correlation_id=event.correlation_id)
+                hook = self.hooks[event.correlation_id]
+                hook.has_dispose_event = True
+                self._unsubscribe_hook(hook)
 
 
 # ── lazy hook resume ───────────────────────────────────────────────────────
