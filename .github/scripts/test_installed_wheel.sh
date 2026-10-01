@@ -125,6 +125,22 @@ for path in (test_root / "tests").rglob("*.py"):
             flags=re.MULTILINE,
         )
         rewritten = re.sub(
+            rf"^(?P<indent>[ \t]*)import {library}(?P<submodule>(?:\.[A-Za-z_]\w*)+)"
+            rf"(?: as (?P<alias>[A-Za-z_]\w*))?(?P<comment>[ \t]*(?:#.*)?)$",
+            lambda match: f"{match.group('indent')}import vercel.internal._vendor.{library}"
+            f"{match.group('submodule')}"
+            f"{(' as ' + match.group('alias')) if match.group('alias') else ''}"
+            f"{match.group('comment')}"
+            # Unaliased dotted imports bind the library root, not the submodule.
+            + (
+                ""
+                if match.group('alias')
+                else f"\n{match.group('indent')}from vercel.internal._vendor import {library}"
+            ),
+            rewritten,
+            flags=re.MULTILINE,
+        )
+        rewritten = re.sub(
             rf"^(?P<indent>[ \t]*)import {library}(?: as (?P<alias>[A-Za-z_]\w*))?(?P<comment>[ \t]*(?:#.*)?)$",
             lambda match: f"{match.group('indent')}from vercel.internal._vendor import {library}"
             f"{(' as ' + match.group('alias')) if match.group('alias') else ''}"
