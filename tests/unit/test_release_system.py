@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import importlib.util
-import json
 import subprocess
 from collections.abc import Sequence
 from datetime import datetime, timezone
@@ -1853,6 +1852,7 @@ def test_apscheduler_bundle_keeps_apscheduler_peer_dependency(
         (),
     ) == (
         "APScheduler>=3.10.4,<4",
+        "anyio>=4,<5",
         "vercel-queue-bundle>=0.7.0",
         "vercel-internal-shared-vendored-deps>=0.7.0",
     )
@@ -1915,6 +1915,7 @@ def test_vendored_requirements_are_derived_from_release_deps_and_lock(
             "python-multipart": "0.0.32",
             "truststore": "0.10.4",
             "typing-extensions": "4.15.0",
+            "wsproto": "1.3.2",
         },
     )
     monkeypatch.setattr(
@@ -1938,7 +1939,7 @@ def test_vendored_requirements_are_derived_from_release_deps_and_lock(
             "vercel": {
                 "release": {
                     "dependencies": [
-                        "anyio>=4.0.0",
+                        "anyio>=4.11.0",
                         "httpx2[http2]>=2",
                         "python-multipart>=0.0.20",
                         "typing_extensions>=4.0.0",
@@ -1966,7 +1967,6 @@ def test_vendored_requirements_are_derived_from_release_deps_and_lock(
     assert bundle_release._derive_vendor_requirements(  # noqa: SLF001
         bundle_release.SHARED_VENDORED_PACKAGE, {}
     ) == (
-        "anyio==4.13.0",
         "h11==0.16.0",
         "h2==4.3.0",
         "hpack==4.2.0",
@@ -1976,10 +1976,15 @@ def test_vendored_requirements_are_derived_from_release_deps_and_lock(
         "idna==3.13",
         "truststore==0.10.4",
         "typing-extensions==4.15.0",
+        "wsproto==1.3.2",
     )
     assert bundle_release._derive_vendor_requirements(  # noqa: SLF001
         "vercel-queue", queue_data
     ) == ("python-multipart==0.0.32",)
+    monkeypatch.setattr(bundle_release, "_vendored_dependency", lambda req: req.name + "-bundle")
+    assert "anyio>=4.11.0" in bundle_release._external_dependencies(
+        "vercel-queue", queue_data, ("python-multipart==0.0.32",)
+    )
     assert (
         bundle_release._derive_vendor_requirements(  # noqa: SLF001
             "vercel-celery", celery_data
@@ -2006,6 +2011,7 @@ def test_shared_bundle_package_is_generated(
     pyproject = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
     metadata = (tmp_path / "vercel/internal/_vendor/_shared_deps.json").read_text(encoding="utf-8")
     assert 'name = "vercel-internal-shared-vendored-deps"' in pyproject
+    assert 'dependencies = ["anyio>=4.11.0,<5"]' in pyproject
     assert "[tool.vendoring]" not in pyproject
     assert (tmp_path / "vercel/internal/_vendor/version.py").read_text(
         encoding="utf-8"
@@ -2047,71 +2053,10 @@ path = "vercel/queue/version.py"
     assert "import anyio\\\\.from_thread" not in pyproject
 
 
-def test_vendoring_config_includes_anyio_from_thread_transform(tmp_path: Path) -> None:
-    package_path = tmp_path / "pkg"
-    package_path.mkdir()
-    (package_path / "pyproject.toml").write_text(
-        """
-[project]
-name = "pkg"
-
-[tool.hatch.version]
-path = "vercel/pkg/version.py"
-""".lstrip(),
-        encoding="utf-8",
-    )
-    plan = bundle_release.VendoredPlan(
-        package=workspace.Package("pkg", package_path, package_path / "vercel/pkg/version.py", ()),
-        variant_name="pkg-bundle",
-        config=_derived_vendoring_config("/vercel/pkg"),
-        vendored_requirements=("anyio==4.13.0",),
-        external_dependencies=(),
-    )
-
-    bundle_release._write_vendoring_config(plan, package_path)  # noqa: SLF001
-
-    pyproject = (package_path / "pyproject.toml").read_text(encoding="utf-8")
-    assert "import anyio\\\\.from_thread" in pyproject
-
-
-def test_shared_vendoring_config_normalizes_anyio_dotted_imports(tmp_path: Path) -> None:
+def test_shared_bundle_declares_anyio_peer() -> None:
     plan = bundle_release._shared_vendored_plan()  # noqa: SLF001
-    (tmp_path / "pyproject.toml").write_text(
-        '[project]\nname = "vercel-internal-shared-vendored-deps"\n',
-        encoding="utf-8",
-    )
-
-    bundle_release._write_vendoring_config(plan, tmp_path)  # noqa: SLF001
-
-    pyproject = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
-    for match, replace in bundle_release.SHARED_ANYIO_SUBSTITUTIONS:
-        assert json.dumps(match) in pyproject
-        assert json.dumps(replace) in pyproject
-
-
-def test_shared_vendoring_rewrites_anyio_backend_import(tmp_path: Path) -> None:
-    from vendoring.tasks.vendor import rewrite_file_imports
-
-    plan = bundle_release._shared_vendored_plan()  # noqa: SLF001
-    transformations = bundle_release._vendoring_transformations(plan)  # noqa: SLF001
-    path = tmp_path / "_eventloop.py"
-    path.write_text(
-        "from importlib import import_module\n"
-        "def get_async_backend(asynclib_name):\n"
-        '    module = import_module(f"anyio._backends._{asynclib_name}")\n',
-        encoding="utf-8",
-    )
-
-    rewrite_file_imports(
-        path,
-        plan.config.namespace,
-        sorted(bundle_release.SHARED_VENDORED_LIBS),
-        [{"match": match, "replace": replace} for match, replace in transformations.substitutions],
-    )
-    rewritten = path.read_text(encoding="utf-8")
-
-    assert 'import_module(f"vercel.internal._vendor.anyio._backends._{asynclib_name}")' in rewritten
-    assert 'import_module(f"anyio._backends.' not in rewritten
+    assert plan.external_dependencies == ("anyio>=4.11.0,<5",)
+    assert not any(req.startswith("anyio==") for req in plan.vendored_requirements)
 
 
 def test_shared_deps_fingerprint_includes_recipe_revision(
@@ -2356,7 +2301,7 @@ def test_vendored_source_import_rewrite_handles_workspace_modules(tmp_path: Path
             namespace="vercel.integrations.celery._vendor",
             protected_files=("__init__.py", "vendor.txt"),
         ),
-        vendored_requirements=("anyio==4.13.0",),
+        vendored_requirements=(),
         external_dependencies=(
             "celery>=5.3,<6",
             "vercel-cache-bundle>=0.7.0",
@@ -2372,6 +2317,7 @@ def test_vendored_source_import_rewrite_handles_workspace_modules(tmp_path: Path
         "from vercel.oidc.utils import find_project_info\n"
         "from vercel.queue import sanitize_name\n"
         "import httpx2 as httpx\n"
+        "from wsproto.utilities import LocalProtocolError\n"
         "from anyio.abc import ObjectReceiveStream\n"
         "import anyio.from_thread\n"
         "from typing_extensions import override\n"
@@ -2396,8 +2342,9 @@ def test_vendored_source_import_rewrite_handles_workspace_modules(tmp_path: Path
     assert "from vercel.oidc.utils import find_project_info" in rewritten
     assert "from vercel.queue import sanitize_name" in rewritten
     assert "import vercel.internal._vendor.httpx2 as httpx" in rewritten
-    assert "from vercel.internal._vendor.anyio.abc import ObjectReceiveStream" in rewritten
-    assert "from vercel.internal._vendor.anyio import from_thread" in rewritten
+    assert "from vercel.internal._vendor.wsproto.utilities import LocalProtocolError" in rewritten
+    assert "from anyio.abc import ObjectReceiveStream" in rewritten
+    assert "import anyio.from_thread" in rewritten
     assert "from vercel.internal._vendor.typing_extensions import override" in rewritten
     assert "import vercel.queue as vqs" in rewritten
     assert "import vercel.queue.sync as vqs_sync" in rewritten

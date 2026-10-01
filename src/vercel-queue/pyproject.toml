@@ -16,7 +16,7 @@ path = "hatch_build.py"
 
 [tool.vercel.release.dependencies]
 dependencies = [
-    "anyio>=4.0.0",
+    "anyio>=4.11.0,<5",
     "httpx2[http2]>=2",
     "python-multipart>=0.0.20",
     "typing_extensions>=4.0.0",
@@ -28,7 +28,7 @@ dependencies = [
 [project.optional-dependencies]
 devserver = ["uvicorn"]
 typed = ["pydantic>=2.7.0"]
-trio = ["anyio[trio]>=4.0.0"]
+trio = ["anyio[trio]>=4.11.0,<5"]
 
 [tool.uv.sources]
 vercel-oidc = { workspace = true }

@@ -89,6 +89,14 @@ with zipfile.ZipFile(wheel) as archive:
         "vercel-* packages must be installed side-by-side as -bundle dependencies, "
         "not copied into another package's vendor tree"
     )
+    assert not any("/_vendor/anyio/" in name for name in names), (
+        "AnyIO must be shared with user code, never vendored"
+    )
+    for name in names:
+        if name.endswith(".py"):
+            source = archive.read(name).decode("utf-8")
+            assert "vercel.internal._vendor.anyio" not in source
+            assert "from vercel.internal._vendor import anyio" not in source
     for member in archive.namelist():
         if member.startswith("vercel/") and not member.endswith("/"):
             archive.extract(member, test_root)
@@ -102,7 +110,7 @@ from pathlib import Path
 test_root = Path(sys.argv[1])
 vendored_libraries = tuple(
     library
-    for library in ("anyio", "httpx2")
+    for library in ("httpx2",)
     if any(
         f"vercel.internal._vendor.{library}" in path.read_text(encoding="utf-8")
         or f"from vercel.internal._vendor import {library}" in path.read_text(encoding="utf-8")
@@ -398,6 +406,7 @@ if [ -d "$test_root/tests" ]; then
         --directory "$test_root" \
         --with "$wheel_path" \
         --with pytest \
+        --with "${VERCEL_TEST_ANYIO:-anyio>=4.11.0,<5}" \
         --with-requirements "$test_root/requirements.txt" \
         $extra_wheel_args \
         pytest \

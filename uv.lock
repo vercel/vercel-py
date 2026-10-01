@@ -2645,7 +2645,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "anyio", specifier = ">=4.0.0,<5" },
+    { name = "anyio", specifier = ">=4.11.0,<5" },
     { name = "httpx2", specifier = ">=2" },
     { name = "pydantic", specifier = ">=2.7.0,<3" },
     { name = "python-dotenv", specifier = ">=1.0.0,<2" },
@@ -2776,7 +2776,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "anyio", specifier = ">=4.0.0,<5" },
+    { name = "anyio", specifier = ">=4.11.0,<5" },
     { name = "httpx2", specifier = ">=2" },
     { name = "typing-extensions", marker = "python_full_version < '3.12'", specifier = ">=4.6.0,<5" },
 ]
@@ -2812,7 +2812,7 @@ verify = [
 
 [package.metadata]
 requires-dist = [
-    { name = "anyio", specifier = ">=4.0.0,<5" },
+    { name = "anyio", specifier = ">=4.11.0,<5" },
     { name = "cryptography", marker = "extra == 'verify'", specifier = ">=48.0.1" },
     { name = "httpx2", specifier = ">=2" },
     { name = "pyjwt", extras = ["crypto"], marker = "extra == 'verify'", specifier = ">=2.13.0,<3" },
@@ -2846,8 +2846,8 @@ typed = [
 
 [package.metadata]
 requires-dist = [
-    { name = "anyio", specifier = ">=4.0.0" },
-    { name = "anyio", extras = ["trio"], marker = "extra == 'trio'", specifier = ">=4.0.0" },
+    { name = "anyio", specifier = ">=4.11.0,<5" },
+    { name = "anyio", extras = ["trio"], marker = "extra == 'trio'", specifier = ">=4.11.0,<5" },
     { name = "httpx2", extras = ["http2"], specifier = ">=2" },
     { name = "pydantic", marker = "extra == 'typed'", specifier = ">=2.7.0" },
     { name = "python-multipart", specifier = ">=0.0.20" },
@@ -2872,7 +2872,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "anyio", specifier = ">=4.0.0,<5" },
+    { name = "anyio", specifier = ">=4.11.0,<5" },
     { name = "httpx2", extras = ["ws"], specifier = ">=2" },
     { name = "pydantic", specifier = ">=2.7.0,<3" },
     { name = "vercel-internal-core", editable = "src/vercel-internal-core" },
@@ -2900,7 +2900,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "anyio", specifier = ">=4.0.0,<5" },
+    { name = "anyio", specifier = ">=4.11.0,<5" },
     { name = "cbor2", specifier = ">=6.0,<7" },
     { name = "cryptography", specifier = ">=43.0.0" },
     { name = "httpx2", specifier = ">=2" },

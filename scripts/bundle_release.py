@@ -45,7 +45,6 @@ LICENSE_FILE_RE = re.compile(
     re.IGNORECASE,
 )
 SHARED_VENDORED_LIBS = {
-    "anyio": "anyio",
     "h11": "h11",
     "h2": "h2",
     "hpack": "hpack",
@@ -55,6 +54,8 @@ SHARED_VENDORED_LIBS = {
     "idna": "idna",
     "truststore": "truststore",
     "typing_extensions": "typing-extensions",
+    # httpx2[ws] consumers need the WebSocket protocol implementation too.
+    "wsproto": "wsproto",
 }
 SHARED_VENDORED_REQUIREMENTS = tuple(SHARED_VENDORED_LIBS.values())
 SHARED_VENDORED_CONSUMERS = {
@@ -70,6 +71,10 @@ SHARED_VENDORED_CONSUMERS = {
     "vercel-queue",
     "vercel-sandbox",
 }
+# Queue lease renewal uses EventLoopToken and from_thread token support (4.11).
+ANYIO_REQUIREMENT = "anyio>=4.11.0,<5"
+# AnyIO manages task-local state shared with application callbacks.
+GLOBAL_PEER_DEPENDENCIES = {"anyio"}
 PEER_DEPENDENCIES = {
     "vercel-apscheduler": {"apscheduler"},
     "vercel-celery": {"celery"},
@@ -100,21 +105,9 @@ COMMON_DROP_TRANSFORMATIONS = (
     "*/tests/",
     "*/__pycache__/",
 )
-ANYIO_FROM_THREAD_SUBSTITUTION = (
-    r"import anyio\.from_thread",
-    "from anyio import from_thread",
-)
-SHARED_ANYIO_SUBSTITUTIONS = (
-    (r"import anyio\.abc", "from anyio import abc"),
-    (r"import anyio\.streams\.tls", "from anyio.streams import tls"),
-    (
-        r'import_module\(f"anyio\._backends\._',
-        'import_module(f"vercel.internal._vendor.anyio._backends._',
-    ),
-)
 # Bump to force a republish of the shared vendored package when the vendoring
 # recipe changes without any change to the pinned requirements.
-SHARED_VENDOR_RECIPE_REVISION = 4
+SHARED_VENDOR_RECIPE_REVISION = 5
 
 
 @dataclass(frozen=True)
@@ -203,12 +196,12 @@ def _shared_vendored_plan() -> VendoredPlan:
             ),
         ),
         vendored_requirements=_derive_vendor_requirements(SHARED_VENDORED_PACKAGE, data),
-        external_dependencies=(),
+        external_dependencies=(ANYIO_REQUIREMENT,),
     )
 
 
 def _shared_pyproject_data() -> dict[str, Any]:
-    return {"tool": {"vercel": {"release": {"dependencies": []}}}}
+    return {"tool": {"vercel": {"release": {"dependencies": [ANYIO_REQUIREMENT]}}}}
 
 
 def _load_pyproject(path: Path) -> dict[str, Any]:
@@ -266,7 +259,7 @@ def _derive_vendor_requirements(package_name: str, data: dict[str, Any]) -> tupl
 
     vendored_names = []
     external_dependencies = EXTERNAL_DEPENDENCIES.get(package_name, set())
-    peers = PEER_DEPENDENCIES.get(package_name, set())
+    peers = GLOBAL_PEER_DEPENDENCIES | PEER_DEPENDENCIES.get(package_name, set())
     for dependency in _release_dependencies(data):
         parsed = Requirement(dependency)
         normalized = _normalize_name(parsed.name)
@@ -326,7 +319,7 @@ def _external_dependencies(
     packages = workspace.packages()
     vendored_names = {_requirement_name(requirement) for requirement in vendored_requirements}
     external_dependencies = EXTERNAL_DEPENDENCIES.get(package_name, set())
-    peers = PEER_DEPENDENCIES.get(package_name, set())
+    peers = GLOBAL_PEER_DEPENDENCIES | PEER_DEPENDENCIES.get(package_name, set())
     external = []
     for dependency in _release_dependencies(data):
         parsed = Requirement(dependency)
@@ -583,12 +576,12 @@ dynamic = ["version"]
 description = "Shared vendored dependencies for Vercel Python packages"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = ["{ANYIO_REQUIREMENT}"]
 license = "MIT"
 license-files = ["LICENSE", "LICENSE.*"]
 
 [tool.vercel.release.dependencies]
-dependencies = []
+dependencies = ["{ANYIO_REQUIREMENT}"]
 
 [tool.hatch.version]
 path = "vercel/internal/_vendor/version.py"
@@ -672,11 +665,12 @@ def _render_vendoring_config(plan: VendoredPlan) -> str:
 def _vendoring_transformations(plan: VendoredPlan) -> VendoringTransformations:
     if plan.package.name == SHARED_VENDORED_PACKAGE:
         return VendoringTransformations(
-            substitutions=(*_shared_h2_substitution_pairs(), *SHARED_ANYIO_SUBSTITUTIONS),
+            substitutions=(
+                *_shared_h2_substitution_pairs(),
+                (r"import wsproto\.utilities", "from wsproto import utilities"),
+            ),
         )
-    vendored_names = {_requirement_name(requirement) for requirement in plan.vendored_requirements}
-    substitutions = (ANYIO_FROM_THREAD_SUBSTITUTION,) if "anyio" in vendored_names else ()
-    return VendoringTransformations(substitutions=substitutions)
+    return VendoringTransformations(substitutions=())
 
 
 def _shared_h2_substitution_pairs() -> tuple[tuple[str, str], ...]:
@@ -1080,13 +1074,6 @@ def _source_rewrite_substitutions(plan: VendoredPlan) -> tuple[dict[str, str], .
             {
                 "match": rf"import {re.escape(lib)}\.([A-Za-z_]\w*) as ([A-Za-z_]\w*)",
                 "replace": rf"from {plan.config.namespace}.{lib} import \1 as \2",
-            }
-        )
-    if "anyio" in _source_rewrite_libs(plan):
-        substitutions.append(
-            {
-                "match": r"import anyio\.from_thread",
-                "replace": "from anyio import from_thread",
             }
         )
     return tuple(substitutions)

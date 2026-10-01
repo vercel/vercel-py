@@ -17,7 +17,6 @@ import traceback
 from collections import deque
 from collections.abc import (
     AsyncIterator,
-    Awaitable,
     Callable,
     Coroutine,
     Mapping,
@@ -1909,7 +1908,7 @@ async def _workflow_replay_pass(
     # released, create all pending events in parallel. Steps are enqueued only
     # once every event is durable: a step may hand a hook's token to whoever
     # will resume it, so the hook has to exist by the time the step runs.
-    steps_to_queue: list[Callable[[], Awaitable[str]]] = []
+    steps_to_queue: list[Callable[[], Coroutine[Any, Any, str]]] = []
     async with anyio.create_task_group() as tg:
         for sus in context.suspensions.values():
             if sus.has_created_event:
