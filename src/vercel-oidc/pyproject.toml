@@ -28,7 +28,7 @@ dependencies = [
     # anyio provides the backend-agnostic sleep used while waiting for another
     # caller's JWKS fetch; httpx2 already requires it unconditionally, so this adds
     # no install weight.
-    "anyio>=4.0.0,<5",
+    "anyio>=4.11.0,<5",
     "httpx2>=2",
     "vercel-headers>=0.6.0",
 ]

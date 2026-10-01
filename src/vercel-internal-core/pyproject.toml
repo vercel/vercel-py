@@ -17,7 +17,7 @@ path = "hatch_build.py"
 [tool.vercel.release.dependencies]
 dependencies = [
     "httpx2>=2",
-    "anyio>=4.0.0,<5",
+    "anyio>=4.11.0,<5",
     "typing-extensions>=4.6.0,<5 ; python_version < '3.12'",
 ]
 

@@ -36,7 +36,7 @@ jobs:
         run: uv run poe typecheck
 
   test:
-    name: Test (${{ matrix.os.name }}, py${{ matrix.python-version }})
+    name: Test (${{ matrix.os.name }}, py${{ matrix.python-version }}, anyio ${{ matrix.anyio }})
     runs-on: ${{ matrix.os.runner }}
     environment: ci
     permissions:
@@ -61,6 +61,7 @@ jobs:
             redis-image: ""
             redis-url: ""
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        anyio: [lowest, latest]
     services:
       # The vercel-apscheduler driver tests exercise their Lua scripts against
       # a real Redis on Linux; without this service they skip silently.
@@ -69,6 +70,9 @@ jobs:
         ports:
           - 6379:6379
     env:
+      # Keep nested task runners from restoring the locked AnyIO version.
+      UV_NO_SYNC: "1"
+      ANYIO_VERSION: ${{ matrix.anyio }}
       APSCHEDULER_TEST_REDIS_URL: ${{ matrix.os.redis-url }}
       BLOB_READ_WRITE_TOKEN: ${{ secrets.BLOB_READ_WRITE_TOKEN }}
       VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
@@ -124,6 +128,11 @@ jobs:
       - name: Sync dependencies
         run: uv sync --all-packages --locked --python ${{ matrix.python-version }}
 
+      - name: Select AnyIO boundary
+        run: |
+          requirement=$(uv run --no-sync python scripts/anyio_version.py "$ANYIO_VERSION")
+          uv pip install "$requirement"
+
       - name: Test
         run: uv run poe test
         env:
@@ -135,7 +144,13 @@ jobs:
         run: uv run poe test-examples
 
   build:
-    name: Build packages
+    name: Build packages (anyio ${{ matrix.anyio }})
+    strategy:
+      fail-fast: false
+      matrix:
+        anyio: [lowest, latest]
+    env:
+      ANYIO_VERSION: ${{ matrix.anyio }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -155,6 +170,14 @@ jobs:
 
       - name: Build package
         run: uv run poe dist
+
+      - name: Test bundled packages with shared AnyIO
+        run: |
+          VERCEL_TEST_ANYIO=$(uv run --no-sync python scripts/anyio_version.py "$ANYIO_VERSION")
+          export VERCEL_TEST_ANYIO
+          for package in vercel-internal-core vercel-queue vercel-sandbox; do
+            uv run python scripts/bundle_release.py test-wheel --package "$package" --dist-dir dist
+          done
 
   release-dry-run:
     name: Release publish dry run
