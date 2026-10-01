@@ -922,14 +922,18 @@ class WorkflowOrchestratorContext:
 
             token = self._ctx.set(self)
             try:
-                result = self.payload_encoder.encode(
-                    obj.codec.dump_return(
-                        _run_isolated(
-                            obj.func(*args, **kwargs),
-                            loop_factory=lambda: loop.WorkflowLoop(workflow=self),
+                try:
+                    result = self.payload_encoder.encode(
+                        obj.codec.dump_return(
+                            _run_isolated(
+                                obj.func(*args, **kwargs),
+                                loop_factory=lambda: loop.WorkflowLoop(workflow=self),
+                            )
                         )
                     )
-                )
+                finally:
+                    if not self.suspended:
+                        self._finish_replay()
             except BaseException as ex:
                 if self.resume_exception is not None:
                     # Since resume_exception actually got raised on a
@@ -1098,25 +1102,30 @@ class WorkflowOrchestratorContext:
         hook.conflict_futures.append(future)
         return await future
 
-    def dispose_hook(self, *, correlation_id: str) -> None:
+    def dispose_hook(self, *, correlation_id: str, deliver: bool = True) -> None:
         hook = self.hooks[correlation_id]
         hook.disposed = True
-        while hook.futures:
-            fut = hook.futures.popleft()
-            if not fut.done():
-                fut.set_exception(StopAsyncIteration)
+        if deliver:
+            while hook.futures:
+                fut = hook.futures.popleft()
+                if not fut.done():
+                    fut.set_exception(StopAsyncIteration)
         self.suspensions.pop(correlation_id, None)
 
-    def _fail_nondeterminism(self, sus: BaseSuspension | None, exc: Exception) -> None:
+    def _fail_nondeterminism(
+        self, sus: BaseSuspension | None, exc: Exception, *, deliver: bool
+    ) -> None:
         """Fail the run with a replay-divergence error the body cannot suppress.
 
         The diverged suspension may be absent or not be what the body is blocked
         on, so failing its future alone might never surface anywhere -- and a
         body that is awaiting it could catch the error. So the exception is
         also stashed for ``run_workflow`` to raise, and the run is suspended
-        so nothing else executes.
+        so nothing else executes. During finalization, raise directly instead.
         """
         self.resume_exception = exc
+        if not deliver:
+            raise exc
         if sus is not None:
             sus.fail(exc)
         self.suspend()
@@ -1152,6 +1161,13 @@ class WorkflowOrchestratorContext:
         # multiple deliveries bunched up before a resume(), which could
         # lead to mismatches between a recording trace and a replaying
         # one.
+        self._replay_next_event(deliver=True)
+
+    def _finish_replay(self) -> None:
+        while self.replay_index < len(self.events):
+            self._replay_next_event(deliver=False)
+
+    def _replay_next_event(self, *, deliver: bool) -> None:
         event = self.events[self.replay_index]
         self.replay_index += 1
         if event.correlation_id in self.hooks:
@@ -1169,6 +1185,7 @@ class WorkflowOrchestratorContext:
                             f"recorded hook token {event_token!r}, but the body now uses "
                             f"{registered_hook.token!r}"
                         ),
+                        deliver=deliver,
                     )
                     return
         elif event.correlation_id not in self.suspensions:
@@ -1205,6 +1222,7 @@ class WorkflowOrchestratorContext:
                                     f"issues a {_correlation_kind(sus.correlation_id)!r} call. "
                                     "The workflow body is non-deterministic."
                                 ),
+                                deliver=deliver,
                             )
                             return
                     self._fail_nondeterminism(
@@ -1213,6 +1231,7 @@ class WorkflowOrchestratorContext:
                             f"workflow replay cannot deliver {slot_id!r}: "
                             "the workflow body has not registered its suspension"
                         ),
+                        deliver=deliver,
                     )
                     return
 
@@ -1236,6 +1255,7 @@ class WorkflowOrchestratorContext:
                             f"step {name!r}, but the body now calls {sus.step.name!r} with "
                             "different arguments. The workflow body is non-deterministic."
                         ),
+                        deliver=deliver,
                     )
                     return
                 sus.has_created_event = True
@@ -1247,6 +1267,8 @@ class WorkflowOrchestratorContext:
                     hook = self.suspensions[event.correlation_id]
                 hook.has_created_event = True
                 if isinstance(hook, Hook):
+                    if not deliver:
+                        return
                     while hook.conflict_futures:
                         future = hook.conflict_futures.popleft()
                         if not future.cancelled():
@@ -1271,14 +1293,17 @@ class WorkflowOrchestratorContext:
                             f"{recorded_changes!r}, but the body now sets "
                             f"{attr_sus.changes!r}. The workflow body is non-deterministic."
                         ),
+                        deliver=deliver,
                     )
                     return
-                if not attr_sus.future.cancelled():
+                if deliver and not attr_sus.future.cancelled():
                     attr_sus.future.set_result(None)
 
             case w.StepCompletedEvent(event_data=w.StepCompletedEventData(result=data)):
                 sus = self.suspensions.pop(event.correlation_id)
                 assert isinstance(sus, Suspension)
+                if not deliver:
+                    return
                 result = ser.hydrate(
                     data,
                     what=f"the result of step {event.correlation_id}",
@@ -1295,12 +1320,14 @@ class WorkflowOrchestratorContext:
             case w.WaitCompletedEvent():
                 wait = self.suspensions.pop(event.correlation_id)
                 assert isinstance(wait, Wait)
-                if not wait.future.cancelled():
+                if deliver and not wait.future.cancelled():
                     wait.future.set_result(None)
 
             case w.StepFailedEvent(event_data=w.StepFailedEventData(error=data)):
                 sus = self.suspensions.pop(event.correlation_id)
                 assert isinstance(sus, Suspension)
+                if not deliver:
+                    return
                 what = f"the error of step {event.correlation_id}"
                 try:
                     failure = ser.hydrate_error(data, what=what, key=self.run_key)
@@ -1330,6 +1357,8 @@ class WorkflowOrchestratorContext:
                     conflicting_hook.conflicting_run = (
                         Run(conflicting_run_id) if conflicting_run_id else None
                     )
+                    if not deliver:
+                        return
                     while conflicting_hook.futures:
                         future = conflicting_hook.futures.popleft()
                         if not future.cancelled():
@@ -1357,6 +1386,8 @@ class WorkflowOrchestratorContext:
                     return
 
                 assert isinstance(hook, Hook)
+                if not deliver:
+                    return
                 try:
                     result = ser.hydrate(
                         data,
@@ -1370,7 +1401,7 @@ class WorkflowOrchestratorContext:
 
             case w.HookDisposedEvent():
                 self.hooks[event.correlation_id].has_dispose_event = True
-                self.dispose_hook(correlation_id=event.correlation_id)
+                self.dispose_hook(correlation_id=event.correlation_id, deliver=deliver)
 
 
 # ── lazy hook resume ───────────────────────────────────────────────────────
