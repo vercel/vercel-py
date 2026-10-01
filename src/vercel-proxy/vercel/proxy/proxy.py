@@ -8,7 +8,7 @@ from typing import Any, TypeAlias, TypeVar
 
 from starlette.concurrency import run_in_threadpool
 from starlette.routing import Host, Match, Route, Router
-from starlette.types import Receive, Scope, Send
+from starlette.types import Message, Receive, Scope, Send
 
 from vercel.proxy.request import Request
 from vercel.proxy.response import ContinueResponse, Response
@@ -19,6 +19,8 @@ Handler: TypeAlias = Callable[[Request], Response | Awaitable[Response]]
 """A sync or async function that takes a request and returns a response."""
 
 _H = TypeVar("_H", bound=Handler)
+
+_WEBSOCKET_DENIAL = "websocket.http.response"
 
 
 @dataclass(frozen=True)
@@ -128,8 +130,12 @@ class Proxy:
         if scope["type"] == "lifespan":
             await Router().lifespan(scope, receive, send)
             return
-        if scope["type"] != "http":
-            raise RuntimeError(f'unsupported ASGI scope type "{scope["type"]}": expected "http"')
+        if scope["type"] == "websocket":
+            scope, send = _upgrade_as_http(scope, send)
+        elif scope["type"] != "http":
+            raise RuntimeError(
+                f'unsupported ASGI scope type "{scope["type"]}": expected "http" or "websocket"'
+            )
 
         response = await self._dispatch(scope)
         await response(scope, receive, send)
@@ -167,6 +173,21 @@ def _match_route(route: _Route, scope: Scope) -> dict[str, Any] | None:
         return None
     path_params: dict[str, Any] = child_scope["path_params"]
     return path_params
+
+
+def _upgrade_as_http(scope: Scope, send: Send) -> tuple[Scope, Send]:
+    if _WEBSOCKET_DENIAL not in (scope.get("extensions") or {}):
+        raise RuntimeError("server does not support the ASGI websocket denial response extension")
+
+    # An upgrade is a GET with Upgrade headers. Route it like any other
+    # request and answer with plain HTTP. The destination accepts the socket.
+    scheme = "https" if scope.get("scheme") == "wss" else "http"
+    http_scope = {**scope, "type": "http", "method": "GET", "scheme": scheme}
+
+    async def denial_send(message: Message) -> None:
+        await send({**message, "type": f"websocket.{message['type']}"})
+
+    return http_scope, denial_send
 
 
 def _respond_with(response: Response) -> Handler:

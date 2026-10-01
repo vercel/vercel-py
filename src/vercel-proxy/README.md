@@ -105,6 +105,9 @@ it.
 The request body is forwarded to the destination unread. `body()`, `json()`, `form()`, `stream()`, `receive` and
 `is_disconnected()` raise `RuntimeError`.
 
+WebSocket upgrades are routed like `GET` requests, and the destination accepts
+the socket. Check `request.headers.get("upgrade")` to tell them apart.
+
 ## Responses
 
 A handler returns a `ContinueResponse` or `RewriteResponse` to let the request

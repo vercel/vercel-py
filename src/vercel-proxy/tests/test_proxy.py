@@ -798,9 +798,130 @@ async def test_lifespan() -> None:
     ]
 
 
-async def test_websocket_scope_rejected() -> None:
+def make_websocket_scope(
+    path: str = "/",
+    *,
+    scheme: str | None = "wss",
+    host: str = "example.com",
+) -> dict[str, Any]:
+    scope = make_scope(path, host=host)
+    del scope["method"]
+    if scheme is None:
+        del scope["scheme"]
+    else:
+        scope["scheme"] = scheme
+    return {
+        **scope,
+        "type": "websocket",
+        "headers": [*scope["headers"], (b"upgrade", b"websocket")],
+        "subprotocols": [],
+        "extensions": {"websocket.http.response": {}},
+    }
+
+
+async def call_websocket(proxy: Proxy, scope: dict[str, Any]) -> Sent:
+    messages: list[Message] = []
+
+    async def send(message: Message) -> None:
+        messages.append(message)
+
+    await proxy(scope, never_receive, send)
+    assert [m["type"] for m in messages] == [
+        "websocket.http.response.start",
+        "websocket.http.response.body",
+    ]
+    return Sent(messages[0]["status"], messages[0]["headers"], messages[1]["body"])
+
+
+async def test_websocket_continue() -> None:
+    proxy = Proxy()
+    proxy.route("/chat")(lambda req: ContinueResponse(request_headers={"x-user": "1"}))
+    sent = await call_websocket(proxy, make_websocket_scope("/chat"))
+    assert (sent.status, sent.body) == (200, b"")
+    assert sent.headers == [
+        (b"x-middleware-next", b"1"),
+        (b"x-middleware-override-headers-diff", b"x-user"),
+        (b"x-middleware-request-x-user", b"1"),
+        (b"content-length", b"0"),
+    ]
+
+
+async def test_websocket_rewrite() -> None:
+    proxy = Proxy()
+    proxy.route("/chat")(lambda req: RewriteResponse("/rooms/1"))
+    sent = await call_websocket(proxy, make_websocket_scope("/chat"))
+    assert sent.header_dict["x-middleware-rewrite"] == "/rooms/1"
+
+
+async def test_websocket_answered() -> None:
+    proxy = Proxy()
+    proxy.route("/chat")(lambda req: PlainTextResponse("forbidden", status_code=403))
+    sent = await call_websocket(proxy, make_websocket_scope("/chat"))
+    assert (sent.status, sent.body) == (403, b"forbidden")
+    assert sent.header_dict["x-middleware-refresh"] == "1"
+
+
+async def test_websocket_redirect() -> None:
+    proxy = Proxy()
+    proxy.route("/chat")(lambda req: RedirectResponse("/login"))
+    sent = await call_websocket(proxy, make_websocket_scope("/chat"))
+    assert sent.status == 307
+    assert sent.header_dict["location"] == "/login"
+
+
+async def test_websocket_fallback() -> None:
+    sent = await call_websocket(Proxy(), make_websocket_scope("/chat"))
+    assert sent.header_dict["x-middleware-next"] == "1"
+
+
+async def test_websocket_routed_as_get() -> None:
+    proxy = Proxy()
+    proxy.route("/chat", methods=["POST"])(lambda req: Response(status_code=405))
+    proxy.route("/chat")(lambda req: PlainTextResponse(f"{req.method} {req.headers['upgrade']}"))
+    sent = await call_websocket(proxy, make_websocket_scope("/chat"))
+    assert sent.body == b"GET websocket"
+
+
+@pytest.mark.parametrize(
+    ("scheme", "expected"),
+    [("wss", "https"), ("ws", "http"), (None, "http")],
+    ids=["wss", "ws", "missing"],
+)
+async def test_websocket_scheme_mapped(scheme: str | None, expected: str) -> None:
+    seen: list[Any] = []
+    proxy = Proxy()
+    proxy.route("/chat")(capture(seen, lambda req: str(req.url)))
+    await call_websocket(proxy, make_websocket_scope("/chat", scheme=scheme))
+    assert seen == [f"{expected}://example.com/chat"]
+
+
+async def test_websocket_host_route() -> None:
+    proxy = Proxy()
+    proxy.route("/chat", host="other.example.com")(lambda req: Response(status_code=404))
+    proxy.route("/chat", host="{tenant}.example.com")(
+        lambda req: PlainTextResponse(req.path_params["tenant"])
+    )
+    sent = await call_websocket(proxy, make_websocket_scope("/chat", host="acme.example.com"))
+    assert sent.body == b"acme"
+
+
+@pytest.mark.parametrize("extensions", ["missing", None, {}], ids=["missing", "none", "empty"])
+async def test_websocket_requires_denial_extension(extensions: Any) -> None:
     async def send(message: Message) -> None:
         raise AssertionError("nothing should be sent")
 
-    with pytest.raises(RuntimeError, match='unsupported ASGI scope type "websocket"'):
-        await Proxy()({"type": "websocket"}, never_receive, send)
+    scope = make_websocket_scope()
+    if extensions == "missing":
+        del scope["extensions"]
+    else:
+        scope["extensions"] = extensions
+    with pytest.raises(RuntimeError, match="websocket denial response extension"):
+        await Proxy()(scope, never_receive, send)
+
+
+async def test_unknown_scope_rejected() -> None:
+    async def send(message: Message) -> None:
+        raise AssertionError("nothing should be sent")
+
+    with pytest.raises(RuntimeError, match='unsupported ASGI scope type "custom"'):
+        await Proxy()({"type": "custom"}, never_receive, send)
