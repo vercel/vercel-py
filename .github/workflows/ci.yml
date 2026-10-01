@@ -130,11 +130,8 @@ jobs:
 
       - name: Select AnyIO boundary
         run: |
-          if [ "$ANYIO_VERSION" = lowest ]; then
-            uv pip install 'anyio==4.11.0'
-          else
-            uv pip install --upgrade 'anyio>=4.11.0,<5'
-          fi
+          requirement=$(uv run --no-sync python scripts/anyio_version.py "$ANYIO_VERSION")
+          uv pip install "$requirement"
 
       - name: Test
         run: uv run poe test
@@ -176,11 +173,8 @@ jobs:
 
       - name: Test bundled packages with shared AnyIO
         run: |
-          if [ "$ANYIO_VERSION" = lowest ]; then
-            export VERCEL_TEST_ANYIO='anyio==4.11.0'
-          else
-            export VERCEL_TEST_ANYIO='anyio>=4.11.0,<5'
-          fi
+          VERCEL_TEST_ANYIO=$(uv run --no-sync python scripts/anyio_version.py "$ANYIO_VERSION")
+          export VERCEL_TEST_ANYIO
           for package in vercel-internal-core vercel-queue vercel-sandbox; do
             uv run python scripts/bundle_release.py test-wheel --package "$package" --dist-dir dist
           done
