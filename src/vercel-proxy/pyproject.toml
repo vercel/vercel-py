@@ -16,7 +16,7 @@ path = "hatch_build.py"
 
 [tool.vercel.release.dependencies]
 dependencies = [
-    "starlette>=1.0,<2",
+    "starlette>=0.33,<2",
 ]
 
 [tool.hatch.version]

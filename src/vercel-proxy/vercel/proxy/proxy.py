@@ -99,7 +99,7 @@ class Proxy:
         # endpoint is never called. Passing the proxy (an ASGI app, not a
         # function) keeps methods=None meaning "every method"; Starlette
         # restricts function endpoints to GET by default.
-        path_route = Route(path, endpoint=self, methods=methods)
+        path_route = Route(path, endpoint=self, methods=None if methods is None else list(methods))
         host_route = Host(host, app=self) if host is not None else None
         if host_route is not None:
             overlap = path_route.param_convertors.keys() & host_route.param_convertors.keys()
