@@ -382,6 +382,33 @@ def test_sync_overlap_rejection_preserves_first_read() -> None:
             assert stream.close_calls == 1
 
 
+def test_direct_sync_read_claims_download() -> None:
+    stream = _FaultingStream()
+    with session(
+        httpx_client_factory=lambda: httpx.Client(
+            transport=httpx.MockTransport(lambda _: _response(stream))
+        )
+    ):
+        with blob.sync.get(_URL, access="public") as download:
+            assert next(download) == _CHUNK
+            with pytest.raises(BlobStreamError, match="consumed once"):
+                iter(download)
+
+
+@pytest.mark.anyio
+async def test_direct_async_read_claims_download() -> None:
+    stream = _FaultingStream()
+    async with session(
+        httpx_client_factory=lambda: httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda _: _response(stream))
+        )
+    ):
+        async with blob.get(_URL, access="public") as download:
+            assert await anext(download) == _CHUNK
+            with pytest.raises(BlobStreamError, match="consumed once"):
+                aiter(download)
+
+
 @pytest.mark.anyio
 async def test_async_overlap_rejection_preserves_first_read() -> None:
     entered = anyio.Event()

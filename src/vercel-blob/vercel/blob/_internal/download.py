@@ -99,6 +99,8 @@ class AsyncBlobDownload(_BlobDownloadCore):
             yield chunk
 
     async def __anext__(self) -> bytes:
+        if not self._consumed:
+            self._begin_iteration()
         return await self._next_chunk()
 
     async def aclose(self) -> None:
@@ -127,6 +129,8 @@ class SyncBlobDownload(_BlobDownloadCore):
             yield chunk
 
     def __next__(self) -> bytes:
+        if not self._consumed:
+            self._begin_iteration()
         try:
             return iter_coroutine(self._next_chunk())
         except StopAsyncIteration:
