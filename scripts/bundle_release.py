@@ -94,6 +94,9 @@ EXTERNAL_DEPENDENCIES = {
 UNBUNDLED_PACKAGES = {
     # Workflow is not vendored by anything yet, so we don't need its -bundle
     "vercel-workflow",
+    # Proxy is only used as an explicit dependency of user code, so it has no
+    # need for a -bundle.
+    "vercel-proxy",
 }
 COMMON_DROP_TRANSFORMATIONS = (
     "*.so",
