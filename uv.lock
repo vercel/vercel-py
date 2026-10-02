@@ -2680,6 +2680,22 @@ requires-dist = [
 [[package]]
 name = "vercel-blob"
 source = { editable = "src/vercel-blob" }
+dependencies = [
+    { name = "anyio" },
+    { name = "httpx2" },
+    { name = "pydantic" },
+    { name = "vercel-internal-core" },
+    { name = "vercel-oidc" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "anyio", specifier = ">=4.0.0,<5" },
+    { name = "httpx2", specifier = ">=2" },
+    { name = "pydantic", specifier = ">=2.7.0,<3" },
+    { name = "vercel-internal-core", editable = "src/vercel-internal-core" },
+    { name = "vercel-oidc", editable = "src/vercel-oidc" },
+]
 
 [[package]]
 name = "vercel-cache"
