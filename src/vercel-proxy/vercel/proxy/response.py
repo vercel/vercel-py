@@ -6,6 +6,7 @@ from collections.abc import Iterator, Mapping, MutableMapping
 from typing import ClassVar
 
 from starlette import responses
+from starlette.background import BackgroundTask
 from starlette.datastructures import MutableHeaders
 from starlette.types import Message, Receive, Scope, Send
 
@@ -106,7 +107,7 @@ class Response(responses.Response):
     """A response that answers the request directly.
 
     Works like Starlette's ``Response``. Header names starting with
-    ``x-middleware-`` are reserved.
+    ``x-middleware-`` are reserved. Background tasks are not supported.
     """
 
     # Whether Vercel should send this response to the client as is.
@@ -121,6 +122,15 @@ class Response(responses.Response):
     def headers(self) -> MutableHeaders:
         """The headers added to the response. Names are case-insensitive."""
         return _ResponseHeaders(raw=self.raw_headers)
+
+    @property
+    def background(self) -> None:
+        return None
+
+    @background.setter
+    def background(self, value: BackgroundTask | None) -> None:
+        if value is not None:
+            raise RuntimeError("background tasks are not supported in proxy responses")
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         """Send the response.

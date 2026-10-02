@@ -4,6 +4,7 @@ from collections.abc import Callable, Mapping
 
 import pytest
 from starlette import responses
+from starlette.background import BackgroundTask
 from starlette.datastructures import Headers, MutableHeaders
 from starlette.types import Message
 
@@ -257,6 +258,49 @@ def test_delete_cookie() -> None:
     cookie = res.headers["set-cookie"]
     assert cookie.startswith('a=""; expires=')
     assert cookie.endswith("; Max-Age=0; Path=/app; SameSite=lax")
+
+
+# ---------------------------------------------------------------------------
+# Background tasks
+# ---------------------------------------------------------------------------
+
+BACKGROUND_UNSUPPORTED = "background tasks are not supported in proxy responses"
+
+# Each factory builds a response with the given background task.
+_BACKGROUND_FACTORIES: dict[str, Callable[[BackgroundTask], Response]] = {
+    "response": lambda task: Response(background=task),
+    "html": lambda task: HTMLResponse("", background=task),
+    "plain_text": lambda task: PlainTextResponse("", background=task),
+    "json": lambda task: JSONResponse({}, background=task),
+    "redirect": lambda task: RedirectResponse("/x", background=task),
+}
+
+
+def background_task() -> BackgroundTask:
+    def task() -> None:
+        raise AssertionError("background task must not run")
+
+    return BackgroundTask(task)
+
+
+@pytest.mark.parametrize("factory", _FACTORIES.values(), ids=list(_FACTORIES))
+def test_background_is_none(factory: Factory) -> None:
+    response = factory({})
+    response.background = None
+    assert response.background is None
+
+
+@pytest.mark.parametrize("factory", _BACKGROUND_FACTORIES.values(), ids=list(_BACKGROUND_FACTORIES))
+def test_background_rejected_on_creation(factory: Callable[[BackgroundTask], Response]) -> None:
+    with pytest.raises(RuntimeError, match=BACKGROUND_UNSUPPORTED):
+        factory(background_task())
+
+
+@pytest.mark.parametrize("factory", _FACTORIES.values(), ids=list(_FACTORIES))
+def test_background_rejected_on_assignment(factory: Factory) -> None:
+    response = factory({})
+    with pytest.raises(RuntimeError, match=BACKGROUND_UNSUPPORTED):
+        response.background = background_task()
 
 
 # ---------------------------------------------------------------------------
