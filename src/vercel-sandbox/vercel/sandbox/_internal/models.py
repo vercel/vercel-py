@@ -130,33 +130,69 @@ class NetworkPolicyRequestMatcher:
 
 @dataclass(frozen=True, slots=True)
 class NetworkPolicyTransform:
-    """Inject authored headers or describe redacted response header names."""
+    """Inject authored headers into matching requests."""
 
     headers: Mapping[str, str] | None = None
-    header_names: tuple[str, ...] | None = None
     __hash__ = None  # type: ignore[assignment]
 
     def __init__(
         self,
         *,
         headers: Mapping[str, str] | None = None,
-        header_names: Iterable[str] | None = None,
     ) -> None:
         normalized_headers = None if headers is None else MappingProxyType(dict(headers))
-        normalized_header_names = None if header_names is None else tuple(header_names)
-        if normalized_headers is not None and normalized_header_names is not None:
-            raise ValueError("network policy transform cannot set headers and header_names")
         object.__setattr__(self, "headers", normalized_headers)
-        object.__setattr__(self, "header_names", normalized_header_names)
+
+
+@dataclass(frozen=True, slots=True)
+class NetworkPolicyResponse:
+    """Response returned by the network proxy without contacting the origin."""
+
+    status_code: int
+    headers: Mapping[str, str] | None = None
+    body: str | None = None
+    content_type: str | None = None
+    __hash__ = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if type(self.status_code) is not int or not 200 <= self.status_code <= 599:
+            raise ValueError("response status_code must be an integer between 200 and 599")
+        if self.body is not None and not isinstance(self.body, str):
+            raise TypeError("response body must be a string")
+        if self.content_type is not None and not isinstance(self.content_type, str):
+            raise TypeError("response content_type must be a string")
+        if self.body is not None and self.status_code in {204, 205, 304}:
+            raise ValueError("response body is not allowed for status codes 204, 205, and 304")
+        if self.body is not None and self.content_type is None:
+            raise ValueError("response content_type is required when body is set")
+
+        headers = None if self.headers is None else dict(self.headers)
+        if headers is not None and any(
+            not isinstance(name, str) or not isinstance(value, str)
+            for name, value in headers.items()
+        ):
+            raise TypeError("response headers must map strings to strings")
+        names = [name.lower() for name in headers or ()]
+        if len(names) != len(set(names)):
+            raise ValueError("response headers cannot contain duplicate names")
+        proxy_managed = {"connection", "content-length", "transfer-encoding"}
+        if any(name in proxy_managed for name in names):
+            raise ValueError("response headers cannot set proxy-managed headers")
+        object.__setattr__(
+            self,
+            "headers",
+            None if headers is None else MappingProxyType(headers),
+        )
 
 
 @dataclass(frozen=True, slots=True)
 class NetworkPolicyRule:
-    """Configure request matching, transforms, and forwarding for one domain."""
+    """Configure one matched request action for a domain."""
 
     transform: tuple[NetworkPolicyTransform, ...] = ()
     match: NetworkPolicyRequestMatcher | None = None
     forward_url: str | None = None
+    response: NetworkPolicyResponse | None = None
     __hash__ = None  # type: ignore[assignment]
 
     def __init__(
@@ -165,10 +201,52 @@ class NetworkPolicyRule:
         transform: Iterable[NetworkPolicyTransform] = (),
         match: NetworkPolicyRequestMatcher | None = None,
         forward_url: str | None = None,
+        response: NetworkPolicyResponse | None = None,
     ) -> None:
-        object.__setattr__(self, "transform", tuple(transform))
+        normalized_transform = tuple(transform)
+        handlers = sum((bool(normalized_transform), forward_url is not None, response is not None))
+        if handlers != 1:
+            raise ValueError(
+                "network policy rule requires exactly one of transform, forward_url, or response"
+            )
+        object.__setattr__(self, "transform", normalized_transform)
         object.__setattr__(self, "match", match)
         object.__setattr__(self, "forward_url", forward_url)
+        object.__setattr__(self, "response", response)
+
+
+NetworkPolicyMatchDimension: TypeAlias = Literal["path", "method", "query", "headers"]
+
+
+@dataclass(frozen=True, slots=True)
+class NetworkPolicyInjectionRuleSummary:
+    """Redacted header-injection rule metadata returned by the Sandbox API."""
+
+    domain: str
+    header_names: tuple[str, ...] = ()
+    match_dimensions: tuple[NetworkPolicyMatchDimension, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class NetworkPolicyForwardRuleSummary:
+    """Redacted forward rule metadata returned by the Sandbox API."""
+
+    domain: str
+    forward_url: str
+    match_dimensions: tuple[NetworkPolicyMatchDimension, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class NetworkPolicyResponseRuleSummary:
+    """Redacted direct-response rule metadata returned by the Sandbox API."""
+
+    domain: str
+    status_code: int
+    match_dimensions: tuple[NetworkPolicyMatchDimension, ...] = ()
+
+    def __post_init__(self) -> None:
+        if type(self.status_code) is not int or not 200 <= self.status_code <= 599:
+            raise ValueError("response rule summary status_code must be between 200 and 599")
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,7 +269,7 @@ class NetworkPolicySubnets:
 
 @dataclass(frozen=True, slots=True)
 class NetworkPolicy:
-    """Immutable outbound network access policy."""
+    """Complete outbound policy authored for submission to the Sandbox API."""
 
     mode: Literal["allow-all", "deny-all", "custom"]
     allow: Mapping[str, tuple[NetworkPolicyRule, ...]]
@@ -229,6 +307,18 @@ class NetworkPolicy:
             raise ValueError("simple network policy modes cannot include custom rules")
 
 
+@dataclass(frozen=True, slots=True)
+class NetworkPolicyReadback:
+    """Incomplete policy metadata; cannot be submitted as a network policy."""
+
+    mode: Literal["allow-all", "deny-all", "custom"]
+    allowed_domains: tuple[str, ...] = ()
+    subnets: NetworkPolicySubnets | None = None
+    injection_rules: tuple[NetworkPolicyInjectionRuleSummary, ...] = ()
+    forward_rules: tuple[NetworkPolicyForwardRuleSummary, ...] = ()
+    response_rules: tuple[NetworkPolicyResponseRuleSummary, ...] = ()
+
+
 def _serialize_network_policy(network_policy: NetworkPolicy) -> JSONObject:
     if not isinstance(network_policy, NetworkPolicy):
         raise TypeError("network_policy must be a NetworkPolicy")
@@ -256,10 +346,6 @@ def _serialize_network_policy_rule(rule: NetworkPolicyRule) -> JSONObject:
     if rule.transform:
         transforms: list[JSONValue] = []
         for transform in rule.transform:
-            if transform.header_names is not None:
-                raise ValueError(
-                    "redacted network policy transforms cannot be submitted to the API"
-                )
             transform_data: JSONObject = {}
             if transform.headers is not None:
                 transform_data["headers"] = dict(transform.headers)
@@ -267,6 +353,15 @@ def _serialize_network_policy_rule(rule: NetworkPolicyRule) -> JSONObject:
         result["transform"] = transforms
     if rule.forward_url is not None:
         result["forwardURL"] = rule.forward_url
+    if rule.response is not None:
+        response: JSONObject = {"statusCode": rule.response.status_code}
+        if rule.response.headers is not None:
+            response["headers"] = dict(rule.response.headers)
+        if rule.response.body is not None:
+            response["body"] = rule.response.body
+        if rule.response.content_type is not None:
+            response["contentType"] = rule.response.content_type
+        result["response"] = response
     return result
 
 
@@ -297,8 +392,8 @@ def _serialize_matcher(matcher: NetworkPolicyMatcher) -> JSONObject:
     return {key: matcher.value}
 
 
-def _parse_network_policy(value: object) -> NetworkPolicy | None:
-    if value is None or isinstance(value, NetworkPolicy):
+def _parse_network_policy(value: object) -> NetworkPolicyReadback | None:
+    if value is None or isinstance(value, NetworkPolicyReadback):
         return value
     data = _mapping(value, "network policy")
     if "allow" in data or "subnets" in data:
@@ -306,29 +401,27 @@ def _parse_network_policy(value: object) -> NetworkPolicy | None:
 
     mode = data.get("mode")
     if mode == "allow-all":
-        return NetworkPolicy.allow_all()
+        return NetworkPolicyReadback(mode="allow-all")
     if mode == "deny-all":
-        return NetworkPolicy.deny_all()
+        return NetworkPolicyReadback(mode="deny-all")
     if mode != "custom":
         raise ValueError("network policy mode must be allow-all, deny-all, or custom")
     return _parse_normalized_network_policy(data)
 
 
-def _parse_domain_map_network_policy(data: Mapping[str, Any]) -> NetworkPolicy:
+def _parse_domain_map_network_policy(data: Mapping[str, Any]) -> NetworkPolicyReadback:
     raw_allow = data.get("allow", {})
-    allow: list[tuple[str, tuple[NetworkPolicyRule, ...]]] = []
     if isinstance(raw_allow, Mapping):
+        domains: list[str] = []
         for domain, raw_rules in raw_allow.items():
-            rules = tuple(
+            domains.append(_string(domain, "network policy domain"))
+            for item in _iterable(raw_rules, f"network policy rules for {domain!r}"):
                 _parse_network_policy_rule(item)
-                for item in _iterable(raw_rules, f"network policy rules for {domain!r}")
-            )
-            allow.append((_string(domain, "network policy domain"), rules))
     else:
-        allow.extend(
-            (_string(domain, "network policy domain"), ())
+        domains = [
+            _string(domain, "network policy domain")
             for domain in _iterable(raw_allow, "network policy allow")
-        )
+        ]
 
     subnets = None
     if "subnets" in data:
@@ -337,40 +430,36 @@ def _parse_domain_map_network_policy(data: Mapping[str, Any]) -> NetworkPolicy:
             allow=_optional_string_iterable(raw_subnets.get("allow"), "subnet allow"),
             deny=_optional_string_iterable(raw_subnets.get("deny"), "subnet deny"),
         )
-    return NetworkPolicy.custom(allow, subnets=subnets)
+    return NetworkPolicyReadback(mode="custom", allowed_domains=tuple(domains), subnets=subnets)
 
 
-def _parse_normalized_network_policy(data: Mapping[str, Any]) -> NetworkPolicy:
-    grouped: dict[str, list[NetworkPolicyRule]] = {}
+def _parse_normalized_network_policy(data: Mapping[str, Any]) -> NetworkPolicyReadback:
+    domains: dict[str, None] = {}
     for domain in _optional_string_iterable(data.get("allowedDomains"), "allowedDomains") or ():
-        grouped.setdefault(domain, [])
+        domains.setdefault(domain, None)
 
-    for raw_rule in _iterable(data.get("injectionRules", ()), "injectionRules"):
-        rule_data = _mapping(raw_rule, "injection rule")
-        domain = _string(rule_data.get("domain"), "injection rule domain")
-        transform = _parse_normalized_transform(rule_data)
-        grouped.setdefault(domain, []).append(
-            NetworkPolicyRule(
-                transform=(transform,),
-                match=_parse_optional_request_matcher(rule_data.get("match")),
-            )
-        )
+    injection_rules = tuple(
+        _parse_injection_rule_summary(raw_rule)
+        for raw_rule in _iterable(data.get("injectionRules", ()), "injectionRules")
+    )
+    for rule in injection_rules:
+        domains.setdefault(rule.domain, None)
 
-    for raw_rule in _iterable(
-        data.get("forwardRules", data.get("forwardingRules", ())),
-        "forwardRules",
-    ):
-        rule_data = _mapping(raw_rule, "forward rule")
-        domain = _string(rule_data.get("domain"), "forward rule domain")
-        grouped.setdefault(domain, []).append(
-            NetworkPolicyRule(
-                forward_url=_string(
-                    rule_data.get("forwardURL", rule_data.get("forwardUrl")),
-                    "forward rule forwardURL",
-                ),
-                match=_parse_optional_request_matcher(rule_data.get("match")),
-            )
+    forward_rules = tuple(
+        _parse_forward_rule_summary(raw_rule)
+        for raw_rule in _iterable(
+            data.get("forwardRules", data.get("forwardingRules", ())),
+            "forwardRules",
         )
+    )
+    response_rules = tuple(
+        _parse_response_rule_summary(raw_rule)
+        for raw_rule in _iterable(data.get("responseRules", ()), "responseRules")
+    )
+    for forward_rule in forward_rules:
+        domains.setdefault(forward_rule.domain, None)
+    for response_rule in response_rules:
+        domains.setdefault(response_rule.domain, None)
 
     allowed_cidrs = _optional_string_iterable(data.get("allowedCIDRs"), "allowedCIDRs")
     denied_cidrs = _optional_string_iterable(data.get("deniedCIDRs"), "deniedCIDRs")
@@ -379,23 +468,69 @@ def _parse_normalized_network_policy(data: Mapping[str, Any]) -> NetworkPolicy:
         if allowed_cidrs is None and denied_cidrs is None
         else NetworkPolicySubnets(allow=allowed_cidrs, deny=denied_cidrs)
     )
-    return NetworkPolicy.custom(grouped, subnets=subnets)
+    return NetworkPolicyReadback(
+        mode="custom",
+        allowed_domains=tuple(domains),
+        subnets=subnets,
+        injection_rules=injection_rules,
+        forward_rules=forward_rules,
+        response_rules=response_rules,
+    )
 
 
-def _parse_normalized_transform(data: Mapping[str, Any]) -> NetworkPolicyTransform:
+def _parse_injection_rule_summary(value: object) -> NetworkPolicyInjectionRuleSummary:
+    data = _mapping(value, "injection rule")
     if "headers" in data and "headerNames" in data:
         raise ValueError("injection rule cannot set headers and headerNames")
     if "headerNames" in data:
-        return NetworkPolicyTransform(
-            header_names=_string_iterable(data["headerNames"], "headerNames")
+        names = _string_iterable(data["headerNames"], "headerNames")
+    else:
+        names = tuple(
+            _string(key, "header name")
+            for key in _mapping(data.get("headers", {}), "injection rule headers")
         )
-    headers = _mapping(data.get("headers", {}), "injection rule headers")
-    return NetworkPolicyTransform(
-        headers={
-            _string(key, "header name"): _string(value, "header value")
-            for key, value in headers.items()
-        }
+    return NetworkPolicyInjectionRuleSummary(
+        domain=_string(data.get("domain"), "injection rule domain"),
+        header_names=names,
+        match_dimensions=_parse_match_dimensions(data.get("matchDimensions")),
     )
+
+
+def _parse_forward_rule_summary(value: object) -> NetworkPolicyForwardRuleSummary:
+    data = _mapping(value, "forward rule")
+    return NetworkPolicyForwardRuleSummary(
+        domain=_string(data.get("domain"), "forward rule domain"),
+        forward_url=_string(
+            data.get("forwardURL", data.get("forwardUrl")),
+            "forward rule forwardURL",
+        ),
+        match_dimensions=_parse_match_dimensions(data.get("matchDimensions")),
+    )
+
+
+def _parse_response_rule_summary(value: object) -> NetworkPolicyResponseRuleSummary:
+    data = _mapping(value, "response rule")
+    status_code = data.get("statusCode")
+    if type(status_code) is not int:
+        raise TypeError("response rule statusCode must be an integer")
+    return NetworkPolicyResponseRuleSummary(
+        domain=_string(data.get("domain"), "response rule domain"),
+        status_code=status_code,
+        match_dimensions=_parse_match_dimensions(data.get("matchDimensions")),
+    )
+
+
+def _parse_match_dimensions(value: object) -> tuple[NetworkPolicyMatchDimension, ...]:
+    dimensions = _optional_string_iterable(value, "network policy matchDimensions") or ()
+    normalized: list[NetworkPolicyMatchDimension] = []
+    for dimension in dimensions:
+        python_name = "query" if dimension in {"query", "queryString"} else dimension
+        if python_name not in {"path", "method", "query", "headers"}:
+            raise ValueError(f"unknown network policy match dimension {dimension!r}")
+        normalized.append(cast(NetworkPolicyMatchDimension, python_name))
+    if len(normalized) != len(set(normalized)):
+        raise ValueError("network policy matchDimensions must not contain duplicates")
+    return tuple(normalized)
 
 
 def _parse_network_policy_rule(value: object) -> NetworkPolicyRule:
@@ -405,29 +540,47 @@ def _parse_network_policy_rule(value: object) -> NetworkPolicyRule:
         transform_data = _mapping(raw_transform, "network policy transform")
         if "headers" in transform_data and "headerNames" in transform_data:
             raise ValueError("network policy transform cannot set headers and headerNames")
-        if "headerNames" in transform_data:
-            transforms.append(
-                NetworkPolicyTransform(
-                    header_names=_string_iterable(
-                        transform_data["headerNames"], "transform headerNames"
-                    )
-                )
+        headers = _mapping(transform_data.get("headers", {}), "transform headers")
+        transforms.append(
+            NetworkPolicyTransform(
+                headers={
+                    _string(key, "header name"): _string(value, "header value")
+                    for key, value in headers.items()
+                }
             )
-        else:
-            headers = _mapping(transform_data.get("headers", {}), "transform headers")
-            transforms.append(
-                NetworkPolicyTransform(
-                    headers={
-                        _string(key, "header name"): _string(value, "header value")
-                        for key, value in headers.items()
-                    }
-                )
-            )
+        )
     forward_url = data.get("forwardURL", data.get("forwardUrl"))
+    response = data.get("response")
     return NetworkPolicyRule(
         transform=transforms,
         match=_parse_optional_request_matcher(data.get("match")),
         forward_url=None if forward_url is None else _string(forward_url, "forwardURL"),
+        response=None if response is None else _parse_network_policy_response(response),
+    )
+
+
+def _parse_network_policy_response(value: object) -> NetworkPolicyResponse:
+    data = _mapping(value, "network policy response")
+    status_code = data.get("statusCode")
+    if type(status_code) is not int:
+        raise TypeError("network policy response statusCode must be an integer")
+    headers = data.get("headers")
+    return NetworkPolicyResponse(
+        status_code=status_code,
+        headers=(
+            None
+            if headers is None
+            else {
+                _string(key, "response header name"): _string(value, "response header value")
+                for key, value in _mapping(headers, "response headers").items()
+            }
+        ),
+        body=None if "body" not in data else _string(data["body"], "response body"),
+        content_type=(
+            None
+            if "contentType" not in data
+            else _string(data["contentType"], "response contentType")
+        ),
     )
 
 

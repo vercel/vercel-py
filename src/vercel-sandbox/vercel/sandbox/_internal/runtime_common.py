@@ -15,7 +15,7 @@ from vercel._internal.core.byte_stream import ReadableByteStream
 from vercel.sandbox._internal.errors import SandboxResponseError
 from vercel.sandbox._internal.models import (
     JSONObject,
-    NetworkPolicy,
+    NetworkPolicyReadback,
     ProcessSignal,
     ProcessStatus,
     RemotePath,
@@ -405,7 +405,8 @@ class RuntimeSessionHandleBase:
         return self._payload.execution_time_limit
 
     @property
-    def network_policy(self) -> NetworkPolicy | None:
+    def network_policy(self) -> NetworkPolicyReadback | None:
+        """Sanitized session policy metadata, not a policy that can be submitted."""
         return self._payload.network_policy
 
     @property
@@ -542,7 +543,8 @@ class SandboxHandleBase(Generic[RuntimeSessionHandleT]):
         return self._payload.execution_time_limit
 
     @property
-    def network_policy(self) -> NetworkPolicy | None:
+    def network_policy(self) -> NetworkPolicyReadback | None:
+        """Saved sandbox policy metadata, not a policy that can be submitted."""
         return self._payload.network_policy
 
     @property

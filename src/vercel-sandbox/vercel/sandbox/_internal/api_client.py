@@ -51,6 +51,7 @@ from vercel.sandbox._internal.models import (
     JSONValue,
     NetworkIdUpdate,
     NetworkPolicy,
+    NetworkPolicyReadback,
     PrivateSandboxParameters,
     ProcessLog,
     ProcessLogStream,
@@ -885,7 +886,7 @@ def _sandbox_state(
     )
 
 
-def _parse_response_network_policy(value: object) -> NetworkPolicy | None:
+def _parse_response_network_policy(value: object) -> NetworkPolicyReadback | None:
     try:
         return _parse_network_policy(value)
     except (TypeError, ValueError) as exc:

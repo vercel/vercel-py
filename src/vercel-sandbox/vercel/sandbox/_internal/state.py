@@ -6,7 +6,7 @@ from typing import Literal
 
 from vercel.sandbox._internal.models import (
     JSONObject,
-    NetworkPolicy,
+    NetworkPolicyReadback,
     SandboxMount,
     SandboxStatus,
 )
@@ -55,7 +55,7 @@ class SandboxRuntimeSessionState:
     memory: int | None = None
     vcpus: int | None = None
     execution_time_limit: timedelta | None = None
-    network_policy: NetworkPolicy | None = None
+    network_policy: NetworkPolicyReadback | None = None
     network_id: str | None = None
     requested_at: int | None = None
     started_at: int | None = None
@@ -86,7 +86,7 @@ class SandboxState:
     memory: int | None = None
     vcpus: int | None = None
     execution_time_limit: timedelta | None = None
-    network_policy: NetworkPolicy | None = None
+    network_policy: NetworkPolicyReadback | None = None
     network_id: str | None = None
     snapshot_expiration: timedelta | None = None
     snapshot_retention: SnapshotRetentionState | None = None
