@@ -20,7 +20,7 @@ def rotate_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Callable[[]
     monkeypatch.delenv("VERCEL_OIDC_TOKEN", raising=False)
     path = tmp_path / "token"
     now = time.time()
-    monkeypatch.setattr(oidc, "_OIDC_TOKEN_PATH", path)
+    monkeypatch.setenv("VERCEL_OIDC_TOKEN_FILE", str(path))
     monkeypatch.setattr(oidc, "time", SimpleNamespace(time=lambda: now, monotonic=lambda: now))
 
     def rotate() -> str:

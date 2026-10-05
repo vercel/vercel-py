@@ -27,7 +27,6 @@ BASE_URL = "https://api.vercel.com/v1"
 _cached_oidc_token_lock = threading.Lock()
 _cached_oidc_token: str | None = None
 _cached_oidc_payload: dict[str, Any] | None = None
-_OIDC_TOKEN_PATH = Path("/var/run/secrets/vercel.com/token")
 _FILE_TOKEN_REFRESH_BUFFER = 60.0
 _FILE_TOKEN_RETRY_INTERVAL = 30.0
 _file_token_lock = threading.Lock()
@@ -76,8 +75,11 @@ def _get_ambient_oidc_token() -> str:
 
 
 def _read_file_oidc_token() -> tuple[str, float] | None:
+    path = os.getenv("VERCEL_OIDC_TOKEN_FILE")
+    if not path:
+        return None
     try:
-        token = _OIDC_TOKEN_PATH.read_text(encoding="utf-8").strip()
+        token = Path(path).read_text(encoding="utf-8").strip()
         payload = get_token_payload(token)
         if not isinstance(payload, dict):
             return None

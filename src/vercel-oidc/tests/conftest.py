@@ -24,6 +24,7 @@ def mock_env_clear(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, Non
         "VERCEL_TEAM_ID",
         "VERCEL_PROJECT_ID",
         "VERCEL_OIDC_TOKEN",
+        "VERCEL_OIDC_TOKEN_FILE",
         "VERCEL_OIDC_TOKEN_HEADER",
         "VERCEL_ENV",
         "VERCEL_TARGET_ENV",

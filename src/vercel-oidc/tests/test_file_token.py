@@ -47,7 +47,7 @@ def token_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Toke
     set_headers(None)
     oidc._clear_cached_oidc_token()
     state = TokenFile(tmp_path / "token", time.time(), Mock(wraps=oidc._read_file_oidc_token))
-    monkeypatch.setattr(oidc, "_OIDC_TOKEN_PATH", state.path)
+    monkeypatch.setenv("VERCEL_OIDC_TOKEN_FILE", str(state.path))
     monkeypatch.setattr(
         oidc, "time", SimpleNamespace(time=lambda: state.now, monotonic=lambda: state.monotonic)
     )
@@ -350,6 +350,20 @@ async def test_unusable_file_allows_local_cli_refresh(
     )
     assert actual == fresh
     refresh.assert_called_once_with()
+
+
+@pytest.mark.parametrize("configured", [None, ""])
+def test_unconfigured_file_does_not_touch_filesystem(
+    monkeypatch: pytest.MonkeyPatch, configured: str | None
+) -> None:
+    if configured is None:
+        monkeypatch.delenv("VERCEL_OIDC_TOKEN_FILE", raising=False)
+    else:
+        monkeypatch.setenv("VERCEL_OIDC_TOKEN_FILE", configured)
+    read = Mock()
+    monkeypatch.setattr(Path, "read_text", read)
+    assert oidc._read_file_oidc_token() is None
+    read.assert_not_called()
 
 
 async def test_sync_and_async_share_cache_and_async_reads_off_event_loop(

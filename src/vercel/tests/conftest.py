@@ -26,6 +26,7 @@ def mock_env_clear(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, Non
         "BLOB_STORE_ID",
         # OIDC
         "VERCEL_OIDC_TOKEN",
+        "VERCEL_OIDC_TOKEN_FILE",
         "VERCEL_OIDC_TOKEN_HEADER",
         # Cache
         "VERCEL_CACHE_API_TOKEN",

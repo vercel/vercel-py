@@ -84,7 +84,7 @@ def test_broker_refreshes_mounted_token_without_recreation(
     oidc._clear_cached_oidc_token()
     path = tmp_path / "token"
     now = time.time()
-    monkeypatch.setattr(oidc, "_OIDC_TOKEN_PATH", path)
+    monkeypatch.setenv("VERCEL_OIDC_TOKEN_FILE", str(path))
     monkeypatch.setattr(oidc, "time", SimpleNamespace(time=lambda: now, monotonic=lambda: now))
 
     def rotate() -> str:
