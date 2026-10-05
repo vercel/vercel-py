@@ -347,8 +347,78 @@ def test_sync_put_invalid_input_resolves_credentials_without_http(
     assert credentials_calls == 1
 
 
+_BUFFERED_GET_CASES = [
+    pytest.param([], False, id="empty"),
+    pytest.param([b"a" * (64 * 1024), b"\x00\xfftail"], False, id="multi-chunk"),
+    pytest.param([b"a" * (64 * 1024)], True, id="read-error"),
+]
+
+
 @pytest.mark.anyio
-async def test_async_get_streaming_lifecycle() -> None:
+@pytest.mark.parametrize("chunks,fail", _BUFFERED_GET_CASES)
+async def test_async_get_buffered(chunks: list[bytes], fail: bool) -> None:
+    stream = _TrackingAsyncStream(chunks, fail=fail)
+    requests: list[httpx.Request] = []
+    headers = {"content-type": "application/octet-stream", "etag": "buffered-etag"}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.method == "GET"
+        return httpx.Response(200, headers=headers, stream=stream)
+
+    async with _async_session(handler):
+        if fail:
+            with pytest.raises(RuntimeError, match="network failure"):
+                await blob.get(_URL, access="public")
+        else:
+            result = await blob.get(_URL, access="public")
+        assert stream.closed
+    assert len(requests) == 1
+    if not fail:
+        assert type(result) is blob.GetResult is blob.sync.GetResult
+        assert result.body == b"".join(chunks)
+        assert result.metadata == DownloadMetadata(
+            url=_URL,
+            status_code=200,
+            content_type="application/octet-stream",
+            etag="buffered-etag",
+            headers=headers,
+        )
+
+
+@pytest.mark.parametrize("chunks,fail", _BUFFERED_GET_CASES)
+def test_sync_get_buffered(chunks: list[bytes], fail: bool) -> None:
+    stream = _TrackingSyncStream(chunks, fail=fail)
+    requests: list[httpx.Request] = []
+    headers = {"content-type": "application/octet-stream", "etag": "buffered-etag"}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.method == "GET"
+        return httpx.Response(200, headers=headers, stream=stream)
+
+    with _sync_session(handler):
+        if fail:
+            with pytest.raises(RuntimeError, match="network failure"):
+                blob.sync.get(_URL, access="public")
+        else:
+            result = blob.sync.get(_URL, access="public")
+        assert stream.closed
+    assert len(requests) == 1
+    if not fail:
+        assert type(result) is blob.GetResult is blob.sync.GetResult
+        assert result.body == b"".join(chunks)
+        assert result.metadata == DownloadMetadata(
+            url=_URL,
+            status_code=200,
+            content_type="application/octet-stream",
+            etag="buffered-etag",
+            headers=headers,
+        )
+
+
+@pytest.mark.anyio
+async def test_async_stream_lifecycle() -> None:
     stream = _TrackingAsyncStream([b"chunk-1-", b"chunk-2-", b"chunk-3"])
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -377,7 +447,7 @@ async def test_async_get_streaming_lifecycle() -> None:
         service_options=[opt],
         httpx_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
     ):
-        context = blob.get(target_url, access="public")
+        context = blob.stream(target_url, access="public")
         async with context as download:
             assert isinstance(download.metadata, DownloadMetadata)
             assert download.metadata.size == 23
@@ -403,7 +473,7 @@ async def test_async_get_streaming_lifecycle() -> None:
                 pass
 
 
-def test_sync_get_streaming_lifecycle() -> None:
+def test_sync_stream_lifecycle() -> None:
     stream = _TrackingSyncStream([b"part-a", b"part-b"])
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -418,7 +488,7 @@ def test_sync_get_streaming_lifecycle() -> None:
         )
 
     with _sync_session(handler):
-        context = blob.sync.get("test.bin", access="private")
+        context = blob.sync.stream("test.bin", access="private")
         with context as download:
             assert download.metadata.size == 12
             assert stream.yielded_count == 0
@@ -435,7 +505,7 @@ def test_sync_get_streaming_lifecycle() -> None:
 
 
 @pytest.mark.anyio
-async def test_get_early_exit_closes_stream() -> None:
+async def test_stream_early_exit_closes_stream() -> None:
     chunk1 = b"c1" * 32768
     chunk2 = b"c2" * 32768
     stream = _TrackingAsyncStream([chunk1, chunk2])
@@ -446,7 +516,7 @@ async def test_get_early_exit_closes_stream() -> None:
     url = "https://teststore123.public.blob.vercel-storage.com/early.bin"
 
     async with _async_session(handler):
-        async with blob.get(url, access="public") as download:
+        async with blob.stream(url, access="public") as download:
             async for chunk in download:
                 assert chunk == chunk1
                 break
@@ -459,7 +529,7 @@ async def test_get_early_exit_closes_stream() -> None:
             aiter(download)
 
 
-def test_sync_get_early_exit_closes_stream() -> None:
+def test_sync_stream_early_exit_closes_stream() -> None:
     chunk1 = b"c1" * 32768
     chunk2 = b"c2" * 32768
     stream = _TrackingSyncStream([chunk1, chunk2])
@@ -470,7 +540,7 @@ def test_sync_get_early_exit_closes_stream() -> None:
     url = "https://teststore123.public.blob.vercel-storage.com/sync-early.bin"
 
     with _sync_session(handler):
-        with blob.sync.get(url, access="public") as download:
+        with blob.sync.stream(url, access="public") as download:
             for chunk in download:
                 assert chunk == chunk1
                 break
@@ -485,7 +555,7 @@ def test_sync_get_early_exit_closes_stream() -> None:
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("chunk_size", [6, 64 * 1024], ids=["buffered", "delivered"])
-async def test_get_stream_error_closes_without_retry(chunk_size: int) -> None:
+async def test_stream_read_error_closes_without_retry(chunk_size: int) -> None:
     chunk = b"z" * chunk_size
     stream = _TrackingAsyncStream([chunk], fail=True)
     requests: list[httpx.Request] = []
@@ -497,7 +567,7 @@ async def test_get_stream_error_closes_without_retry(chunk_size: int) -> None:
     received = []
     async with _async_session(handler):
         with pytest.raises(RuntimeError, match="network failure"):
-            async with blob.get(_URL, access="public") as download:
+            async with blob.stream(_URL, access="public") as download:
                 async for part in download:
                     received.append(part)
     assert received == ([chunk] if chunk_size == 64 * 1024 else [])
@@ -507,7 +577,7 @@ async def test_get_stream_error_closes_without_retry(chunk_size: int) -> None:
 
 
 @pytest.mark.parametrize("chunk_size", [6, 64 * 1024], ids=["buffered", "delivered"])
-def test_sync_get_stream_error_closes_without_retry(chunk_size: int) -> None:
+def test_sync_stream_read_error_closes_without_retry(chunk_size: int) -> None:
     chunk = b"z" * chunk_size
     stream = _TrackingSyncStream([chunk], fail=True)
     requests: list[httpx.Request] = []
@@ -519,7 +589,7 @@ def test_sync_get_stream_error_closes_without_retry(chunk_size: int) -> None:
     received = []
     with _sync_session(handler):
         with pytest.raises(RuntimeError, match="network failure"):
-            with blob.sync.get(_URL, access="public") as download:
+            with blob.sync.stream(_URL, access="public") as download:
                 for part in download:
                     received.append(part)
     assert received == ([chunk] if chunk_size == 64 * 1024 else [])
@@ -529,7 +599,7 @@ def test_sync_get_stream_error_closes_without_retry(chunk_size: int) -> None:
 
 
 @pytest.mark.anyio
-async def test_get_cancellation_closes_stream() -> None:
+async def test_stream_cancellation_closes_stream() -> None:
     chunk = b"a" * (64 * 1024)
     stream = _TrackingAsyncStream([chunk, b"unread"])
 
@@ -540,7 +610,7 @@ async def test_get_cancellation_closes_stream() -> None:
 
     async with _async_session(handler):
         with anyio.CancelScope() as cancel_scope:
-            async with blob.get(url, access="public") as download:
+            async with blob.stream(url, access="public") as download:
                 async for received in download:
                     assert received == chunk
                     assert stream.yielded_count == 1
@@ -611,7 +681,7 @@ async def test_get_cancellation_closes_stream() -> None:
         pytest.param("./secret.txt", "public", "dot segments", id="current-segment"),
     ],
 )
-async def test_get_invalid_input_zero_io(target: str, access: blob.Access, message: str) -> None:
+async def test_stream_invalid_input_zero_io(target: str, access: blob.Access, message: str) -> None:
     def credentials() -> BlobCredentials:
         pytest.fail("Invalid target must not resolve credentials")
 
@@ -620,12 +690,12 @@ async def test_get_invalid_input_zero_io(target: str, access: blob.Access, messa
 
     async with _async_session(handler, credentials_factory=credentials):
         with pytest.raises(BlobError, match=message):
-            async with blob.get(target, access=access):
+            async with blob.stream(target, access=access):
                 pass
 
 
 @pytest.mark.anyio
-async def test_private_get_store_id_mismatch() -> None:
+async def test_private_stream_store_id_mismatch() -> None:
     calls = 0
 
     def credentials() -> BlobCredentials:
@@ -638,7 +708,7 @@ async def test_private_get_store_id_mismatch() -> None:
 
     async with _async_session(handler, credentials_factory=credentials):
         with pytest.raises(BlobError, match="does not match credential store ID"):
-            async with blob.get(
+            async with blob.stream(
                 "https://wrongstore.private.blob.vercel-storage.com/f.txt", access="private"
             ):
                 pass
@@ -688,7 +758,7 @@ async def test_session_closed_guards() -> None:
     url = "https://teststore123.public.blob.vercel-storage.com/sess.bin"
 
     async with _async_session(handler):
-        download = await blob.get(url, access="public").__aenter__()
+        download = await blob.stream(url, access="public").__aenter__()
         chunk = await anext(download.__aiter__())
         assert chunk == chunk1
 
@@ -915,13 +985,13 @@ _INVALID_DOWNLOAD_HEADERS = [
 @pytest.mark.anyio
 @pytest.mark.parametrize("access", ["public", "private"])
 @pytest.mark.parametrize("headers,message", _INVALID_DOWNLOAD_HEADERS)
-async def test_malformed_get_metadata_closes_response(
+async def test_malformed_stream_metadata_closes_response(
     access: blob.Access, headers: dict[str, str], message: str
 ) -> None:
     stream = _TrackingAsyncStream([b"data"])
     async with _async_session(lambda _: httpx.Response(200, headers=headers, stream=stream)):
         with pytest.raises(BlobStreamError, match=message):
-            async with blob.get(
+            async with blob.stream(
                 f"https://{TEST_STORE}.{access}.blob.vercel-storage.com/f.txt", access=access
             ):
                 pass
@@ -931,13 +1001,13 @@ async def test_malformed_get_metadata_closes_response(
 
 @pytest.mark.parametrize("access", ["public", "private"])
 @pytest.mark.parametrize("headers,message", _INVALID_DOWNLOAD_HEADERS)
-def test_sync_malformed_get_metadata_closes_response(
+def test_sync_malformed_stream_metadata_closes_response(
     access: blob.Access, headers: dict[str, str], message: str
 ) -> None:
     stream = _TrackingSyncStream([b"data"])
     with _sync_session(lambda _: httpx.Response(200, headers=headers, stream=stream)):
         with pytest.raises(BlobStreamError, match=message):
-            with blob.sync.get(
+            with blob.sync.stream(
                 f"https://{TEST_STORE}.{access}.blob.vercel-storage.com/f.txt", access=access
             ):
                 pass
@@ -958,7 +1028,7 @@ async def test_explicit_close_errors_preserved() -> None:
 
     stream = FailingCloseAsyncStream([b"unread"])
     async with _async_session(lambda _: httpx.Response(200, stream=stream)):
-        async with blob.get(_URL, access="public") as download:
+        async with blob.stream(_URL, access="public") as download:
             with pytest.raises(OSError, match="disk flush failure"):
                 await download.aclose()
             assert download.is_closed
@@ -978,7 +1048,7 @@ def test_sync_explicit_close_errors_preserved() -> None:
 
     stream = FailingCloseSyncStream([b"unread"])
     with _sync_session(lambda _: httpx.Response(200, stream=stream)):
-        with blob.sync.get(_URL, access="public") as download:
+        with blob.sync.stream(_URL, access="public") as download:
             with pytest.raises(OSError, match="disk flush failure"):
                 download.close()
             assert download.is_closed
@@ -1035,7 +1105,7 @@ async def test_lifecycle_preserves_bytes(payload: bytes) -> None:
     async with _async_session(_lifecycle_handler(storage, asynchronous=True)):
         uploaded = await blob.put("f.bin", payload, access="public")
         assert uploaded.pathname == "f.bin"
-        async with blob.get(uploaded.pathname, access="public") as download:
+        async with blob.stream(uploaded.pathname, access="public") as download:
             chunks = [chunk async for chunk in download]
             assert all(0 < len(chunk) <= 64 * 1024 for chunk in chunks)
             assert b"".join(chunks) == payload
@@ -1055,7 +1125,7 @@ def test_sync_lifecycle_preserves_bytes(payload: bytes) -> None:
     with _sync_session(_lifecycle_handler(storage, asynchronous=False)):
         uploaded = blob.sync.put("f.bin", payload, access="public")
         assert uploaded.pathname == "f.bin"
-        with blob.sync.get(uploaded.pathname, access="public") as download:
+        with blob.sync.stream(uploaded.pathname, access="public") as download:
             chunks = list(download)
             assert all(0 < len(chunk) <= 64 * 1024 for chunk in chunks)
             assert b"".join(chunks) == payload
@@ -1067,7 +1137,8 @@ def test_sync_lifecycle_preserves_bytes(payload: bytes) -> None:
 
 
 @pytest.mark.anyio
-async def test_cancellation_while_body_read_awaits() -> None:
+@pytest.mark.parametrize("buffered", [False, True], ids=["stream", "get"])
+async def test_cancellation_while_body_read_awaits(buffered: bool) -> None:
     read_started = anyio.Event()
 
     class HangingAsyncStream(httpx.AsyncByteStream):
@@ -1093,9 +1164,12 @@ async def test_cancellation_while_body_read_awaits() -> None:
         with anyio.CancelScope() as cancel_scope:
 
             async def consumer() -> None:
-                async with blob.get(url, access="public") as download:
-                    async for _ in download:
-                        pass
+                if buffered:
+                    await blob.get(url, access="public")
+                else:
+                    async with blob.stream(url, access="public") as download:
+                        async for _ in download:
+                            pass
 
             async with anyio.create_task_group() as tg:
                 tg.start_soon(consumer)
@@ -1109,7 +1183,7 @@ async def test_cancellation_while_body_read_awaits() -> None:
 @pytest.mark.parametrize(
     "store_id,normalized", [(TEST_STORE, TEST_STORE), ("store_AbCd123", "AbCd123")]
 )
-async def test_oidc_private_get_headers(store_id: str, normalized: str) -> None:
+async def test_oidc_private_stream_headers(store_id: str, normalized: str) -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -1120,7 +1194,7 @@ async def test_oidc_private_get_headers(store_id: str, normalized: str) -> None:
         token="oidc_jwt_token_sample", store_id=store_id, kind=blob.CredentialKind.OIDC
     )
     async with _async_session(handler, credentials_factory=lambda: credentials):
-        async with blob.get("secure.txt", access="private") as download:
+        async with blob.stream("secure.txt", access="private") as download:
             assert [chunk async for chunk in download] == [b"secure"]
     assert len(requests) == 1
     request = requests[0]
@@ -1171,13 +1245,13 @@ async def test_default_credentials_env(
             httpx_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
         ):
             if has_credentials:
-                async with blob.get("env.txt", access="private") as download:
+                async with blob.stream("env.txt", access="private") as download:
                     assert download.metadata.url == expected_url
                     assert b"".join([chunk async for chunk in download]) == b"data"
                 assert download.is_closed
             else:
                 with pytest.raises(BlobCredentialsError, match="Missing Blob credentials"):
-                    async with blob.get("env.txt", access="private"):
+                    async with blob.stream("env.txt", access="private"):
                         pass
     else:
         with session(
@@ -1185,13 +1259,13 @@ async def test_default_credentials_env(
             httpx_client_factory=lambda: httpx.Client(transport=httpx.MockTransport(handler)),
         ):
             if has_credentials:
-                with blob.sync.get("env.txt", access="private") as sync_download:
+                with blob.sync.stream("env.txt", access="private") as sync_download:
                     assert sync_download.metadata.url == expected_url
                     assert b"".join(sync_download) == b"data"
                 assert sync_download.is_closed
             else:
                 with pytest.raises(BlobCredentialsError, match="Missing Blob credentials"):
-                    with blob.sync.get("env.txt", access="private"):
+                    with blob.sync.stream("env.txt", access="private"):
                         pass
 
     assert len(requests) == int(has_credentials)
@@ -1200,7 +1274,7 @@ async def test_default_credentials_env(
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("operation", ["put", "get", "delete"])
+@pytest.mark.parametrize("operation", ["put", "stream", "delete"])
 async def test_no_redirect_followed(operation: str) -> None:
     requests: list[httpx.Request] = []
 
@@ -1212,8 +1286,8 @@ async def test_no_redirect_followed(operation: str) -> None:
         with pytest.raises(BlobUnknownError):
             if operation == "put":
                 await blob.put("test.bin", b"data", access="public")
-            elif operation == "get":
-                async with blob.get("test.bin", access="private"):
+            elif operation == "stream":
+                async with blob.stream("test.bin", access="private"):
                     pass
             else:
                 await blob.delete("test.bin")
@@ -1244,7 +1318,7 @@ async def test_bounded_sdk_buffering_and_overlapping_reads() -> None:
     url = "https://teststore123.public.blob.vercel-storage.com/stream-buffer.bin"
 
     async with _async_session(handler):
-        async with blob.get(url, access="public") as download:
+        async with blob.stream(url, access="public") as download:
             # Read first chunk
             first_chunk = await anext(download)
             assert len(first_chunk) == chunk_size
@@ -1266,7 +1340,7 @@ async def test_bounded_sdk_buffering_and_overlapping_reads() -> None:
 
 
 @pytest.mark.anyio
-async def test_checkpoint_awaiting_close_under_cancellation_on_failed_get_entry() -> None:
+async def test_checkpoint_awaiting_close_under_cancellation_on_failed_stream_entry() -> None:
     checkpoint_completed = False
 
     class CheckpointAwaitingAsyncStream(httpx.AsyncByteStream):
@@ -1294,7 +1368,7 @@ async def test_checkpoint_awaiting_close_under_cancellation_on_failed_get_entry(
         with anyio.CancelScope() as scope:
             scope.cancel()
             with pytest.raises((BlobNotFoundError, anyio.get_cancelled_exc_class())):
-                async with blob.get(url, access="public"):
+                async with blob.stream(url, access="public"):
                     pass
 
     assert checkpoint_completed, "aclose() checkpoint must complete under shielded cleanup"

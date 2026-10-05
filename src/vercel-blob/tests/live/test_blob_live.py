@@ -27,8 +27,12 @@ async def test_async_lifecycle(store: LiveStore, payload: bytes) -> None:
     async with session():
         uploaded = await blob.put(_pathname("async.bin"), payload, access=store.access)
         try:
+            result = await blob.get(uploaded.url, access=store.access)
+            assert result.body == payload
+            assert result.metadata.url == uploaded.url
+            assert result.metadata.content_type == uploaded.content_type
             received = bytearray()
-            async with blob.get(uploaded.url, access=store.access) as download:
+            async with blob.stream(uploaded.url, access=store.access) as download:
                 async for chunk in download:
                     assert 0 < len(chunk) <= _CHUNK_SIZE
                     received.extend(chunk)
@@ -45,7 +49,9 @@ async def test_async_lifecycle(store: LiveStore, payload: bytes) -> None:
         with pytest.raises(blob.BlobNotFoundError):
             await blob.head(uploaded.url)
         with pytest.raises(blob.BlobNotFoundError):
-            async with blob.get(uploaded.url, access=store.access):
+            await blob.get(uploaded.url, access=store.access)
+        with pytest.raises(blob.BlobNotFoundError):
+            async with blob.stream(uploaded.url, access=store.access):
                 pass
 
 
@@ -54,8 +60,12 @@ def test_sync_lifecycle(store: LiveStore, payload: bytes) -> None:
     with session():
         uploaded = blob.sync.put(_pathname("sync.bin"), payload, access=store.access)
         try:
+            result = blob.sync.get(uploaded.url, access=store.access)
+            assert result.body == payload
+            assert result.metadata.url == uploaded.url
+            assert result.metadata.content_type == uploaded.content_type
             received = bytearray()
-            with blob.sync.get(uploaded.url, access=store.access) as download:
+            with blob.sync.stream(uploaded.url, access=store.access) as download:
                 for chunk in download:
                     assert 0 < len(chunk) <= _CHUNK_SIZE
                     received.extend(chunk)
@@ -72,7 +82,9 @@ def test_sync_lifecycle(store: LiveStore, payload: bytes) -> None:
         with pytest.raises(blob.BlobNotFoundError):
             blob.sync.head(uploaded.url)
         with pytest.raises(blob.BlobNotFoundError):
-            with blob.sync.get(uploaded.url, access=store.access):
+            blob.sync.get(uploaded.url, access=store.access)
+        with pytest.raises(blob.BlobNotFoundError):
+            with blob.sync.stream(uploaded.url, access=store.access):
                 pass
 
 
@@ -99,11 +111,11 @@ def test_encoded_pathname_and_metadata(store: LiveStore) -> None:
             assert "max-age=120" in metadata.cache_control
 
             for target in (pathname, uploaded.url, uploaded.download_url):
-                with blob.sync.get(target, access=store.access) as download:
-                    assert b"".join(download) == b"hello"
-                assert download.metadata.content_type == content_type
-                assert download.metadata.etag == uploaded.etag
-                assert download.metadata.size == 5
+                result = blob.sync.get(target, access=store.access)
+                assert result.body == b"hello"
+                assert result.metadata.content_type == content_type
+                assert result.metadata.etag == uploaded.etag
+                assert result.metadata.size == 5
         finally:
             blob.sync.delete(pathname)
 
@@ -126,8 +138,7 @@ def test_overwrite_policy(store: LiveStore) -> None:
             )
             assert second.url == first.url
             assert second.etag != first.etag
-            with blob.sync.get(pathname, access=store.access) as download:
-                assert b"".join(download) == b"second"
+            assert blob.sync.get(pathname, access=store.access).body == b"second"
         finally:
             blob.sync.delete(pathname)
 
@@ -168,7 +179,7 @@ async def test_early_exit_closes_download(store: LiveStore) -> None:
         uploaded = await blob.put(_pathname("early-exit.bin"), payload, access=store.access)
         try:
             for _ in range(3):
-                async with blob.get(uploaded.url, access=store.access) as download:
+                async with blob.stream(uploaded.url, access=store.access) as download:
                     async for chunk in download:
                         assert chunk == payload[: len(chunk)]
                         break

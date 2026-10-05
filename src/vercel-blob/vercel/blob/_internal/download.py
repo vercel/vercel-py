@@ -141,7 +141,7 @@ class SyncBlobDownload(_BlobDownloadCore):
 
 
 class AsyncDownloadContext:
-    """Async context manager returned by `vercel.blob.get(...)`."""
+    """Async context manager returned by `vercel.blob.stream(...)`."""
 
     def __init__(
         self,
@@ -169,7 +169,7 @@ class AsyncDownloadContext:
 
 
 class SyncDownloadContext:
-    """Synchronous context manager returned by `vercel.blob.sync.get(...)`."""
+    """Synchronous context manager returned by `vercel.blob.sync.stream(...)`."""
 
     def __init__(
         self,

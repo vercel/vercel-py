@@ -1,1 +1,1 @@
-Add async and sync bytes uploads, context-managed streaming downloads, object metadata queries, and single-object deletion through session-owned transports.
+Add async and sync bytes uploads, buffered `get` downloads returning metadata and body bytes, context-managed `stream` downloads, object metadata queries, and single-object deletion through session-owned transports.

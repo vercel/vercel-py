@@ -21,8 +21,10 @@ from vercel import blob
 async def round_trip() -> None:
 	uploaded = await blob.put("hello.txt", b"hello, Blob!", access="public")
 	try:
-		async with blob.get(uploaded.url, access="public") as download:
-			print(download.metadata.content_type)
+		result = await blob.get(uploaded.url, access="public")
+		print(result.metadata.content_type)
+		print(result.body)
+		async with blob.stream(uploaded.url, access="public") as download:
 			async for chunk in download:
 				print(chunk)
 		metadata = await blob.head(uploaded.url)
@@ -38,7 +40,10 @@ from vercel.blob import sync as blob
 
 uploaded = blob.put("hello.txt", b"hello, Blob!", access="public")
 try:
-	with blob.get(uploaded.url, access="public") as download:
+	result = blob.get(uploaded.url, access="public")
+	print(result.metadata.content_type)
+	print(result.body)
+	with blob.stream(uploaded.url, access="public") as download:
 		for chunk in download:
 			print(chunk)
 	print(blob.head(uploaded.url).size)
@@ -51,12 +56,14 @@ finally:
 | Operation | Input | Result |
 | --- | --- | --- |
 | `put` | Pathname, `bytes`, required `access` | `PutResult` from the upload response |
-| `get` | Pathname or Blob delivery URL, required `access` | Context manager yielding an iterable byte download |
+| `get` | Pathname or Blob delivery URL, required `access` | `GetResult` with download metadata and the complete body as `bytes` |
+| `stream` | Pathname or Blob delivery URL, required `access` | Context manager yielding an iterable byte download |
 | `head` | Pathname or Blob delivery URL | `HeadResult` with size, upload time, and object metadata |
 | `delete` | One pathname or Blob delivery URL | `None` |
 
-`put`, `head`, and `delete` are awaited in the async API. `get` is not awaited;
-enter it with `async with`. The sync API uses ordinary calls and `with`.
+`put`, `get`, `head`, and `delete` are awaited in the async API. `stream` is not
+awaited; enter it with `async with`. The sync API uses ordinary calls and enters
+`stream` with `with`.
 
 Pathnames are relative to the store. Leading slashes are removed. Empty paths,
 control characters, and `.` or `..` path segments are rejected. Delivery URLs
@@ -87,21 +94,32 @@ No extra metadata request runs after `put`.
 
 ### Downloads and ownership
 
-Entering `get` obtains the response without reading its complete body or issuing
-a preliminary HEAD. `download.metadata` contains the URL, status code, and
-response-derived headers such as size, content type, ETag, and last-modified time.
-Header-derived fields are `None` when the server omits them.
+`get` buffers the complete body in memory and returns a frozen, slotted
+`GetResult` with `metadata: DownloadMetadata` and `body: bytes`. It closes the
+response before returning, and the result remains usable after the session closes.
+Read errors raise an exception rather than returning a partial body. There is no
+`max_bytes` parameter or decoding helper.
 
-A download has one consumer. Iterate it once inside its context. It yields byte
-chunks of at most 64 KiB, with a smaller final chunk. It closes its response at
+`stream` provides incremental reads without buffering the complete body. Entering
+its context obtains the response. Both APIs accept the same pathname or Blob
+delivery URL and require `access`. Neither issues a preliminary HEAD request.
+
+`result.metadata` and `download.metadata` contain the URL, status code, and
+response-derived headers such as size, content type, ETag, and last-modified time.
+Header-derived fields are `None` when the server omits them. In particular,
+`metadata.size` stays `None` when the size header is absent, even after `get`
+reads the body. Use `len(result.body)` for the actual number of downloaded bytes.
+
+A streamed download has one consumer. Iterate it once inside its context. It yields
+byte chunks of at most 64 KiB, with a smaller final chunk. It closes its response at
 EOF, on early context exit, on read errors, and on cancellation. Explicit closure
 uses `await download.aclose()` or `download.close()`. Closed downloads reject
 further reads. There is no automatic restart after a partial download.
 
-The session owns the HTTP client; each download owns its response. Exiting a
-download does not close the session. Enter download contexts inside their session
-scope. Operations and reads reject a closed session. Module calls outside an
-explicit session use the SDK's default session.
+The session owns the HTTP client; each streamed download owns its response.
+Exiting a download does not close the session. Enter `stream` contexts inside their
+session scope. Operations and streaming reads reject a closed session. Module
+calls outside an explicit session use the SDK's default session.
 
 A complete public delivery URL can be downloaded without Blob credentials.
 Pathname downloads need credentials to identify the store. Private downloads
@@ -109,8 +127,9 @@ attach credentials only after validating the delivery URL and store.
 
 ### Errors
 
-`get` and `head` raise `BlobNotFoundError` for missing objects. Deleting an absent
-object succeeds when the backend returns its normal successful deletion response.
+`get`, `stream`, and `head` raise `BlobNotFoundError` for missing objects.
+Deleting an absent object succeeds when the backend returns its normal successful
+deletion response.
 Other deletion errors, including an unknown store, are not suppressed.
 
 Service errors inherit from `BlobError` and expose `status_code` and `code` when

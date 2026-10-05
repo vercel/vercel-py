@@ -125,7 +125,7 @@ def test_sync_lifecycle_outside_event_loop(scenario: _Scenario) -> None:
                 httpx_client_factory=lambda: httpx.Client(transport=httpx.MockTransport(handler))
             )
         )
-        with blob.sync.get(_URL, access="public") as download:
+        with blob.sync.stream(_URL, access="public") as download:
             metadata = download.metadata
             assert metadata == DownloadMetadata(
                 url=_URL,
@@ -212,7 +212,7 @@ async def test_async_lifecycle(scenario: _Scenario) -> None:
                 )
             )
         )
-        async with blob.get(_URL, access="public") as download:
+        async with blob.stream(_URL, access="public") as download:
             metadata = download.metadata
             assert metadata == DownloadMetadata(
                 url=_URL,
@@ -283,7 +283,7 @@ def test_public_sync_handle_eof_and_idempotency() -> None:
             transport=httpx.MockTransport(lambda _: _response(stream))
         )
     ):
-        with blob.sync.get(_URL, access="public") as download:
+        with blob.sync.stream(_URL, access="public") as download:
             iterator = iter(download)
             assert iter(iterator) is iterator
             assert list(iterator) == [_CHUNK, b"b"]
@@ -300,7 +300,7 @@ async def test_public_async_handle_eof_and_idempotency() -> None:
             transport=httpx.MockTransport(lambda _: _response(stream))
         )
     ):
-        async with blob.get(_URL, access="public") as download:
+        async with blob.stream(_URL, access="public") as download:
             iterator = aiter(download)
             assert aiter(iterator) is iterator
             assert [chunk async for chunk in iterator] == [_CHUNK, b"b"]
@@ -328,7 +328,7 @@ async def test_async_cleanup_checkpoints_under_cancellation(
             transport=httpx.MockTransport(lambda _: _response(stream))
         )
     ):
-        async with blob.get(_URL, access="public") as download:
+        async with blob.stream(_URL, access="public") as download:
 
             def assert_closed() -> None:
                 assert download.is_closed
@@ -363,7 +363,7 @@ def test_sync_overlap_rejection_preserves_first_read() -> None:
             transport=httpx.MockTransport(lambda _: _response(stream))
         )
     ):
-        with blob.sync.get(_URL, access="public") as download:
+        with blob.sync.stream(_URL, access="public") as download:
 
             def overlap() -> None:
                 with pytest.raises(BlobStreamError, match="Concurrent reads"):
@@ -389,7 +389,7 @@ def test_direct_sync_read_claims_download() -> None:
             transport=httpx.MockTransport(lambda _: _response(stream))
         )
     ):
-        with blob.sync.get(_URL, access="public") as download:
+        with blob.sync.stream(_URL, access="public") as download:
             assert next(download) == _CHUNK
             with pytest.raises(BlobStreamError, match="consumed once"):
                 iter(download)
@@ -403,7 +403,7 @@ async def test_direct_async_read_claims_download() -> None:
             transport=httpx.MockTransport(lambda _: _response(stream))
         )
     ):
-        async with blob.get(_URL, access="public") as download:
+        async with blob.stream(_URL, access="public") as download:
             assert await anext(download) == _CHUNK
             with pytest.raises(BlobStreamError, match="consumed once"):
                 aiter(download)
@@ -428,7 +428,7 @@ async def test_async_overlap_rejection_preserves_first_read() -> None:
             transport=httpx.MockTransport(lambda _: _response(stream))
         )
     ):
-        async with blob.get(_URL, access="public") as download:
+        async with blob.stream(_URL, access="public") as download:
 
             async def first_read() -> None:
                 received.append(await anext(download))

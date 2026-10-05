@@ -76,3 +76,11 @@ class DownloadMetadata:
     etag: str | None = None
     last_modified: datetime | None = None
     headers: Mapping[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class GetResult:
+    """A fully buffered object and its response-derived metadata."""
+
+    metadata: DownloadMetadata
+    body: bytes

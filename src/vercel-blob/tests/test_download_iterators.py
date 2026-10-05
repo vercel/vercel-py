@@ -48,7 +48,7 @@ def test_sync_download_preserves_transport_bytes(chunks: list[bytes]) -> None:
             transport=httpx.MockTransport(lambda _: httpx.Response(200, stream=stream))
         )
     ):
-        with blob.sync.get(_URL, access="public") as download:
+        with blob.sync.stream(_URL, access="public") as download:
             assert stream.yielded_count == 0
             received = list(download)
             assert b"".join(received) == b"".join(chunks)
@@ -69,7 +69,7 @@ async def test_async_download_preserves_transport_bytes(chunks: list[bytes]) -> 
             transport=httpx.MockTransport(lambda _: httpx.Response(200, stream=stream))
         )
     ):
-        async with blob.get(_URL, access="public") as download:
+        async with blob.stream(_URL, access="public") as download:
             assert stream.yielded_count == 0
             received = [chunk async for chunk in download]
             assert b"".join(received) == b"".join(chunks)
@@ -101,7 +101,7 @@ def test_download_pathname_encoding_roundtrips(suffix: str) -> None:
         service_options=[SyncBlobServiceOptions(credentials_factory=lambda: credentials)],
         httpx_client_factory=lambda: httpx.Client(transport=httpx.MockTransport(handler)),
     ):
-        with blob.sync.get(f"/{pathname}", access="public") as download:
+        with blob.sync.stream(f"/{pathname}", access="public") as download:
             assert b"".join(download) == b""
     assert len(requests) == 1
     url = urlsplit(str(requests[0].url))

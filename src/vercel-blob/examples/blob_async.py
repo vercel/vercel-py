@@ -1,4 +1,4 @@
-"""Upload bytes, stream the object, inspect metadata, and delete it."""
+"""Upload bytes, download buffered and streamed content, and delete the object."""
 
 from __future__ import annotations
 
@@ -18,8 +18,11 @@ async def main() -> None:
         pathname, payload, access=access, content_type="application/octet-stream"
     )
     try:
+        result = await blob.get(uploaded.url, access=access)
+        assert result.body == payload
+        assert result.metadata.content_type == uploaded.content_type
         received = bytearray()
-        async with blob.get(uploaded.url, access=access) as download:
+        async with blob.stream(uploaded.url, access=access) as download:
             async for chunk in download:
                 received.extend(chunk)
         assert received == payload

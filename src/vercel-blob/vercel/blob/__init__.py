@@ -33,6 +33,7 @@ from .models import (
     BlobCredentialsFactory,
     CredentialKind,
     DownloadMetadata,
+    GetResult,
     HeadResult,
     PutResult,
     SyncBlobCredentialsFactory,
@@ -62,7 +63,18 @@ async def put(
     )
 
 
-def get(
+async def get(
+    url_or_pathname: str,
+    *,
+    access: Literal["public", "private"],
+) -> GetResult:
+    """Download the complete object into memory and close its response."""
+    async with stream(url_or_pathname, access=access) as download:
+        body = b"".join([chunk async for chunk in download])
+    return GetResult(metadata=download.metadata, body=body)
+
+
+def stream(
     url_or_pathname: str,
     *,
     access: Literal["public", "private"],
@@ -115,6 +127,7 @@ __all__ = [
     "BlobUnknownError",
     "CredentialKind",
     "DownloadMetadata",
+    "GetResult",
     "HeadResult",
     "PutResult",
     "SyncBlobCredentialsFactory",
@@ -122,5 +135,6 @@ __all__ = [
     "get",
     "head",
     "put",
+    "stream",
     "sync",
 ]

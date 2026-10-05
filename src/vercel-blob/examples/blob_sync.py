@@ -14,8 +14,11 @@ def main() -> None:
     payload = bytes(range(256)) * 1024
     uploaded = blob.put(pathname, payload, access=access, content_type="application/octet-stream")
     try:
+        result = blob.get(uploaded.url, access=access)
+        assert result.body == payload
+        assert result.metadata.content_type == uploaded.content_type
         received = bytearray()
-        with blob.get(uploaded.url, access=access) as download:
+        with blob.stream(uploaded.url, access=access) as download:
             for chunk in download:
                 received.extend(chunk)
         assert received == payload
