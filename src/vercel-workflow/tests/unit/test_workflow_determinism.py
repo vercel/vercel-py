@@ -17,6 +17,7 @@ import pytest
 from tests.payloads import PLAIN_ENCODER
 from vercel.workflow._internal import (
     core,
+    errors,
     loop as workflow_loop,
     runtime,
     serialization as ser,
@@ -258,13 +259,14 @@ def _completed(cid: str, result: Any) -> w.Event:
     return w.StepCompletedEventData(result=PLAIN_ENCODER.encode(result)).into_event(cid)
 
 
-async def test_cancelled_step_ignores_later_completion() -> None:
+@pytest.mark.parametrize("result", [PLAIN_ENCODER.encode("one"), b"invalid payload"])
+async def test_cancelled_step_ignores_later_completion(result: bytes) -> None:
     """A step can be cancelled before its completion is replayed.
 
     The completion event still needs to be consumed, but setting a result on
     the cancelled future would raise ``InvalidStateError``.
     """
-    events: list[w.Event] = [_completed("step_1", "one")]
+    events: list[w.Event] = [w.StepCompletedEventData(result=result).into_event("step_1")]
     ctx = _context(events)
     sus = _suspension("step_1", _ARGS)
     ctx.suspensions["step_1"] = sus
@@ -401,6 +403,14 @@ async def _reraising() -> str:
 
 
 @_run_registry.workflow
+async def _catch_step_error() -> str:
+    try:
+        return await _record(name="a")
+    except errors.FatalError as error:
+        return str(error)
+
+
+@_run_registry.workflow
 async def _unawaited_record(fail: bool = False) -> str:
     ctx = runtime.WorkflowOrchestratorContext.current()
     pending = ctx.run_step(_record, name="a")
@@ -501,6 +511,31 @@ async def test_nondeterminism_cannot_be_suppressed_by_the_body() -> None:
 
     with pytest.raises(runtime.NondeterminismError):
         ctx.run_workflow(_running_run(_suppressing.workflow_id))
+
+
+@pytest.mark.parametrize("outcome", ["result", "error"])
+async def test_workflow_catches_unreadable_step_outcome(outcome: str) -> None:
+    cid = f"step_{_context([]).generate_ulid()}"
+    event = (
+        w.StepCompletedEventData(result=b"invalid payload").into_event(cid)
+        if outcome == "result"
+        else w.StepFailedEventData(error=b"invalid payload").into_event(cid)
+    )
+    ctx = runtime.WorkflowOrchestratorContext(
+        [_created(_record, cid), event],
+        run_id="wrun_test",
+        seed="wrun_test",
+        started_at=0,
+        registry=_run_registry,
+    )
+
+    output = ctx.run_workflow(_running_run(_catch_step_error.workflow_id))
+    message = ser.hydrate(output, what="the workflow result")
+
+    assert message.startswith(f"Cannot read the {outcome} of step {cid}:")
+    assert "unknown serialization format" in message
+    assert ctx.replay_index == len(ctx.events)
+    assert not ctx.suspensions
 
 
 @pytest.mark.parametrize("fail", [False, True])

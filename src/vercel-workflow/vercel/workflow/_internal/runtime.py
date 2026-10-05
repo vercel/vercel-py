@@ -1304,11 +1304,13 @@ class WorkflowOrchestratorContext:
                 assert isinstance(sus, Suspension)
                 if not deliver:
                     return
-                result = ser.hydrate(
-                    data,
-                    what=f"the result of step {event.correlation_id}",
-                    key=self.run_key,
-                )
+                what = f"the result of step {event.correlation_id}"
+                try:
+                    result = ser.hydrate(data, what=what, key=self.run_key)
+                except ser.SerializationError as error:
+                    if not sus.future.cancelled():
+                        sus.future.set_exception(errors.FatalError(f"Cannot read {what}: {error}"))
+                    return
                 if not sus.future.cancelled():
                     try:
                         validated = sus.step.codec.validate_return(result)
