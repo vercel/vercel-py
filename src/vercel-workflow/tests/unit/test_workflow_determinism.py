@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 
 from tests.payloads import PLAIN_ENCODER
+from tests.workflow_context import bind_context
 from vercel.workflow._internal import (
     core,
     errors,
@@ -64,7 +65,8 @@ def _resume_isolated(ctx: runtime.WorkflowOrchestratorContext) -> None:
     """
 
     async def body() -> None:
-        ctx.resume()
+        with bind_context(ctx):
+            ctx.resume()
 
     try:
         runtime._run_isolated(body(), loop_factory=asyncio.new_event_loop)
@@ -150,7 +152,8 @@ async def test_changed_hook_token_raises_nondeterminism(conflict: bool, disposed
     hook = ctx.hooks[hook_id]
     ctx.events.append(_hook_registration_event(hook_id, "old-token", conflict=conflict))
     if disposed:
-        ctx.dispose_hook(correlation_id=hook_id)
+        with bind_context(ctx):
+            ctx.dispose_hook(correlation_id=hook_id)
 
     _resume_isolated(ctx)
 
@@ -170,7 +173,8 @@ async def test_unchanged_hook_token_replays_normally(conflict: bool) -> None:
     hook = ctx.hooks[hook_id]
     ctx.events.append(_hook_registration_event(hook_id, "same-token", conflict=conflict))
 
-    ctx.resume()
+    with bind_context(ctx):
+        ctx.resume()
 
     assert ctx.resume_exception is None
     assert not ctx.suspended
@@ -196,7 +200,8 @@ async def test_received_hook_token_mismatch_fails_before_delivery(
         ).into_event(hook_id)
     )
     if disposed:
-        ctx.dispose_hook(correlation_id=hook_id)
+        with bind_context(ctx):
+            ctx.dispose_hook(correlation_id=hook_id)
 
     _resume_isolated(ctx)
 
@@ -218,7 +223,8 @@ async def test_received_hook_with_missing_or_matching_token_delivers_payload(
         ).into_event(hook_id)
     )
 
-    ctx.resume()
+    with bind_context(ctx):
+        ctx.resume()
 
     assert ctx.resume_exception is None
     assert not ctx.suspended
@@ -230,7 +236,8 @@ async def test_hook_disposal_without_event_data_skips_token_validation() -> None
     hook_id = ctx.create_hook("current-token", _HookPayload)._correlation_id
     ctx.events.append(w.HookDisposedEvent(correlation_id=hook_id))
 
-    ctx.resume()
+    with bind_context(ctx):
+        ctx.resume()
 
     assert ctx.resume_exception is None
     assert ctx.hooks[hook_id].has_dispose_event
@@ -272,7 +279,8 @@ async def test_cancelled_step_ignores_later_completion(result: bytes) -> None:
     ctx.suspensions["step_1"] = sus
 
     assert sus.future.cancel()
-    ctx.resume()
+    with bind_context(ctx):
+        ctx.resume()
 
     assert sus.future.cancelled()
     assert "step_1" not in ctx.suspensions
@@ -291,7 +299,8 @@ async def test_single_step_delivers_one_completion_per_pass() -> None:
     ctx.suspensions["step_1"] = sus1
     ctx.suspensions["step_2"] = sus2
 
-    ctx.resume()
+    with bind_context(ctx):
+        ctx.resume()
 
     # exactly one completion delivered; its suspension consumed...
     assert sus1.future.done() and sus1.future.result() == "one"
@@ -319,7 +328,8 @@ async def test_workflow_loop_runs_pending_work_before_resume() -> None:
 
     def resume() -> None:
         assert pending_ran
-        ctx.resume()
+        with bind_context(ctx):
+            ctx.resume()
 
     class Workflow:
         def resume(self) -> None:
@@ -356,7 +366,7 @@ async def test_idle_resume_parks_when_nothing_to_deliver() -> None:
     async def wait_forever() -> None:
         await asyncio.Future()
 
-    with pytest.raises(asyncio.CancelledError):
+    with bind_context(ctx), pytest.raises(asyncio.CancelledError):
         runtime._run_isolated(
             wait_forever(),
             loop_factory=lambda: workflow_loop.WorkflowLoop(workflow=ctx),
@@ -539,7 +549,7 @@ async def test_workflow_catches_unreadable_step_outcome(outcome: str) -> None:
 
 
 @pytest.mark.parametrize("fail", [False, True])
-@pytest.mark.parametrize("outcome", ["pending", "completed", "failed"])
+@pytest.mark.parametrize("outcome", ["pending", "completed", "failed", "unreadable_result"])
 async def test_terminal_replay_applies_unawaited_operation_history(fail, outcome) -> None:
     cid = f"step_{_context([]).generate_ulid()}"
     events = [_created(_record, cid)]
@@ -551,6 +561,9 @@ async def test_terminal_replay_applies_unawaited_operation_history(fail, outcome
                 error=PLAIN_ENCODER.encode_error(ValueError("step failed"))
             ).into_event(cid)
         )
+    elif outcome == "unreadable_result":
+        # Terminal replay must skip decoding as well as future notification.
+        events.append(w.StepCompletedEventData(result=b"invalid payload").into_event(cid))
     ctx = runtime.WorkflowOrchestratorContext(
         events, run_id="wrun_test", seed="wrun_test", started_at=0, registry=_run_registry
     )
@@ -684,17 +697,21 @@ async def test_terminal_replay_applies_hook_history_after_task_cleanup(outcome: 
     await asyncio.sleep(0)
 
 
-async def test_terminal_hook_disposal_does_not_resolve_a_waiter_on_a_closed_loop() -> None:
+@pytest.mark.parametrize("outcome", ["created", "conflict", "received", "disposed"])
+async def test_terminal_hook_history_does_not_signal_waiters_on_a_closed_loop(outcome) -> None:
     ctx = _context([])
     hook_event = ctx.create_hook("same-token", _HookPayload)
     cid = hook_event._correlation_id
     hook = ctx.hooks[cid]
-    ctx.events.extend(
-        [
-            _hook_registration_event(cid, "same-token", conflict=False),
-            w.HookDisposedEvent(correlation_id=cid),
-        ]
-    )
+    ctx.events.append(_hook_registration_event(cid, "same-token", conflict=outcome == "conflict"))
+    if outcome == "received":
+        ctx.events.append(
+            w.HookReceivedEventData(
+                token="same-token", payload=PLAIN_ENCODER.encode({"value": "recorded payload"})
+            ).into_event(cid)
+        )
+    elif outcome == "disposed":
+        ctx.events.append(w.HookDisposedEvent(correlation_id=cid))
 
     # A task spawned during shutdown can leave a waiter on the closed loop.
     # Keep a callback attached so resolving it would try to schedule user code.
@@ -703,17 +720,24 @@ async def test_terminal_hook_disposal_does_not_resolve_a_waiter_on_a_closed_loop
         future = isolated_loop.create_future()
         future.add_done_callback(lambda _: None)
         hook.futures.append(future)
+        conflict_future = isolated_loop.create_future()
+        conflict_future.add_done_callback(lambda _: None)
+        hook.conflict_futures.append(conflict_future)
     finally:
         isolated_loop.close()
 
-    ctx._finish_replay()
+    with bind_context(ctx):
+        ctx._finish_replay()
 
     assert ctx.replay_index == len(ctx.events)
-    assert hook.has_created_event
-    assert hook.has_dispose_event
-    assert hook.disposed
-    assert not ctx.suspensions
+    assert hook.has_created_event == (outcome != "conflict")
+    assert (hook.conflict_error is not None) == (outcome == "conflict")
+    assert hook.has_dispose_event == (outcome == "disposed")
+    assert hook.disposed == (outcome == "disposed")
+    assert set(ctx.suspensions) == ({cid} if outcome in {"created", "received"} else set())
+    assert not hook.buffered_results
     assert not future.done()
+    assert not conflict_future.done()
 
 
 @pytest.mark.parametrize("conflict", [False, True], ids=["created", "conflict"])
@@ -780,10 +804,11 @@ async def test_now_advances_with_replay_index() -> None:
     sus1 = _suspension("step_1", _ARGS)
     ctx.suspensions["step_1"] = sus1
 
-    for _ in events:
-        ctx.resume()
-        if sus1.future.done():
-            break
+    with bind_context(ctx):
+        for _ in events:
+            ctx.resume()
+            if sus1.future.done():
+                break
 
     assert sus1.future.done() and sus1.future.result() == "one"
     assert ctx.now() == t1

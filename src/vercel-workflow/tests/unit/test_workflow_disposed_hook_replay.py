@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import pytest
 
 from tests.payloads import PLAIN_ENCODER
+from tests.workflow_context import bind_context
 from vercel.workflow._internal import core, errors, runtime, world as w
 
 TOKEN = "disposed-hook"
@@ -36,7 +37,8 @@ async def test_disposal_does_not_abandon_a_pending_registration(outcome: str) ->
     assert not registration.done()
 
     try:
-        context.dispose_hook(correlation_id=hook_id)
+        with bind_context(context):
+            context.dispose_hook(correlation_id=hook_id)
         assert not registration.done()
 
         context.events.append(
@@ -50,7 +52,8 @@ async def test_disposal_does_not_abandon_a_pending_registration(outcome: str) ->
                 ),
             )
         )
-        context.resume()
+        with bind_context(context):
+            context.resume()
         await asyncio.sleep(0)
         assert registration.done()
         if outcome == "created":
@@ -77,7 +80,8 @@ async def test_disposal_does_not_abandon_a_pending_registration(outcome: str) ->
 async def test_disposed_hook_still_discards_recorded_payloads() -> None:
     context = _context()
     hook_id = context.create_hook(TOKEN, Payload)._correlation_id
-    context.dispose_hook(correlation_id=hook_id)
+    with bind_context(context):
+        context.dispose_hook(correlation_id=hook_id)
     context.events.extend(
         [
             w.HookCreatedEventData(token=TOKEN).into_event(hook_id),
@@ -88,8 +92,9 @@ async def test_disposed_hook_still_discards_recorded_payloads() -> None:
         ]
     )
 
-    for _ in context.events:
-        context.resume()
+    with bind_context(context):
+        for _ in context.events:
+            context.resume()
 
     assert not context.hooks[hook_id].buffered_results
     assert context.hooks[hook_id].has_dispose_event
@@ -113,10 +118,12 @@ async def test_disposed_hook_still_occupies_its_recorded_position(recorded_kind:
         )
     )
     context.events.append(event)
-    context.dispose_hook(correlation_id=hook_id)
+    with bind_context(context):
+        context.dispose_hook(correlation_id=hook_id)
 
     async def replay() -> None:
-        context.resume()
+        with bind_context(context):
+            context.resume()
 
     try:
         runtime._run_isolated(replay(), loop_factory=asyncio.new_event_loop)
@@ -148,8 +155,9 @@ async def test_cancellation_hook_replays_without_a_user_hook() -> None:
         ]
     )
 
-    context.resume()
-    assert cancellation.has_created_event
-    assert not context.hooks
-    context.resume()
+    with bind_context(context):
+        context.resume()
+        assert cancellation.has_created_event
+        assert not context.hooks
+        context.resume()
     assert not context.suspensions

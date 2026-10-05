@@ -18,8 +18,9 @@ import pydantic
 import pytest
 
 from tests.payloads import PLAIN_ENCODER
+from tests.workflow_context import bind_context
 from vercel.workflow import BaseHook
-from vercel.workflow._internal import encryption, runtime, serialization as ser, world as w
+from vercel.workflow._internal import core, encryption, runtime, serialization as ser, world as w
 from vercel.workflow._internal.worlds.local import LocalWorld
 
 TOKEN = "tok-abc"
@@ -128,9 +129,13 @@ async def test_pydantic_hook_round_trips_through_resume(tmp_path, monkeypatch) -
         "at": at,
     }
     # ...and the orchestrator rebuilds the model the workflow awaits.
+    context = runtime.WorkflowOrchestratorContext(
+        [], run_id=run_id, seed=run_id, started_at=0, registry=core.Workflows(as_vercel_job=False)
+    )
     hook = runtime.Hook(correlation_id="hook_0", token=TOKEN, hook_cls=Approval)
     hook.futures.append(future := _future())
-    hook.set_result(ser.hydrate(payload, what="the payload"))
+    with bind_context(context):
+        hook.receive_payload(payload)
     assert future.result() == Approval(approved=True, reviewer="ada", at=at)
 
 
@@ -142,9 +147,13 @@ async def test_dataclass_hook_round_trips_through_resume(tmp_path, monkeypatch) 
     await Signoff(approved=False, reviewer="grace").resume(TOKEN)
 
     payload = _received_payload((await world.events_list(run_id)).data)
+    context = runtime.WorkflowOrchestratorContext(
+        [], run_id=run_id, seed=run_id, started_at=0, registry=core.Workflows(as_vercel_job=False)
+    )
     hook = runtime.Hook(correlation_id="hook_0", token=TOKEN, hook_cls=Signoff)
     hook.futures.append(future := _future())
-    hook.set_result(ser.hydrate(payload, what="the payload"))
+    with bind_context(context):
+        hook.receive_payload(payload)
     assert future.result() == Signoff(approved=False, reviewer="grace")
 
 

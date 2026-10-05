@@ -16,11 +16,13 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 from collections.abc import Iterator
+from unittest.mock import Mock
 
 import pydantic
 import pytest
 
 from tests.payloads import PLAIN_ENCODER
+from tests.workflow_context import bind_context
 from vercel.workflow import Run
 from vercel.workflow._internal import core, runtime, serialization as ser, world as w
 from vercel.workflow._internal.worlds import local as local_mod
@@ -41,7 +43,9 @@ class ExceptionPayload(Exception):
 
 @pytest.mark.parametrize("buffered", [False, True])
 @pytest.mark.parametrize("failed", [False, True])
-async def test_hook_distinguishes_exception_payloads_from_errors(buffered, failed) -> None:
+async def test_hook_distinguishes_exception_payloads_from_errors(
+    buffered, failed, monkeypatch
+) -> None:
     context = runtime.WorkflowOrchestratorContext(
         [], run_id="wrun_test", seed="seed", started_at=0, registry=registry
     )
@@ -57,9 +61,9 @@ async def test_hook_distinguishes_exception_payloads_from_errors(buffered, faile
 
     error = ExceptionPayload("payload")
     if failed:
-        hook.set_error(error)
-    else:
-        hook.set_result({"message": "payload"})
+        monkeypatch.setattr(ser, "hydrate", Mock(side_effect=error))
+    with bind_context(context):
+        hook.receive_payload(PLAIN_ENCODER.encode({"message": "payload"}))
 
     result = context.run_hook(correlation_id=hook_id) if buffered else future
     if failed:
@@ -337,8 +341,9 @@ async def test_invalid_buffered_payload_fails_only_when_awaited(
         ]
     )
 
-    context.resume()
-    context.resume()
+    with bind_context(context):
+        context.resume()
+        context.resume()
 
     with pytest.raises(error_type):
         await context.run_hook(correlation_id=hook_id)
@@ -357,9 +362,9 @@ async def test_dispose_discards_an_invalid_buffered_payload() -> None:
     context.events.append(
         w.HookReceivedEventData(payload=PLAIN_ENCODER.encode({"wrong": True})).into_event(hook_id)
     )
-    context.resume()
-
-    context.dispose_hook(correlation_id=hook_id)
+    with bind_context(context):
+        context.resume()
+        context.dispose_hook(correlation_id=hook_id)
 
     with pytest.raises(StopAsyncIteration):
         await context.run_hook(correlation_id=hook_id)
