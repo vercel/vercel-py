@@ -10,10 +10,11 @@ backend therefore places each guarantee on something that can carry it:
   accepts the publication once. Claims are best-effort filters that shrink,
   but cannot eliminate, duplicate wake *executions*; the contract is
   at-least-once.
-- **Declared jobs are reconstructable, not durable.** Code is the backup: a
-  missing driver or job document is rebuilt from declarations by the existing
-  reconcile/materialize machinery, so eviction can only cost state that code
-  cannot restate (execution progress, lifecycle flags).
+- **Declared jobs are reconstructable, not durable.** Code is the index and
+  the backup: reads enumerate the declared job ids, and a missing, unreadable,
+  or schedule-changed record is rebuilt from its declaration at the point of
+  use (read-repair), so eviction can only cost state that code cannot restate
+  (execution progress, lifecycle flags).
 - **Lifecycle flags are best-effort** by declared policy: read-merge-write
   with bounded retries; last writer wins. ``pause()`` additionally rides the
   queue as a control message.
@@ -116,7 +117,6 @@ class CacheBackend:
             scheduler_id=adapter.identity.scheduler_id,
             deployment=deployment,
         )
-        driver.attach_store(store)
         coordinator = CacheJobCoordinator(store, driver, adapter)
         coordinator.install()
         return _Bound(driver=driver, coordinator=coordinator)
