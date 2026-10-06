@@ -119,35 +119,26 @@ API. Each deployment controls only its own scheduler.
 
 Off Vercel, these methods retain their normal APScheduler behavior.
 
-## Runtime job changes
+## Jobs are immutable at runtime
+
+The durable inputs to the scheduler are code and time. The managed store
+holds only code-declared jobs plus their execution progress, so its contents
+are always reconstructable: code is the durable copy. `add_job()` before the
+activation boundary is a declaration; at runtime, creating a job
+(`add_job()` with a new id) and mutating one (`modify_job()`,
+`reschedule_job()`, `pause_job()`, `resume_job()`, `remove_job()`,
+`add_job(replace_existing=True)`) are rejected.
+
+To change a job, change its declaration and deploy. To stop a job that must
+not run, remove or gate its declaration in code, or check a flag in your own
+database at the top of the job — the same application-owned state your
+at-least-once idempotency story already requires.
+
+Keep dynamic schedules in your own database, or publish a delayed Vercel
+Queue message for one-shot work.
 
 The chain sleeps until the next persisted job is due. It emits no idle
-heartbeat. `add_job()`, `modify_job()`, `reschedule_job()`, `pause_job()`,
-`resume_job()`, and removals update the managed store and rearm the one
-current wake as needed.
-
-Automatic activation establishes the runtime-mutation boundary before the
-user application handles a production request (or an opted-in preview
-request). In environments without automatic activation, call
-`scheduler.start()` first in each Function instance that changes jobs; before
-that boundary, `add_job()` calls are treated as module-level declarations.
-The call is idempotent:
-
-```python
-@app.post("/jobs")
-def add_job() -> dict[str, str]:
-    scheduler.start()
-    scheduler.add_job(
-        send_report,
-        "date",
-        run_date="2026-08-01 09:00:00+00:00",
-        id="report-2026-08-01",
-    )
-    return {"state": "scheduled"}
-```
-
-Job writes and wake rearming are coordinated through the managed store; raw
-writes to its cache keys are unsupported.
+heartbeat. Raw writes to the store's cache keys are unsupported.
 
 ## The managed job store
 
@@ -161,11 +152,13 @@ can actually carry it:
   never strands the chain.
 - **Code-declared jobs are durable because code is the backup.** Whenever the
   store's documents are missing, reconciliation rewrites declared jobs from
-  the declarations.
-- **Runtime-added jobs and lifecycle flags are best-effort.** They can be
-  lost to cache eviction. `pause()` additionally publishes a queue-borne
-  control message so the flag reaches the process serving the chain even
-  where cache state does not.
+  the declarations. The store holds nothing code cannot restate: jobs are
+  immutable at runtime.
+- **Scheduler lifecycle flags are best-effort.** A `pause()` can be lost to
+  cache eviction, after which traffic reactivates the scheduler. `pause()`
+  publishes a queue-borne control message so the flag reaches the process
+  serving the chain, but it is operational control, not a kill switch: a job
+  that must never run is stopped by shipping code.
 
 Under `vercel dev` the cache client falls back to per-process memory, which
 makes the integration a zero-infrastructure development mode: the
@@ -184,7 +177,6 @@ This gives the driver the following guarantees:
 - `resume()` creates one new generation, even under concurrent calls.
 - Rapid `pause()`/`resume()` cannot overlap a new generation with an in-flight
   handler from the old generation.
-- Runtime job changes cannot create a second chain.
 - A crash between reserving and publishing a successor is repaired by a retry.
 - Occurrences during a pause are skipped on resume instead of replayed in a
   catch-up burst.
@@ -200,15 +192,13 @@ This gives the driver the following guarantees:
 - A later preview request creates one new generation; concurrent requests
   converge on that generation.
 
-`start()` and job mutation calls are durable after they return successfully.
-If a process dies before returning, an idempotent `start()` repairs any pending
-publication, and repeating an interrupted mutation republishes the pending
-wake even when the retry itself fails on a conflicting job id. With no idle
-heartbeat, an ambiguous failure while publishing the first wake for a dormant
-scheduler is repaired by a later `start()` or mutation call, not by a periodic
-timer. Unless a job chooses its own `misfire_grace_time`, occurrences run when
-their wake arrives, however late; set a finite `misfire_grace_time` on jobs
-that must not run late.
+`start()` is durable after it returns successfully. If a process dies before
+returning, an idempotent `start()` repairs any pending publication. With no
+idle heartbeat, an ambiguous failure while publishing the first wake for a
+dormant scheduler is repaired by a later `start()` or by the request-driven
+activation sweep, not by a periodic timer. Unless a job chooses its own
+`misfire_grace_time`, occurrences run when their wake arrives, however late;
+set a finite `misfire_grace_time` on jobs that must not run late.
 
 These are chain guarantees, not exactly-once job execution. Vercel Queues is
 at-least-once, so a delivery interrupted after a job's side effect may run that
@@ -226,8 +216,8 @@ job again. Scheduled work must still be idempotent. A job already running when
 - Jobs declared in code need explicit stable IDs.
 - When the same ID is already persisted, declare it with
   `replace_existing=True`. `scheduled_job()` already enables replacement.
-- Runtime mutation APIs require prior activation in that Function instance,
-  either automatically on the request or through `scheduler.start()`.
+- Jobs are immutable at runtime: `add_job()` of a new id and all runtime
+  job mutations are rejected. Change jobs by deploying changed declarations.
 - Job execution is at-least-once.
 
 See [SCHEDULER.md](SCHEDULER.md) for the state machine and failure model. A

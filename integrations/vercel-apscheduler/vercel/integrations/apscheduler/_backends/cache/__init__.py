@@ -13,10 +13,10 @@ backend therefore places each guarantee on something that can carry it:
 - **Declared jobs are reconstructable, not durable.** Code is the backup: a
   missing driver or job document is rebuilt from declarations by the existing
   reconcile/materialize machinery, so eviction can only cost state that code
-  cannot restate (runtime-added jobs, lifecycle flags).
-- **Runtime mutations and lifecycle flags are best-effort** by declared
-  policy: read-merge-write with bounded retries; last writer wins. ``pause()``
-  additionally rides the queue as a control message.
+  cannot restate (execution progress, lifecycle flags).
+- **Lifecycle flags are best-effort** by declared policy: read-merge-write
+  with bounded retries; last writer wins. ``pause()`` additionally rides the
+  queue as a control message.
 
 Outside deployed environments (``vercel dev``) the cache client falls back to
 per-process memory, which makes this backend the in-memory dev mode with the
