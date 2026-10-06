@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.10.0 - 2026-10-06
+
+### Features
+
+- Support the file named by `VERCEL_OIDC_TOKEN_FILE` as an OIDC fallback with expiration-aware caching and automatic rereads for rotated tokens. (#437)
+
+### Bug Fixes
+
+- Use a shared AnyIO dependency (>=4.11,<5) so application callbacks and SDK code share cancellation scopes and exception types. (#436)
+
 ## 0.9.0 - 2026-09-14
 
 ### Features

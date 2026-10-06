@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.3 - 2026-10-06
+
+- Update dependencies.
+
 ## 0.3.2 - 2026-09-14
 
 > **Release note:** Supersedes repository-declared versions `0.3.1` and `0.3.0`,

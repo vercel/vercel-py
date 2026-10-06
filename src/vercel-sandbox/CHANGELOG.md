@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.8.0 - 2026-10-06
+
+### Features
+
+- Add network policy response rules so the Sandbox proxy can answer matching requests without contacting the destination. (#401)
+- Add `open_interactive()` for interactive PTY sessions. Terminal I/O is a standard stream on the session: an `anyio.abc.ByteStream` asynchronously and an `io.RawIOBase` synchronously, alongside `resize()` and `wait()` for the remote exit code. (#415)
+- Tag Sandbox API requests with the coding agent driving the Python process, when detected, as an `agent/<name>` User-Agent phrase. This covers normal requests, streams, and uploads. (#424)
+
+### Bug Fixes
+
+- Allow Drive mounts to be combined with failover regions when creating sandboxes, while retaining primary-region validation. (#417)
+- Use a shared AnyIO dependency (>=4.11,<5) so application callbacks and SDK code share cancellation scopes and exception types. Include the WebSocket protocol dependency in the shared bundle. (#436)
+
 ## 0.7.0 - 2026-09-23
 
 ### Breaking Changes

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.6 - 2026-10-06
+
+- Update dependencies.
+
 ## 0.7.5 - 2026-09-14
 
 > **Release note:** Supersedes repository-declared versions `0.7.4` and `0.7.3`,

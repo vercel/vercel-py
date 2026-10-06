@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.1 - 2026-10-06
+
+### Bug Fixes
+
+- Use a shared AnyIO dependency (>=4.11,<5) so application callbacks and SDK code share cancellation scopes and exception types. (#436)
+
+### Internal
+
+- Add shared environment-based coding-agent detection for SDK request attribution. (#424)
+
 ## 0.2.0 - 2026-09-14
 
 ### Features
