@@ -27,6 +27,7 @@ from vercel.sandbox._internal.async_runtime import (
     create_sandbox_operation as _create_sandbox_operation,
     delete_drive as _delete_drive,
     fork_sandbox_operation as _fork_sandbox_operation,
+    get_drive as _get_drive,
     get_or_create_drive as _get_or_create_drive,
     get_or_create_sandbox as _get_or_create_sandbox,
     get_sandbox as _get_sandbox,
@@ -426,6 +427,14 @@ def resume_sandbox(
     )
 
 
+async def get_drive(*, name_or_id: str) -> Drive:
+    """Look up a Drive by name or ID without creating it.
+
+    Raises SandboxApiError with status code 404 if the Drive does not exist.
+    """
+    return await _get_drive(_service(), name_or_id=name_or_id)
+
+
 async def get_or_create_drive(
     *,
     name: str,
@@ -670,6 +679,7 @@ __all__ = [
     "fork_sandbox",
     "get_or_create_sandbox",
     "get_sandbox",
+    "get_drive",
     "get_or_create_drive",
     "get_snapshot",
     "query_sandboxes",

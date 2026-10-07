@@ -4265,3 +4265,93 @@ async def test_async_get_or_create_projects_response_mount_modes_and_defensively
     assert mounts is not None
     mounts["/cache"] = SandboxMount(drive="other", mode="read-write")
     assert box.mounts["/cache"].drive == "cache"
+
+
+@respx.mock
+@pytest.mark.parametrize("name_or_id", ["cache", "drive_123", "cache/with space"])
+@pytest.mark.parametrize("standalone", [False, True])
+@pytest.mark.parametrize("status_code", [200, 404])
+async def test_get_drive_by_name_or_id(
+    mock_env_clear: None, name_or_id: str, standalone: bool, status_code: int
+) -> None:
+    from urllib.parse import quote
+
+    from vercel.sandbox.client import SandboxClient
+
+    data = {"error": {"code": "not_found", "message": "Drive not found"}}
+    route = respx.get(
+        f"https://sandbox.test/v2/sandboxes/drives/{quote(name_or_id, safe='')}"
+    ).mock(
+        return_value=httpx.Response(
+            status_code, json=_drive_response() if status_code == 200 else data
+        )
+    )
+    client = SandboxClient.create(
+        options=cast(sandbox.SandboxServiceOptions, _session_options(project_id="prj_other")[0])
+    )
+    try:
+        async with session(service_options=_session_options(project_id="prj_other")):
+            get_drive = client.get_drive if standalone else sandbox.get_drive
+            if status_code == 404:
+                with pytest.raises(SandboxApiError) as exc_info:
+                    await get_drive(name_or_id=name_or_id)
+                assert exc_info.value.status_code == 404
+                assert exc_info.value.code == "not_found"
+                assert exc_info.value.data == data
+            else:
+                drive = await get_drive(name_or_id=name_or_id)
+                assert isinstance(drive, sandbox.Drive)
+                assert drive.id == "drive_123"
+                assert drive.name == "cache"
+                assert drive.snapshot() == DriveMount(drive, mode="snapshot")
+    finally:
+        await client.aclose()
+    assert route.call_count == 1
+    assert dict(route.calls.last.request.url.params) == {
+        "teamId": "team_123",
+        "projectId": "prj_other",
+    }
+    assert len(respx.calls) == 1
+
+
+@respx.mock
+@pytest.mark.parametrize("name_or_id", ["cache", "drive_123"])
+@pytest.mark.parametrize("standalone", [False, True])
+@pytest.mark.parametrize("status_code", [200, 404])
+def test_sync_get_drive_by_name_or_id(
+    mock_env_clear: None, name_or_id: str, standalone: bool, status_code: int
+) -> None:
+    from vercel.sandbox.sync.client import SyncSandboxClient
+
+    data = {"error": {"code": "not_found", "message": "Drive not found"}}
+    route = respx.get(f"https://sandbox.test/v2/sandboxes/drives/{name_or_id}").mock(
+        return_value=httpx.Response(
+            status_code, json=_drive_response() if status_code == 200 else data
+        )
+    )
+    client = SyncSandboxClient.create(
+        options=cast(sandbox_sync.SandboxServiceOptions, _session_options()[0])
+    )
+    try:
+        with session(service_options=_session_options()):
+            get_drive = client.get_drive if standalone else sandbox_sync.get_drive
+            if status_code == 404:
+                with pytest.raises(SandboxApiError) as exc_info:
+                    get_drive(name_or_id=name_or_id)
+                assert exc_info.value.status_code == 404
+                assert exc_info.value.code == "not_found"
+                assert exc_info.value.data == data
+            else:
+                drive = get_drive(name_or_id=name_or_id)
+                assert isinstance(drive, sandbox_sync.SyncDrive)
+                assert drive.id == "drive_123"
+                assert drive.name == "cache"
+                assert drive.snapshot() == DriveMount(drive, mode="snapshot")
+    finally:
+        client.close()
+    assert route.call_count == 1
+    assert dict(route.calls.last.request.url.params) == {
+        "teamId": "team_123",
+        "projectId": "prj_123",
+    }
+    assert len(respx.calls) == 1

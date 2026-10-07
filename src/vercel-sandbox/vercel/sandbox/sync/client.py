@@ -31,6 +31,7 @@ from vercel.sandbox._internal.sync_runtime import (
     create_sandbox as _create_sync_sandbox,
     delete_drive as _delete_sync_drive,
     fork_sandbox as _fork_sync_sandbox,
+    get_drive as _get_sync_drive,
     get_or_create_drive as _get_or_create_sync_drive,
     get_or_create_sandbox as _get_or_create_sync_sandbox,
     get_sandbox as _get_sync_sandbox,
@@ -239,6 +240,13 @@ class SyncSandboxClient:
             include_system_routes=include_system_routes,
             private_parameters=_normalize_private_parameters("resume_sandbox", private_parameters),
         )
+
+    def get_drive(self, *, name_or_id: str) -> SyncDrive:
+        """Look up a Drive by name or ID without creating it.
+
+        Raises SandboxApiError with status code 404 if the Drive does not exist.
+        """
+        return _get_sync_drive(self._service, name_or_id=name_or_id)
 
     def get_or_create_drive(
         self,

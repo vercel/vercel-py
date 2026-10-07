@@ -623,6 +623,10 @@ class SandboxService:
         self._ensure_open()
         return await self._api_client.create_snapshot(session_id=session_id, expiration=expiration)
 
+    async def get_drive(self, *, name_or_id: str, project_id: str | None = None) -> DriveState:
+        self._ensure_open()
+        return await self._api_client.get_drive(name_or_id=name_or_id, project_id=project_id)
+
     async def get_or_create_drive(
         self,
         *,
