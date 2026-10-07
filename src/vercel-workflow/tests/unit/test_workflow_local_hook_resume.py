@@ -189,7 +189,7 @@ async def test_a_claim_is_converged_on_by_the_resume_id_not_the_position(
 
     # Repoint the claim at an unrelated event, the way a bumped writer would.
     occupied = "evnt_00000000000000000000000009"
-    (world.data_dir / "events" / f"{RUN_ID}-{occupied}.json").write_text(
+    (world.data_dir / "events" / RUN_ID / f"{RUN_ID}-{occupied}.json").write_text(
         json.dumps(
             {
                 "eventType": "run_started",
