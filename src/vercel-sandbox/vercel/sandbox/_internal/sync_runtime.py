@@ -2012,11 +2012,9 @@ def resume_sandbox(
     )
 
 
-def get_drive(
-    service: SandboxService, *, name_or_id: str, project_id: str | None = None
-) -> SyncDrive:
+def get_drive(service: SandboxService, *, name_or_id: str) -> SyncDrive:
     return SyncDrive(
-        payload=iter_coroutine(service.get_drive(name_or_id=name_or_id, project_id=project_id)),
+        payload=iter_coroutine(service.get_drive(name_or_id=name_or_id)),
         service=service,
     )
 

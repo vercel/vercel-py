@@ -2224,11 +2224,9 @@ def resume_sandbox_operation(
     )
 
 
-async def get_drive(
-    service: SandboxService, *, name_or_id: str, project_id: str | None = None
-) -> Drive:
+async def get_drive(service: SandboxService, *, name_or_id: str) -> Drive:
     return Drive(
-        payload=await service.get_drive(name_or_id=name_or_id, project_id=project_id),
+        payload=await service.get_drive(name_or_id=name_or_id),
         service=service,
     )
 

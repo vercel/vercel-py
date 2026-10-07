@@ -1582,13 +1582,13 @@ class SandboxApiClient:
         )
         return _validate_response(_CreateSnapshotResponse, data).to_snapshot_and_session()
 
-    async def get_drive(self, *, name_or_id: str, project_id: str | None = None) -> DriveState:
+    async def get_drive(self, *, name_or_id: str) -> DriveState:
         credentials = await self._credentials_factory()
         data = await self._request_json(
             "GET",
             format_url_path("v2/sandboxes/drives/{name_or_id}", name_or_id=name_or_id),
             credentials=credentials,
-            params={"projectId": project_id or credentials.project_id},
+            params={"projectId": credentials.project_id},
         )
         return _validate_response(_DriveResponse, data).to_drive()
 
