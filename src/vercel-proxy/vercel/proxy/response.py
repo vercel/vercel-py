@@ -50,6 +50,12 @@ def _check_response_name(name: str) -> None:
     _check_reserved(name)
 
 
+def _check_raw_headers(raw_headers: list[tuple[bytes, bytes]]) -> None:
+    # Checked again on send so headers set without our hooks are caught too.
+    for name, _ in raw_headers:
+        _check_response_name(name.decode("latin-1"))
+
+
 def _check_request_name(name: str) -> None:
     if not _REQUEST_HEADER_NAME.fullmatch(name):
         raise ValueError(
@@ -137,6 +143,7 @@ class Response(responses.Response):
 
         *scope*, *receive* and *send* are the standard ASGI arguments.
         """
+        _check_raw_headers(self.raw_headers)
         if not self.is_terminating:
             await super().__call__(scope, receive, send)
             return
@@ -238,6 +245,7 @@ class ContinueResponse(Response):
 
         *scope*, *receive* and *send* are the standard ASGI arguments.
         """
+        _check_raw_headers(self.raw_headers)
         control = MutableHeaders()
         header, destination = self._destination_header()
         control[header] = destination
