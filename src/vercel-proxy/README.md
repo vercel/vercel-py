@@ -5,6 +5,8 @@ request reaches your app and decides whether to let it continue, rewrite it,
 redirect it or answer it directly.
 
 ```python
+from urllib.parse import quote
+
 from vercel.proxy import (
     ContinueResponse,
     Proxy,
@@ -19,7 +21,8 @@ proxy = Proxy()
 
 @proxy.route("/old-blog/{slug}")
 def old_blog(request: Request) -> Response:
-    return RedirectResponse(f"/blog/{request.path_params['slug']}", status_code=308)
+    slug = quote(request.path_params["slug"])
+    return RedirectResponse(f"/blog/{slug}", status_code=308)
 
 
 @proxy.route("/dashboard/{path:path}")
@@ -32,7 +35,8 @@ def dashboard(request: Request) -> Response:
 @proxy.route("/api/{path:path}", host="{tenant}.example.com")
 async def tenant_api(request: Request) -> Response:
     tenant = request.path_params["tenant"]
-    return RewriteResponse(f"https://{tenant}.api.example.com/{request.path_params['path']}")
+    path = quote(request.path_params["path"])
+    return RewriteResponse(f"https://{tenant}.api.example.com/{path}")
 ```
 
 ## Routes
@@ -42,7 +46,9 @@ request goes to the first matching route, in the order the routes were
 registered.
 
 A path can capture parts of the URL with placeholders. The captured values are
-passed to the handler in `request.path_params`.
+passed to the handler in `request.path_params`. They are decoded, so quote them
+with `urllib.parse.quote` before building a URL from them, and check any value
+that chooses the destination, such as a host or a path containing `..`.
 
 ```python
 @proxy.route("/users/{user_id:int}")
@@ -57,8 +63,11 @@ The following placeholders are available:
   or `uuid`.
 - `{name:path}` captures any part of the path, including `/`.
 
-Trailing slashes are optional by default, but a route that matches the path
-exactly is preferred. Pass `strict=True` to `Proxy()` to require exact matches.
+Trailing slashes are optional by default. Each request is first matched against
+every route as sent, and only then with the trailing slash added or removed. So
+with `/users/{id}` registered before `/{path:path}`, a request for `/users/42/`
+goes to `/{path:path}`, which matches it exactly. Pass `strict=True` to
+`Proxy()` to require exact matches.
 
 A route can also be limited to certain methods or hosts.
 
