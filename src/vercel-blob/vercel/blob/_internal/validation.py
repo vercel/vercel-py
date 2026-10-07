@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from typing import Literal
-from urllib.parse import quote, urlsplit, urlunsplit
+from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 from vercel.blob.errors import BlobError
 
@@ -44,8 +44,12 @@ def validate_pathname(pathname: object) -> str:
         raise BlobError("pathname cannot be empty")
     if has_control_character(pathname):
         raise BlobError("pathname cannot contain control characters")
+    if any(0xD800 <= ord(char) <= 0xDFFF for char in pathname):
+        raise BlobError("pathname must contain valid Unicode")
+    if "//" in pathname:
+        raise BlobError('pathname cannot contain "//"')
 
-    normalized = pathname.lstrip("/")
+    normalized = pathname.removeprefix("/")
     if not normalized:
         raise BlobError("pathname cannot be root or empty")
 
@@ -54,6 +58,17 @@ def validate_pathname(pathname: object) -> str:
         if seg in (".", ".."):
             raise BlobError("Pathname cannot contain dot segments ('.' or '..')")
 
+    return normalized
+
+
+def validate_upload_pathname(pathname: object) -> str:
+    """Apply the TS SDK's upload limit to the original UTF-16 string length."""
+    normalized = validate_pathname(pathname)
+    length = len(normalized.encode("utf-16-le")) // 2
+    if pathname != normalized:
+        length += 1
+    if length > 950:
+        raise BlobError("pathname is too long, maximum length is 950")
     return normalized
 
 
@@ -152,7 +167,12 @@ def parse_and_validate_delivery_url(
             msg = f"URL store ID '{url_store_id}' does not match credential store ID"
             raise BlobError(f"{msg} '{expected_norm}'")
 
-    pathname = validate_pathname(parsed.path)
+    try:
+        decoded_path = unquote(parsed.path, errors="strict")
+    except UnicodeDecodeError as exc:
+        raise BlobError("Blob URL pathname must contain valid UTF-8") from exc
+    validate_pathname(decoded_path)
+    pathname = parsed.path.removeprefix("/")
 
     # Reassemble URL without fragment
     clean_url = urlunsplit(("https", hostname, parsed.path, parsed.query, ""))
