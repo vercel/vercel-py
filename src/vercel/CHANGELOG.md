@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.11.6 - 2026-10-07
+
+- Update dependencies.
+
 ## 0.11.5 - 2026-10-06
 
 ### Bug Fixes
