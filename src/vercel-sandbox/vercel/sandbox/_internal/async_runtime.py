@@ -8,7 +8,7 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import timedelta
 from types import TracebackType
-from typing import Any, Literal, TextIO, overload
+from typing import TYPE_CHECKING, Any, Literal, TextIO, overload
 
 import anyio
 
@@ -117,6 +117,9 @@ from vercel.sandbox._internal.state import (
     SnapshotState,
 )
 from vercel.sandbox._internal.text_reader import TextReader, _text_readers
+
+if TYPE_CHECKING:
+    from vercel.sandbox.user import SandboxUser
 
 
 def _terminal_error(error: _SandboxTerminalState, sandbox: object) -> SandboxTerminalStateError:
@@ -922,6 +925,37 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
             write_files_cwd=self._write_files_cwd,
         )
 
+    def as_user(self, username: str) -> "SandboxUser":
+        """Select an existing account without I/O; validate the username now.
+
+        The account's actual home is resolved lazily on first use.
+        This handle stays pinned to this runtime session.
+        """
+        from vercel.sandbox._internal.user_core import UserContext
+        from vercel.sandbox.user import SandboxUser
+
+        context = UserContext(
+            username=username,
+            service=self._service,
+            execution=self.fs._execution,
+            home_dir="/root" if username == "root" else None,
+        )
+        filesystem = SandboxFilesystem(
+            service=context.service,
+            execution=context.filesystem_execution,
+            write_files_cwd=context.write_files_cwd,
+        )
+        return SandboxUser(context, filesystem)
+
+    async def create_user(self, username: str) -> "SandboxUser":
+        """Create a Linux account with /bin/bash and a private (0700) home.
+
+        Existing accounts cause an error; use ``as_user()`` to reuse one.
+        """
+        user = self.as_user(username)
+        await user._context.provision()
+        return user
+
     async def run_process(
         self,
         command: str,
@@ -1268,6 +1302,37 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         to stop that exact session identity on exit.
         """
         return SandboxSessionOperation(self)
+
+    def as_user(self, username: str) -> "SandboxUser":
+        """Select an existing account without I/O; validate the username now.
+
+        The account's actual home is resolved lazily on first use.
+        This handle follows this sandbox through lazy resume.
+        """
+        from vercel.sandbox._internal.user_core import UserContext
+        from vercel.sandbox.user import SandboxUser
+
+        context = UserContext(
+            username=username,
+            service=self._service,
+            execution=self.fs._execution,
+            home_dir="/root" if username == "root" else None,
+        )
+        filesystem = SandboxFilesystem(
+            service=context.service,
+            execution=context.filesystem_execution,
+            write_files_cwd=context.write_files_cwd,
+        )
+        return SandboxUser(context, filesystem)
+
+    async def create_user(self, username: str) -> "SandboxUser":
+        """Create a Linux account with /bin/bash and a private (0700) home.
+
+        Existing accounts cause an error; use ``as_user()`` to reuse one.
+        """
+        user = self.as_user(username)
+        await user._context.provision()
+        return user
 
     async def run_process(
         self,
