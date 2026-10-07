@@ -9,6 +9,7 @@ layouts or holds unknown ``.json`` files is refused and left alone.
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -129,3 +130,17 @@ async def test_a_symlinked_run_directory_is_refused(tmp_path, monkeypatch) -> No
     with pytest.raises(local_mod.UnsafeEntityIdError):
         await world.steps_get("wrun_A", "step_1")
     assert list(outside.iterdir()) == []
+
+
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="needs POSIX permissions")
+def test_a_failed_wipe_fails_startup(tmp_path, monkeypatch) -> None:
+    events = tmp_path / "events"
+    events.mkdir()
+    (events / "wrun_old-evnt_1.json").write_text("{}")
+    events.chmod(0o500)
+    try:
+        with pytest.raises(PermissionError):
+            _world(tmp_path, monkeypatch)
+        assert (events / "wrun_old-evnt_1.json").is_file()
+    finally:
+        events.chmod(0o700)

@@ -437,7 +437,9 @@ def _wipe_flat_layout(data_dir: pathlib.Path) -> None:
         "it was written by an older version with an incompatible storage layout.",
         file=sys.stderr,
     )
-    shutil.rmtree(data_dir, ignore_errors=True)
+    # Errors propagate: a partly deleted directory would leave flat history
+    # that the per-run layout cannot read.
+    shutil.rmtree(data_dir)
 
 
 class LocalWorld(w.World):
