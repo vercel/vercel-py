@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.10"
 resolution-markers = [
     "python_full_version >= '3.15'",
@@ -41,7 +41,7 @@ dev = [
     { name = "cryptography", specifier = ">=48.0.1" },
     { name = "django-stubs", specifier = ">=6.0.6,<7" },
     { name = "fastapi", specifier = ">=0.115.0,<1" },
-    { name = "ggt", marker = "python_full_version >= '3.11'", specifier = ">=1.6.0" },
+    { name = "ggt", marker = "python_full_version >= '3.11'", git = "https://github.com/vercel-labs/ggt.git?rev=69d7aac7e61be28cb4714b69e25606d83a10744b" },
     { name = "hatchling", specifier = ">=1.27.0,<2" },
     { name = "httpx", specifier = "==0.28.1" },
     { name = "hypothesis", specifier = ">=6.0.0,<7" },
@@ -730,14 +730,10 @@ wheels = [
 
 [[package]]
 name = "ggt"
-version = "1.6.0"
-source = { registry = "https://pypi.org/simple" }
+version = "1.6.1.dev1+69d7aac"
+source = { git = "https://github.com/vercel-labs/ggt.git?rev=69d7aac7e61be28cb4714b69e25606d83a10744b#69d7aac7e61be28cb4714b69e25606d83a10744b" }
 dependencies = [
     { name = "typing-extensions" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/4b/e5/b125686afaed90b803c91a4394d6fb3520df53734bcd1cea3410645c1265/ggt-1.6.0.tar.gz", hash = "sha256:c2bee3eeeb847da985bdf4a41a0c90220d76c69126c88ba0bcf6d5b6e9d57505", size = 206975, upload-time = "2026-08-31T21:54:03.482Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/ed/0f/800b548512e16082abe157e74e00c9f3f4fdbec41cb9cb553fbe80a5c9a3/ggt-1.6.0-py3-none-any.whl", hash = "sha256:52fe480fd2ace23a6c4f3964e7c6f29342ebdbb60de758f43ed204d7e6e1fe96", size = 129008, upload-time = "2026-08-31T21:54:02.334Z" },
 ]
 
 [[package]]

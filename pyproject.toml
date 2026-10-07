@@ -41,6 +41,10 @@ package = false
 exclude-newer = "2 days"
 exclude-newer-package = { ggt = "2026-09-01T00:00:00Z", lograil = "2026-08-21T00:00:00Z" }
 
+[tool.uv.sources]
+# Temporary pin for the Windows output-capture fix; remove after ggt releases it.
+ggt = { git = "https://github.com/vercel-labs/ggt.git", rev = "69d7aac7e61be28cb4714b69e25606d83a10744b" }
+
 [tool.uv.workspace]
 members = ["src/*", "integrations/*"]
 
