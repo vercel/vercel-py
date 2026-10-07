@@ -65,11 +65,24 @@ finally:
 awaited; enter it with `async with`. The sync API uses ordinary calls and enters
 `stream` with `with`.
 
-Pathnames are relative to the store. Leading slashes are removed. Empty paths,
-control characters, and `.` or `..` path segments are rejected. Delivery URLs
-must use HTTPS and a standard `<store>.<access>.blob.vercel-storage.com` host.
+Pathnames are relative to the store. One leading slash is removed. Empty paths,
+control characters, invalid Unicode, `//`, and `.` or `..` path segments are
+rejected. `put` accepts at most 950 UTF-16 code units in the original pathname,
+matching the TypeScript SDK. Characters outside the Unicode Basic Multilingual
+Plane count as two units. Reads do not inherit this upload limit.
+
+Pathnames are literal object names, not URL-encoded strings or local file paths.
+Characters such as `?`, `#`, and `%` are preserved and encoded when constructing
+a delivery URL. Delivery URLs must use HTTPS and a standard
+`<store>.<access>.blob.vercel-storage.com` host. Their path is checked after one
+UTF-8 percent-decode, including for control characters and dot segments. The
+encoded path is preserved, queries are retained, and fragments are removed.
 Private URL downloads must belong to the credential's store. Redirects are not
 followed. Custom delivery domains are not supported.
+
+The SDK does not execute object names or write downloads to local files. Pathname
+validation is not a shell-escaping or filesystem-safety guarantee. Applications
+must not use untrusted object names as commands or unchecked local file paths.
 
 ### Upload options
 
@@ -77,15 +90,16 @@ followed. Custom delivery domains are not supported.
 | --- | --- | --- |
 | `access` | Required | `"public"` or `"private"` |
 | `content_type` | `None` | Explicit media type; otherwise the service determines it |
-| `add_random_suffix` | `True` | Add a random suffix to avoid pathname collisions |
+| `add_random_suffix` | `False` | Set to `True` to add a random suffix and avoid pathname collisions |
 | `allow_overwrite` | `False` | Permit replacement of an existing object when enabled |
 | `cache_control_max_age` | `None` | Cache lifetime in whole seconds; otherwise use the service default |
 
 `put` accepts only `bytes`, including `b""`. It infers content length and never
 chooses multipart upload, reads an iterable, or stages data in a temporary file.
-To write a stable pathname, set `add_random_suffix=False`. To replace that object,
-also set `allow_overwrite=True`. Always use the returned `pathname` or `url` when
-referring to an upload that has a random suffix.
+Uploads use a stable pathname by default, matching the TypeScript SDK. To replace
+an existing object, set `allow_overwrite=True`. To create distinct objects with
+random suffixes, set `add_random_suffix=True` and use the returned `pathname` or
+`url` when referring to each upload.
 
 `PutResult` contains `url`, `download_url`, `pathname`, `content_type`,
 `content_disposition`, and `etag`. It does not contain size or upload time.

@@ -52,8 +52,8 @@ from .validation import (
     validate_bool_flag,
     validate_cache_control_max_age,
     validate_content_type,
-    validate_pathname,
     validate_put_body,
+    validate_upload_pathname,
 )
 
 
@@ -64,14 +64,14 @@ class _ApiModel(BaseModel):
 class _PutRequest(_ApiModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    pathname: Annotated[str, BeforeValidator(validate_pathname)]
+    pathname: Annotated[str, BeforeValidator(validate_upload_pathname)]
     body: Annotated[bytes, BeforeValidator(validate_put_body)]
     access: Annotated[Access, BeforeValidator(validate_access)] = Field(
         serialization_alias="x-vercel-blob-access"
     )
     add_random_suffix: Annotated[
         bool, BeforeValidator(partial(validate_bool_flag, name="add_random_suffix"))
-    ] = Field(default=True, serialization_alias="x-add-random-suffix")
+    ] = Field(default=False, serialization_alias="x-add-random-suffix")
     allow_overwrite: Annotated[
         bool, BeforeValidator(partial(validate_bool_flag, name="allow_overwrite"))
     ] = Field(default=False, serialization_alias="x-allow-overwrite")
@@ -368,27 +368,7 @@ class BlobApiClient:
             raise _map_http_error(response)
         return response
 
-    async def put(
-        self,
-        pathname: str,
-        body: bytes,
-        *,
-        access: Access,
-        credentials: BlobCredentials,
-        content_type: str | None = None,
-        add_random_suffix: bool = True,
-        allow_overwrite: bool = False,
-        cache_control_max_age: int | None = None,
-    ) -> PutResult:
-        request = _PutRequest(
-            pathname=pathname,
-            body=body,
-            access=access,
-            content_type=content_type,
-            add_random_suffix=add_random_suffix,
-            allow_overwrite=allow_overwrite,
-            cache_control_max_age=cache_control_max_age,
-        )
+    async def put(self, request: _PutRequest, *, credentials: BlobCredentials) -> PutResult:
         response = await self._request(
             "PUT",
             "",

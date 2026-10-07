@@ -216,6 +216,7 @@ def test_sync_put_success() -> None:
 @pytest.mark.parametrize("cache_age", [None, 0, 60])
 async def test_put_valid_input_boundaries(cache_age: int | None) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["x-add-random-suffix"] == "0"
         assert request.url.params["pathname"] == "valid.bin"
         assert request.content == b""
         assert "x-content-type" not in request.headers
@@ -236,6 +237,7 @@ async def test_put_valid_input_boundaries(cache_age: int | None) -> None:
 @pytest.mark.parametrize("cache_age", [None, 0, 60])
 def test_sync_put_valid_input_boundaries(cache_age: int | None) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["x-add-random-suffix"] == "0"
         assert request.url.params["pathname"] == "valid.bin"
         assert request.content == b""
         assert "x-content-type" not in request.headers
@@ -262,6 +264,18 @@ _INVALID_PUT_INPUTS = [
         {"body": memoryview(b"123")}, TypeError, "put body must be bytes", id="memoryview-body"
     ),
     pytest.param({"pathname": ""}, BlobError, "pathname cannot be empty", id="empty-path"),
+    pytest.param(
+        {"pathname": "//file.txt"}, BlobError, "cannot contain.*//", id="leading-double-slash"
+    ),
+    pytest.param(
+        {"pathname": "folder//file.txt"}, BlobError, "cannot contain.*//", id="double-slash"
+    ),
+    pytest.param({"pathname": "folder/../file.txt"}, BlobError, "dot segments", id="dot-path"),
+    pytest.param({"pathname": "file\ud800.txt"}, BlobError, "Unicode", id="surrogate-path"),
+    pytest.param({"pathname": "x" * 951}, BlobError, "maximum length is 950", id="long-path"),
+    pytest.param(
+        {"pathname": "😀" * 476}, BlobError, "maximum length is 950", id="long-utf16-path"
+    ),
     pytest.param(
         {"pathname": "valid/\x01path.txt"}, BlobError, "control characters", id="control-path"
     ),
@@ -304,7 +318,7 @@ _INVALID_PUT_INPUTS = [
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("invalid,error,message", _INVALID_PUT_INPUTS)
-async def test_put_invalid_input_resolves_credentials_without_http(
+async def test_put_invalid_input_fails_before_credentials_or_http(
     invalid: dict[str, Any], error: type[Exception], message: str
 ) -> None:
     credentials_calls = 0
@@ -322,11 +336,11 @@ async def test_put_invalid_input_resolves_credentials_without_http(
         with pytest.raises(error, match=message):
             await blob.put(**arguments)
 
-    assert credentials_calls == 1
+    assert credentials_calls == 0
 
 
 @pytest.mark.parametrize("invalid,error,message", _INVALID_PUT_INPUTS)
-def test_sync_put_invalid_input_resolves_credentials_without_http(
+def test_sync_put_invalid_input_fails_before_credentials_or_http(
     invalid: dict[str, Any], error: type[Exception], message: str
 ) -> None:
     credentials_calls = 0
@@ -344,7 +358,7 @@ def test_sync_put_invalid_input_resolves_credentials_without_http(
         with pytest.raises(error, match=message):
             blob.sync.put(**arguments)
 
-    assert credentials_calls == 1
+    assert credentials_calls == 0
 
 
 _BUFFERED_GET_CASES = [
@@ -692,6 +706,43 @@ async def test_stream_invalid_input_zero_io(target: str, access: blob.Access, me
         with pytest.raises(BlobError, match=message):
             async with blob.stream(target, access=access):
                 pass
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("operation", ["stream", "head", "delete"])
+@pytest.mark.parametrize("encoded_path", ["folder/%2e%2e/file.txt", "file%00.txt", "file%ff.txt"])
+async def test_encoded_invalid_delivery_url_zero_io(
+    asynchronous: bool, operation: str, encoded_path: str
+) -> None:
+    target = f"https://{TEST_STORE}.private.blob.vercel-storage.com/{encoded_path}"
+
+    def credentials() -> BlobCredentials:
+        pytest.fail("Invalid URL must not resolve credentials")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        pytest.fail("Invalid URL must not send HTTP requests")
+
+    if asynchronous:
+        async with _async_session(handler, credentials_factory=credentials):
+            with pytest.raises(BlobError):
+                if operation == "stream":
+                    async with blob.stream(target, access="private"):
+                        pass
+                elif operation == "head":
+                    await blob.head(target)
+                else:
+                    await blob.delete(target)
+    else:
+        with _sync_session(handler, credentials_factory=credentials):
+            with pytest.raises(BlobError):
+                if operation == "stream":
+                    with blob.sync.stream(target, access="private"):
+                        pass
+                elif operation == "head":
+                    blob.sync.head(target)
+                else:
+                    blob.sync.delete(target)
 
 
 @pytest.mark.anyio

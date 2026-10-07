@@ -17,7 +17,7 @@ from vercel.blob.models import (
     PutResult,
 )
 
-from .api_client import BlobApiClient
+from .api_client import BlobApiClient, _PutRequest
 from .credentials import adapt_sync_credentials_factory, normalize_credentials
 from .options import BlobServiceOptions, SyncBlobServiceOptions
 from .validation import (
@@ -63,22 +63,22 @@ class BlobService:
         *,
         access: Access,
         content_type: str | None = None,
-        add_random_suffix: bool = True,
+        add_random_suffix: bool = False,
         allow_overwrite: bool = False,
         cache_control_max_age: int | None = None,
     ) -> PutResult:
         self.check_open()
-        credentials = await self._get_credentials()
-        return await self._api_client.put(
-            pathname,
-            body,
+        request = _PutRequest(
+            pathname=pathname,
+            body=body,
             access=access,
-            credentials=credentials,
             add_random_suffix=add_random_suffix,
             allow_overwrite=allow_overwrite,
             content_type=content_type,
             cache_control_max_age=cache_control_max_age,
         )
+        credentials = await self._get_credentials()
+        return await self._api_client.put(request, credentials=credentials)
 
     async def head(self, url_or_pathname: str) -> HeadResult:
         self.check_open()

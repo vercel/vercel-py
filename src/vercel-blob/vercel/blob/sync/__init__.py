@@ -46,7 +46,7 @@ def put(
     *,
     access: Literal["public", "private"],
     content_type: str | None = None,
-    add_random_suffix: bool = True,
+    add_random_suffix: bool = False,
     allow_overwrite: bool = False,
     cache_control_max_age: int | None = None,
 ) -> PutResult:
