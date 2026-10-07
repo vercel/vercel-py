@@ -5,6 +5,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "poe" / "workspace_poe.py"
 SPEC = importlib.util.spec_from_file_location("workspace_poe", SCRIPT)
 assert SPEC is not None
@@ -188,6 +190,25 @@ def test_test_scope_uses_pytest_parser_for_pytest_fallback(monkeypatch) -> None:
 
     assert command.parser == "pytest"
     assert command.env[workspace_poe.TEST_RUNNER_ENV] == "pytest"
+
+
+@pytest.mark.parametrize("task", ["test", "test-examples"])
+@pytest.mark.parametrize("force_pytest", ["1", "true", "yes"])
+def test_forced_pytest_scope_uses_matching_runner_and_parser(
+    monkeypatch, task: str, force_pytest: str
+) -> None:
+    monkeypatch.setenv("FORCE_PYTEST", force_pytest)
+    monkeypatch.setattr(workspace_poe.shutil, "which", lambda *args, **kwargs: "/venv/bin/ggt")
+    runner = object.__new__(workspace_poe.WorkspaceRunner)
+    runner.root = Path.cwd()
+    runner.project_root = None
+    scope = workspace_poe.Scope("root", Path.cwd())
+
+    command = runner.scope_command(task, scope, (), workspace_poe.ROOT_TASKS[task])
+
+    assert command.env[workspace_poe.TEST_RUNNER_ENV] == "pytest"
+    assert command.env["FORCE_PYTEST"] == force_pytest
+    assert command.parser == "pytest"
 
 
 def test_tool_command_lograil_name_includes_tool_and_package(monkeypatch) -> None:

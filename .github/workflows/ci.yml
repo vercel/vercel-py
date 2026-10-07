@@ -73,6 +73,10 @@ jobs:
       # Keep nested task runners from restoring the locked AnyIO version.
       UV_NO_SYNC: "1"
       ANYIO_VERSION: ${{ matrix.anyio }}
+      # ggt 1.6.0 can fail in Windows workers before a test starts when
+      # output capture duplicates stdout/stderr (OSError: Bad file descriptor).
+      # Use the supported pytest runner until upstream capture is fixed.
+      FORCE_PYTEST: ${{ matrix.os.name == 'Windows' && '1' || '0' }}
       APSCHEDULER_TEST_REDIS_URL: ${{ matrix.os.redis-url }}
       BLOB_READ_WRITE_TOKEN: ${{ secrets.BLOB_READ_WRITE_TOKEN }}
       VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
