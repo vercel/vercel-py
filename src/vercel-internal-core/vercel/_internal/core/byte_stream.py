@@ -3,8 +3,9 @@
 Shared code consumes the async-shaped ``ReadableByteStream`` and
 ``StagingByteFile`` protocols. Callers select the runtime matching their public
 API, then use its factories instead of constructing the private adapters directly.
-The sync runtime never suspends, while the async runtime awaits or offloads I/O as
-appropriate.
+The sync runtime accepts buffers and blocking readers and never suspends. The async
+runtime accepts buffers and async readers only; callers adapt blocking readers
+before passing them to async code.
 """
 
 import inspect
@@ -37,15 +38,14 @@ class AsyncByteReader(Protocol):
 
 BytesLike: TypeAlias = bytes | bytearray | memoryview
 SyncByteSource: TypeAlias = BytesLike | SyncByteReader
-AsyncByteSource: TypeAlias = AsyncByteReader
-RawByteSource: TypeAlias = SyncByteSource | AsyncByteSource
+AsyncByteSource: TypeAlias = BytesLike | AsyncByteReader
 
 
 class ReadableByteStream(Protocol):
     """Normalized readable stream consumed by shared internal workflows.
 
-    Its async shape hides whether a runtime performs the read inline, awaits an
-    async source, or moves a blocking read to a worker thread.
+    Its async shape hides whether a runtime performs the read inline or awaits an
+    async source.
     """
 
     async def read(self, size: int = -1, /) -> bytes: ...
@@ -124,16 +124,6 @@ class _AsyncReader:
 
     async def read(self, size: int = -1, /) -> bytes:
         return _bytes_result(await self._source.read(size))
-
-
-class _ThreadedSyncReader:
-    """Run a blocking reader on a worker thread for use by async workflows."""
-
-    def __init__(self, source: SyncByteReader) -> None:
-        self._source = source
-
-    async def read(self, size: int = -1, /) -> bytes:
-        return _bytes_result(await anyio.to_thread.run_sync(self._source.read, size))
 
 
 class _SyncTemporaryFile:
@@ -217,20 +207,20 @@ class SyncByteStreamRuntime:
 class AsyncByteStreamRuntime:
     """Adapt byte primitives for execution under AnyIO.
 
-    Async readers are awaited directly, while blocking readers run on a worker
-    thread so they do not block the event loop.
+    Async readers are awaited directly. Blocking readers are rejected rather than
+    moved to worker threads.
     """
 
     @staticmethod
-    def reader(source: RawByteSource) -> ReadableByteStream:
+    def reader(source: AsyncByteSource) -> ReadableByteStream:
         if isinstance(source, (bytes, bytearray, memoryview)):
             return _MemoryReader(source)
         read = getattr(source, "read", None)
         if not callable(read):
             raise TypeError("byte source must provide a callable read method")
-        if inspect.iscoroutinefunction(read):
-            return _AsyncReader(cast(AsyncByteReader, source))
-        return _ThreadedSyncReader(cast(SyncByteReader, source))
+        if not inspect.iscoroutinefunction(read):
+            raise TypeError("async byte stream runtime does not support sync readers")
+        return _AsyncReader(source)
 
     def temporary_file(self) -> AbstractAsyncContextManager[StagingByteFile]:
         return cast(
@@ -244,7 +234,6 @@ __all__ = [
     "AsyncByteSource",
     "AsyncByteStreamRuntime",
     "BytesLike",
-    "RawByteSource",
     "ReadableByteStream",
     "StagingByteFile",
     "StagingFileRuntime",
