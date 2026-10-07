@@ -4355,3 +4355,39 @@ def test_sync_get_drive_by_name_or_id(
         "projectId": "prj_123",
     }
     assert len(respx.calls) == 1
+
+
+@respx.mock
+async def test_drive_delete_uses_credentials_project(mock_env_clear: None) -> None:
+    respx.get("https://sandbox.test/v2/sandboxes/drives/cache").mock(
+        return_value=httpx.Response(200, json=_drive_response())
+    )
+    delete_route = respx.delete("https://sandbox.test/v2/sandboxes/drives/cache").mock(
+        return_value=httpx.Response(200, json=_drive_response())
+    )
+    async with session(service_options=_session_options(project_id="project-name")):
+        drive = await sandbox.get_drive(name_or_id="cache")
+        assert drive.project_id == "prj_123"
+        await drive.delete()
+    assert dict(delete_route.calls.last.request.url.params) == {
+        "teamId": "team_123",
+        "projectId": "project-name",
+    }
+
+
+@respx.mock
+def test_sync_drive_delete_uses_credentials_project(mock_env_clear: None) -> None:
+    respx.get("https://sandbox.test/v2/sandboxes/drives/cache").mock(
+        return_value=httpx.Response(200, json=_drive_response())
+    )
+    delete_route = respx.delete("https://sandbox.test/v2/sandboxes/drives/cache").mock(
+        return_value=httpx.Response(200, json=_drive_response())
+    )
+    with session(service_options=_session_options(project_id="project-name")):
+        drive = sandbox_sync.get_drive(name_or_id="cache")
+        assert drive.project_id == "prj_123"
+        drive.delete()
+    assert dict(delete_route.calls.last.request.url.params) == {
+        "teamId": "team_123",
+        "projectId": "project-name",
+    }

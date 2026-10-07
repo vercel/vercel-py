@@ -1,0 +1,1 @@
+Drive operations now always use the project resolved from Sandbox credentials. Remove the `project_id` override from the API client and runtime drive functions; Drive deletion also uses credentials rather than the handle’s project metadata.

@@ -203,6 +203,9 @@ by project-local name or Drive ID without creating it. A missing Drive raises
 `SandboxApiError` with `status_code == 404`. The async and sync clients and
 `vercel.sandbox.sync.get_drive(...)` expose the same lookup.
 
+All Drive operations use the project resolved by the configured Sandbox credentials.
+They do not accept a `project_id` override.
+
 Drives must be unmounted from any running Sandbox before they are able to be
 deleted. You can either call the `delete` method on the Drive handle, or use the
 `delete_drive(name=...)` function to delete a drive by name if

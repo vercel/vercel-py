@@ -424,7 +424,7 @@ class Drive(DriveHandleBase):
         Deletion does not use the Drive ID. If the name now refers to a replacement
         Drive, this method deletes that replacement and updates this handle to it.
         """
-        payload = await self._service.delete_drive(name=self.name, project_id=self.project_id)
+        payload = await self._service.delete_drive(name=self.name)
         self._apply_payload(payload)
         return self
 
@@ -2235,24 +2235,20 @@ async def get_or_create_drive(
     service: SandboxService,
     *,
     name: str,
-    project_id: str | None = None,
     max_size_bytes: int | None = None,
     region: str | None = None,
 ) -> tuple[Drive, bool]:
     state, created = await service.get_or_create_drive(
         name=name,
-        project_id=project_id,
         max_size_bytes=max_size_bytes,
         region=region,
     )
     return Drive(payload=state, service=service), created
 
 
-async def delete_drive(
-    service: SandboxService, *, name: str, project_id: str | None = None
-) -> Drive:
+async def delete_drive(service: SandboxService, *, name: str) -> Drive:
     return Drive(
-        payload=await service.delete_drive(name=name, project_id=project_id),
+        payload=await service.delete_drive(name=name),
         service=service,
     )
 
@@ -2269,7 +2265,6 @@ def query_drives(
     service: SandboxService,
     *,
     query: DriveQuery | None = None,
-    project_id: str | None = None,
     page_size: int | None = None,
     cursor: str | None = None,
 ) -> AsyncIterator[Drive]:
@@ -2279,7 +2274,6 @@ def query_drives(
             page = await query_drives_page(
                 service,
                 query=query,
-                project_id=project_id,
                 page_size=params.page_size,
                 cursor=params.cursor,
             )

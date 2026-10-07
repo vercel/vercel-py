@@ -1596,13 +1596,12 @@ class SandboxApiClient:
         self,
         *,
         name: str,
-        project_id: str | None = None,
         max_size_bytes: int | None = None,
         region: str | None = None,
     ) -> tuple[DriveState, bool]:
         credentials = await self._credentials_factory()
         request = _GetOrCreateDriveRequest(
-            project_id=project_id or credentials.project_id,
+            project_id=credentials.project_id,
             max_size_bytes=max_size_bytes,
             region=region,
         )
@@ -1627,7 +1626,6 @@ class SandboxApiClient:
     async def query_drives(
         self,
         *,
-        project_id: str | None = None,
         limit: int | None = None,
         cursor: str | None = None,
         sort_by: str | None = None,
@@ -1636,7 +1634,7 @@ class SandboxApiClient:
     ) -> DrivesPageState:
         credentials = await self._credentials_factory()
         request = _QueryDrivesRequest(
-            project_id=project_id or credentials.project_id,
+            project_id=credentials.project_id,
             limit=limit,
             cursor=cursor,
             sort_by=sort_by,
@@ -1659,14 +1657,13 @@ class SandboxApiClient:
         self,
         *,
         name: str,
-        project_id: str | None = None,
     ) -> DriveState:
         credentials = await self._credentials_factory()
         data = await self._request_json(
             "DELETE",
             format_url_path("v2/sandboxes/drives/{name}", name=name),
             credentials=credentials,
-            params={"projectId": project_id or credentials.project_id},
+            params={"projectId": credentials.project_id},
         )
         return _validate_response(_DriveResponse, data).to_drive()
 

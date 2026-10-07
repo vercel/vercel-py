@@ -445,9 +445,7 @@ class SyncDrive(DriveHandleBase):
         Deletion does not use the Drive ID. If the name now refers to a replacement
         Drive, this method deletes that replacement and updates this handle to it.
         """
-        payload = iter_coroutine(
-            self._service.delete_drive(name=self.name, project_id=self.project_id)
-        )
+        payload = iter_coroutine(self._service.delete_drive(name=self.name))
         self._apply_payload(payload)
         return self
 
@@ -2023,14 +2021,12 @@ def get_or_create_drive(
     service: SandboxService,
     *,
     name: str,
-    project_id: str | None = None,
     max_size_bytes: int | None = None,
     region: str | None = None,
 ) -> tuple[SyncDrive, bool]:
     state, created = iter_coroutine(
         service.get_or_create_drive(
             name=name,
-            project_id=project_id,
             max_size_bytes=max_size_bytes,
             region=region,
         )
@@ -2038,9 +2034,9 @@ def get_or_create_drive(
     return SyncDrive(payload=state, service=service), created
 
 
-def delete_drive(service: SandboxService, *, name: str, project_id: str | None = None) -> SyncDrive:
+def delete_drive(service: SandboxService, *, name: str) -> SyncDrive:
     return SyncDrive(
-        payload=iter_coroutine(service.delete_drive(name=name, project_id=project_id)),
+        payload=iter_coroutine(service.delete_drive(name=name)),
         service=service,
     )
 
@@ -2057,7 +2053,6 @@ def query_drives(
     service: SandboxService,
     *,
     query: DriveQuery | None = None,
-    project_id: str | None = None,
     page_size: int | None = None,
     cursor: str | None = None,
 ) -> Iterator[SyncDrive]:
@@ -2066,7 +2061,6 @@ def query_drives(
         page = query_drives_page(
             service,
             query=query,
-            project_id=project_id,
             page_size=params.page_size,
             cursor=params.cursor,
         )

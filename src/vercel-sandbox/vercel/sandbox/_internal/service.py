@@ -631,14 +631,12 @@ class SandboxService:
         self,
         *,
         name: str,
-        project_id: str | None = None,
         max_size_bytes: int | None = None,
         region: str | None = None,
     ) -> tuple[DriveState, bool]:
         self._ensure_open()
         return await self._api_client.get_or_create_drive(
             name=name,
-            project_id=project_id,
             max_size_bytes=max_size_bytes,
             region=region or self._options.region,
         )
@@ -647,14 +645,12 @@ class SandboxService:
         self,
         *,
         query: DriveQuery | None = None,
-        project_id: str | None = None,
         page_size: int | None = None,
         cursor: str | None = None,
     ) -> DrivesPageState:
         self._ensure_open()
         criteria = _compile_drive_query(query)
         return await self._api_client.query_drives(
-            project_id=project_id,
             limit=page_size,
             cursor=cursor,
             sort_by=criteria.sort_by,
@@ -662,9 +658,9 @@ class SandboxService:
             name_prefix=criteria.name_prefix,
         )
 
-    async def delete_drive(self, *, name: str, project_id: str | None = None) -> DriveState:
+    async def delete_drive(self, *, name: str) -> DriveState:
         self._ensure_open()
-        return await self._api_client.delete_drive(name=name, project_id=project_id)
+        return await self._api_client.delete_drive(name=name)
 
     async def query_snapshots_page(
         self,
