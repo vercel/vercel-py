@@ -39,6 +39,34 @@ async def tenant_api(request: Request) -> Response:
     return RewriteResponse(f"https://{tenant}.api.example.com/{path}")
 ```
 
+## Setup
+
+Create a proxy module, such as `proxy.py`, and set the proxy in `vercel.json` as
+`module:attribute`. A module in a package works too, such as `app.proxy:proxy`.
+
+```json
+{
+  "proxy": { "entrypoint": "proxy:proxy" }
+}
+```
+
+By default the proxy runs for every request. To run it only for some paths, add
+a `matcher` with one path or a list of paths.
+
+```json
+{
+  "proxy": { "entrypoint": "proxy:proxy", "matcher": ["/api/:path*", "/admin"] }
+}
+```
+
+The proxy runs separately from your app and gets only the packages in the
+`vercel.proxy` dependency group of `pyproject.toml`.
+
+```toml
+[dependency-groups]
+"vercel.proxy" = ["vercel-proxy"]
+```
+
 ## Routes
 
 `@proxy.route(path)` registers a handler for requests whose path matches. Each
@@ -116,11 +144,24 @@ the socket. Check `request.headers.get("upgrade")` to tell them apart.
 
 ## Responses
 
-A handler returns a `ContinueResponse` or `RewriteResponse` to let the request
-continue, or another response to answer it directly.
+Every handler returns a `Response`. Responses are based on Starlette's
+[responses](https://starlette.dev/responses/), so `headers`, `set_cookie` and
+`delete_cookie` work as in Starlette.
 
-`ContinueResponse()` continues to the original URL. `RewriteResponse(url)`
-serves the request from `url` without changing the URL the client sees.
+```python
+response = ContinueResponse()
+response.set_cookie("bucket", "b", max_age=86400)
+return response
+```
+
+Header names starting with `x-middleware-` are reserved. Background tasks are
+not supported.
+
+### Continuing the request
+
+`ContinueResponse()` lets the request continue to the original URL.
+`RewriteResponse(url)` serves it from `url` without changing the URL the client
+sees.
 
 For both, `request_headers` is a dictionary of headers to replace on the
 forwarded request. A `None` value removes the header.
@@ -129,15 +170,8 @@ forwarded request. A `None` value removes the header.
 return ContinueResponse(request_headers={"x-region": "eu", "cookie": None})
 ```
 
+### Answering the request
+
 `Response`, `JSONResponse`, `PlainTextResponse`, `HTMLResponse` and
-`RedirectResponse` answer the request directly. They are the Starlette
-[responses](https://starlette.dev/responses/) of the same name.
-
-Every response has `headers`, `set_cookie` and `delete_cookie`, which work like
-Starlette's.
-
-```python
-response = ContinueResponse()
-response.set_cookie("bucket", "b", max_age=86400)
-return response
-```
+`RedirectResponse` answer the request directly, like the Starlette classes of
+the same name. The request does not reach your app.
