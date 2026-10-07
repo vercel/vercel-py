@@ -7,7 +7,7 @@ from collections.abc import Callable
 
 from vercel._internal.core.http import StreamingResponse
 from vercel._internal.core.session import SdkSession, SyncSdkSession
-from vercel.blob.errors import BlobCredentialsError, BlobError
+from vercel.blob.errors import BlobContentLengthError, BlobCredentialsError, BlobError
 from vercel.blob.models import (
     Access,
     BlobCredentials,
@@ -20,6 +20,12 @@ from vercel.blob.models import (
 from .api_client import BlobApiClient, _PutRequest
 from .credentials import adapt_sync_credentials_factory, normalize_credentials
 from .options import BlobServiceOptions, SyncBlobServiceOptions
+from .upload import (
+    AsyncUploadRuntime,
+    SyncUploadRuntime,
+    UploadRuntime,
+    _BufferedUpload,
+)
 from .validation import (
     construct_delivery_url,
     is_url,
@@ -37,10 +43,12 @@ class BlobService:
         api_client: BlobApiClient,
         credentials_factory: BlobCredentialsFactory,
         check_open: Callable[[], None],
+        upload_runtime: UploadRuntime,
     ) -> None:
         self._api_client = api_client
         self.credentials_factory = credentials_factory
         self.check_open = check_open
+        self._upload_runtime = upload_runtime
         self._store_id: str | None = None
 
     async def _get_credentials(self) -> BlobCredentials:
@@ -59,9 +67,10 @@ class BlobService:
     async def put(
         self,
         pathname: str,
-        body: bytes,
+        body: object,
         *,
         access: Access,
+        content_length: int | None = None,
         content_type: str | None = None,
         add_random_suffix: bool = False,
         allow_overwrite: bool = False,
@@ -70,15 +79,29 @@ class BlobService:
         self.check_open()
         request = _PutRequest(
             pathname=pathname,
-            body=body,
             access=access,
             add_random_suffix=add_random_suffix,
             allow_overwrite=allow_overwrite,
             content_type=content_type,
             cache_control_max_age=cache_control_max_age,
         )
+        upload = self._upload_runtime.classify(body, content_length=content_length)
+
+        if upload.content_length == 0:
+            if not isinstance(upload, _BufferedUpload):
+                source = self._upload_runtime.chunk_source(upload)
+                first = await source.next_chunk(1)
+                if first:
+                    raise BlobContentLengthError("body exceeded content_length of 0 bytes")
+                upload = _BufferedUpload(b"", 0)
+
         credentials = await self._get_credentials()
-        return await self._api_client.put(request, credentials=credentials)
+        if isinstance(upload, _BufferedUpload):
+            return await self._api_client.put(request, upload.body, credentials=credentials)
+        source = self._upload_runtime.chunk_source(upload)
+        return await self._api_client.put_stream(
+            request, source, upload.content_length, credentials=credentials
+        )
 
     async def head(self, url_or_pathname: str) -> HeadResult:
         self.check_open()
@@ -123,6 +146,7 @@ def get_blob_service(session: SdkSession) -> BlobService:
             api_client=BlobApiClient(base_url=options.base_url, transport=session.get_transport()),
             credentials_factory=options.credentials_factory,
             check_open=session.check_open,
+            upload_runtime=AsyncUploadRuntime(session.get_staging_file_runtime()),
         )
 
     return session.get_or_create_service(BlobService, factory)
@@ -135,6 +159,7 @@ def get_sync_blob_service(session: SyncSdkSession) -> BlobService:
             api_client=BlobApiClient(base_url=options.base_url, transport=session.get_transport()),
             credentials_factory=adapt_sync_credentials_factory(options.credentials_factory),
             check_open=session.check_open,
+            upload_runtime=SyncUploadRuntime(session.get_staging_file_runtime()),
         )
 
     return session.get_or_create_service(BlobService, factory)

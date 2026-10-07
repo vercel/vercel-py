@@ -72,12 +72,6 @@ def validate_upload_pathname(pathname: object) -> str:
     return normalized
 
 
-def validate_put_body(body: object) -> bytes:
-    if type(body) is not bytes:
-        raise TypeError(f"put body must be bytes, got {type(body).__name__}")
-    return body
-
-
 def validate_bool_flag(value: object, *, name: str) -> bool:
     if not isinstance(value, bool):
         raise TypeError(f"{name} must be bool, got {type(value).__name__}")
@@ -106,6 +100,24 @@ def validate_cache_control_max_age(cache_control_max_age: object) -> int | None:
     if cache_control_max_age < 0:
         raise ValueError("cache_control_max_age must be nonnegative")
     return cache_control_max_age
+
+
+def validate_optional_content_length(content_length: object) -> int | None:
+    if content_length is None:
+        return None
+    if isinstance(content_length, bool) or not isinstance(content_length, int):
+        raise TypeError(f"content_length must be int, got {type(content_length).__name__}")
+    if content_length < 0:
+        raise ValueError("content_length must be nonnegative")
+    return content_length
+
+
+def validate_content_length(content_length: object) -> int:
+    if content_length is None:
+        raise TypeError("content_length is required for streaming bodies")
+    validated = validate_optional_content_length(content_length)
+    assert validated is not None
+    return validated
 
 
 def is_url(value: str) -> bool:
