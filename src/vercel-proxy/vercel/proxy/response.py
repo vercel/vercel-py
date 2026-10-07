@@ -51,7 +51,6 @@ def _check_response_name(name: str) -> None:
 
 
 def _check_raw_headers(raw_headers: list[tuple[bytes, bytes]]) -> None:
-    # Checked again on send so headers set without our hooks are caught too.
     for name, _ in raw_headers:
         _check_response_name(name.decode("latin-1"))
 
