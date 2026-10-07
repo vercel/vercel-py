@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.9.0 - 2026-10-07
+
+### Breaking Changes
+
+- Drive operations now always use the project resolved from Sandbox credentials. Remove the `project_id` override from the API client and runtime drive functions; Drive deletion also uses credentials rather than the handle’s project metadata. (#439)
+
+### Features
+
+- Add `get_drive(name_or_id=...)` to look up existing Drives by name or ID without creating them, with async and sync support. Missing Drives raise `SandboxApiError` with status code 404. (#439)
+
 ## 0.8.0 - 2026-10-06
 
 ### Features
