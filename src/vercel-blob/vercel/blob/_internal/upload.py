@@ -6,7 +6,7 @@ import inspect
 from collections.abc import AsyncIterable, AsyncIterator, Callable, Iterable, Iterator
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
-from typing import NoReturn, Protocol, cast
+from typing import NoReturn, Protocol, TypeAlias, cast
 
 import anyio
 import httpx2 as httpx
@@ -14,6 +14,7 @@ import httpx2 as httpx
 from vercel._internal.core.byte_stream import (
     AsyncByteReader,
     AsyncByteStreamRuntime,
+    BytesLike,
     ReadableByteStream,
     SyncByteStreamRuntime,
 )
@@ -24,6 +25,11 @@ from vercel.blob._internal.validation import (
     validate_optional_content_length,
 )
 from vercel.blob.errors import BlobContentLengthError, BlobUnknownError
+from vercel.blob.models import PutBody, SyncPutBody
+
+# Every body accepted by the sync or async public ``put``. Each runtime rejects
+# the half of this union that belongs to the other surface.
+AnyPutBody: TypeAlias = BytesLike | PutBody | SyncPutBody
 
 _CHUNK_SIZE = 64 * 1024
 _PUT_BODY_TYPE_ERROR = "put body must be bytes, a byte reader, or an iterable of bytes, got {name}"
@@ -123,7 +129,7 @@ _StreamingUpload = _ReaderUpload | _IterableUpload
 _UploadBody = _BufferedUpload | _StreamingUpload
 
 
-def _classify_buffered_body(body: object, content_length: object) -> _BufferedUpload | None:
+def _classify_buffered_body(body: AnyPutBody, content_length: int | None) -> _BufferedUpload | None:
     if not isinstance(body, (bytes, bytearray, memoryview)):
         return None
     snapshot = bytes(body)
@@ -140,7 +146,7 @@ def _classify_buffered_body(body: object, content_length: object) -> _BufferedUp
 
 
 class UploadRuntime(Protocol):
-    def classify(self, body: object, *, content_length: object) -> _UploadBody: ...
+    def classify(self, body: AnyPutBody, *, content_length: int | None) -> _UploadBody: ...
     def chunk_source(self, upload: _StreamingUpload) -> _ChunkSource: ...
 
 
@@ -152,7 +158,7 @@ class SyncUploadRuntime:
     def __init__(self, runtime: SyncByteStreamRuntime) -> None:
         self._runtime = runtime
 
-    def classify(self, body: object, *, content_length: object) -> _UploadBody:
+    def classify(self, body: AnyPutBody, *, content_length: int | None) -> _UploadBody:
         buffered = _classify_buffered_body(body, content_length)
         if buffered is not None:
             return buffered
@@ -189,7 +195,7 @@ class AsyncUploadRuntime:
     def __init__(self, runtime: AsyncByteStreamRuntime) -> None:
         self._runtime = runtime
 
-    def classify(self, body: object, *, content_length: object) -> _UploadBody:
+    def classify(self, body: AnyPutBody, *, content_length: int | None) -> _UploadBody:
         buffered = _classify_buffered_body(body, content_length)
         if buffered is not None:
             return buffered

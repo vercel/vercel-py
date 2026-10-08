@@ -21,6 +21,7 @@ from .api_client import BlobApiClient, _PutRequest
 from .credentials import adapt_sync_credentials_factory, normalize_credentials
 from .options import BlobServiceOptions, SyncBlobServiceOptions
 from .upload import (
+    AnyPutBody,
     AsyncUploadRuntime,
     SyncUploadRuntime,
     UploadRuntime,
@@ -67,7 +68,7 @@ class BlobService:
     async def put(
         self,
         pathname: str,
-        body: object,
+        body: AnyPutBody,
         *,
         access: Access,
         content_length: int | None = None,
