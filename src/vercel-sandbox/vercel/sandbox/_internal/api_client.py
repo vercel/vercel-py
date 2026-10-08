@@ -573,6 +573,16 @@ class _SnapshotPayload(_ApiModel):
 
 class _DrivePayload(_ApiModel):
     id: str
+    parent_drive_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("parent_drive_id", "parentDriveId"),
+        serialization_alias="parentDriveId",
+    )
+    root_drive_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("root_drive_id", "rootDriveId"),
+        serialization_alias="rootDriveId",
+    )
     name: str
     project_id: str = Field(
         validation_alias=AliasChoices("project_id", "projectId"),
@@ -915,6 +925,8 @@ def _snapshot_state(payload: _SnapshotPayload) -> SnapshotState:
 
 def _drive_state(payload: _DrivePayload) -> DriveState:
     return DriveState(
+        parent_drive_id=payload.parent_drive_id,
+        root_drive_id=payload.root_drive_id,
         id=payload.id,
         name=payload.name,
         project_id=payload.project_id,
@@ -1581,6 +1593,17 @@ class SandboxApiClient:
             body=body,
         )
         return _validate_response(_CreateSnapshotResponse, data).to_snapshot_and_session()
+
+    async def fork_drive(self, *, name: str, fork_name: str) -> DriveState:
+        credentials = await self._credentials_factory()
+        data = await self._request_json(
+            "POST",
+            format_url_path("v2/sandboxes/drives/{name}/fork", name=name),
+            credentials=credentials,
+            params={"projectId": credentials.project_id},
+            body={"name": fork_name},
+        )
+        return _validate_response(_DriveResponse, data).to_drive()
 
     async def get_drive(self, *, name_or_id: str) -> DriveState:
         credentials = await self._credentials_factory()

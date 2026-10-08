@@ -30,6 +30,7 @@ from vercel.sandbox._internal.sync_runtime import (
     _ManagedSyncSandbox,
     create_sandbox as _create_sync_sandbox,
     delete_drive as _delete_sync_drive,
+    fork_drive as _fork_sync_drive,
     fork_sandbox as _fork_sync_sandbox,
     get_drive as _get_sync_drive,
     get_or_create_drive as _get_or_create_sync_drive,
@@ -240,6 +241,18 @@ class SyncSandboxClient:
             include_system_routes=include_system_routes,
             private_parameters=_normalize_private_parameters("resume_sandbox", private_parameters),
         )
+
+    def fork_drive(self, *, source: str, name: str) -> SyncDrive:
+        """Fork a Drive by project-local name without fetching it first.
+
+        The new Drive inherits the source's committed data, region, and maximum
+        size. API failures propagate as SandboxApiError (403, 404, or 409).
+
+        Args:
+            source: Project-local source Drive name.
+            name: Project-local name for the new Drive.
+        """
+        return _fork_sync_drive(self._service, source=source, name=name)
 
     def get_drive(self, *, name_or_id: str) -> SyncDrive:
         """Look up a Drive by name or ID without creating it.

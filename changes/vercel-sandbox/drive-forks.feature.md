@@ -1,0 +1,1 @@
+Add async `Drive.fork(name=...)` and sync `SyncDrive.fork(name=...)` to copy committed Drive data with inherited region and maximum size, plus optional `parent_drive_id` and `root_drive_id` lineage fields. Use `fork_drive(source=..., name=...)` on the top-level APIs or standalone clients to fork directly without fetching the source.
