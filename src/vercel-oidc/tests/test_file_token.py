@@ -5,10 +5,7 @@ import json
 import threading
 import time
 from collections.abc import Awaitable, Callable, Iterator
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -17,43 +14,21 @@ from vercel.headers import set_headers
 from vercel.oidc import token as oidc
 
 
-def _token(payload: object) -> str:
+def _token(*, lifetime: float = 3600, subject: str = "file") -> str:
+    payload = {"exp": time.time() + lifetime, "sub": subject}
     encoded = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
     return f"header.{encoded}.signature"
 
 
-@dataclass
-class TokenFile:
-    path: Path
-    now: float
-    read: Mock
-    monotonic: float = 0.0
-
-    def advance(self, seconds: float) -> None:
-        self.now += seconds
-        self.monotonic += seconds
-
-    def replace(self, lifetime: float = 3600) -> str:
-        token = _token({"exp": self.now + lifetime})
-        replacement = self.path.with_suffix(".replacement")
-        replacement.write_text(f"{token}\n", encoding="utf-8")
-        replacement.replace(self.path)
-        return token
-
-
 @pytest.fixture
-def token_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TokenFile]:
+def token_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     monkeypatch.delenv("VERCEL_OIDC_TOKEN", raising=False)
     set_headers(None)
     oidc._clear_cached_oidc_token()
-    state = TokenFile(tmp_path / "token", time.time(), Mock(wraps=oidc._read_file_oidc_token))
-    monkeypatch.setenv("VERCEL_OIDC_TOKEN_FILE", str(state.path))
-    monkeypatch.setattr(
-        oidc, "time", SimpleNamespace(time=lambda: state.now, monotonic=lambda: state.monotonic)
-    )
-    monkeypatch.setattr(oidc, "_read_file_oidc_token", state.read)
+    path = tmp_path / "token"
+    monkeypatch.setenv("VERCEL_OIDC_TOKEN_FILE", str(path))
     monkeypatch.setattr(oidc, "find_project_info", Mock(side_effect=RuntimeError("no project")))
-    yield state
+    yield path
     set_headers(None)
     oidc._clear_cached_oidc_token()
 
@@ -70,273 +45,120 @@ def lookup(request: pytest.FixtureRequest) -> Callable[[], Awaitable[str]]:
     return get
 
 
-async def test_caches_until_expiration_buffer_then_reopens_replaced_file(
-    token_file: TokenFile, lookup: Callable[[], Awaitable[str]]
+async def test_rereads_replaced_file_on_each_call(
+    token_file: Path, lookup: Callable[[], Awaitable[str]]
 ) -> None:
-    first = token_file.replace()
+    first = _token()
+    token_file.write_text(f" \n{first}\n ", encoding="utf-8")
     assert await lookup() == first
-    token_file.advance(1800)
-    second = token_file.replace()
-    assert await lookup() == first
-    token_file.advance(1739)
-    assert await lookup() == first
-    assert token_file.read.call_count == 1
-
-    token_file.advance(1)
-    assert await lookup() == second
-    assert token_file.read.call_count == 2
-
-
-async def test_rotation_accepts_a_replacement_with_shorter_expiration(
-    token_file: TokenFile, lookup: Callable[[], Awaitable[str]]
-) -> None:
-    first = token_file.replace(lifetime=120)
-    assert await lookup() == first
-
-    token_file.advance(60)
-    second = token_file.replace(lifetime=50)
-    assert await lookup() == second
-    assert token_file.read.call_count == 2
-
-    token_file.advance(50)
-    with pytest.raises(oidc.VercelOidcTokenError):
-        await lookup()
-
-
-async def test_refresh_buffer_is_not_delayed_by_retry_interval(
-    token_file: TokenFile, lookup: Callable[[], Awaitable[str]]
-) -> None:
-    first = token_file.replace(lifetime=80)
-    assert await lookup() == first
-    second = token_file.replace()
-
-    token_file.advance(19)
-    assert await lookup() == first
-    assert token_file.read.call_count == 1
-    token_file.advance(1)
-    assert await lookup() == second
-    assert token_file.read.call_count == 2
-
-
-@pytest.mark.parametrize("lifetime", [20, 60])
-async def test_token_discovered_inside_refresh_buffer_is_rechecked_on_next_lookup(
-    token_file: TokenFile, lookup: Callable[[], Awaitable[str]], lifetime: float
-) -> None:
-    first = token_file.replace(lifetime=lifetime)
-    assert await lookup() == first
-    second = token_file.replace()
-
-    assert await lookup() == second
-    assert token_file.read.call_count == 2
-    assert await lookup() == second
-    assert token_file.read.call_count == 2
-
-
-async def test_unchanged_token_inside_refresh_buffer_retries_no_later_than_expiration(
-    token_file: TokenFile, lookup: Callable[[], Awaitable[str]]
-) -> None:
-    first = token_file.replace(lifetime=20)
-    assert await lookup() == first
-    assert await lookup() == first
-    assert token_file.read.call_count == 2
-
-    token_file.advance(19)
-    assert await lookup() == first
-    assert token_file.read.call_count == 2
-    token_file.advance(1)
-    second = token_file.replace()
-    assert await lookup() == second
-    assert token_file.read.call_count == 3
-
-
-async def test_short_lived_file_token_does_not_trigger_cli_refresh(
-    token_file: TokenFile, lookup: Callable[[], Awaitable[str]]
-) -> None:
-    first = token_file.replace(lifetime=120)
-    assert await lookup() == first
-    token_file.advance(60)
-    assert await lookup() == first
-    second = token_file.replace()
-    token_file.advance(29)
-    assert await lookup() == first
-    assert token_file.read.call_count == 2
-    token_file.advance(1)
+    second = _token(lifetime=1200, subject="rotated")
+    replacement = token_file.with_suffix(".replacement")
+    replacement.write_text(second, encoding="utf-8")
+    replacement.replace(token_file)
     assert await lookup() == second
 
 
-@pytest.mark.parametrize("failure", [PermissionError("denied"), FileNotFoundError(), None])
-async def test_failed_refresh_keeps_valid_cache_but_never_returns_expired_token(
-    token_file: TokenFile,
-    lookup: Callable[[], Awaitable[str]],
-    failure: OSError | None,
-    monkeypatch: pytest.MonkeyPatch,
+async def test_file_precedes_environment_token(
+    token_file: Path, lookup: Callable[[], Awaitable[str]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    first = token_file.replace(lifetime=80)
-    assert await lookup() == first
-    # Simulate an unreadable, temporarily missing, or empty replacement file.
-    if failure is None:
-        token_file.path.write_text("", encoding="utf-8")
-    else:
-        monkeypatch.setattr(Path, "read_text", Mock(side_effect=failure))
-    token_file.advance(30)
-    assert await lookup() == first
-    token_file.advance(30)
-    assert await lookup() == first
-    token_file.advance(20)
-    with pytest.raises(oidc.VercelOidcTokenError):
-        await lookup()
-    # Expiry forces another read, even before the 30-second retry interval.
-    assert token_file.read.call_count == 4
+    monkeypatch.setenv("VERCEL_OIDC_TOKEN", _token(subject="environment"))
+    current = _token()
+    token_file.write_text(current, encoding="utf-8")
+    assert await lookup() == current
+    oidc.find_project_info.assert_not_called()  # type: ignore[attr-defined]
 
 
-async def test_missing_file_is_retried_after_startup(
-    token_file: TokenFile, lookup: Callable[[], Awaitable[str]]
+async def test_request_header_precedes_missing_file(
+    token_file: Path, lookup: Callable[[], Awaitable[str]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    with pytest.raises(oidc.VercelOidcTokenError):
-        await lookup()
-    token = token_file.replace()
-    token_file.advance(29)
-    with pytest.raises(oidc.VercelOidcTokenError):
-        await lookup()
-    assert token_file.read.call_count == 1
-    token_file.advance(1)
-    assert await lookup() == token
+    header = _token(subject="request")
+    set_headers({"x-vercel-oidc-token": header})
+    monkeypatch.setenv("VERCEL_OIDC_TOKEN", _token(subject="environment"))
+    read = Mock(side_effect=AssertionError("must not read file"))
+    monkeypatch.setattr(Path, "read_text", read)
+    assert await lookup() == header
+    read.assert_not_called()
 
 
-@pytest.mark.parametrize("clock_adjustment", [-3600, 3600])
-async def test_missing_file_retry_ignores_wall_clock_adjustments(
-    token_file: TokenFile,
-    lookup: Callable[[], Awaitable[str]],
-    clock_adjustment: float,
+async def test_file_precedes_remembered_header_without_live_request(
+    token_file: Path, lookup: Callable[[], Awaitable[str]]
 ) -> None:
-    with pytest.raises(oidc.VercelOidcTokenError):
-        await lookup()
-    token_file.now += clock_adjustment
-    fresh = token_file.replace()
-
-    with pytest.raises(oidc.VercelOidcTokenError):
-        await lookup()
-    token_file.advance(29)
-    with pytest.raises(oidc.VercelOidcTokenError):
-        await lookup()
-    assert token_file.read.call_count == 1
-    token_file.advance(1)
-    assert await lookup() == fresh
-    assert token_file.read.call_count == 2
-
-
-@pytest.mark.parametrize("clock_adjustment", [-10, 10])
-async def test_cached_file_retry_ignores_wall_clock_adjustments(
-    token_file: TokenFile,
-    lookup: Callable[[], Awaitable[str]],
-    clock_adjustment: float,
-) -> None:
-    first = token_file.replace(lifetime=120)
-    assert await lookup() == first
-    token_file.advance(80)
-    assert await lookup() == first
-    token_file.now += clock_adjustment
-    second = token_file.replace()
-
-    assert await lookup() == first
-    token_file.advance(29)
-    assert await lookup() == first
-    assert token_file.read.call_count == 2
-    token_file.advance(1)
-    assert await lookup() == second
-    assert token_file.read.call_count == 3
-
-
-async def test_wall_clock_expiration_bypasses_retry_backoff(
-    token_file: TokenFile, lookup: Callable[[], Awaitable[str]]
-) -> None:
-    first = token_file.replace(lifetime=20)
-    assert await lookup() == first
-    assert await lookup() == first
-    assert token_file.read.call_count == 2
-
-    token_file.now += 20
-    second = token_file.replace()
-    assert await lookup() == second
-    assert token_file.read.call_count == 3
-
-
-async def test_refresh_window_uses_wall_clock_time(
-    token_file: TokenFile, lookup: Callable[[], Awaitable[str]]
-) -> None:
-    first = token_file.replace(lifetime=120)
-    assert await lookup() == first
-    second = token_file.replace()
-
-    token_file.monotonic += 60
-    assert await lookup() == first
-    assert token_file.read.call_count == 1
-    token_file.now += 60
-    assert await lookup() == second
-    assert token_file.read.call_count == 2
-
-
-@pytest.mark.parametrize(
-    "content",
-    [
-        b"",
-        b"not-a-jwt",
-        b"\xff",
-        _token([]).encode(),
-        _token({}).encode(),
-        *(
-            _token({"exp": exp}).encode()
-            for exp in [0, True, "later", None, float("nan"), float("inf")]
-        ),
-    ],
-)
-async def test_invalid_file_falls_back_and_recovers(
-    token_file: TokenFile, lookup: Callable[[], Awaitable[str]], content: bytes
-) -> None:
-    token_file.path.write_bytes(content)
-    with pytest.raises(oidc.VercelOidcTokenError):
-        await lookup()
-    fresh = token_file.replace()
-    token_file.advance(30)
-    assert await lookup() == fresh
-
-
-async def test_existing_sources_take_precedence_even_after_file_is_cached(
-    token_file: TokenFile,
-    lookup: Callable[[], Awaitable[str]],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    token_file.replace()
-    await lookup()
-    env = _token({"exp": token_file.now + 7200, "sub": "env"})
-    header = _token({"exp": token_file.now + 7200, "sub": "header"})
-    monkeypatch.setenv("VERCEL_OIDC_TOKEN", env)
-    assert await lookup() == env
+    header = _token(subject="request")
     set_headers({"x-vercel-oidc-token": header})
     assert await lookup() == header
     set_headers(None)
-    assert await lookup() == header
-    assert token_file.read.call_count == 1
+    current = _token()
+    token_file.write_text(current, encoding="utf-8")
+    assert await lookup() == current
+
+
+async def test_missing_file_never_falls_back_and_is_retried_next_call(
+    token_file: Path, lookup: Callable[[], Awaitable[str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("VERCEL_OIDC_TOKEN", _token(subject="environment"))
+    with pytest.raises(FileNotFoundError) as error:
+        await lookup()
+    assert error.value.filename == str(token_file)
+    oidc.find_project_info.assert_not_called()  # type: ignore[attr-defined]
+    fresh = _token()
+    token_file.write_text(fresh, encoding="utf-8")
+    assert await lookup() == fresh
+    token_file.unlink()
+    with pytest.raises(FileNotFoundError):
+        await lookup()
+
+
+async def test_unreadable_file_never_falls_back(
+    token_file: Path, lookup: Callable[[], Awaitable[str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("VERCEL_OIDC_TOKEN", _token(subject="environment"))
+    monkeypatch.setattr(Path, "read_text", Mock(side_effect=PermissionError("denied")))
+    with pytest.raises(PermissionError, match="denied"):
+        await lookup()
+    oidc.find_project_info.assert_not_called()  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("content", ["", " \n\t"])
+async def test_empty_file_includes_path_and_never_falls_back(
+    token_file: Path,
+    lookup: Callable[[], Awaitable[str]],
+    monkeypatch: pytest.MonkeyPatch,
+    content: str,
+) -> None:
+    monkeypatch.setenv("VERCEL_OIDC_TOKEN", _token(subject="environment"))
+    token_file.write_text(content, encoding="utf-8")
+    with pytest.raises(oidc.VercelOidcTokenError) as error:
+        await lookup()
+    assert str(error.value) == f"The Vercel OIDC token file is empty: {token_file}"
+    oidc.find_project_info.assert_not_called()  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("configured", [None, ""])
+async def test_unconfigured_file_uses_environment_without_reading(
+    token_file: Path,
+    lookup: Callable[[], Awaitable[str]],
+    monkeypatch: pytest.MonkeyPatch,
+    configured: str | None,
+) -> None:
+    if configured is None:
+        monkeypatch.delenv("VERCEL_OIDC_TOKEN_FILE")
+    else:
+        monkeypatch.setenv("VERCEL_OIDC_TOKEN_FILE", configured)
+    env = _token(subject="environment")
+    monkeypatch.setenv("VERCEL_OIDC_TOKEN", env)
+    read = Mock()
+    monkeypatch.setattr(Path, "read_text", read)
+    assert await lookup() == env
+    read.assert_not_called()
 
 
 @pytest.mark.parametrize("async_lookup", [False, True])
-async def test_expired_environment_token_falls_back_to_file(
-    token_file: TokenFile, monkeypatch: pytest.MonkeyPatch, async_lookup: bool
+@pytest.mark.parametrize("lifetime", [-1, 60])
+async def test_expired_or_near_expiry_file_token_allows_local_cli_refresh(
+    token_file: Path, monkeypatch: pytest.MonkeyPatch, async_lookup: bool, lifetime: float
 ) -> None:
-    monkeypatch.setenv("VERCEL_OIDC_TOKEN", _token({"exp": 1}))
-    fresh = token_file.replace(lifetime=120)
-    actual = (
-        await oidc.get_vercel_oidc_token_async() if async_lookup else oidc.get_vercel_oidc_token()
-    )
-    assert actual == fresh
-
-
-@pytest.mark.parametrize("async_lookup", [False, True])
-async def test_unusable_file_allows_local_cli_refresh(
-    token_file: TokenFile, monkeypatch: pytest.MonkeyPatch, async_lookup: bool
-) -> None:
-    token_file.replace(lifetime=-1)
-    fresh = _token({"exp": token_file.now + 3600})
+    token_file.write_text(_token(lifetime=lifetime), encoding="utf-8")
+    fresh = _token(subject="refreshed")
     monkeypatch.setattr(oidc, "find_project_info", lambda: {"projectId": "prj_test"})
     refresh = Mock(side_effect=lambda: monkeypatch.setenv("VERCEL_OIDC_TOKEN", fresh))
 
@@ -352,48 +174,17 @@ async def test_unusable_file_allows_local_cli_refresh(
     refresh.assert_called_once_with()
 
 
-@pytest.mark.parametrize("configured", [None, ""])
-def test_unconfigured_file_does_not_touch_filesystem(
-    monkeypatch: pytest.MonkeyPatch, configured: str | None
+async def test_async_reads_off_event_loop(
+    token_file: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    if configured is None:
-        monkeypatch.delenv("VERCEL_OIDC_TOKEN_FILE", raising=False)
-    else:
-        monkeypatch.setenv("VERCEL_OIDC_TOKEN_FILE", configured)
-    read = Mock()
-    monkeypatch.setattr(Path, "read_text", read)
-    assert oidc._read_file_oidc_token() is None
-    read.assert_not_called()
-
-
-async def test_sync_and_async_share_cache_and_async_reads_off_event_loop(
-    token_file: TokenFile, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    first = token_file.replace(lifetime=120)
-    assert oidc.get_vercel_oidc_token() == first
-    assert await oidc.get_vercel_oidc_token_async() == first
-    assert token_file.read.call_count == 1
-
+    token = _token()
+    token_file.write_text(token, encoding="utf-8")
     loop_thread = threading.get_ident()
-    read = token_file.read
+    read = oidc._read_file_oidc_token
 
-    def read_in_worker() -> tuple[str, float] | None:
+    def read_in_worker() -> str | None:
         assert threading.get_ident() != loop_thread
         return read()
 
     monkeypatch.setattr(oidc, "_read_file_oidc_token", read_in_worker)
-    token_file.advance(60)
-    second = token_file.replace()
-    assert await oidc.get_vercel_oidc_token_async() == second
-    assert oidc.get_vercel_oidc_token() == second
-    assert read.call_count == 2
-
-
-def test_concurrent_lookups_share_one_file_read_per_refresh(token_file: TokenFile) -> None:
-    first = token_file.replace(lifetime=120)
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        assert list(pool.map(lambda _: oidc.get_vercel_oidc_token(), range(16))) == [first] * 16
-        token_file.advance(60)
-        second = token_file.replace()
-        assert list(pool.map(lambda _: oidc.get_vercel_oidc_token(), range(16))) == [second] * 16
-    assert token_file.read.call_count == 2
+    assert await oidc.get_vercel_oidc_token_async() == token
