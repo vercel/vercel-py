@@ -321,6 +321,16 @@ class DriveHandleBase:
         return self._payload.id
 
     @property
+    def parent_drive_id(self) -> str | None:
+        """The source Drive ID, if this Drive is a fork."""
+        return self._payload.parent_drive_id
+
+    @property
+    def root_drive_id(self) -> str | None:
+        """The original Drive ID at the root of this fork."""
+        return self._payload.root_drive_id
+
+    @property
     def name(self) -> str:
         return self._payload.name
 

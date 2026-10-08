@@ -26,6 +26,7 @@ from vercel.sandbox._internal.async_runtime import (
     Snapshot,
     create_sandbox_operation as _create_sandbox_operation,
     delete_drive as _delete_drive,
+    fork_drive as _fork_drive,
     fork_sandbox_operation as _fork_sandbox_operation,
     get_drive as _get_drive,
     get_or_create_drive as _get_or_create_drive,
@@ -427,6 +428,19 @@ def resume_sandbox(
     )
 
 
+async def fork_drive(*, source: str, name: str) -> Drive:
+    """Fork a Drive by project-local name without fetching it first.
+
+    The new Drive inherits the source's committed data, region, and maximum
+    size. API failures propagate as SandboxApiError (403, 404, or 409).
+
+    Args:
+        source: Project-local source Drive name.
+        name: Project-local name for the new Drive.
+    """
+    return await _fork_drive(_service(), source=source, name=name)
+
+
 async def get_drive(*, name_or_id: str) -> Drive:
     """Look up a Drive by name or ID without creating it.
 
@@ -676,6 +690,7 @@ __all__ = [
     "TextReader",
     "create_sandbox",
     "delete_drive",
+    "fork_drive",
     "fork_sandbox",
     "get_or_create_sandbox",
     "get_sandbox",

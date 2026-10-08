@@ -203,6 +203,38 @@ by project-local name or Drive ID without creating it. A missing Drive raises
 `SandboxApiError` with `status_code == 404`. The async and sync clients and
 `vercel.sandbox.sync.get_drive(...)` expose the same lookup.
 
+Fork a Drive's committed data into an independent Drive with a new name:
+
+```python
+cache = await sandbox.get_drive(name_or_id="cache")
+forked = await cache.fork(name="cache-fork")
+async with sandbox.create_sandbox(region=forked.region, mounts={"/cache": forked}) as box:
+    print(forked.parent_drive_id, forked.root_drive_id)
+await forked.delete()
+```
+
+If you already know the source name, fork it directly without a lookup:
+
+```python
+forked = await sandbox.fork_drive(source="cache", name="cache-fork")
+```
+
+`vercel.sandbox.sync.fork_drive(source=..., name=...)` is the synchronous
+counterpart. Both standalone clients also expose `fork_drive(...)`.
+
+Forks inherit the source Drive's data, region, and maximum size without changing
+its handle. `parent_drive_id` identifies the immediate source and `root_drive_id`
+identifies the original Drive; both are `None` when absent from the API response.
+`SyncDrive.fork(name=...)` provides the same operation synchronously. Async calls
+use Python's normal task cancellation.
+
+Drive forking is in private beta. `SandboxApiError` preserves the API's status,
+code, and message: `403 forbidden` requests access at <https://vercel.com/help>,
+`404 not_found` means the source is missing, `409 conflict` means the new name
+already exists, and `409 drive_not_initialized` means the source has no committed
+data. Mount the source read-write and stop its session to commit data before
+forking. See [the Drive fork example](examples/sandbox_10_drive_fork.py).
+
 All Drive operations use the project resolved by the configured Sandbox credentials.
 They do not accept a `project_id` override.
 
