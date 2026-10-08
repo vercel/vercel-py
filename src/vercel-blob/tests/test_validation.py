@@ -59,7 +59,7 @@ def test_pathname_identity_survives_put_and_delivery_encoding(
     pathname: str, leading_slash: bool
 ) -> None:
     original = "/" + pathname if leading_slash else pathname
-    put = _PutRequest(pathname=original, body=b"", access="public")
+    put = _PutRequest(pathname=original, access="public")
     assert put.pathname == pathname
     assert put.add_random_suffix is False
 
@@ -129,7 +129,7 @@ def test_controls_rejected_in_pathnames_and_encoded_delivery_urls(
     ids=["ascii", "astral", "leading-slash", "mixed"],
 )
 def test_put_accepts_950_utf16_units(pathname: str) -> None:
-    request = _PutRequest(pathname=pathname, body=b"", access="public")
+    request = _PutRequest(pathname=pathname, access="public")
     assert request.pathname == pathname.removeprefix("/")
 
 
@@ -140,7 +140,7 @@ def test_put_accepts_950_utf16_units(pathname: str) -> None:
 )
 def test_put_rejects_more_than_950_utf16_units(pathname: str) -> None:
     with pytest.raises(BlobError, match="maximum length is 950"):
-        _PutRequest(pathname=pathname, body=b"", access="public")
+        _PutRequest(pathname=pathname, access="public")
 
 
 @given(bmp=st.integers(0, 960), astral=st.integers(0, 480), leading_slash=st.booleans())
@@ -151,11 +151,11 @@ def test_put_limit_matches_javascript_string_length(
     units = len(pathname.encode("utf-16-le")) // 2
     if not pathname or pathname == "/" or units > 950:
         with pytest.raises(BlobError):
-            _PutRequest(pathname=pathname, body=b"", access="public")
+            _PutRequest(pathname=pathname, access="public")
     else:
-        assert _PutRequest(
-            pathname=pathname, body=b"", access="public"
-        ).pathname == pathname.removeprefix("/")
+        assert _PutRequest(pathname=pathname, access="public").pathname == pathname.removeprefix(
+            "/"
+        )
 
 
 @pytest.mark.parametrize("pathname", ["x" * 981, "😀" * 476])

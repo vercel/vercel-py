@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Coroutine, Mapping
+from collections.abc import AsyncIterable, Callable, Coroutine, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal, Protocol, TypeAlias
 
+from vercel._internal.core.byte_stream import AsyncByteReader, SyncByteReader
 from vercel._internal.core.polyfills import StrEnum
 
 Access: TypeAlias = Literal["public", "private"]
+
+PutBody: TypeAlias = AsyncByteReader | AsyncIterable[bytes]
+SyncPutBody: TypeAlias = SyncByteReader | Iterable[bytes]
 
 
 class CredentialKind(StrEnum):

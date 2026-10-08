@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import io
 import json
-from collections.abc import AsyncIterator, Callable, Iterator
-from contextlib import asynccontextmanager, contextmanager
+from collections.abc import AsyncIterator, Callable, Coroutine, Iterator
+from contextlib import ExitStack, asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -14,13 +15,16 @@ import pytest
 from hypothesis import example, given, settings, strategies as st
 
 from vercel import blob
+from vercel._internal.core.http.transport import StreamingRequest, StreamingResponse
 from vercel.api import session
 from vercel.blob import (
     BlobAccessError,
+    BlobContentLengthError,
     BlobCredentials,
     BlobCredentialsError,
     BlobCredentialsFactory,
     BlobError,
+    BlobFileTooLargeError,
     BlobNotFoundError,
     BlobPreconditionFailedError,
     BlobServiceNotAvailable,
@@ -212,6 +216,866 @@ def test_sync_put_success() -> None:
     assert req.headers["x-allow-overwrite"] == "0"
 
 
+class _AsyncTestReader:
+    def __init__(self, data: bytes) -> None:
+        self.data = data
+        self.offset = 0
+
+    async def read(self, size: int = -1) -> bytes:
+        await anyio.lowlevel.checkpoint()
+        if self.offset >= len(self.data):
+            return b""
+        end = len(self.data) if size < 0 else min(len(self.data), self.offset + size)
+        chunk = self.data[self.offset : end]
+        self.offset = end
+        return chunk
+
+
+@pytest.mark.anyio
+async def test_async_put_bytearray_snapshot_before_credentials() -> None:
+    captured: list[httpx.Request] = []
+    barr = bytearray(b"original bytearray data")
+
+    def creds_factory() -> BlobCredentials:
+        barr[0] = ord(b"X")
+        return _credentials()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json=_object_json("snap.bin"))
+
+    async with _async_session(handler, credentials_factory=creds_factory):
+        res = await blob.put("snap.bin", barr, access="public")
+
+    assert res.pathname == "snap.bin"
+    assert captured[0].content == b"original bytearray data"
+
+
+def test_sync_put_bytearray_snapshot_before_credentials() -> None:
+    captured: list[httpx.Request] = []
+    barr = bytearray(b"original bytearray data")
+
+    def creds_factory() -> BlobCredentials:
+        barr[0] = ord(b"X")
+        return _credentials()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json=_object_json("snap.bin"))
+
+    with _sync_session(handler, credentials_factory=creds_factory):
+        res = blob.sync.put("snap.bin", barr, access="public")
+
+    assert res.pathname == "snap.bin"
+    assert captured[0].content == b"original bytearray data"
+
+
+async def _make_async_gen(chunks: list[bytes]) -> AsyncIterator[bytes]:
+    for c in chunks:
+        await anyio.lowlevel.checkpoint()
+        yield c
+
+
+class _SyncReadAsyncIterable:
+    def __init__(self, chunks: list[bytes]) -> None:
+        self.chunks = chunks
+
+    def read(self, size: int = -1) -> bytes:
+        raise AssertionError("async put must iterate an async iterable, not call sync read")
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        for chunk in self.chunks:
+            yield chunk
+
+
+def _make_temp_file(tmp_path: Path, filename: str, content: bytes) -> io.BufferedReader:
+    path = tmp_path / filename
+    path.write_bytes(content)
+    return path.open("rb")
+
+
+_ASYNC_ROUND_TRIP_CASES = [
+    pytest.param(lambda _: b"hello bytes", b"hello bytes", None, id="bytes-no-len"),
+    pytest.param(lambda _: b"hello len", b"hello len", 9, id="bytes-with-len"),
+    pytest.param(lambda _: memoryview(b"view content"), b"view content", 12, id="memoryview"),
+    pytest.param(
+        lambda _: anyio.wrap_file(io.BytesIO(b"wrapped reader")),
+        b"wrapped reader",
+        14,
+        id="wrapped-bytesio",
+    ),
+    pytest.param(
+        lambda path: anyio.wrap_file(_make_temp_file(path, "f.bin", b"file content here")),
+        b"file content here",
+        17,
+        id="wrapped-file",
+    ),
+    pytest.param(
+        lambda _: _AsyncTestReader(b"async reader content"),
+        b"async reader content",
+        20,
+        id="async-reader",
+    ),
+    pytest.param(
+        lambda _: _make_async_gen([b"part1-", b"part2"]), b"part1-part2", 11, id="async-gen"
+    ),
+    pytest.param(
+        lambda _: _SyncReadAsyncIterable([b"async-", b"shape"]),
+        b"async-shape",
+        11,
+        id="async-iterable-with-sync-read",
+    ),
+]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("factory,expected,content_length", _ASYNC_ROUND_TRIP_CASES)
+async def test_async_put_round_trip(
+    tmp_path: Path, factory: Callable[[Path], Any], expected: bytes, content_length: int | None
+) -> None:
+    body = factory(tmp_path)
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json=_object_json("test.bin"))
+
+    async with _async_session(handler):
+        res = await blob.put("test.bin", body, access="public", content_length=content_length)
+
+    assert res.pathname == "test.bin"
+    assert captured[0].content == expected
+    assert captured[0].headers["content-length"] == str(len(expected))
+    assert "transfer-encoding" not in captured[0].headers
+
+
+_SYNC_ROUND_TRIP_CASES = [
+    pytest.param(lambda _: b"hello sync bytes", b"hello sync bytes", None, id="bytes-no-len"),
+    pytest.param(lambda _: b"hello len", b"hello len", 9, id="bytes-with-len"),
+    pytest.param(lambda _: memoryview(b"view content"), b"view content", 12, id="memoryview"),
+    pytest.param(
+        lambda _: io.BytesIO(b"sync reader data"), b"sync reader data", 16, id="sync-reader"
+    ),
+    pytest.param(
+        lambda path: _make_temp_file(path, "sync_f.bin", b"file content here"),
+        b"file content here",
+        17,
+        id="file-reader",
+    ),
+    pytest.param(lambda _: (c for c in [b"part1-", b"part2"]), b"part1-part2", 11, id="sync-iter"),
+]
+
+
+@pytest.mark.parametrize("factory,expected,content_length", _SYNC_ROUND_TRIP_CASES)
+def test_sync_put_round_trip(
+    tmp_path: Path, factory: Callable[[Path], Any], expected: bytes, content_length: int | None
+) -> None:
+    body = factory(tmp_path)
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json=_object_json("test.bin"))
+
+    with _sync_session(handler):
+        res = blob.sync.put("test.bin", body, access="public", content_length=content_length)
+
+    assert res.pathname == "test.bin"
+    assert captured[0].content == expected
+    assert captured[0].headers["content-length"] == str(len(expected))
+    assert "transfer-encoding" not in captured[0].headers
+
+
+@pytest.mark.anyio
+async def test_async_put_stream_copy() -> None:
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                headers={"content-length": "13", "content-type": "text/plain"},
+                stream=_TrackingAsyncStream([b"stream-", b"copied"]),
+            )
+        return httpx.Response(200, json=_object_json("copy.bin"))
+
+    async with _async_session(handler):
+        async with blob.stream("source.bin", access="public") as download:
+            assert download.metadata.size == 13
+            res = await blob.put(
+                "copy.bin", download, access="public", content_length=download.metadata.size
+            )
+
+    assert res.pathname == "copy.bin"
+    put_req = [r for r in captured if r.method == "PUT"][0]
+    assert put_req.content == b"stream-copied"
+    assert put_req.headers["content-length"] == "13"
+    assert "transfer-encoding" not in put_req.headers
+
+
+def test_sync_put_stream_copy() -> None:
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                headers={"content-length": "13", "content-type": "text/plain"},
+                stream=_TrackingSyncStream([b"stream-", b"copied"]),
+            )
+        return httpx.Response(200, json=_object_json("copy.bin"))
+
+    with _sync_session(handler):
+        with blob.sync.stream("source.bin", access="public") as download:
+            assert download.metadata.size == 13
+            res = blob.sync.put(
+                "copy.bin", download, access="public", content_length=download.metadata.size
+            )
+
+    assert res.pathname == "copy.bin"
+    put_req = [r for r in captured if r.method == "PUT"][0]
+    assert put_req.content == b"stream-copied"
+    assert put_req.headers["content-length"] == "13"
+    assert "transfer-encoding" not in put_req.headers
+
+
+class _EarlyResponseSyncTransport(httpx.BaseTransport):
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(413, json={"error": {"code": "file_too_large", "message": "too big"}})
+
+
+class _EarlyResponseAsyncTransport(httpx.AsyncBaseTransport):
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(413, json={"error": {"code": "file_too_large", "message": "too big"}})
+
+
+class _StreamingMockTransport(httpx.BaseTransport):
+    def __init__(self, handler: Callable[[httpx.Request], httpx.Response]) -> None:
+        self.handler = handler
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        return self.handler(request)
+
+
+class _AsyncStreamingMockTransport(httpx.AsyncBaseTransport):
+    def __init__(
+        self, handler: Callable[[httpx.Request], Coroutine[Any, Any, httpx.Response]]
+    ) -> None:
+        self.handler = handler
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        return await self.handler(request)
+
+
+class _IncrementalReader:
+    def __init__(self, chunks: list[bytes]) -> None:
+        self.chunks = chunks
+        self.index = 0
+        self.chunks_read = 0
+
+    def read(self, size: int = -1) -> bytes:
+        if self.index >= len(self.chunks):
+            return b""
+        chunk = self.chunks[self.index]
+        self.index += 1
+        self.chunks_read += 1
+        return chunk
+
+
+class _AsyncIncrementalReader:
+    def __init__(self, chunks: list[bytes]) -> None:
+        self.reader = _IncrementalReader(chunks)
+
+    @property
+    def chunks_read(self) -> int:
+        return self.reader.chunks_read
+
+    async def read(self, size: int = -1) -> bytes:
+        await anyio.lowlevel.checkpoint()
+        return self.reader.read(size)
+
+
+@pytest.mark.anyio
+async def test_async_put_incremental_consumption() -> None:
+    chunks = [b"a" * 1024] * 10
+    source = _AsyncIncrementalReader(chunks)
+    total_len = sum(len(c) for c in chunks)
+    first_chunk_read_count = -1
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal first_chunk_read_count
+        assert isinstance(request.stream, httpx.AsyncByteStream)
+        stream_iter = aiter(request.stream)
+        first_chunk = await anext(stream_iter)
+        first_chunk_read_count = source.chunks_read
+        rest = [first_chunk]
+        async for chunk in stream_iter:
+            rest.append(chunk)
+        assert b"".join(rest) == b"".join(chunks)
+        return httpx.Response(200, json=_object_json("incremental.bin"))
+
+    async with session(
+        service_options=[BlobServiceOptions(credentials_factory=_credentials)],
+        httpx_client_factory=lambda: httpx.AsyncClient(
+            transport=_AsyncStreamingMockTransport(handler)
+        ),
+    ):
+        res = await blob.put("incremental.bin", source, access="public", content_length=total_len)
+
+    assert res.pathname == "incremental.bin"
+    # Source was not fully read before the server received the first chunk
+    assert 0 < first_chunk_read_count < len(chunks)
+
+
+def test_sync_put_incremental_consumption() -> None:
+    chunks = [b"a" * 1024] * 10
+    source = _IncrementalReader(chunks)
+    total_len = sum(len(c) for c in chunks)
+    first_chunk_read_count = -1
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal first_chunk_read_count
+        assert isinstance(request.stream, httpx.SyncByteStream)
+        stream_iter = iter(request.stream)
+        first_chunk = next(stream_iter)
+        first_chunk_read_count = source.chunks_read
+        rest = list(stream_iter)
+        assert b"".join([first_chunk, *rest]) == b"".join(chunks)
+        return httpx.Response(200, json=_object_json("incremental.bin"))
+
+    with session(
+        service_options=[SyncBlobServiceOptions(credentials_factory=_credentials)],
+        httpx_client_factory=lambda: httpx.Client(transport=_StreamingMockTransport(handler)),
+    ):
+        res = blob.sync.put("incremental.bin", source, access="public", content_length=total_len)
+
+    assert res.pathname == "incremental.bin"
+    assert 0 < first_chunk_read_count < len(chunks)
+
+
+class _PropertyUnifiedSource:
+    def __init__(self, payload: bytes, chunk_sizes: list[int]) -> None:
+        self.payload = payload
+        self.chunk_sizes = chunk_sizes
+        self.chunk_idx = 0
+        self.offset = 0
+        self.max_byte_requested = 0
+
+    def _next_slice(self, size: int) -> bytes:
+        if size > 0:
+            self.max_byte_requested = max(self.max_byte_requested, self.offset + size)
+        elif size < 0:
+            self.max_byte_requested = max(self.max_byte_requested, len(self.payload))
+        if self.offset >= len(self.payload):
+            return b""
+        step = size if size > 0 else (len(self.payload) - self.offset)
+        if self.chunk_idx < len(self.chunk_sizes):
+            step = min(step, self.chunk_sizes[self.chunk_idx])
+            self.chunk_idx += 1
+        chunk = self.payload[self.offset : self.offset + step]
+        self.offset += len(chunk)
+        return chunk
+
+
+class _PropertyReader(_PropertyUnifiedSource):
+    def read(self, size: int = -1) -> bytes:
+        return self._next_slice(size)
+
+
+class _PropertyAsyncReader(_PropertyUnifiedSource):
+    async def read(self, size: int = -1) -> bytes:
+        return self._next_slice(size)
+
+
+class _PropertyIterable(_PropertyUnifiedSource):
+    def __iter__(self) -> Iterator[bytes]:
+        while True:
+            chunk = self._next_slice(65536)
+            if not chunk:
+                break
+            yield chunk
+
+
+class _PropertyAsyncIterable(_PropertyUnifiedSource):
+    def __aiter__(self) -> AsyncIterator[bytes]:
+        async def gen() -> AsyncIterator[bytes]:
+            while True:
+                chunk = self._next_slice(65536)
+                if not chunk:
+                    break
+                yield chunk
+
+        return gen()
+
+
+def _run_property_upload(
+    source_kind: str,
+    payload: bytes,
+    chunk_sizes: list[int],
+    declared_length: int,
+    backend: str | None,
+) -> tuple[PutResult | BlobContentLengthError, bytes, bool, int, int]:
+    source: Any
+    if source_kind == "sync_reader":
+        source = _PropertyReader(payload, chunk_sizes)
+    elif source_kind == "sync_iter":
+        source = _PropertyIterable(payload, chunk_sizes)
+    elif source_kind == "async_reader":
+        source = _PropertyAsyncReader(payload, chunk_sizes)
+    else:
+        source = _PropertyAsyncIterable(payload, chunk_sizes)
+
+    received = bytearray()
+    captured_requests: list[httpx.Request] = []
+    completed = False
+
+    if backend is None:
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal completed
+            captured_requests.append(request)
+            assert isinstance(request.stream, httpx.SyncByteStream)
+            for chunk in request.stream:
+                received.extend(chunk)
+            if len(received) == declared_length and declared_length > 0:
+                completed = True
+            return httpx.Response(200, json=_object_json("prop.bin"))
+
+        with session(
+            service_options=[SyncBlobServiceOptions(credentials_factory=_credentials)],
+            httpx_client_factory=lambda: httpx.Client(transport=_StreamingMockTransport(handler)),
+        ):
+            try:
+                outcome: PutResult | BlobContentLengthError = blob.sync.put(
+                    "prop.bin", source, access="public", content_length=declared_length
+                )
+            except BlobContentLengthError as err:
+                outcome = err
+    else:
+
+        async def ahandler(request: httpx.Request) -> httpx.Response:
+            nonlocal completed
+            captured_requests.append(request)
+            assert isinstance(request.stream, httpx.AsyncByteStream)
+            async for chunk in request.stream:
+                received.extend(chunk)
+            if len(received) == declared_length and declared_length > 0:
+                completed = True
+            return httpx.Response(200, json=_object_json("prop.bin"))
+
+        async def run_async() -> PutResult | BlobContentLengthError:
+            async with session(
+                service_options=[BlobServiceOptions(credentials_factory=_credentials)],
+                httpx_client_factory=lambda: httpx.AsyncClient(
+                    transport=_AsyncStreamingMockTransport(ahandler)
+                ),
+            ):
+                try:
+                    return await blob.put(
+                        "prop.bin", source, access="public", content_length=declared_length
+                    )
+                except BlobContentLengthError as err:
+                    return err
+
+        outcome = anyio.run(run_async, backend=backend)
+
+    return (
+        outcome,
+        bytes(received),
+        completed,
+        len(captured_requests),
+        source.max_byte_requested if "reader" in source_kind else 0,
+    )
+
+
+@given(
+    payload=st.binary(max_size=20_000),
+    chunk_sizes=st.lists(st.integers(min_value=1, max_value=4096), max_size=8),
+    length_delta=st.integers(min_value=-3, max_value=3),
+    config=st.sampled_from(
+        [
+            ("sync_reader", None),
+            ("sync_iter", None),
+            ("async_reader", "asyncio"),
+            ("async_reader", "trio"),
+            ("async_iter", "asyncio"),
+            ("async_iter", "trio"),
+        ]
+    ),
+)
+@settings(max_examples=40, deadline=None)
+def test_put_property_exact_length(
+    payload: bytes,
+    chunk_sizes: list[int],
+    length_delta: int,
+    config: tuple[str, str | None],
+) -> None:
+    source_kind, backend = config
+    declared_length = max(0, len(payload) + length_delta)
+    outcome, received, completed, requests_count, max_requested = _run_property_upload(
+        source_kind, payload, chunk_sizes, declared_length, backend
+    )
+    is_match = declared_length == len(payload)
+    assert isinstance(outcome, PutResult) == is_match
+    if is_match:
+        assert received == payload
+    else:
+        assert not completed
+        assert len(received) < declared_length or declared_length == 0
+        if declared_length == 0:
+            assert requests_count == 0
+    assert max_requested <= declared_length + 1
+
+
+class _FaultyReader:
+    def __init__(self, exc: Exception) -> None:
+        self.exc = exc
+        self.closed = False
+
+    def read(self, size: int = -1) -> bytes:
+        raise self.exc
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _FaultyAsyncReader:
+    def __init__(self, exc: Exception) -> None:
+        self.exc = exc
+        self.closed = False
+
+    async def read(self, size: int = -1) -> bytes:
+        raise self.exc
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class _FaultyIterable:
+    def __init__(self, exc: Exception) -> None:
+        self.exc = exc
+        self.closed = False
+
+    def __iter__(self) -> Iterator[bytes]:
+        yield b"chunk"
+        raise self.exc
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _FaultyAsyncIterable:
+    def __init__(self, exc: Exception) -> None:
+        self.exc = exc
+        self.closed = False
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        yield b"chunk"
+        raise self.exc
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class _TextModeReader:
+    closed = False
+
+    def read(self, size: int = -1) -> str:
+        return "text string not bytes"
+
+
+class _TextModeAsyncReader:
+    closed = False
+
+    async def read(self, size: int = -1) -> str:
+        return "text string not bytes"
+
+
+class _NonBytesIterable:
+    closed = False
+
+    def __iter__(self) -> Iterator[Any]:
+        yield "not-bytes"
+
+
+class _NonBytesAsyncIterable:
+    closed = False
+
+    async def __aiter__(self) -> AsyncIterator[Any]:
+        yield "not-bytes"
+
+
+_SYNC_SOURCE_EXCEPTION_CASES = [
+    pytest.param(
+        lambda: _FaultyReader(RuntimeError("disk read failure")),
+        RuntimeError,
+        id="reader-runtime-error",
+    ),
+    pytest.param(
+        lambda: _FaultyReader(anyio.BrokenResourceError()),
+        anyio.BrokenResourceError,
+        id="reader-broken-resource",
+    ),
+    pytest.param(
+        lambda: _FaultyReader(anyio.ClosedResourceError()),
+        anyio.ClosedResourceError,
+        id="reader-closed-resource",
+    ),
+    pytest.param(
+        lambda: _FaultyReader(httpx.ReadError("net error")),
+        httpx.ReadError,
+        id="reader-httpx-error",
+    ),
+    pytest.param(
+        lambda: _FaultyIterable(RuntimeError("gen failure")),
+        RuntimeError,
+        id="iterable-runtime-error",
+    ),
+    pytest.param(
+        lambda: _FaultyIterable(anyio.BrokenResourceError()),
+        anyio.BrokenResourceError,
+        id="iterable-broken-resource",
+    ),
+    pytest.param(
+        lambda: _FaultyIterable(anyio.ClosedResourceError()),
+        anyio.ClosedResourceError,
+        id="iterable-closed-resource",
+    ),
+    pytest.param(
+        lambda: _FaultyIterable(httpx.ReadError("net error")),
+        httpx.ReadError,
+        id="iterable-httpx-error",
+    ),
+    pytest.param(lambda: _TextModeReader(), TypeError, id="text-mode-reader"),
+    pytest.param(lambda: _NonBytesIterable(), TypeError, id="non-bytes-iterable"),
+]
+
+
+_ASYNC_SOURCE_EXCEPTION_CASES = [
+    pytest.param(
+        lambda: _FaultyAsyncReader(RuntimeError("disk read failure")),
+        RuntimeError,
+        id="async-reader-runtime-error",
+    ),
+    pytest.param(
+        lambda: _FaultyAsyncReader(anyio.BrokenResourceError()),
+        anyio.BrokenResourceError,
+        id="async-reader-broken-resource",
+    ),
+    pytest.param(
+        lambda: _FaultyAsyncReader(anyio.ClosedResourceError()),
+        anyio.ClosedResourceError,
+        id="async-reader-closed-resource",
+    ),
+    pytest.param(
+        lambda: _FaultyAsyncReader(httpx.ReadError("net error")),
+        httpx.ReadError,
+        id="async-reader-httpx-error",
+    ),
+    pytest.param(
+        lambda: _FaultyAsyncIterable(RuntimeError("gen failure")),
+        RuntimeError,
+        id="async-iterable-runtime-error",
+    ),
+    pytest.param(
+        lambda: _FaultyAsyncIterable(anyio.BrokenResourceError()),
+        anyio.BrokenResourceError,
+        id="async-iterable-broken-resource",
+    ),
+    pytest.param(
+        lambda: _FaultyAsyncIterable(anyio.ClosedResourceError()),
+        anyio.ClosedResourceError,
+        id="async-iterable-closed-resource",
+    ),
+    pytest.param(
+        lambda: _FaultyAsyncIterable(httpx.ReadError("net error")),
+        httpx.ReadError,
+        id="async-iterable-httpx-error",
+    ),
+    pytest.param(lambda: _TextModeAsyncReader(), TypeError, id="text-mode-async-reader"),
+    pytest.param(lambda: _NonBytesAsyncIterable(), TypeError, id="non-bytes-async-iterable"),
+]
+
+
+@pytest.mark.parametrize("source_factory,expected_exc_type", _SYNC_SOURCE_EXCEPTION_CASES)
+def test_sync_put_source_exceptions_propagate(
+    source_factory: Callable[[], Any], expected_exc_type: type[Exception]
+) -> None:
+    source = source_factory()
+    completed = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal completed
+        assert isinstance(request.stream, httpx.SyncByteStream)
+        for _ in request.stream:
+            pass
+        completed = True
+        return httpx.Response(200, json=_object_json("faulty.bin"))
+
+    with session(
+        service_options=[SyncBlobServiceOptions(credentials_factory=_credentials)],
+        httpx_client_factory=lambda: httpx.Client(transport=_StreamingMockTransport(handler)),
+    ):
+        with pytest.raises(expected_exc_type) as excinfo:
+            blob.sync.put("faulty.bin", source, access="public", content_length=100)
+
+    if hasattr(source, "exc"):
+        assert excinfo.value is source.exc
+    assert not completed
+    assert not getattr(source, "closed", False)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("source_factory,expected_exc_type", _ASYNC_SOURCE_EXCEPTION_CASES)
+async def test_async_put_source_exceptions_propagate(
+    source_factory: Callable[[], Any], expected_exc_type: type[Exception]
+) -> None:
+    source = source_factory()
+    completed = False
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal completed
+        assert isinstance(request.stream, httpx.AsyncByteStream)
+        async for _ in request.stream:
+            pass
+        completed = True
+        return httpx.Response(200, json=_object_json("faulty.bin"))
+
+    async with session(
+        service_options=[BlobServiceOptions(credentials_factory=_credentials)],
+        httpx_client_factory=lambda: httpx.AsyncClient(
+            transport=_AsyncStreamingMockTransport(handler)
+        ),
+    ):
+        with pytest.raises(expected_exc_type) as excinfo:
+            await blob.put("faulty.bin", source, access="public", content_length=100)
+
+    if hasattr(source, "exc"):
+        assert excinfo.value is source.exc
+    assert not completed
+    assert not getattr(source, "closed", False)
+
+
+def test_put_successful_upload_does_not_close_reader() -> None:
+    successful_reader = io.BytesIO(b"data")
+    with _sync_session(lambda r: httpx.Response(200, json=_object_json("ok.bin"))):
+        res = blob.sync.put("ok.bin", successful_reader, access="public", content_length=4)
+    assert res.pathname == "ok.bin"
+    assert not successful_reader.closed
+
+
+@pytest.mark.anyio
+async def test_async_put_cancellation_during_broken_write_recovery_not_converted() -> None:
+    class _BrokenWriteStalledFinish(StreamingRequest):
+        async def write(self, data: bytes) -> None:
+            raise anyio.BrokenResourceError
+
+        async def finish(self) -> StreamingResponse:
+            await anyio.sleep(10)
+            raise AssertionError("unreachable")
+
+        async def abort(self) -> None:
+            pass
+
+    def map_err(resp: httpx.Response) -> Exception:
+        return Exception("mapped")
+
+    from vercel.blob._internal.upload import _transport_write
+
+    with anyio.move_on_after(0.05) as scope:
+        await _transport_write(_BrokenWriteStalledFinish(), b"x", map_err)
+
+    assert scope.cancelled_caught
+
+
+@pytest.mark.anyio
+async def test_async_put_cancellation_mid_upload_signaled() -> None:
+    event = anyio.Event()
+    received = bytearray()
+    body_exhausted = False
+
+    async def agen() -> AsyncIterator[bytes]:
+        yield b"chunk1-"
+        event.set()
+        await anyio.sleep(100)
+        yield b"chunk2"
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal body_exhausted
+        assert isinstance(request.stream, httpx.AsyncByteStream)
+        async for chunk in request.stream:
+            received.extend(chunk)
+        body_exhausted = True
+        return httpx.Response(200, json=_object_json("cancel.bin"))
+
+    async with session(
+        service_options=[BlobServiceOptions(credentials_factory=_credentials)],
+        httpx_client_factory=lambda: httpx.AsyncClient(
+            transport=_AsyncStreamingMockTransport(handler)
+        ),
+    ):
+        with anyio.CancelScope() as cancel_scope:
+            async with anyio.create_task_group() as tg:
+
+                async def do_put() -> None:
+                    await blob.put("cancel.bin", agen(), access="public", content_length=14)
+
+                tg.start_soon(do_put)
+                await event.wait()
+                cancel_scope.cancel()
+
+    assert cancel_scope.cancelled_caught
+    assert not body_exhausted
+
+
+@pytest.mark.anyio
+async def test_async_put_streaming_http_error_mapping() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"error": {"code": "not_found", "message": "Failed"}})
+
+    async with _async_session(handler):
+        with pytest.raises(BlobNotFoundError):
+            await blob.put(
+                "test.bin",
+                _AsyncTestReader(b"streaming payload"),
+                access="public",
+                content_length=17,
+            )
+
+
+def test_sync_put_streaming_early_response() -> None:
+    client = httpx.Client(transport=_EarlyResponseSyncTransport())
+    with session(
+        service_options=[SyncBlobServiceOptions(credentials_factory=_credentials)],
+        httpx_client_factory=lambda: client,
+    ):
+        with pytest.raises(BlobFileTooLargeError):
+            blob.sync.put(
+                "early.bin",
+                io.BytesIO(b"x" * 100_000),
+                access="public",
+                content_length=100_000,
+            )
+
+
+@pytest.mark.anyio
+async def test_async_put_streaming_early_response() -> None:
+    client = httpx.AsyncClient(transport=_EarlyResponseAsyncTransport())
+    async with session(
+        service_options=[BlobServiceOptions(credentials_factory=_credentials)],
+        httpx_client_factory=lambda: client,
+    ):
+        with pytest.raises(BlobFileTooLargeError):
+            await blob.put(
+                "early.bin",
+                _AsyncTestReader(b"x" * 100_000),
+                access="public",
+                content_length=100_000,
+            )
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize("cache_age", [None, 0, 60])
 async def test_put_valid_input_boundaries(cache_age: int | None) -> None:
@@ -255,71 +1119,423 @@ def test_sync_put_valid_input_boundaries(cache_age: int | None) -> None:
     assert result.pathname == "valid.bin"
 
 
-_INVALID_PUT_INPUTS = [
-    pytest.param({"body": "not bytes"}, TypeError, "put body must be bytes", id="str-body"),
+class _TouchSpy:
+    def __init__(self) -> None:
+        self.touched = False
+
+
+class _NoopSpy(_TouchSpy):
+    pass
+
+
+class _SyncReaderSpy(_TouchSpy):
+    def read(self, size: int = -1) -> bytes:
+        self.touched = True
+        return b"abc"
+
+
+class _AsyncReaderSpy(_TouchSpy):
+    async def read(self, size: int = -1) -> bytes:
+        self.touched = True
+        return b"abc"
+
+
+class _SyncIterableSpy(_TouchSpy):
+    def __iter__(self) -> Iterator[bytes]:
+        self.touched = True
+        return iter([b"abc"])
+
+
+class _AsyncIterableSpy(_TouchSpy):
+    def __aiter__(self) -> AsyncIterator[bytes]:
+        self.touched = True
+
+        async def gen() -> AsyncIterator[bytes]:
+            yield b"abc"
+
+        return gen()
+
+
+class _AsyncCallable:
+    def __init__(self) -> None:
+        self.touched = False
+
+    async def __call__(self, size: int = -1) -> bytes:
+        self.touched = True
+        return b"abc"
+
+
+class _AsyncCallableReadSpy:
+    def __init__(self) -> None:
+        self.read = _AsyncCallable()
+
+    @property
+    def touched(self) -> bool:
+        return self.read.touched
+
+
+class _LoggedBytesIO(io.BytesIO):
+    """In-memory sync reader that records every call that reads or inspects it."""
+
+    def __init__(self, data: bytes) -> None:
+        self.calls: list[str] = []
+        super().__init__(data)
+
+    @property
+    def touched(self) -> list[str]:
+        return self.calls
+
+    def read(self, size: int | None = -1, /) -> bytes:
+        self.calls.append("read")
+        return super().read(size)
+
+    def __iter__(self) -> Iterator[bytes]:
+        self.calls.append("__iter__")
+        return super().__iter__()
+
+    def __next__(self) -> bytes:
+        self.calls.append("__next__")
+        return super().__next__()
+
+    def tell(self) -> int:
+        self.calls.append("tell")
+        return super().tell()
+
+
+class _LoggedBufferedReader(io.BufferedReader):
+    """Real binary file reader that records every call that reads or inspects it."""
+
+    def __init__(self, path: str) -> None:
+        self.calls: list[str] = []
+        super().__init__(io.FileIO(path, "rb"))
+
+    @property
+    def touched(self) -> list[str]:
+        return self.calls
+
+    def read(self, size: int | None = -1, /) -> bytes:
+        self.calls.append("read")
+        return super().read(size)
+
+    def __iter__(self) -> Iterator[bytes]:
+        self.calls.append("__iter__")
+        return super().__iter__()
+
+    def __next__(self) -> bytes:
+        self.calls.append("__next__")
+        return super().__next__()
+
+    def tell(self) -> int:
+        self.calls.append("tell")
+        return super().tell()
+
+
+@pytest.fixture
+def exit_stack() -> Iterator[ExitStack]:
+    with ExitStack() as stack:
+        yield stack
+
+
+def _make_common_invalid_inputs(reader_spy: type[_TouchSpy]) -> list[Any]:
+    return [
+        pytest.param(
+            lambda _: ({"body": "not bytes"}, _NoopSpy()),
+            TypeError,
+            "put body must be bytes, a byte reader, or an iterable of bytes",
+            id="str-body",
+        ),
+        pytest.param(
+            lambda _: ({"content_length": True}, _NoopSpy()),
+            TypeError,
+            "content_length must be int, got bool",
+            id="bool-len",
+        ),
+        pytest.param(
+            lambda _: ({"content_length": 1.5}, _NoopSpy()),
+            TypeError,
+            "content_length must be int, got float",
+            id="float-len",
+        ),
+        pytest.param(
+            lambda _: ({"content_length": "10"}, _NoopSpy()),
+            TypeError,
+            "content_length must be int, got str",
+            id="str-len",
+        ),
+        pytest.param(
+            lambda _: ({"content_length": -1}, _NoopSpy()),
+            ValueError,
+            "content_length must be nonnegative",
+            id="neg-len",
+        ),
+        pytest.param(
+            lambda _: ({"body": b"123", "content_length": 5}, _NoopSpy()),
+            BlobContentLengthError,
+            "body ended after 3 of 5 bytes declared by content_length",
+            id="buffer-short",
+        ),
+        pytest.param(
+            lambda _: ({"body": b"12345", "content_length": 2}, _NoopSpy()),
+            BlobContentLengthError,
+            "body exceeded content_length of 2 bytes",
+            id="buffer-long",
+        ),
+        pytest.param(
+            lambda _: ({"pathname": ""}, _NoopSpy()),
+            BlobError,
+            "pathname cannot be empty",
+            id="empty-pathname",
+        ),
+        pytest.param(
+            lambda _: ({"pathname": "//file.txt"}, _NoopSpy()),
+            BlobError,
+            "cannot contain.*//",
+            id="double-slash",
+        ),
+        pytest.param(
+            lambda _: ({"pathname": "folder//file.txt"}, _NoopSpy()),
+            BlobError,
+            "cannot contain.*//",
+            id="folder-double-slash",
+        ),
+        pytest.param(
+            lambda _: ({"pathname": "folder/../file.txt"}, _NoopSpy()),
+            BlobError,
+            "dot segments",
+            id="dot-segment",
+        ),
+        pytest.param(
+            lambda _: ({"pathname": "file\ud800.txt"}, _NoopSpy()),
+            BlobError,
+            "Unicode",
+            id="unicode-surrogate",
+        ),
+        pytest.param(
+            lambda _: ({"pathname": "x" * 951}, _NoopSpy()),
+            BlobError,
+            "maximum length is 950",
+            id="long-pathname",
+        ),
+        pytest.param(
+            lambda _: ({"pathname": "😀" * 476}, _NoopSpy()),
+            BlobError,
+            "maximum length is 950",
+            id="surrogate-pathname-limit",
+        ),
+        pytest.param(
+            lambda _: ({"pathname": "valid/\x01path.txt"}, _NoopSpy()),
+            BlobError,
+            "control characters",
+            id="control-char-pathname",
+        ),
+        pytest.param(
+            lambda _: ({"access": "invalid"}, _NoopSpy()),
+            BlobError,
+            "access must be 'public' or 'private'",
+            id="invalid-access",
+        ),
+        pytest.param(
+            lambda _: ({"add_random_suffix": 1}, _NoopSpy()),
+            TypeError,
+            "add_random_suffix must be bool",
+            id="int-random-suffix",
+        ),
+        pytest.param(
+            lambda _: ({"allow_overwrite": 0}, _NoopSpy()),
+            TypeError,
+            "allow_overwrite must be bool",
+            id="int-allow-overwrite",
+        ),
+        pytest.param(
+            lambda _: ({"cache_control_max_age": True}, _NoopSpy()),
+            TypeError,
+            "cache_control_max_age must be an integer, not bool",
+            id="bool-cache-age",
+        ),
+        pytest.param(
+            lambda _: ({"cache_control_max_age": -1}, _NoopSpy()),
+            ValueError,
+            "cache_control_max_age must be nonnegative",
+            id="neg-cache-age",
+        ),
+        pytest.param(
+            lambda _: ({"cache_control_max_age": 1.5}, _NoopSpy()),
+            TypeError,
+            "must be an integer",
+            id="float-cache-age",
+        ),
+        pytest.param(
+            lambda _: ({"cache_control_max_age": "1"}, _NoopSpy()),
+            TypeError,
+            "must be an integer",
+            id="str-cache-age",
+        ),
+        pytest.param(
+            lambda _: ({"add_random_suffix": "true"}, _NoopSpy()),
+            TypeError,
+            "must be bool",
+            id="str-random-suffix",
+        ),
+        pytest.param(
+            lambda _: ({"allow_overwrite": None}, _NoopSpy()),
+            TypeError,
+            "must be bool",
+            id="none-allow-overwrite",
+        ),
+        pytest.param(
+            lambda _: ({"content_type": 123}, _NoopSpy()),
+            ValueError,
+            "must be a string",
+            id="int-content-type",
+        ),
+        pytest.param(
+            lambda _: ({"content_type": "text/plain\r\n"}, _NoopSpy()),
+            ValueError,
+            "control characters",
+            id="newline-content-type",
+        ),
+        pytest.param(
+            lambda _: ({"content_type": ""}, _NoopSpy()),
+            ValueError,
+            "content_type cannot be empty",
+            id="empty-content-type",
+        ),
+        pytest.param(
+            lambda _: ({"content_type": "text/plain\x7f"}, _NoopSpy()),
+            ValueError,
+            "control characters",
+            id="del-content-type",
+        ),
+        pytest.param(
+            lambda _: ({"content_type": "text/plain; café=1"}, _NoopSpy()),
+            ValueError,
+            "content_type must be ASCII",
+            id="non-ascii-content-type",
+        ),
+        # Missing content-length on the API's own reader form
+        pytest.param(
+            lambda _: ({"body": (s := reader_spy())}, s),
+            TypeError,
+            "content_length is required for streaming bodies",
+            id="reader-missing-len",
+        ),
+        # Valid streaming body paired with invalid other arguments
+        pytest.param(
+            lambda _: ({"body": (s := reader_spy()), "content_length": 3, "pathname": ""}, s),
+            BlobError,
+            "pathname cannot be empty",
+            id="reader-empty-pathname",
+        ),
+        pytest.param(
+            lambda _: ({"body": (s := reader_spy()), "content_length": 3, "access": "invalid"}, s),
+            BlobError,
+            "access must be 'public' or 'private'",
+            id="reader-invalid-access",
+        ),
+        pytest.param(
+            lambda _: (
+                {"body": (s := reader_spy()), "content_length": 3, "cache_control_max_age": -1},
+                s,
+            ),
+            ValueError,
+            "cache_control_max_age must be nonnegative",
+            id="reader-neg-cache-age",
+        ),
+    ]
+
+
+_ASYNC_INVALID_PUT_CASES = [
+    *_make_common_invalid_inputs(_AsyncReaderSpy),
+    # Missing content-length on async-specific streaming forms
     pytest.param(
-        {"body": bytearray(b"123")}, TypeError, "put body must be bytes", id="bytearray-body"
-    ),
-    pytest.param(
-        {"body": memoryview(b"123")}, TypeError, "put body must be bytes", id="memoryview-body"
-    ),
-    pytest.param({"pathname": ""}, BlobError, "pathname cannot be empty", id="empty-path"),
-    pytest.param(
-        {"pathname": "//file.txt"}, BlobError, "cannot contain.*//", id="leading-double-slash"
-    ),
-    pytest.param(
-        {"pathname": "folder//file.txt"}, BlobError, "cannot contain.*//", id="double-slash"
-    ),
-    pytest.param({"pathname": "folder/../file.txt"}, BlobError, "dot segments", id="dot-path"),
-    pytest.param({"pathname": "file\ud800.txt"}, BlobError, "Unicode", id="surrogate-path"),
-    pytest.param({"pathname": "x" * 951}, BlobError, "maximum length is 950", id="long-path"),
-    pytest.param(
-        {"pathname": "😀" * 476}, BlobError, "maximum length is 950", id="long-utf16-path"
-    ),
-    pytest.param(
-        {"pathname": "valid/\x01path.txt"}, BlobError, "control characters", id="control-path"
-    ),
-    pytest.param(
-        {"access": "invalid"}, BlobError, "access must be 'public' or 'private'", id="access"
-    ),
-    pytest.param(
-        {"add_random_suffix": 1}, TypeError, "add_random_suffix must be bool", id="suffix"
-    ),
-    pytest.param({"allow_overwrite": 0}, TypeError, "allow_overwrite must be bool", id="overwrite"),
-    pytest.param(
-        {"cache_control_max_age": True},
+        lambda _: ({"body": (s := _AsyncIterableSpy())}, s),
         TypeError,
-        "cache_control_max_age must be an integer, not bool",
-        id="bool-age",
+        "content_length is required for streaming bodies",
+        id="async-iter-missing-len",
     ),
     pytest.param(
-        {"cache_control_max_age": -1}, ValueError, "must be nonnegative", id="negative-age"
+        lambda _: ({"body": (s := _AsyncIterableSpy()), "content_length": 3, "pathname": ""}, s),
+        BlobError,
+        "pathname cannot be empty",
+        id="async-iter-empty-pathname",
     ),
-    pytest.param({"cache_control_max_age": 1.5}, TypeError, "must be an integer", id="float-age"),
-    pytest.param({"cache_control_max_age": "1"}, TypeError, "must be an integer", id="str-age"),
-    pytest.param({"add_random_suffix": "true"}, TypeError, "must be bool", id="str-suffix"),
-    pytest.param({"allow_overwrite": None}, TypeError, "must be bool", id="null-overwrite"),
-    pytest.param({"content_type": 123}, ValueError, "must be a string", id="non-string-type"),
+    # Sync sources in async; callers adapt them without hidden SDK threading
     pytest.param(
-        {"content_type": "text/plain\r\n"}, ValueError, "control characters", id="control-type"
-    ),
-    pytest.param({"content_type": ""}, ValueError, "content_type cannot be empty", id="empty-type"),
-    pytest.param(
-        {"content_type": "text/plain\x7f"}, ValueError, "control characters", id="delete-type"
+        lambda _: ({"body": (s := _SyncIterableSpy()), "content_length": 3}, s),
+        TypeError,
+        "got sync iterable _SyncIterableSpy; adapt it into an async iterable",
+        id="sync-iter-in-async",
     ),
     pytest.param(
-        {"content_type": "text/plain; café=1"},
-        ValueError,
-        "content_type must be ASCII",
-        id="non-ascii-type",
+        lambda _: ({"body": (s := _SyncReaderSpy()), "content_length": 3}, s),
+        TypeError,
+        "coroutine function.*got reader _SyncReaderSpy; for sync files use anyio.open_file",
+        id="sync-reader-in-async",
+    ),
+    pytest.param(
+        lambda _: ({"body": (f := _LoggedBytesIO(b"abc")), "content_length": 3}, f),
+        TypeError,
+        "got reader _LoggedBytesIO; .*anyio.wrap_file",
+        id="bytesio-in-async",
+    ),
+    pytest.param(
+        lambda stack: (
+            {
+                "body": (f := stack.enter_context(_LoggedBufferedReader(__file__))),
+                "content_length": 3,
+            },
+            f,
+        ),
+        TypeError,
+        "got reader _LoggedBufferedReader; .*anyio.wrap_file",
+        id="binary-file-in-async",
+    ),
+    pytest.param(
+        lambda _: ({"body": (s := _AsyncCallableReadSpy()), "content_length": 3}, s),
+        TypeError,
+        "coroutine function.*got reader _AsyncCallableReadSpy",
+        id="async-callable-read-in-async",
+    ),
+]
+
+_SYNC_INVALID_PUT_CASES = [
+    *_make_common_invalid_inputs(_SyncReaderSpy),
+    # Missing content-length on sync-specific streaming form
+    pytest.param(
+        lambda _: ({"body": (s := _SyncIterableSpy())}, s),
+        TypeError,
+        "content_length is required for streaming bodies",
+        id="sync-iter-missing-len",
+    ),
+    pytest.param(
+        lambda _: ({"body": (s := _SyncIterableSpy()), "content_length": 3, "pathname": ""}, s),
+        BlobError,
+        "pathname cannot be empty",
+        id="sync-iter-empty-pathname",
+    ),
+    # Wrong-runtime sources in sync
+    pytest.param(
+        lambda _: ({"body": (s := _AsyncReaderSpy()), "content_length": 3}, s),
+        TypeError,
+        "does not support async readers",
+        id="async-reader-in-sync",
+    ),
+    pytest.param(
+        lambda _: ({"body": (s := _AsyncIterableSpy()), "content_length": 3}, s),
+        TypeError,
+        "sync put does not support async iterables",
+        id="async-iter-in-sync",
     ),
 ]
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("invalid,error,message", _INVALID_PUT_INPUTS)
+@pytest.mark.parametrize("factory,error,message", _ASYNC_INVALID_PUT_CASES)
 async def test_put_invalid_input_fails_before_credentials_or_http(
-    invalid: dict[str, Any], error: type[Exception], message: str
+    factory: Callable[[ExitStack], tuple[dict[str, Any], Any]],
+    error: type[Exception],
+    message: str,
+    exit_stack: ExitStack,
 ) -> None:
     credentials_calls = 0
 
@@ -331,17 +1547,22 @@ async def test_put_invalid_input_fails_before_credentials_or_http(
     def handler(request: httpx.Request) -> httpx.Response:
         pytest.fail("Invalid arguments must not send HTTP requests")
 
+    invalid, spy = factory(exit_stack)
     async with _async_session(handler, credentials_factory=credentials):
         arguments = {"pathname": "valid.bin", "body": b"123", "access": "public"} | invalid
         with pytest.raises(error, match=message):
             await blob.put(**arguments)
 
     assert credentials_calls == 0
+    assert not spy.touched
 
 
-@pytest.mark.parametrize("invalid,error,message", _INVALID_PUT_INPUTS)
+@pytest.mark.parametrize("factory,error,message", _SYNC_INVALID_PUT_CASES)
 def test_sync_put_invalid_input_fails_before_credentials_or_http(
-    invalid: dict[str, Any], error: type[Exception], message: str
+    factory: Callable[[ExitStack], tuple[dict[str, Any], Any]],
+    error: type[Exception],
+    message: str,
+    exit_stack: ExitStack,
 ) -> None:
     credentials_calls = 0
 
@@ -353,12 +1574,14 @@ def test_sync_put_invalid_input_fails_before_credentials_or_http(
     def handler(request: httpx.Request) -> httpx.Response:
         pytest.fail("Invalid arguments must not send HTTP requests")
 
+    invalid, spy = factory(exit_stack)
     with _sync_session(handler, credentials_factory=credentials):
         arguments = {"pathname": "valid.bin", "body": b"123", "access": "public"} | invalid
         with pytest.raises(error, match=message):
             blob.sync.put(**arguments)
 
     assert credentials_calls == 0
+    assert not spy.touched
 
 
 _BUFFERED_GET_CASES = [

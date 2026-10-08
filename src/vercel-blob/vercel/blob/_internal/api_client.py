@@ -47,12 +47,12 @@ from vercel.blob.errors import (
 )
 from vercel.blob.models import Access, BlobCredentials, DownloadMetadata, HeadResult, PutResult
 
+from .upload import _CHUNK_SIZE, _ChunkSource, send_streaming_upload
 from .validation import (
     validate_access,
     validate_bool_flag,
     validate_cache_control_max_age,
     validate_content_type,
-    validate_put_body,
     validate_upload_pathname,
 )
 
@@ -65,7 +65,6 @@ class _PutRequest(_ApiModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     pathname: Annotated[str, BeforeValidator(validate_upload_pathname)]
-    body: Annotated[bytes, BeforeValidator(validate_put_body)]
     access: Annotated[Access, BeforeValidator(validate_access)] = Field(
         serialization_alias="x-vercel-blob-access"
     )
@@ -94,7 +93,7 @@ class _PutRequest(_ApiModel):
         return {
             name: str(value)
             for name, value in self.model_dump(
-                by_alias=True, exclude={"pathname", "body"}, exclude_none=True
+                by_alias=True, exclude={"pathname"}, exclude_none=True
             ).items()
         }
 
@@ -326,9 +325,6 @@ def _map_http_error(response: httpx.Response) -> Exception:
     return BlobUnknownError(message, status_code=response.status_code, code=code)
 
 
-_CHUNK_SIZE = 64 * 1024
-
-
 class BlobApiClient:
     def __init__(self, *, base_url: str, transport: BaseTransport) -> None:
         self._base_url = base_url.rstrip("/")
@@ -368,15 +364,42 @@ class BlobApiClient:
             raise _map_http_error(response)
         return response
 
-    async def put(self, request: _PutRequest, *, credentials: BlobCredentials) -> PutResult:
+    async def put(
+        self, request: _PutRequest, body: bytes, *, credentials: BlobCredentials
+    ) -> PutResult:
         response = await self._request(
             "PUT",
             "",
             credentials=credentials,
             params={"pathname": request.pathname},
             headers=request._to_headers(),
-            body=RawBody(request.body),
+            body=RawBody(body),
         )
+        return _parse_put_response(response)
+
+    async def put_stream(
+        self,
+        request: _PutRequest,
+        chunk_source: _ChunkSource,
+        content_length: int,
+        *,
+        credentials: BlobCredentials,
+    ) -> PutResult:
+        headers = (
+            self._headers(credentials)
+            | request._to_headers()
+            | {"content-length": str(content_length)}
+        )
+        cm = self._transport.request_stream(
+            "PUT",
+            self._base_url,
+            token=credentials.token,
+            params={"pathname": request.pathname},
+            headers=headers,
+            follow_redirects=False,
+            read_response=ReadResponsePolicy.ALWAYS,
+        )
+        response = await send_streaming_upload(cm, chunk_source, content_length, _map_http_error)
         return _parse_put_response(response)
 
     async def get_metadata(self, url: str, *, credentials: BlobCredentials) -> HeadResult:

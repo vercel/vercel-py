@@ -367,15 +367,22 @@ class _SyncStreamingRequest(StreamingRequest):
         if self._closed:
             raise anyio.ClosedResourceError
         self._closed = True
-        try:
-            self._put(_STREAM_EOF)
-        except BaseException:
-            self._thread.join()
-            raise
+        early_error: BaseException | None = None
+        if not self._finished.is_set() or self._response is None:
+            try:
+                self._put(_STREAM_EOF)
+            except anyio.BrokenResourceError as exc:
+                early_error = exc
+        else:
+            early_error = anyio.BrokenResourceError()
         self._thread.join()
         self._raise_worker_error()
         if self._response is None:
+            if early_error is not None:
+                raise early_error
             raise anyio.BrokenResourceError
+        if early_error is not None and self._response.is_success:
+            raise anyio.BrokenResourceError from early_error
         self._completed = True
         return _SyncStreamingResponse(self._response, self._chunk_size)
 
@@ -540,16 +547,25 @@ class _AsyncStreamingRequest(StreamingRequest):
         if self._closed:
             raise anyio.ClosedResourceError
         self._closed = True
+        early_error: BaseException | None = None
+        if self._done.is_set() and self._response is not None:
+            early_error = anyio.BrokenResourceError()
         try:
             await self._send.aclose()
             await self._done.wait()
+        except anyio.BrokenResourceError as exc:
+            early_error = exc
         except BaseException:
             with anyio.CancelScope(shield=True):
                 await self.abort()
             raise
         self._raise_worker_error()
         if self._response is None:
+            if early_error is not None:
+                raise early_error
             raise anyio.BrokenResourceError
+        if early_error is not None and self._response.is_success:
+            raise anyio.BrokenResourceError from early_error
         self._completed = True
         return _AsyncStreamingResponse(self._response, self._chunk_size)
 
