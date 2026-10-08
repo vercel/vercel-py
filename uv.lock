@@ -41,7 +41,7 @@ dev = [
     { name = "cryptography", specifier = ">=48.0.1" },
     { name = "django-stubs", specifier = ">=6.0.6,<7" },
     { name = "fastapi", specifier = ">=0.115.0,<1" },
-    { name = "ggt", marker = "python_full_version >= '3.11'", specifier = "==1.6.1" },
+    { name = "ggt", marker = "python_full_version >= '3.11'", specifier = ">=1.6.1" },
     { name = "hatchling", specifier = ">=1.27.0,<2" },
     { name = "httpx", specifier = "==0.28.1" },
     { name = "hypothesis", specifier = ">=6.0.0,<7" },
