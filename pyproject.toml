@@ -32,18 +32,14 @@ dev = [
     "tomli>=2.0.0,<3; python_version < '3.11'",
     "vendoring>=1,<2",
     "lograil~=0.8.1",
-    "ggt>=1.6.0; python_version >= '3.11'",
+    "ggt==1.6.1; python_version >= '3.11'",
 ]
 
 [tool.uv]
 default-groups = ["dev"]
 package = false
 exclude-newer = "2 days"
-exclude-newer-package = { ggt = "2026-09-01T00:00:00Z", lograil = "2026-08-21T00:00:00Z" }
-
-[tool.uv.sources]
-# Temporary pin for the Windows output-capture fix; remove after ggt releases it.
-ggt = { git = "https://github.com/vercel-labs/ggt.git", rev = "69d7aac7e61be28cb4714b69e25606d83a10744b" }
+exclude-newer-package = { ggt = "2026-10-08T13:08:37Z", lograil = "2026-08-21T00:00:00Z" }
 
 [tool.uv.workspace]
 members = ["src/*", "integrations/*"]

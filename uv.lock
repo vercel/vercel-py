@@ -13,7 +13,7 @@ exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for 
 exclude-newer-span = "P2D"
 
 [options.exclude-newer-package]
-ggt = "2026-09-01T00:00:00Z"
+ggt = "2026-10-08T13:08:37Z"
 lograil = "2026-08-21T00:00:00Z"
 
 [manifest]
@@ -41,7 +41,7 @@ dev = [
     { name = "cryptography", specifier = ">=48.0.1" },
     { name = "django-stubs", specifier = ">=6.0.6,<7" },
     { name = "fastapi", specifier = ">=0.115.0,<1" },
-    { name = "ggt", marker = "python_full_version >= '3.11'", git = "https://github.com/vercel-labs/ggt.git?rev=69d7aac7e61be28cb4714b69e25606d83a10744b" },
+    { name = "ggt", marker = "python_full_version >= '3.11'", specifier = "==1.6.1" },
     { name = "hatchling", specifier = ">=1.27.0,<2" },
     { name = "httpx", specifier = "==0.28.1" },
     { name = "hypothesis", specifier = ">=6.0.0,<7" },
@@ -730,10 +730,14 @@ wheels = [
 
 [[package]]
 name = "ggt"
-version = "1.6.1.dev1+69d7aac"
-source = { git = "https://github.com/vercel-labs/ggt.git?rev=69d7aac7e61be28cb4714b69e25606d83a10744b#69d7aac7e61be28cb4714b69e25606d83a10744b" }
+version = "1.6.1"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/df/3a/42c8ba5639ec68518cf897602da9e3d64cdbc62174cf81d1f73d7ac5f5c1/ggt-1.6.1.tar.gz", hash = "sha256:c664a5dda9bdb33c26181a4c65d3e5b013675b1e8e52b32ecda9c0e71788c557", size = 207606, upload-time = "2026-10-08T13:08:36.891Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/13/84/c78f5801864410c7489e5358aced7110f642b63a079aed2504fc2a2d30a0/ggt-1.6.1-py3-none-any.whl", hash = "sha256:896942c03ca0c525b42bde45dd2c7400f88f0fece5ad5acc31eacdac24b2648d", size = 129249, upload-time = "2026-10-08T13:08:35.742Z" },
 ]
 
 [[package]]
