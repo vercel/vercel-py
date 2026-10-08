@@ -174,23 +174,6 @@ async def from_blocking(chunks: Iterator[bytes]) -> AsyncIterator[bytes]:
         yield chunk
 ```
 
-Copy a Blob object by piping `stream` directly into `put`. Delivery responses
-can omit `Content-Length`, so take the size from `head`:
-
-```python
-from vercel import blob
-
-async def copy_object(source_url: str, destination_path: str) -> blob.PutResult:
-    size = (await blob.head(source_url)).size
-    async with blob.stream(source_url, access="public") as download:
-        return await blob.put(
-            destination_path,
-            download,
-            access="public",
-            content_length=size,
-        )
-```
-
 ### Downloads and ownership
 
 `get` buffers the complete body in memory and returns a frozen, slotted
