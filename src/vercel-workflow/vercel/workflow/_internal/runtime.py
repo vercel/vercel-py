@@ -1774,6 +1774,70 @@ async def _send_cancellations(context: WorkflowOrchestratorContext) -> None:
             )
 
 
+async def _flush_hook_lifecycle_events(
+    context: WorkflowOrchestratorContext,
+) -> tuple[bool, set[str]]:
+    world = w.get_world()
+    groups: dict[str, list[Hook]] = {}
+    for hook in context.hooks.values():
+        if hook.has_dispose_event or hook.conflict_error is not None:
+            continue
+        groups.setdefault(hook.token, []).append(hook)
+    events_created = False
+    replay_reasons: set[str] = set()
+
+    async def flush_group(hooks: list[Hook]) -> None:
+        nonlocal events_created
+        for hook in hooks:
+            if not hook.has_created_event:
+                try:
+                    result = await world.events_create(
+                        context.run_id,
+                        w.HookCreatedEventData(token=hook.token, metadata=hook.metadata).into_event(
+                            hook.correlation_id
+                        ),
+                    )
+                except w.EntityConflictError:
+                    logger.debug("Workflow hook %r has already been created", hook.correlation_id)
+                except w.RunExpiredError:
+                    return
+                else:
+                    if isinstance(result.event, w.HookConflictEvent):
+                        events_created = True
+                        replay_reasons.add("hook_conflict")
+                        continue
+                events_created = True
+                if hook.has_conflict_awaiter:
+                    replay_reasons.add("hook_created")
+
+            if hook.disposed:
+                try:
+                    await world.events_create(
+                        context.run_id,
+                        w.HookDisposedEvent(correlation_id=hook.correlation_id),
+                    )
+                except (w.EntityConflictError, w.HookNotFoundError):
+                    logger.debug("Workflow hook %r has already been disposed", hook.correlation_id)
+                except w.RunExpiredError:
+                    return
+                events_created = True
+
+    failures: list[Exception] = []
+
+    async def settle_group(hooks: list[Hook]) -> None:
+        try:
+            await flush_group(hooks)
+        except Exception as error:
+            failures.append(error)
+
+    async with anyio.create_task_group() as tg:
+        for hooks in groups.values():
+            tg.start_soon(settle_group, hooks)
+    if failures:
+        raise failures[0]
+    return events_created, replay_reasons
+
+
 async def _workflow_replay_pass(
     *,
     req: w.WorkflowInvokePayload,
@@ -1913,38 +1977,11 @@ async def _workflow_replay_pass(
             logger.warning(f"Workflow run {run_id} was already completed")
         return None
 
-    events_created = False
-    immediate_replay_reasons: set[str] = set()
-
-    # A hook token is not released until its disposal event is durable. Flush
-    # disposals before creating new hooks so a workflow can reuse a token in the
-    # same suspension without conflicting with its own previous hook.
-    async with anyio.create_task_group() as tg:
-        for hook in context.hooks.values():
-            if hook.disposed and not hook.has_dispose_event:
-
-                async def dispose_hook(h=hook):
-                    try:
-                        await world.events_create(
-                            run_id,
-                            w.HookDisposedEvent(correlation_id=h.correlation_id),
-                        )
-                    except (w.EntityConflictError, w.HookNotFoundError):
-                        logger.debug(
-                            f"Workflow hook {h.correlation_id!r} has already been disposed"
-                        )
-
-                tg.start_soon(dispose_hook)
-                events_created = True
-
-    # Now that the workflow is fully suspended and old hook tokens have been
-    # released, create all pending events in parallel. Steps are enqueued only
-    # once every event is durable: a step may hand a hook's token to whoever
-    # will resume it, so the hook has to exist by the time the step runs.
+    events_created, immediate_replay_reasons = await _flush_hook_lifecycle_events(context)
     steps_to_queue: list[Callable[[], Coroutine[Any, Any, str]]] = []
     async with anyio.create_task_group() as tg:
         for sus in context.suspensions.values():
-            if sus.has_created_event:
+            if sus.has_created_event or isinstance(sus, Hook):
                 pass
 
             elif isinstance(sus, Suspension):
@@ -1989,27 +2026,6 @@ async def _workflow_replay_pass(
                         logger.debug(f"Workflow wait {s.correlation_id!r} has already been created")
 
                 tg.start_soon(create_wait)
-                events_created = True
-
-            elif isinstance(sus, Hook):
-
-                async def create_hook(s=sus):
-                    hook_data = w.HookCreatedEventData(token=s.token, metadata=s.metadata)
-                    try:
-                        result = await world.events_create(
-                            run_id, hook_data.into_event(s.correlation_id)
-                        )
-                    except w.EntityConflictError:
-                        logger.debug(f"Workflow hook {s.correlation_id!r} has already been created")
-                        if s.has_conflict_awaiter:
-                            immediate_replay_reasons.add("hook_created")
-                    else:
-                        if isinstance(result.event, w.HookConflictEvent):
-                            immediate_replay_reasons.add("hook_conflict")
-                        elif s.has_conflict_awaiter:
-                            immediate_replay_reasons.add("hook_created")
-
-                tg.start_soon(create_hook)
                 events_created = True
 
             elif isinstance(sus, Attributes):
