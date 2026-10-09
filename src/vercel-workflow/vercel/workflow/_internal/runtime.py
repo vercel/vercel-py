@@ -1957,6 +1957,15 @@ async def _workflow_replay_pass(
         error_message = "".join(traceback.format_exception_only(type(e), e)).strip()
         logger.exception("[Workflows] '%s' - workflow run failed: %s", run_id, error_message)
         await _send_cancellations(context)
+        if not isinstance(e, NondeterminismError):
+            # Flush pending hook events before ending the run. Log failures so they do
+            # not replace the workflow's outcome. This is the same as the TS SDK.
+            try:
+                await _flush_hook_lifecycle_events(context)
+            except Exception:
+                logger.warning(
+                    "Failed to flush hooks for terminating run %s", run_id, exc_info=True
+                )
         try:
             await world.events_create(
                 run_id,
@@ -1972,6 +1981,11 @@ async def _workflow_replay_pass(
     await _send_cancellations(context)
 
     if output is not None:
+        # Flush pending hook events, see also above in the failure path.
+        try:
+            await _flush_hook_lifecycle_events(context)
+        except Exception:
+            logger.warning("Failed to flush hooks for terminating run %s", run_id, exc_info=True)
         try:
             await world.events_create(
                 run_id,
