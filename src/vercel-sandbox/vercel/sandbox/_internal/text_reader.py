@@ -3,9 +3,10 @@
 import inspect
 import subprocess
 import threading
+import time
 from abc import ABC, abstractmethod
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
+from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator, Mapping
 from types import TracebackType
 from typing import Protocol, TypeAlias
 
@@ -13,8 +14,8 @@ import anyio
 
 from vercel._internal.core.http import StreamingResponse
 from vercel._internal.core.iter_coroutine import iter_coroutine
-from vercel.sandbox._internal.log_stream import _parse_command_log_record
-from vercel.sandbox._internal.models import ProcessLogStream
+from vercel.sandbox._internal.log_stream import AsyncSleep, _iter_command_logs
+from vercel.sandbox._internal.models import ProcessLog, ProcessLogStream
 
 _OpenResponse: TypeAlias = Callable[[], StreamingResponse | Awaitable[StreamingResponse]]
 
@@ -165,20 +166,20 @@ class _TextTransportCore:
         open_response: Callable[[], Awaitable[StreamingResponse]],
         routes: Mapping[ProcessLogStream, _TextBuffer | None],
         lock: _PumpLock,
+        sleep: AsyncSleep,
     ) -> None:
         self._open_response = open_response
-        self._response: StreamingResponse | None = None
-        self._lines: AsyncIterator[str] | None = None
+        self._sleep = sleep
+        self._events: AsyncGenerator[ProcessLog, None] | None = None
         self._routes = dict(routes)
         self._live = len(_distinct_buffers(routes))
         self._broken = False
         self._lock = lock
 
     async def _cleanup(self) -> None:
-        response, self._response = self._response, None
-        self._lines = None
-        if response is not None:
-            await response.aclose()
+        events, self._events = self._events, None
+        if events is not None:
+            await events.aclose()
 
     async def pump(self) -> None:
         if self._broken:
@@ -188,26 +189,18 @@ class _TextTransportCore:
             if self._broken:
                 raise anyio.BrokenResourceError
             try:
-                if self._response is None:
-                    self._response = await self._open_response()
-                    self._lines = self._response.aiter_lines()
-                assert self._lines is not None
-                while True:
-                    try:
-                        line = await anext(self._lines)
-                    except StopAsyncIteration:
-                        for buffer in _distinct_buffers(self._routes):
-                            buffer.eof = True
-                        await self._cleanup()
-                        return
-                    if not line:
-                        continue
-                    event = _parse_command_log_record(line)
-                    if event is not None:
-                        target = self._routes[event.stream]
-                        if target is not None:
-                            target.append(event.data)
-                        return
+                if self._events is None:
+                    self._events = _iter_command_logs(self._open_response, sleep=self._sleep)
+                try:
+                    event = await anext(self._events)
+                except StopAsyncIteration:
+                    for buffer in _distinct_buffers(self._routes):
+                        buffer.eof = True
+                    await self._cleanup()
+                    return
+                target = self._routes[event.stream]
+                if target is not None:
+                    target.append(event.data)
             except BaseException:
                 self._broken = True
                 for buffer in _distinct_buffers(self._routes):
@@ -314,6 +307,10 @@ class _SyncTextReader(SyncTextReader):
         iter_coroutine(self._core.close())
 
 
+async def _blocking_sleep(seconds: float) -> None:
+    time.sleep(seconds)
+
+
 def _reader_buffers(stdout: int, stderr: int) -> tuple[_TextBuffer | None, _TextBuffer | None]:
     stdout_buffer = _TextBuffer() if stdout == subprocess.PIPE else None
     if stderr == subprocess.STDOUT:
@@ -330,6 +327,7 @@ def _cores(
     stdout: int,
     stderr: int,
     lock: _PumpLock,
+    sleep: AsyncSleep,
 ) -> tuple[_ReaderCore | None, _ReaderCore | None]:
     stdout_buffer, stderr_buffer = _reader_buffers(stdout, stderr)
     if stdout_buffer is None and stderr_buffer is None:
@@ -338,6 +336,7 @@ def _cores(
         open_response,
         {ProcessLogStream.STDOUT: stdout_buffer, ProcessLogStream.STDERR: stderr_buffer},
         lock,
+        sleep,
     )
     return (
         None if stdout_buffer is None else _ReaderCore(transport, stdout_buffer),
@@ -352,9 +351,10 @@ def _text_readers(
     *,
     stdout: int = subprocess.PIPE,
     stderr: int = subprocess.PIPE,
+    sleep: AsyncSleep = anyio.sleep,
 ) -> tuple[TextReader | None, TextReader | None]:
     stdout_core, stderr_core = _cores(
-        _normalize_open_response(open_response), stdout, stderr, _AsyncPumpLock()
+        _normalize_open_response(open_response), stdout, stderr, _AsyncPumpLock(), sleep
     )
     return (
         None if stdout_core is None else _TextReader(stdout_core),
@@ -367,9 +367,10 @@ def _sync_text_readers(
     *,
     stdout: int = subprocess.PIPE,
     stderr: int = subprocess.PIPE,
+    sleep: AsyncSleep = _blocking_sleep,
 ) -> tuple[SyncTextReader | None, SyncTextReader | None]:
     stdout_core, stderr_core = _cores(
-        _normalize_open_response(open_response), stdout, stderr, _SyncPumpLock()
+        _normalize_open_response(open_response), stdout, stderr, _SyncPumpLock(), sleep
     )
     return (
         None if stdout_core is None else _SyncTextReader(stdout_core),

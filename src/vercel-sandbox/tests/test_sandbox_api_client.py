@@ -122,9 +122,13 @@ class _CompletedResponse(StreamingResponse):
         self.response = response
         self.closed = False
         self.lines = lines
+        self._chunks = iter(line.encode() + b"\n" for line in lines)
 
     async def __anext__(self) -> bytes:
-        raise StopAsyncIteration
+        try:
+            return next(self._chunks)
+        except StopIteration:
+            raise StopAsyncIteration from None
 
     async def aiter_lines(self):  # type: ignore[no-untyped-def]
         for line in self.lines:

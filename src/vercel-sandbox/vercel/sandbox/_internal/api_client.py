@@ -43,6 +43,12 @@ from vercel.sandbox._internal.errors import (
     SandboxResponseError,
     SandboxStreamError,
 )
+from vercel.sandbox._internal.log_stream import (
+    _is_transient_error,
+    _ndjson_lines,
+    _OutputOffsets,
+    _TruncatedStreamError,
+)
 from vercel.sandbox._internal.models import (
     _OMITTED,
     NO_PRIVATE_PARAMETERS,
@@ -941,10 +947,15 @@ def _validate_response(model: type[ResponseModelT], data: JSONObject) -> Respons
         ) from exc
 
 
-def _parse_run_process_record(line: str) -> JSONObject:
+def _parse_run_process_record(line: str, *, terminated: bool = True) -> JSONObject:
     try:
         record = json.loads(line)
     except json.JSONDecodeError as exc:
+        if not terminated:
+            raise _TruncatedStreamError(
+                "Sandbox process response ended in the middle of a record",
+                data=line,
+            ) from exc
         raise SandboxResponseError(
             "Sandbox process response included malformed NDJSON",
             data=line,
@@ -955,6 +966,38 @@ def _parse_run_process_record(line: str) -> JSONObject:
             data=record,
         )
     return cast(JSONObject, record)
+
+
+class _RunProcessInterrupted(Exception):
+    """A run response broke after the process started but before it finished.
+
+    The process keeps running in the sandbox, so callers must follow it with
+    the logs and wait endpoints rather than run the command again.
+    """
+
+    def __init__(self, process: ProcessState, delivered: _OutputOffsets) -> None:
+        super().__init__("Sandbox process response was interrupted")
+        self.process = process
+        self.delivered = delivered
+
+
+def _completed_process_state(
+    initial: ProcessState,
+    final: ProcessState,
+    output_router: ProcessOutputRouter,
+) -> CompletedProcessState:
+    if initial.id != final.id or initial.session_id != final.session_id:
+        raise SandboxResponseError(
+            "Sandbox process response returned a different final process identity",
+            data={"initial": initial, "final": final},
+        )
+    if final.returncode is None:
+        raise SandboxResponseError(
+            "Sandbox process response final metadata is missing a return code",
+            data=final,
+        )
+    stdout, stderr = output_router.captured()
+    return CompletedProcessState(process=final, stdout=stdout, stderr=stderr)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1777,62 +1820,62 @@ class SandboxApiClient:
 
         initial: ProcessState | None = None
         final: ProcessState | None = None
+        delivered = _OutputOffsets()
         try:
-            async for line in response.aiter_lines():
-                if not line:
-                    continue
-                record = _parse_run_process_record(line)
-                if "command" in record:
-                    process = _validate_response(_CommandResponse, record).to_command()
-                    if initial is None:
-                        initial = process
-                    elif final is None:
-                        final = process
-                    else:
-                        raise SandboxResponseError(
-                            "Sandbox process response included extra process metadata",
-                            data=record,
-                        )
-                    continue
+            try:
+                async for line, terminated in _ndjson_lines(response):
+                    if not line.strip():
+                        continue
+                    record = _parse_run_process_record(line, terminated=terminated)
+                    if "command" in record:
+                        process = _validate_response(_CommandResponse, record).to_command()
+                        if initial is None:
+                            initial = process
+                        elif final is None:
+                            final = process
+                        else:
+                            raise SandboxResponseError(
+                                "Sandbox process response included extra process metadata",
+                                data=record,
+                            )
+                        continue
 
-                stream = record.get("stream")
-                data = record.get("data")
-                if (stream == "stdout" or stream == "stderr") and isinstance(data, str):
-                    if initial is None or final is not None:
-                        raise SandboxResponseError(
-                            "Sandbox process response included output outside process metadata",
-                            data=record,
-                        )
-                    output_router.route(ProcessLog(stream=ProcessLogStream(stream), data=data))
-                    continue
-                if stream == "error" and isinstance(data, dict):
-                    code = data.get("code")
-                    message = data.get("message")
-                    if isinstance(code, str) and isinstance(message, str):
-                        raise SandboxStreamError(message, code=code)
-                raise SandboxResponseError(
-                    "Sandbox process response included an unexpected NDJSON record",
-                    data=record,
-                )
-        finally:
-            await response.aclose()
+                    stream = record.get("stream")
+                    data = record.get("data")
+                    if (stream == "stdout" or stream == "stderr") and isinstance(data, str):
+                        if initial is None or final is not None:
+                            raise SandboxResponseError(
+                                "Sandbox process response included output outside process metadata",
+                                data=record,
+                            )
+                        event = ProcessLog(stream=ProcessLogStream(stream), data=data)
+                        output_router.route(event)
+                        delivered.advance(event.stream, len(data))
+                        continue
+                    if stream == "error" and isinstance(data, dict):
+                        code = data.get("code")
+                        message = data.get("message")
+                        if isinstance(code, str) and isinstance(message, str):
+                            raise SandboxStreamError(message, code=code)
+                    raise SandboxResponseError(
+                        "Sandbox process response included an unexpected NDJSON record",
+                        data=record,
+                    )
+            finally:
+                await response.aclose()
+            if initial is not None and final is None:
+                raise _TruncatedStreamError("Sandbox process response is missing final metadata")
+        except Exception as error:
+            # Once the process has started, a broken connection must not rerun
+            # it; the caller resumes following it from the delivered output.
+            if initial is None or final is not None or not _is_transient_error(error):
+                raise
+            raise _RunProcessInterrupted(initial, delivered) from error
 
         if initial is None:
             raise SandboxResponseError("Sandbox process response is missing initial metadata")
-        if final is None:
-            raise SandboxResponseError("Sandbox process response is missing final metadata")
-        if initial.id != final.id or initial.session_id != final.session_id:
-            raise SandboxResponseError(
-                "Sandbox process response returned a different final process identity",
-                data={"initial": initial, "final": final},
-            )
-        if final.returncode is None:
-            raise SandboxResponseError(
-                "Sandbox process response final metadata is missing a return code",
-                data=final,
-            )
-        stdout, stderr = output_router.captured()
-        return CompletedProcessState(process=final, stdout=stdout, stderr=stderr)
+        assert final is not None
+        return _completed_process_state(initial, final, output_router)
 
     async def get_command(
         self,
