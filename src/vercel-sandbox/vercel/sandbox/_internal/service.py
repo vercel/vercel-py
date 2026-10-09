@@ -1,7 +1,7 @@
 """Neutral orchestration for Sandbox operations."""
 
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
-from contextlib import asynccontextmanager
+from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import TYPE_CHECKING, Literal, cast
@@ -10,7 +10,11 @@ from vercel._internal.core.byte_stream import (
     StagingFileRuntime,
 )
 from vercel._internal.core.http import StreamingResponse
-from vercel.sandbox._internal.api_client import SandboxApiClient
+from vercel.sandbox._internal.api_client import (
+    SandboxApiClient,
+    _completed_process_state,
+    _RunProcessInterrupted,
+)
 from vercel.sandbox._internal.errors import (
     SandboxApiError,
     SandboxFilesystemCommandError,
@@ -19,7 +23,11 @@ from vercel.sandbox._internal.errors import (
     SandboxResponseError,
     SandboxUploadSizeMismatchError,
 )
-from vercel.sandbox._internal.log_stream import _parse_command_log_record
+from vercel.sandbox._internal.log_stream import (
+    AsyncSleep,
+    _iter_command_logs,
+    _with_transient_retries,
+)
 from vercel.sandbox._internal.models import (
     _OMITTED,
     NO_PRIVATE_PARAMETERS,
@@ -86,7 +94,6 @@ _TRANSITIONAL_SANDBOX_STATUSES = frozenset(
     {SandboxStatus.PENDING, SandboxStatus.STOPPING, SandboxStatus.SNAPSHOTTING}
 )
 _READY_POLL_INTERVAL_SECONDS = 0.5
-AsyncSleep = Callable[[float], Awaitable[None]]
 ProcessOutputCollector = Callable[[ProcessState], Awaitable[tuple[str, str]]]
 _MISSING_PATH_ERROR_CODES = frozenset({"not_found", "path_not_found", "file_not_found", "ENOENT"})
 _PREDICATE_SCRIPT = """\
@@ -712,10 +719,7 @@ class SandboxService:
         )
         if not wait:
             return started
-        self._ensure_open()
-        return await self._api_client.get_command(
-            session_id=session_id, command_id=started.id, wait=True
-        )
+        return await self.get_process(session_id=session_id, process_id=started.id, wait=True)
 
     async def _wait_process(
         self,
@@ -752,16 +756,33 @@ class SandboxService:
         output_router: ProcessOutputRouter,
     ) -> CompletedProcessState:
         self._ensure_open()
-        return await self._api_client.run_process(
-            session_id=session_id,
-            command=command,
-            args=args,
-            cwd=cwd,
-            env=env,
-            sudo=sudo,
-            kill_after=kill_after,
-            output_router=output_router,
-        )
+        try:
+            return await self._api_client.run_process(
+                session_id=session_id,
+                command=command,
+                args=args,
+                cwd=cwd,
+                env=env,
+                sudo=sudo,
+                kill_after=kill_after,
+                output_router=output_router,
+            )
+        except _RunProcessInterrupted as interrupted:
+            started, delivered = interrupted.process, interrupted.delivered
+
+        # The process is already running, so follow the rest of its output
+        # from the logs endpoint and its exit through the wait endpoint.
+        async with aclosing(
+            _iter_command_logs(
+                lambda: self.process_logs_response(session_id=session_id, process_id=started.id),
+                sleep=self._sleep,
+                delivered=delivered,
+            )
+        ) as logs:
+            async for event in logs:
+                output_router.route(event)
+        final = await self.get_process(session_id=session_id, process_id=started.id, wait=True)
+        return _completed_process_state(started, final, output_router)
 
     async def create_process(
         self,
@@ -792,10 +813,13 @@ class SandboxService:
     async def get_process(
         self, *, session_id: str, process_id: str, wait: bool = False
     ) -> ProcessState:
-        self._ensure_open()
-        return await self._api_client.get_command(
-            session_id=session_id, command_id=process_id, wait=wait
-        )
+        async def get_command() -> ProcessState:
+            self._ensure_open()
+            return await self._api_client.get_command(
+                session_id=session_id, command_id=process_id, wait=wait
+            )
+
+        return await _with_transient_retries(get_command, sleep=self._sleep)
 
     async def query_processes(self, *, session_id: str) -> list[ProcessState]:
         self._ensure_open()
@@ -1114,18 +1138,11 @@ class SandboxService:
             session_id=session_id, command_id=process_id
         )
 
-    async def process_logs(
-        self, *, session_id: str, process_id: str
-    ) -> AsyncGenerator[ProcessLog, None]:
-        response = await self.process_logs_response(session_id=session_id, process_id=process_id)
-        try:
-            async for line in response.aiter_lines():
-                if line:
-                    event = _parse_command_log_record(line)
-                    if event is not None:
-                        yield event
-        finally:
-            await response.aclose()
+    def process_logs(self, *, session_id: str, process_id: str) -> AsyncGenerator[ProcessLog, None]:
+        return _iter_command_logs(
+            lambda: self.process_logs_response(session_id=session_id, process_id=process_id),
+            sleep=self._sleep,
+        )
 
 
 class SandboxArchiveUpload:
