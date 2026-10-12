@@ -1,0 +1,1 @@
+Send `isWebhook: false` on `hook_created`, so hooks are no longer treated as webhooks: they were resumable through the public webhook URL, and are refused by `resumeHook(token)` in newer Workflow SDKs.
