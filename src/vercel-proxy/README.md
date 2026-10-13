@@ -25,11 +25,10 @@ def old_blog(request: Request) -> Response:
     return RedirectResponse(f"/blog/{slug}", status_code=308)
 
 
-@proxy.route("/dashboard/{path:path}")
-def dashboard(request: Request) -> Response:
-    if "session" not in request.cookies:
-        return RedirectResponse("/login")
-    return ContinueResponse(request_headers={"x-user": request.cookies["session"]})
+@proxy.route("/docs/{path:path}")
+def docs(request: Request) -> Response:
+    theme = "dark" if request.cookies.get("theme") == "dark" else "light"
+    return ContinueResponse(request_headers={"x-theme": theme})
 
 
 @proxy.route("/api/{path:path}", host="{tenant}.example.com")
