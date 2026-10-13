@@ -1,6 +1,7 @@
 """Tests for coding-agent detection from inherited environment variables."""
 
 import pytest
+from hypothesis import given, strategies as st
 
 from vercel._internal.core.detect_agent import detect_agent_name
 
@@ -30,14 +31,27 @@ def test_known_agent_environment_markers(environment: dict[str, str], agent: str
     assert detect_agent_name(environment) == agent
 
 
-def test_ai_agent_takes_precedence_and_preserves_custom_names() -> None:
-    assert detect_agent_name({"AI_AGENT": " custom-agent@2 ", "CODEX_THREAD_ID": "thread"}) == (
-        "custom-agent@2"
-    )
+@pytest.mark.parametrize(
+    ("declared", "agent"),
+    [
+        ("fx", "fx"),
+        ("eve", "eve"),
+        ("v0", "v0"),
+        ("github-copilot", "github-copilot"),
+        ("github-copilot-cli", "github-copilot"),
+        (" custom-agent@2 ", "custom-agent@2"),
+    ],
+)
+def test_ai_agent_declares_the_agent(declared: str, agent: str) -> None:
+    assert detect_agent_name({"AI_AGENT": declared}) == agent
 
 
-def test_copilot_cli_name_is_normalized() -> None:
-    assert detect_agent_name({"AI_AGENT": "github-copilot-cli"}) == "github-copilot"
+@given(
+    declared=st.text(min_size=1).filter(lambda name: name.strip() not in {"", "github-copilot-cli"})
+)
+def test_ai_agent_takes_precedence_over_known_markers(declared: str) -> None:
+    environment = {"AI_AGENT": declared, "CODEX_THREAD_ID": "thread", "CLAUDECODE": "1"}
+    assert detect_agent_name(environment) == declared.strip()
 
 
 def test_empty_ai_agent_falls_back_to_known_marker() -> None:
