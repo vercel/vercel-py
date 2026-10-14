@@ -112,13 +112,3 @@ class ListBlob:
     size: int
     uploaded_at: datetime
     etag: str
-
-
-@dataclass(frozen=True, slots=True)
-class ListResult:
-    """One catalog page; pass cursor to list again when has_more is true."""
-
-    blobs: tuple[ListBlob, ...]
-    has_more: bool
-    cursor: str | None = None
-    folders: tuple[str, ...] = ()
