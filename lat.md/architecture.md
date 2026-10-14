@@ -14,7 +14,7 @@ For example, [[vercel-oidc]] provides `vercel.oidc`, [[vercel-sandbox]] provides
 
 The [[vercel]] distribution in [[src/vercel]] is the batteries-included entry point that depends on most service packages.
 
-It owns the Vercel REST API helpers (`vercel.blob`, `vercel.deployments`, `vercel.projects`, `vercel.project_routes`), function helpers such as `vercel.cron` and `vercel.env`, and the grouped [[src/vercel/client.py#Vercel]] and [[src/vercel/client.py#AsyncVercel]] clients. Modules such as `vercel.sandbox` and `vercel.workflow` arrive through its dependencies on the separately owned packages.
+It owns the Vercel REST API helpers (`vercel.deployments`, `vercel.projects`, `vercel.project_routes`), function helpers such as `vercel.cron` and `vercel.env`, and the grouped [[src/vercel/client.py#Vercel]] and [[src/vercel/client.py#AsyncVercel]] clients. Modules such as `vercel.blob`, `vercel.sandbox`, and `vercel.workflow` arrive through its dependencies on the separately owned packages.
 
 Its sources sit directly in `src/vercel/` instead of a nested `vercel/` directory; the Hatch wheel config maps that directory onto the `vercel` package.
 
