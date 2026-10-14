@@ -60,13 +60,14 @@ finally:
 | `stream_blob` | Pathname or Blob delivery URL, required `access` | Context manager yielding an iterable byte download |
 | `head_blob` | Pathname or Blob delivery URL | `HeadResult` with size, upload time, and object metadata |
 | `delete_blob` | One target or a sequence of 1–1,000 pathnames or Blob delivery URLs | `None` |
-| `list` | Optional prefix, cursor, page limit, and mode | `ListResult` with catalog entries, cursor, and `has_more` |
+| `query_blobs` | Optional prefix, page size, and starting cursor | Iterator of `ListBlob` entries that follows pagination automatically |
 | `copy` | Source pathname or Blob delivery URL, destination pathname, required `access` | `CopyResult` from the copy response |
 | `multipart_upload_blob` | Pathname, required `access`, upload options | Context yielding a sequential part uploader; `result: PutResult` after successful exit |
 
-`put_blob`, `get_blob`, `head_blob`, `list`, `copy`, and `delete_blob` are awaited in the async API. `stream_blob` is not
-awaited; enter it with `async with`. The sync API uses ordinary calls and enters
-`stream_blob` with `with`.
+`put_blob`, `get_blob`, `head_blob`, `copy`, and `delete_blob` are awaited in the async API.
+Iterate over `query_blobs` with `async for`, without awaiting the call. Enter
+`stream_blob` with `async with`. The sync API uses ordinary calls, iterates over
+`query_blobs` with `for`, and enters `stream_blob` with `with`.
 
 Pathnames are relative to the store. One leading slash is removed. Empty paths,
 control characters, invalid Unicode, `//`, and `.` or `..` path segments are
@@ -240,27 +241,35 @@ not delete remote parts or roll back an object that may already have published.
 
 ### Collections
 
-Both runtimes expose `list`, `copy`, and batch `delete_blob`. Listing returns one
-immutable `ListResult` page; it never fetches another page automatically.
-Each `ListBlob` includes URL, download URL, pathname, size, upload date, and ETag.
-The default expanded mode lists all objects under a prefix. Folded mode returns
-root-level objects and folder prefixes in `page.folders`.
+Both runtimes expose `query_blobs`, `copy`, and batch `delete_blob`. Like Sandbox's
+`query_*` APIs, `query_blobs` lazily yields individual objects and automatically
+follows pagination cursors. Each `ListBlob` includes URL, download URL, pathname,
+size, upload date, and ETag.
 
 ```python
-cursor = None
-while True:
-    page = await blob.list(prefix="reports/", limit=100, cursor=cursor)
-    for item in page.blobs:
-        print(item.pathname, item.size)
-    if not page.has_more:
-        break
-    cursor = page.cursor
+async for item in blob.query_blobs(prefix="reports/", page_size=100):
+    print(item.pathname, item.size)
+
+# Synchronous iteration needs no event loop.
+for item in blob.sync.query_blobs(prefix="reports/", page_size=100):
+    print(item.pathname, item.size)
 ```
 
-`limit` is an integer from 1 to 1,000 (the service defaults to 1,000).
-Prefixes are literal strings; cursors are opaque and must be passed unchanged.
-Use the same prefix and mode for subsequent pages. Listing is not a snapshot
-while objects change.
+`page_size` is the maximum number of objects fetched per API request, an integer
+from 1 to 1,000 (the service defaults to 1,000). It does not limit the total number
+of objects yielded. `prefix` is a literal pathname prefix. The optional opaque
+`cursor` specifies where to begin iteration; subsequent cursors are followed
+internally.
+
+Creating an iterator sends no HTTP request. Validation and the first request
+happen when iteration begins. The iterator retains one page at a time and fetches
+the next page only after yielding the current page's objects. Breaking out early
+does not fetch further pages. Like Sandbox, iteration stops at an empty page or
+when no next cursor remains. Errors propagate during iteration without restarting
+or retrying the listing. Iterate within the session's lifetime.
+
+Listing includes objects in nested folders. Folded folder listing and public page
+results are not exposed. Listing is not a snapshot while objects change.
 
 ```python
 copied = await blob.copy(
@@ -289,7 +298,7 @@ outcome uncertain. Missing targets are harmless. `if_match` is supported only
 for a single target (including a sequence of length one), and checks that
 object's ETag. Invalid sizes and batch preconditions fail locally.
 
-For synchronous usage, call `blob.sync.list`, `blob.sync.copy`, and
+For synchronous usage, iterate over `blob.sync.query_blobs` and call `blob.sync.copy` and
 `blob.sync.delete_blob` without `await`. The package examples exercise cursor
 pagination, conditional copy, and batch cleanup in both runtimes.
 

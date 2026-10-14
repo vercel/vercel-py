@@ -27,6 +27,10 @@ async def runtime(
     credentials = credentials or _credentials
 
     async def call(name: str, *args: Any, **options: Any) -> Any:
+        if name == "query_blobs":
+            if sync:
+                return list(blob.sync.query_blobs(*args, **options))
+            return [item async for item in blob.query_blobs(*args, **options)]
         if sync:
             return getattr(blob.sync, name)(*args, **options)
         return await getattr(blob, name)(*args, **options)
@@ -49,7 +53,7 @@ def entry(path: str) -> dict[str, Any]:
     return {k: data[k] for k in ("url", "downloadUrl", "pathname", "size", "uploadedAt", "etag")}
 
 
-async def test_pagination_and_folded_listing(sync: bool) -> None:
+async def test_query_blobs_pagination_and_metadata(sync: bool) -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -60,14 +64,14 @@ async def test_pagination_and_folded_listing(sync: bool) -> None:
         assert request.headers["x-api-version"] == "12"
         assert request.url.params["prefix"] == "folder/雪 &"
         assert request.url.params["limit"] == "1"
+        assert "mode" not in request.url.params
         if len(requests) == 1:
             assert "cursor" not in request.url.params
             return httpx.Response(
                 200, json={"blobs": [entry("folder/a")], "hasMore": True, "cursor": "opaque+/=&雪"}
             )
         assert request.url.params["cursor"] == "opaque+/=&雪"
-        assert request.url.params["mode"] == "folded"
-        return httpx.Response(200, json={"blobs": [], "hasMore": False, "folders": ["folder/sub/"]})
+        return httpx.Response(200, json={"blobs": [], "hasMore": False})
 
     async with runtime(
         sync,
@@ -76,18 +80,12 @@ async def test_pagination_and_folded_listing(sync: bool) -> None:
             token="oidc-test", store_id="teststore123", kind=CredentialKind.OIDC
         ),
     ) as call:
-        first = await call("list", prefix="folder/雪 &", limit=1)
-        assert isinstance(first, blob.ListResult)
-        assert first.has_more and len(first.blobs) == 1
-        item = first.blobs[0]
+        items = await call("query_blobs", prefix="folder/雪 &", page_size=1)
+        assert len(items) == 1
+        item = items[0]
         assert isinstance(item, blob.ListBlob)
         assert item.size == 7 and item.etag == "etag"
         assert item.uploaded_at.isoformat() == "2026-09-29T12:00:00+00:00"
-        second = await call(
-            "list", prefix="folder/雪 &", limit=1, cursor=first.cursor, mode="folded"
-        )
-        assert not second.has_more and second.cursor is None
-        assert second.blobs == () and second.folders == ("folder/sub/",)
     assert len(requests) == 2
 
 
@@ -156,14 +154,13 @@ async def test_conditional_delete(sync: bool) -> None:
 @pytest.mark.parametrize(
     ("operation", "args", "options"),
     [
-        ("list", (), {"limit": 0}),
-        ("list", (), {"limit": 1001}),
-        ("list", (), {"limit": True}),
-        ("list", (), {"limit": 1.5}),
-        ("list", (), {"mode": "invalid"}),
-        ("list", (), {"cursor": ""}),
-        ("list", (), {"cursor": "a\nb"}),
-        ("list", (), {"prefix": "\ud800"}),
+        ("query_blobs", (), {"page_size": 0}),
+        ("query_blobs", (), {"page_size": 1001}),
+        ("query_blobs", (), {"page_size": True}),
+        ("query_blobs", (), {"page_size": 1.5}),
+        ("query_blobs", (), {"cursor": ""}),
+        ("query_blobs", (), {"cursor": "a\nb"}),
+        ("query_blobs", (), {"prefix": "\ud800"}),
         ("delete", ([],), {}),
         ("delete", (["a"] * 1001,), {}),
         ("delete", (["a", ""],), {}),
@@ -194,7 +191,7 @@ async def test_validation_before_credentials_and_http(
 @pytest.mark.parametrize(
     ("operation", "args", "options"),
     [
-        ("list", (), {}),
+        ("query_blobs", (), {}),
         ("copy", ("a", "b"), {"access": "public"}),
         ("delete", (["a", "b"],), {}),
     ],
@@ -236,7 +233,6 @@ async def test_service_errors_no_retry(
         {},
         {"blobs": [], "hasMore": "true"},
         {"blobs": [], "hasMore": True},
-        {"blobs": [], "hasMore": False, "folders": [1]},
         {"blobs": [{**entry("a"), "size": -1}], "hasMore": False},
         {"blobs": [{**entry("a"), "uploadedAt": "bad-date"}], "hasMore": False},
         {"blobs": [{**entry("a"), "etag": None}], "hasMore": False},
@@ -245,7 +241,7 @@ async def test_service_errors_no_retry(
 async def test_malformed_list_response(sync: bool, payload: Any) -> None:
     async with runtime(sync, lambda r: httpx.Response(200, json=payload)) as call:
         with pytest.raises(blob.BlobStreamError):
-            await call("list")
+            await call("query_blobs")
 
 
 async def test_malformed_copy_response(sync: bool) -> None:
@@ -284,7 +280,7 @@ async def test_successful_conditional_delete(sync: bool) -> None:
 @pytest.mark.parametrize(
     ("operation", "args", "options"),
     [
-        ("list", (), {}),
+        ("query_blobs", (), {}),
         ("copy", ("a", "b"), {"access": "public"}),
     ],
 )
@@ -305,6 +301,119 @@ def test_sync_collections_without_event_loop() -> None:
         return httpx.Response(200, json=None)
 
     with _sync_session(handler):
-        assert blob.sync.list().blobs == ()
+        assert list(blob.sync.query_blobs()) == []
         assert blob.sync.copy("a", "b", access="public").pathname == "b"
         blob.sync.delete_blob(["a", "b"])
+
+
+async def test_query_blobs_is_lazy_and_fetches_pages_on_demand(sync: bool) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.url.params["prefix"] == "folder/"
+        assert request.url.params["limit"] == "2"
+        assert "mode" not in request.url.params
+        if len(requests) == 1:
+            assert request.url.params["cursor"] == "start+/="
+            return httpx.Response(
+                200,
+                json={
+                    "blobs": [entry("folder/a"), entry("folder/b")],
+                    "hasMore": True,
+                    "cursor": "next+/=",
+                },
+            )
+        assert request.url.params["cursor"] == "next+/="
+        return httpx.Response(200, json={"blobs": [entry("folder/c")], "hasMore": False})
+
+    async with runtime(sync, handler):
+        api = blob.sync if sync else blob
+        iterator: Any = api.query_blobs(prefix="folder/", page_size=2, cursor="start+/=")
+        assert not requests
+
+        async def advance() -> Any:
+            return next(iterator) if sync else await anext(iterator)
+
+        assert (await advance()).pathname == "folder/a"
+        assert len(requests) == 1
+        assert (await advance()).pathname == "folder/b"
+        assert len(requests) == 1
+        assert (await advance()).pathname == "folder/c"
+        assert len(requests) == 2
+        with pytest.raises(StopIteration if sync else StopAsyncIteration):
+            if sync:
+                next(iterator)
+            else:
+                await anext(iterator)
+        assert len(requests) == 2
+
+
+async def test_query_blobs_early_exit_fetches_no_more_pages(sync: bool) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "blobs": [entry("a")],
+                "hasMore": True,
+                "cursor": "next",
+            },
+        )
+
+    async with runtime(sync, handler):
+        if sync:
+            for item in blob.sync.query_blobs():
+                assert item.pathname == "a"
+                break
+        else:
+            async for item in blob.query_blobs():
+                assert item.pathname == "a"
+                break
+    assert len(requests) == 1
+
+
+async def test_query_blobs_empty_page_stops_like_sandbox(sync: bool) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"blobs": [], "hasMore": True, "cursor": "next"})
+
+    async with runtime(sync, handler):
+        if sync:
+            assert list(blob.sync.query_blobs()) == []
+        else:
+            assert [item async for item in blob.query_blobs()] == []
+    assert len(requests) == 1
+
+
+async def test_query_blobs_later_page_error_propagates_without_retry(sync: bool) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(
+                200,
+                json={
+                    "blobs": [entry("a")],
+                    "hasMore": True,
+                    "cursor": "next",
+                },
+            )
+        return httpx.Response(403)
+
+    seen: list[str] = []
+    async with runtime(sync, handler):
+        with pytest.raises(blob.BlobAccessError):
+            if sync:
+                for item in blob.sync.query_blobs():
+                    seen.append(item.pathname)
+            else:
+                async for item in blob.query_blobs():
+                    seen.append(item.pathname)
+    assert seen == ["a"]
+    assert len(requests) == 2

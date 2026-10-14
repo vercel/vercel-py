@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from contextlib import AbstractAsyncContextManager
 from typing import Literal, overload
 
@@ -13,6 +13,7 @@ from ._internal.api_client import _PutRequest
 from ._internal.download import AsyncBlobDownload, AsyncDownloadContext
 from ._internal.multipart import AsyncMultipartUpload
 from ._internal.options import BlobServiceOptions
+from ._internal.pagination import query_blobs as _query_blobs
 from ._internal.service import get_blob_service
 from .errors import (
     BlobAccessError,
@@ -42,7 +43,6 @@ from .models import (
     GetResult,
     HeadResult,
     ListBlob,
-    ListResult,
     PutBody,
     PutResult,
     SyncBlobCredentialsFactory,
@@ -161,16 +161,25 @@ async def head_blob(
     return await service.head(url_or_pathname)
 
 
-async def list(
+def query_blobs(
     *,
-    limit: int | None = None,
     prefix: str | None = None,
+    page_size: int | None = None,
     cursor: str | None = None,
-    mode: Literal["expanded", "folded"] = "expanded",
-) -> ListResult:
-    """List one catalog page; explicitly pass the returned cursor for the next."""
-    service = get_blob_service(get_active_session())
-    return await service.list(limit=limit, prefix=prefix, cursor=cursor, mode=mode)
+) -> AsyncIterator[ListBlob]:
+    """Iterate over Blobs, transparently following pagination cursors.
+
+    Args:
+        prefix: Literal pathname prefix to filter objects.
+        page_size: Maximum number of objects fetched per API request (1–1,000).
+        cursor: Cursor at which to begin pagination.
+    """
+    return _query_blobs(
+        get_blob_service(get_active_session()),
+        prefix=prefix,
+        page_size=page_size,
+        cursor=cursor,
+    )
 
 
 async def copy(
@@ -236,7 +245,6 @@ __all__ = [
     "GetResult",
     "HeadResult",
     "ListBlob",
-    "ListResult",
     "PutBody",
     "PutResult",
     "SyncBlobCredentialsFactory",
@@ -246,9 +254,9 @@ __all__ = [
     "delete_blob",
     "get_blob",
     "head_blob",
-    "list",
     "multipart_upload_blob",
     "put_blob",
+    "query_blobs",
     "stream_blob",
     "sync",
 ]
