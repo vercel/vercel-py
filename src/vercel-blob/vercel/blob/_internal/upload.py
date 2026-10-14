@@ -27,7 +27,7 @@ from vercel.blob._internal.validation import (
 from vercel.blob.errors import BlobContentLengthError, BlobUnknownError
 from vercel.blob.models import PutBody, SyncPutBody
 
-# Every body accepted by the sync or async public ``put``. Each runtime rejects
+# Every body accepted by the sync or async public ``put_blob``. Each runtime rejects
 # the half of this union that belongs to the other surface.
 AnyPutBody: TypeAlias = BytesLike | PutBody | SyncPutBody
 
