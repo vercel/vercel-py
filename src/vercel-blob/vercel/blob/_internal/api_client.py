@@ -602,7 +602,7 @@ class BlobApiClient:
         )
         return _parse_response(response, _ListResponse, "LIST")._to_result()
 
-    async def query_entries_page(
+    async def query_blob_entries_page(
         self, request: _FoldedListRequest, *, credentials: BlobCredentials
     ) -> QueryPage[ListBlob | BlobPrefix]:
         response = await self._request(

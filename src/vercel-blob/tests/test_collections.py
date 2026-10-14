@@ -28,7 +28,7 @@ async def runtime(
     credentials = credentials or _credentials
 
     async def call(name: str, *args: Any, **options: Any) -> Any:
-        if name in ("query_blobs", "query_entries"):
+        if name in ("query_blobs", "query_blob_entries"):
             if sync:
                 return list(getattr(blob.sync, name)(*args, **options))
             return [item async for item in getattr(blob, name)(*args, **options)]
@@ -307,7 +307,7 @@ def test_sync_collections_without_event_loop() -> None:
         delete_blob(["a", "b"])
 
 
-@pytest.mark.parametrize("query_name", ["query_blobs", "query_entries"])
+@pytest.mark.parametrize("query_name", ["query_blobs", "query_blob_entries"])
 async def test_queries_are_lazy_and_fetch_pages_on_demand(sync: bool, query_name: str) -> None:
     requests: list[httpx.Request] = []
 
@@ -315,7 +315,7 @@ async def test_queries_are_lazy_and_fetch_pages_on_demand(sync: bool, query_name
         requests.append(request)
         assert request.url.params["prefix"] == "folder/"
         assert request.url.params["limit"] == "2"
-        if query_name == "query_entries":
+        if query_name == "query_blob_entries":
             assert request.url.params["mode"] == "folded"
         else:
             assert "mode" not in request.url.params
@@ -464,7 +464,9 @@ async def test_folded_entries_mixed_and_folder_only_pages(sync: bool) -> None:
         )
 
     async with runtime(sync, handler) as call:
-        items = await call("query_entries", prefix="reports/雪 &/", page_size=2, cursor="start")
+        items = await call(
+            "query_blob_entries", prefix="reports/雪 &/", page_size=2, cursor="start"
+        )
     assert len(requests) == 3
     assert [type(item) for item in items] == [
         blob.ListBlob,
@@ -502,10 +504,10 @@ async def test_folded_entries_root(sync: bool, prefix: str | None) -> None:
         )
 
     async with runtime(sync, handler) as call:
-        items = await call("query_entries", prefix=prefix)
+        items = await call("query_blob_entries", prefix=prefix)
         assert items[1] == blob.BlobPrefix(prefix="reports/")
         # Folder prefixes can be passed directly to another directory query.
-        await call("query_entries", prefix=items[1].prefix)
+        await call("query_blob_entries", prefix=items[1].prefix)
 
 
 @pytest.mark.parametrize(
@@ -533,7 +535,7 @@ async def test_entries_validation_before_credentials(
 
     async with runtime(sync, handler, credentials) as call:
         with pytest.raises((BlobError, ValidationError)):
-            await call("query_entries", **options)
+            await call("query_blob_entries", **options)
 
 
 @pytest.mark.parametrize("folders", [[1], None, "reports/", [""], ["reports"]])
@@ -550,7 +552,7 @@ async def test_malformed_folder_response(sync: bool, folders: Any) -> None:
         ),
     ) as call:
         with pytest.raises(blob.BlobStreamError):
-            await call("query_entries")
+            await call("query_blob_entries")
 
 
 async def test_entries_early_exit_does_not_fetch_next_page(sync: bool) -> None:
@@ -570,11 +572,11 @@ async def test_entries_early_exit_does_not_fetch_next_page(sync: bool) -> None:
 
     async with runtime(sync, handler):
         if sync:
-            for item in blob.sync.query_entries():
+            for item in blob.sync.query_blob_entries():
                 assert item == blob.BlobPrefix(prefix="reports/")
                 break
         else:
-            async for item in blob.query_entries():
+            async for item in blob.query_blob_entries():
                 assert item == blob.BlobPrefix(prefix="reports/")
                 break
     assert len(requests) == 1
@@ -601,10 +603,10 @@ async def test_entries_later_page_error_propagates(sync: bool) -> None:
     async with runtime(sync, handler):
         with pytest.raises(blob.BlobAccessError):
             if sync:
-                for item in blob.sync.query_entries():
+                for item in blob.sync.query_blob_entries():
                     seen.append(item)
             else:
-                async for item in blob.query_entries():
+                async for item in blob.query_blob_entries():
                     seen.append(item)
     assert seen == [blob.BlobPrefix(prefix="reports/")]
     assert len(requests) == 2
@@ -621,6 +623,6 @@ def test_sync_entries_without_event_loop() -> None:
             },
         )
     ):
-        entries = list(blob.sync.query_entries())
+        entries = list(blob.sync.query_blob_entries())
     assert isinstance(entries[0], blob.ListBlob)
     assert entries[1] == blob.BlobPrefix(prefix="b/")

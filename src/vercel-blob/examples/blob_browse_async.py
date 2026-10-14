@@ -7,12 +7,12 @@ from uuid import uuid4
 
 import anyio
 
-from vercel.blob import Access, BlobPrefix, delete_blob, put_blob, query_blobs, query_entries
+from vercel.blob import Access, BlobPrefix, delete_blob, put_blob, query_blob_entries, query_blobs
 
 
 async def print_directory_tree(prefix: str, *, indent: str = "") -> None:
     """Browse one level, then follow each returned prefix into its subfolder."""
-    async for entry in query_entries(prefix=prefix, page_size=2):
+    async for entry in query_blob_entries(prefix=prefix, page_size=2):
         if isinstance(entry, BlobPrefix):
             print(f"{indent}{entry.prefix.removeprefix(prefix)}")
             await print_directory_tree(entry.prefix, indent=indent + "  ")
@@ -50,7 +50,7 @@ async def main() -> None:
             total_bytes += item.size
         print(f"{count} documents, {total_bytes} bytes in total")
 
-        # Use query_entries for a folder browser: it returns immediate documents
+        # Use query_blob_entries for a folder browser: it returns immediate documents
         # and BlobPrefix entries, which we query in turn to display a tree.
         print("\nDirectory tree:")
         await print_directory_tree(prefix)

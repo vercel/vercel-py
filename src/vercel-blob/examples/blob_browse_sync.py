@@ -5,12 +5,19 @@ from __future__ import annotations
 import os
 from uuid import uuid4
 
-from vercel.blob.sync import Access, BlobPrefix, delete_blob, put_blob, query_blobs, query_entries
+from vercel.blob.sync import (
+    Access,
+    BlobPrefix,
+    delete_blob,
+    put_blob,
+    query_blob_entries,
+    query_blobs,
+)
 
 
 def print_directory_tree(prefix: str, *, indent: str = "") -> None:
     """Browse one level, then follow each returned prefix into its subfolder."""
-    for entry in query_entries(prefix=prefix, page_size=2):
+    for entry in query_blob_entries(prefix=prefix, page_size=2):
         if isinstance(entry, BlobPrefix):
             print(f"{indent}{entry.prefix.removeprefix(prefix)}")
             print_directory_tree(entry.prefix, indent=indent + "  ")
@@ -48,7 +55,7 @@ def main() -> None:
             total_bytes += item.size
         print(f"{count} documents, {total_bytes} bytes in total")
 
-        # Use query_entries for a folder browser: it returns immediate documents
+        # Use query_blob_entries for a folder browser: it returns immediate documents
         # and BlobPrefix entries, which we query in turn to display a tree.
         print("\nDirectory tree:")
         print_directory_tree(prefix)

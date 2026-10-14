@@ -14,8 +14,8 @@ from .._internal.download import SyncBlobDownload, SyncDownloadContext
 from .._internal.multipart import SyncMultipartUpload
 from .._internal.options import SyncBlobServiceOptions
 from .._internal.pagination import (
+    query_blob_entries_sync as _query_blob_entries,
     query_blobs_sync as _query_blobs,
-    query_entries_sync as _query_entries,
 )
 from .._internal.service import get_sync_blob_service
 from ..errors import (
@@ -186,7 +186,7 @@ def query_blobs(
     )
 
 
-def query_entries(
+def query_blob_entries(
     *,
     prefix: str | None = None,
     page_size: int | None = None,
@@ -198,7 +198,7 @@ def query_entries(
     within each page; no global sort order is guaranteed. Pagination follows
     cursors lazily, including pages containing only folders.
     """
-    return _query_entries(
+    return _query_blob_entries(
         get_sync_blob_service(get_active_sync_session()),
         prefix=prefix,
         page_size=page_size,
@@ -282,6 +282,6 @@ __all__ = [
     "multipart_upload_blob",
     "put_blob",
     "query_blobs",
-    "query_entries",
+    "query_blob_entries",
     "stream_blob",
 ]
