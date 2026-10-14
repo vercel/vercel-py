@@ -242,5 +242,5 @@ def validate_list_text(value: object, *, name: str) -> str | None:
 def validate_directory_prefix(value: object) -> str | None:
     prefix = validate_list_text(value, name="prefix")
     if prefix and not prefix.endswith("/"):
-        raise BlobError("query_entries prefix must be empty or end with '/'")
+        raise BlobError("query_blob_entries prefix must be empty or end with '/'")
     return prefix

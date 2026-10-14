@@ -435,14 +435,15 @@ async def test_async_collections(store: LiveStore) -> None:
             assert metadata.cache_control == "public, max-age=300"
             paths = {item.pathname async for item in blob.query_blobs(prefix=prefix, page_size=1)}
             assert paths == {source, destination}
-            entries = [item async for item in blob.query_entries(prefix=prefix, page_size=1)]
+            entries = [item async for item in blob.query_blob_entries(prefix=prefix, page_size=1)]
             assert {item.pathname for item in entries if isinstance(item, blob.ListBlob)} == {
                 source
             }
             folders = [item for item in entries if isinstance(item, blob.BlobPrefix)]
             assert folders == [blob.BlobPrefix(prefix=prefix + "nested/")]
             nested = [
-                item async for item in blob.query_entries(prefix=folders[0].prefix, page_size=1)
+                item
+                async for item in blob.query_blob_entries(prefix=folders[0].prefix, page_size=1)
             ]
             assert len(nested) == 1
             assert isinstance(nested[0], blob.ListBlob)
@@ -478,13 +479,13 @@ def test_sync_collections(store: LiveStore) -> None:
             assert metadata.cache_control == "public, max-age=300"
             paths = {item.pathname for item in blob.sync.query_blobs(prefix=prefix, page_size=1)}
             assert paths == {source, destination}
-            entries = list(blob.sync.query_entries(prefix=prefix, page_size=1))
+            entries = list(blob.sync.query_blob_entries(prefix=prefix, page_size=1))
             assert {item.pathname for item in entries if isinstance(item, blob.ListBlob)} == {
                 source
             }
             folders = [item for item in entries if isinstance(item, blob.BlobPrefix)]
             assert folders == [blob.BlobPrefix(prefix=prefix + "nested/")]
-            nested = list(blob.sync.query_entries(prefix=folders[0].prefix, page_size=1))
+            nested = list(blob.sync.query_blob_entries(prefix=folders[0].prefix, page_size=1))
             assert len(nested) == 1
             assert isinstance(nested[0], blob.ListBlob)
             assert nested[0].pathname == destination

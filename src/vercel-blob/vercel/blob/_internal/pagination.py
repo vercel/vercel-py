@@ -76,7 +76,7 @@ def query_blobs_sync(
     )
 
 
-def query_entries(
+def query_blob_entries(
     service: BlobService,
     *,
     prefix: str | None = None,
@@ -84,14 +84,14 @@ def query_entries(
     cursor: str | None = None,
 ) -> AsyncIterator[ListBlob | BlobPrefix]:
     return _iterate(
-        lambda next_cursor: service.query_entries_page(
+        lambda next_cursor: service.query_blob_entries_page(
             prefix=prefix, page_size=page_size, cursor=next_cursor
         ),
         cursor,
     )
 
 
-def query_entries_sync(
+def query_blob_entries_sync(
     service: BlobService,
     *,
     prefix: str | None = None,
@@ -99,7 +99,7 @@ def query_entries_sync(
     cursor: str | None = None,
 ) -> Iterator[ListBlob | BlobPrefix]:
     return _iterate_sync(
-        lambda next_cursor: service.query_entries_page(
+        lambda next_cursor: service.query_blob_entries_page(
             prefix=prefix, page_size=page_size, cursor=next_cursor
         ),
         cursor,

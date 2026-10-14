@@ -127,7 +127,7 @@ class BlobService:
         credentials = await self._get_credentials()
         return await self._api_client.query_blobs_page(request, credentials=credentials)
 
-    async def query_entries_page(
+    async def query_blob_entries_page(
         self,
         *,
         page_size: int | None = None,
@@ -137,7 +137,7 @@ class BlobService:
         self.check_open()
         request = _FoldedListRequest(page_size=page_size, prefix=prefix, cursor=cursor)
         credentials = await self._get_credentials()
-        return await self._api_client.query_entries_page(request, credentials=credentials)
+        return await self._api_client.query_blob_entries_page(request, credentials=credentials)
 
     async def copy(
         self,

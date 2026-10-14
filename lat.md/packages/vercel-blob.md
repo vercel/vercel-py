@@ -58,7 +58,7 @@ Download metadata comes from response headers, with no preliminary HEAD request.
 
 Catalog queries are lazy iterators that follow cursors on demand, mirroring Sandbox's `query_*` APIs.
 
-[[src/vercel-blob/vercel/blob/__init__.py#query_blobs]] yields every object under a prefix, and [[src/vercel-blob/vercel/blob/__init__.py#query_entries]] yields one directory level as objects plus frozen [[src/vercel-blob/vercel/blob/models.py#BlobPrefix]] folders. Both share the cursor loop in [[src/vercel-blob/vercel/blob/_internal/pagination.py]]: no request is sent until iteration begins, one page is held at a time, and iteration stops at an empty page or a missing cursor. Folder-only pages carry entries, so browsing continues through them. Page results stay internal.
+[[src/vercel-blob/vercel/blob/__init__.py#query_blobs]] yields every object under a prefix, and [[src/vercel-blob/vercel/blob/__init__.py#query_blob_entries]] yields one directory level as objects plus frozen [[src/vercel-blob/vercel/blob/models.py#BlobPrefix]] folders. Both share the cursor loop in [[src/vercel-blob/vercel/blob/_internal/pagination.py]]: no request is sent until iteration begins, one page is held at a time, and iteration stops at an empty page or a missing cursor. Folder-only pages carry entries, so browsing continues through them. Page results stay internal.
 
 [[src/vercel-blob/vercel/blob/__init__.py#copy_blob]] copies on the server without downloading, and its `if_match` checks the source ETag. [[src/vercel-blob/vercel/blob/__init__.py#delete_blob]] takes one target or a batch of 1–1,000 sent as one request, validates the whole batch first, and allows `if_match` only for a single target. Batches are not split, retried, or atomic.
 
