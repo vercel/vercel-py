@@ -62,7 +62,7 @@ def main() -> None:
     # Copy on the server, iterate over objects, then delete both objects.
     prefix = f"vercel-py-examples/{uuid4().hex}/collections/"
     source = prefix + "source.bin"
-    destination = prefix + "copy.bin"
+    destination = prefix + "nested/copy.bin"
     try:
         original = blob.put_blob(source, b"collection", access=access)
         copied = blob.copy(
@@ -75,6 +75,15 @@ def main() -> None:
         assert (blob.get_blob(copied.url, access=access)).body == b"collection"
         paths = {item.pathname for item in blob.query_blobs(prefix=prefix, page_size=1)}
         assert paths == {source, destination}
+        entries = list(blob.query_entries(prefix=prefix, page_size=1))
+        objects = {item.pathname for item in entries if isinstance(item, blob.ListBlob)}
+        folders = [item for item in entries if isinstance(item, blob.BlobPrefix)]
+        assert objects == {source}
+        assert folders == [blob.BlobPrefix(prefix=prefix + "nested/")]
+        nested = list(blob.query_entries(prefix=folders[0].prefix))
+        assert len(nested) == 1
+        assert isinstance(nested[0], blob.ListBlob)
+        assert nested[0].pathname == destination
     finally:
         blob.delete_blob([source, destination])
 
