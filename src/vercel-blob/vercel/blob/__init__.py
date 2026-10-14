@@ -48,7 +48,7 @@ from .models import (
 
 
 @overload
-async def put(
+async def put_blob(
     pathname: str,
     body: bytes | bytearray | memoryview,
     *,
@@ -62,7 +62,7 @@ async def put(
 
 
 @overload
-async def put(
+async def put_blob(
     pathname: str,
     body: PutBody,
     *,
@@ -75,7 +75,7 @@ async def put(
 ) -> PutResult: ...
 
 
-async def put(
+async def put_blob(
     pathname: str,
     body: bytes | bytearray | memoryview | PutBody,
     *,
@@ -100,18 +100,18 @@ async def put(
     )
 
 
-async def get(
+async def get_blob(
     url_or_pathname: str,
     *,
     access: Literal["public", "private"],
 ) -> GetResult:
     """Download the complete object into memory and close its response."""
-    async with stream(url_or_pathname, access=access) as download:
+    async with stream_blob(url_or_pathname, access=access) as download:
         body = b"".join([chunk async for chunk in download])
     return GetResult(metadata=download.metadata, body=body)
 
 
-def multipart_upload(
+def multipart_upload_blob(
     pathname: str,
     *,
     access: Literal["public", "private"],
@@ -133,7 +133,7 @@ def multipart_upload(
     return AsyncMultipartUpload(service, request)
 
 
-def stream(
+def stream_blob(
     url_or_pathname: str,
     *,
     access: Literal["public", "private"],
@@ -149,7 +149,7 @@ def stream(
     return AsyncDownloadContext(opener)
 
 
-async def head(
+async def head_blob(
     url_or_pathname: str,
 ) -> HeadResult:
     """Retrieve catalog metadata for a Blob object."""
@@ -157,7 +157,7 @@ async def head(
     return await service.head(url_or_pathname)
 
 
-async def delete(
+async def delete_blob(
     url_or_pathname: str,
 ) -> None:
     """Delete a single object from Vercel Blob."""
@@ -196,11 +196,11 @@ __all__ = [
     "SyncBlobCredentialsFactory",
     "SyncByteReader",
     "SyncPutBody",
-    "delete",
-    "get",
-    "head",
-    "multipart_upload",
-    "put",
-    "stream",
+    "delete_blob",
+    "get_blob",
+    "head_blob",
+    "multipart_upload_blob",
+    "put_blob",
+    "stream_blob",
     "sync",
 ]

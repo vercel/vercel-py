@@ -32,24 +32,24 @@ async def test_async_multipart(store: LiveStore) -> None:
             yield b"m" * _CHUNK_SIZE
 
     async with session():
-        async with blob.multipart_upload(
+        async with blob.multipart_upload_blob(
             _pathname("async-multipart.bin"), access=store.access
         ) as upload:
             await upload.upload_part(part(), content_length=5 * 1024 * 1024)
             await upload.upload_part(part(), content_length=5 * 1024 * 1024)
             await upload.upload_part(b"tail")
         try:
-            assert (await blob.get(upload.result.url, access=store.access)).body == (
+            assert (await blob.get_blob(upload.result.url, access=store.access)).body == (
                 b"m" * (10 * 1024 * 1024) + b"tail"
             )
-            assert (await blob.head(upload.result.url)).etag == upload.result.etag
+            assert (await blob.head_blob(upload.result.url)).etag == upload.result.etag
         finally:
-            await blob.delete(upload.result.url)
+            await blob.delete_blob(upload.result.url)
 
 
 def test_sync_multipart(store: LiveStore) -> None:
     with session():
-        with blob.sync.multipart_upload(
+        with blob.sync.multipart_upload_blob(
             _pathname("sync-multipart.bin"), access=store.access
         ) as upload:
             for _ in range(2):
@@ -58,12 +58,12 @@ def test_sync_multipart(store: LiveStore) -> None:
                 )
             upload.upload_part(b"tail")
         try:
-            assert blob.sync.get(upload.result.url, access=store.access).body == (
+            assert blob.sync.get_blob(upload.result.url, access=store.access).body == (
                 b"m" * (10 * 1024 * 1024) + b"tail"
             )
-            assert blob.sync.head(upload.result.url).etag == upload.result.etag
+            assert blob.sync.head_blob(upload.result.url).etag == upload.result.etag
         finally:
-            blob.sync.delete(upload.result.url)
+            blob.sync.delete_blob(upload.result.url)
 
 
 @pytest.mark.asyncio
@@ -72,13 +72,13 @@ async def test_async_failed_multipart_does_not_publish(store: LiveStore) -> None
     async with session():
         try:
             with pytest.raises(ValueError, match="stop"):
-                async with blob.multipart_upload(pathname, access=store.access) as upload:
+                async with blob.multipart_upload_blob(pathname, access=store.access) as upload:
                     await upload.upload_part(b"prefix")
                     raise ValueError("stop")
             with pytest.raises(blob.BlobNotFoundError):
-                await blob.head(pathname)
+                await blob.head_blob(pathname)
         finally:
-            await blob.delete(pathname)
+            await blob.delete_blob(pathname)
 
 
 def test_sync_failed_multipart_does_not_publish(store: LiveStore) -> None:
@@ -86,79 +86,79 @@ def test_sync_failed_multipart_does_not_publish(store: LiveStore) -> None:
     with session():
         try:
             with pytest.raises(ValueError, match="stop"):
-                with blob.sync.multipart_upload(pathname, access=store.access) as upload:
+                with blob.sync.multipart_upload_blob(pathname, access=store.access) as upload:
                     upload.upload_part(b"prefix")
                     raise ValueError("stop")
             with pytest.raises(blob.BlobNotFoundError):
-                blob.sync.head(pathname)
+                blob.sync.head_blob(pathname)
         finally:
-            blob.sync.delete(pathname)
+            blob.sync.delete_blob(pathname)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("payload", _PAYLOADS, ids=["empty", "multi-chunk"])
 async def test_async_lifecycle(store: LiveStore, payload: bytes) -> None:
     async with session():
-        uploaded = await blob.put(_pathname("async.bin"), payload, access=store.access)
+        uploaded = await blob.put_blob(_pathname("async.bin"), payload, access=store.access)
         try:
-            result = await blob.get(uploaded.url, access=store.access)
+            result = await blob.get_blob(uploaded.url, access=store.access)
             assert result.body == payload
             assert result.metadata.url == uploaded.url
             assert result.metadata.content_type == uploaded.content_type
             received = bytearray()
-            async with blob.stream(uploaded.url, access=store.access) as download:
+            async with blob.stream_blob(uploaded.url, access=store.access) as download:
                 async for chunk in download:
                     assert 0 < len(chunk) <= _CHUNK_SIZE
                     received.extend(chunk)
             assert received == payload
             assert download.is_closed
-            metadata = await blob.head(uploaded.url)
+            metadata = await blob.head_blob(uploaded.url)
             assert metadata.url == uploaded.url
             assert metadata.pathname == uploaded.pathname
             assert metadata.size == len(payload)
             assert metadata.etag == uploaded.etag
         finally:
-            await blob.delete(uploaded.url)
-        await blob.delete(uploaded.url)
+            await blob.delete_blob(uploaded.url)
+        await blob.delete_blob(uploaded.url)
         with pytest.raises(blob.BlobNotFoundError):
-            await blob.head(uploaded.url)
+            await blob.head_blob(uploaded.url)
         with pytest.raises(blob.BlobNotFoundError):
-            await blob.get(uploaded.url, access=store.access)
+            await blob.get_blob(uploaded.url, access=store.access)
         with pytest.raises(blob.BlobNotFoundError):
-            async with blob.stream(uploaded.url, access=store.access):
+            async with blob.stream_blob(uploaded.url, access=store.access):
                 pass
 
 
 @pytest.mark.parametrize("payload", _PAYLOADS, ids=["empty", "multi-chunk"])
 def test_sync_lifecycle(store: LiveStore, payload: bytes) -> None:
     with session():
-        uploaded = blob.sync.put(_pathname("sync.bin"), payload, access=store.access)
+        uploaded = blob.sync.put_blob(_pathname("sync.bin"), payload, access=store.access)
         try:
-            result = blob.sync.get(uploaded.url, access=store.access)
+            result = blob.sync.get_blob(uploaded.url, access=store.access)
             assert result.body == payload
             assert result.metadata.url == uploaded.url
             assert result.metadata.content_type == uploaded.content_type
             received = bytearray()
-            with blob.sync.stream(uploaded.url, access=store.access) as download:
+            with blob.sync.stream_blob(uploaded.url, access=store.access) as download:
                 for chunk in download:
                     assert 0 < len(chunk) <= _CHUNK_SIZE
                     received.extend(chunk)
             assert received == payload
             assert download.is_closed
-            metadata = blob.sync.head(uploaded.url)
+            metadata = blob.sync.head_blob(uploaded.url)
             assert metadata.url == uploaded.url
             assert metadata.pathname == uploaded.pathname
             assert metadata.size == len(payload)
             assert metadata.etag == uploaded.etag
         finally:
-            blob.sync.delete(uploaded.url)
-        blob.sync.delete(uploaded.url)
+            blob.sync.delete_blob(uploaded.url)
+        blob.sync.delete_blob(uploaded.url)
         with pytest.raises(blob.BlobNotFoundError):
-            blob.sync.head(uploaded.url)
+            blob.sync.head_blob(uploaded.url)
         with pytest.raises(blob.BlobNotFoundError):
-            blob.sync.get(uploaded.url, access=store.access)
+            blob.sync.get_blob(uploaded.url, access=store.access)
         with pytest.raises(blob.BlobNotFoundError):
-            with blob.sync.stream(uploaded.url, access=store.access):
+            with blob.sync.stream_blob(uploaded.url, access=store.access):
                 pass
 
 
@@ -166,7 +166,7 @@ def test_encoded_pathname_and_metadata(store: LiveStore) -> None:
     pathname = _pathname("space + ?% café.txt")
     content_type = "text/plain; charset=utf-8"
     with session():
-        uploaded = blob.sync.put(
+        uploaded = blob.sync.put_blob(
             pathname,
             b"hello",
             access=store.access,
@@ -179,31 +179,33 @@ def test_encoded_pathname_and_metadata(store: LiveStore) -> None:
             assert uploaded.content_type == content_type
             assert uploaded.content_disposition.startswith("attachment")
 
-            metadata = blob.sync.head(pathname)
+            metadata = blob.sync.head_blob(pathname)
             assert metadata.url == uploaded.url
             assert metadata.content_type == content_type
             assert "max-age=120" in metadata.cache_control
 
             for target in (pathname, uploaded.url, uploaded.download_url):
-                result = blob.sync.get(target, access=store.access)
+                result = blob.sync.get_blob(target, access=store.access)
                 assert result.body == b"hello"
                 assert result.metadata.content_type == content_type
                 assert result.metadata.etag == uploaded.etag
                 assert result.metadata.size == 5
         finally:
-            blob.sync.delete(pathname)
+            blob.sync.delete_blob(pathname)
 
 
 def test_overwrite_policy(store: LiveStore) -> None:
     pathname = _pathname("overwrite.txt")
     with session():
-        first = blob.sync.put(pathname, b"first", access=store.access, add_random_suffix=False)
+        first = blob.sync.put_blob(pathname, b"first", access=store.access, add_random_suffix=False)
         try:
             with pytest.raises(blob.BlobError) as error:
-                blob.sync.put(pathname, b"second", access=store.access, add_random_suffix=False)
+                blob.sync.put_blob(
+                    pathname, b"second", access=store.access, add_random_suffix=False
+                )
             assert error.value.status_code == 400
 
-            second = blob.sync.put(
+            second = blob.sync.put_blob(
                 pathname,
                 b"second",
                 access=store.access,
@@ -212,9 +214,9 @@ def test_overwrite_policy(store: LiveStore) -> None:
             )
             assert second.url == first.url
             assert second.etag != first.etag
-            assert blob.sync.get(pathname, access=store.access).body == b"second"
+            assert blob.sync.get_blob(pathname, access=store.access).body == b"second"
         finally:
-            blob.sync.delete(pathname)
+            blob.sync.delete_blob(pathname)
 
 
 def test_store_rejects_other_access(store: LiveStore) -> None:
@@ -223,21 +225,21 @@ def test_store_rejects_other_access(store: LiveStore) -> None:
     with session():
         try:
             with pytest.raises(blob.BlobError) as error:
-                blob.sync.put(pathname, b"x", access=other, add_random_suffix=False)
+                blob.sync.put_blob(pathname, b"x", access=other, add_random_suffix=False)
             assert error.value.status_code == 400
             with pytest.raises(blob.BlobNotFoundError):
-                blob.sync.head(pathname)
+                blob.sync.head_blob(pathname)
         finally:
-            blob.sync.delete(pathname)
+            blob.sync.delete_blob(pathname)
 
 
 def test_unauthenticated_delivery(store: LiveStore) -> None:
     with session():
-        uploaded = blob.sync.put(_pathname("delivery.txt"), b"hello", access=store.access)
+        uploaded = blob.sync.put_blob(_pathname("delivery.txt"), b"hello", access=store.access)
         try:
             response = httpx.get(uploaded.url, trust_env=False)
         finally:
-            blob.sync.delete(uploaded.url)
+            blob.sync.delete_blob(uploaded.url)
     if store.access == "public":
         assert response.status_code == 200
         assert response.content == b"hello"
@@ -250,18 +252,18 @@ def test_unauthenticated_delivery(store: LiveStore) -> None:
 async def test_early_exit_closes_download(store: LiveStore) -> None:
     payload = bytes(range(256)) * 4096
     async with session():
-        uploaded = await blob.put(_pathname("early-exit.bin"), payload, access=store.access)
+        uploaded = await blob.put_blob(_pathname("early-exit.bin"), payload, access=store.access)
         try:
             for _ in range(3):
-                async with blob.stream(uploaded.url, access=store.access) as download:
+                async with blob.stream_blob(uploaded.url, access=store.access) as download:
                     async for chunk in download:
                         assert chunk == payload[: len(chunk)]
                         break
                 assert download.is_closed
-            metadata = await blob.head(uploaded.url)
+            metadata = await blob.head_blob(uploaded.url)
             assert metadata.size == len(payload)
         finally:
-            await blob.delete(uploaded.url)
+            await blob.delete_blob(uploaded.url)
 
 
 @pytest.mark.asyncio
@@ -274,42 +276,42 @@ async def test_async_streaming_round_trip(store: LiveStore, tmp_path: Path) -> N
 
     async with session():
         async with await anyio.open_file(path, "rb") as file:
-            uploaded_reader = await blob.put(
+            uploaded_reader = await blob.put_blob(
                 pathname_reader, file, access=store.access, content_length=len(payload)
             )
         try:
-            result = await blob.get(uploaded_reader.url, access=store.access)
+            result = await blob.get_blob(uploaded_reader.url, access=store.access)
             assert result.body == payload
 
-            size = (await blob.head(uploaded_reader.url)).size
-            async with blob.stream(uploaded_reader.url, access=store.access) as download:
-                uploaded_copy = await blob.put(
+            size = (await blob.head_blob(uploaded_reader.url)).size
+            async with blob.stream_blob(uploaded_reader.url, access=store.access) as download:
+                uploaded_copy = await blob.put_blob(
                     _pathname("async-streaming-copy.bin"),
                     download,
                     access=store.access,
                     content_length=size,
                 )
             try:
-                result = await blob.get(uploaded_copy.url, access=store.access)
+                result = await blob.get_blob(uploaded_copy.url, access=store.access)
                 assert result.body == payload
             finally:
-                await blob.delete(uploaded_copy.url)
+                await blob.delete_blob(uploaded_copy.url)
         finally:
-            await blob.delete(uploaded_reader.url)
+            await blob.delete_blob(uploaded_reader.url)
 
         async def chunks() -> AsyncIterator[bytes]:
             chunk_size = 64 * 1024
             for offset in range(0, len(payload), chunk_size):
                 yield payload[offset : offset + chunk_size]
 
-        uploaded_iter = await blob.put(
+        uploaded_iter = await blob.put_blob(
             pathname_iter, chunks(), access=store.access, content_length=len(payload)
         )
         try:
-            result = await blob.get(uploaded_iter.url, access=store.access)
+            result = await blob.get_blob(uploaded_iter.url, access=store.access)
             assert result.body == payload
         finally:
-            await blob.delete(uploaded_iter.url)
+            await blob.delete_blob(uploaded_iter.url)
 
 
 @pytest.mark.asyncio
@@ -328,16 +330,16 @@ async def test_async_streaming_length_mismatch_creates_no_object(
     async with session():
         try:
             with pytest.raises(blob.BlobContentLengthError):
-                await blob.put(
+                await blob.put_blob(
                     pathname,
                     anyio.wrap_file(io.BytesIO(data)),
                     access=store.access,
                     content_length=declared,
                 )
             with pytest.raises(blob.BlobNotFoundError):
-                await blob.head(pathname)
+                await blob.head_blob(pathname)
         finally:
-            await blob.delete(pathname)
+            await blob.delete_blob(pathname)
 
 
 def test_sync_streaming_round_trip(store: LiveStore) -> None:
@@ -347,42 +349,42 @@ def test_sync_streaming_round_trip(store: LiveStore) -> None:
 
     with session():
         reader = io.BytesIO(payload)
-        uploaded_reader = blob.sync.put(
+        uploaded_reader = blob.sync.put_blob(
             pathname_reader, reader, access=store.access, content_length=len(payload)
         )
         try:
-            result = blob.sync.get(uploaded_reader.url, access=store.access)
+            result = blob.sync.get_blob(uploaded_reader.url, access=store.access)
             assert result.body == payload
 
-            size = blob.sync.head(uploaded_reader.url).size
-            with blob.sync.stream(uploaded_reader.url, access=store.access) as download:
-                uploaded_copy = blob.sync.put(
+            size = blob.sync.head_blob(uploaded_reader.url).size
+            with blob.sync.stream_blob(uploaded_reader.url, access=store.access) as download:
+                uploaded_copy = blob.sync.put_blob(
                     _pathname("sync-streaming-copy.bin"),
                     download,
                     access=store.access,
                     content_length=size,
                 )
             try:
-                result = blob.sync.get(uploaded_copy.url, access=store.access)
+                result = blob.sync.get_blob(uploaded_copy.url, access=store.access)
                 assert result.body == payload
             finally:
-                blob.sync.delete(uploaded_copy.url)
+                blob.sync.delete_blob(uploaded_copy.url)
         finally:
-            blob.sync.delete(uploaded_reader.url)
+            blob.sync.delete_blob(uploaded_reader.url)
 
         def chunks():
             chunk_size = 64 * 1024
             for offset in range(0, len(payload), chunk_size):
                 yield payload[offset : offset + chunk_size]
 
-        uploaded_iter = blob.sync.put(
+        uploaded_iter = blob.sync.put_blob(
             pathname_iter, chunks(), access=store.access, content_length=len(payload)
         )
         try:
-            result = blob.sync.get(uploaded_iter.url, access=store.access)
+            result = blob.sync.get_blob(uploaded_iter.url, access=store.access)
             assert result.body == payload
         finally:
-            blob.sync.delete(uploaded_iter.url)
+            blob.sync.delete_blob(uploaded_iter.url)
 
 
 @pytest.mark.parametrize(
@@ -400,10 +402,10 @@ def test_sync_streaming_length_mismatch_creates_no_object(
     with session():
         try:
             with pytest.raises(blob.BlobContentLengthError):
-                blob.sync.put(
+                blob.sync.put_blob(
                     pathname, io.BytesIO(data), access=store.access, content_length=declared
                 )
             with pytest.raises(blob.BlobNotFoundError):
-                blob.sync.head(pathname)
+                blob.sync.head_blob(pathname)
         finally:
-            blob.sync.delete(pathname)
+            blob.sync.delete_blob(pathname)

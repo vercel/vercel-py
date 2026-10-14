@@ -121,7 +121,7 @@ async def runtime(sync: bool, backend: Backend) -> AsyncIterator[Any]:
 
 
 def upload(api: Any) -> Any:
-    return api.multipart_upload("café.bin", access="private", allow_overwrite=True)
+    return api.multipart_upload_blob("café.bin", access="private", allow_overwrite=True)
 
 
 @pytest.mark.anyio
@@ -336,7 +336,7 @@ async def test_invalid_creation_options_send_no_requests(sync: bool) -> None:
     backend = Backend()
     async with runtime(sync, backend) as api:
         with pytest.raises(blob.BlobError):
-            api.multipart_upload("", access="private")
+            api.multipart_upload_blob("", access="private")
         assert backend.actions == []
 
 
