@@ -60,6 +60,7 @@ finally:
 | `stream` | Pathname or Blob delivery URL, required `access` | Context manager yielding an iterable byte download |
 | `head` | Pathname or Blob delivery URL | `HeadResult` with size, upload time, and object metadata |
 | `delete` | One pathname or Blob delivery URL | `None` |
+| `multipart_upload` | Pathname, required `access`, upload options | Context yielding a sequential part uploader; `result: PutResult` after successful exit |
 
 `put`, `get`, `head`, and `delete` are awaited in the async API. `stream` is not
 awaited; enter it with `async with`. The sync API uses ordinary calls and enters
@@ -174,6 +175,66 @@ async def from_blocking(chunks: Iterator[bytes]) -> AsyncIterator[bytes]:
         yield chunk
 ```
 
+### Multipart uploads
+
+Use `multipart_upload` when you want to choose complete parts explicitly. It
+accepts the same metadata, suffix, and overwrite options as `put`. Enter the
+context with `async with` (or `with` for `blob.sync`); do not await its creation.
+
+```python
+from collections.abc import AsyncIterator
+from vercel import blob
+
+async def first_part() -> AsyncIterator[bytes]:
+    for _ in range(80):
+        yield b"x" * (64 * 1024)
+
+async def upload_parts() -> blob.PutResult:
+    async with blob.multipart_upload("parts.bin", access="public") as upload:
+        await upload.upload_part(first_part(), content_length=5 * 1024 * 1024)
+        await upload.upload_part(b"tail")
+    return upload.result
+```
+
+The sync API accepts sync readers and iterables:
+
+```python
+from vercel.blob import sync as blob
+
+with blob.multipart_upload("parts.bin", access="public") as upload:
+    upload.upload_part(
+        (b"x" * (64 * 1024) for _ in range(80)), content_length=5 * 1024 * 1024
+    )
+    upload.upload_part(b"tail")
+print(upload.result.url)
+```
+
+`upload_part` returns `None`. The SDK assigns consecutive numbers starting at 1
+and retains successful ETags internally. There is no part-number argument,
+receipt list, or manual completion step. Upload one part at a time; overlapping
+calls fail the handle. There is no background scheduling or automatic retry.
+
+Parts accept the same sources and exact-length checks as `put`: buffer lengths
+are inferred, streaming lengths are required, and sources stay caller-owned.
+Each part must contain 1 byte through 5 GiB, with at most 10,000 parts. Every
+part except the last must be at least 5 MiB. After a smaller part, a further
+part is rejected before consuming its source or sending its request. An empty
+scope raises without completing; use `put(pathname, b"", ...)` for an empty object.
+
+A successful context exit publishes the object and makes `upload.result`
+available. Normal early `return` or `break` is a successful exit and publishes
+the uploaded parts. Exceptions and cancellation prevent completion. A failed
+part, including a validation or source error caught inside the block, permanently
+fails that handle; normal exit then raises `BlobError` instead of publishing a
+prefix. Result access before successful exit raises `BlobError`, as do part
+uploads before entry or after exit.
+Keep the multipart context inside its session scope.
+
+Completion errors propagate from context exit and leave `result` unavailable.
+A lost completion response can leave publication uncertain; the SDK does not
+retry completion. The backend has no multipart abort action. Local cleanup does
+not delete remote parts or roll back an object that may already have published.
+
 ### Downloads and ownership
 
 `get` buffers the complete body in memory and returns a frozen, slotted
@@ -259,7 +320,8 @@ are configured through the SDK session's `httpx_client_factory`, not through Blo
 [Async lifecycle](examples/blob_async.py) and [sync lifecycle](examples/blob_sync.py)
 upload a unique object, compare downloaded bytes, inspect metadata, and delete the
 object in `finally`. The async example also adapts a sync file and a sync iterator
-for streaming uploads.
+for streaming uploads. Both examples also stream multipart parts, verify the
+published content, and delete the resulting object.
 
 From the repository root:
 
@@ -299,5 +361,5 @@ Source the file instead of passing `uv run --env-file`. uv does not override
 variables that are already set, so a `VERCEL_OIDC_TOKEN` exported for another
 project wins, and the Blob API answers `403 Invalid token`.
 
-This release does not include unknown-length streaming uploads, multipart uploads, listing,
+This release does not include unknown-length streaming uploads, listing,
 batch deletion, copying, or file-like `open` operations.

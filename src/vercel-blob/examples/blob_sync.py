@@ -47,6 +47,18 @@ def main() -> None:
     finally:
         blob.delete(stream_uploaded.url)
 
+    # Parts stream independently; the final part may be smaller than 5 MiB.
+    multipart_pathname = f"vercel-py-examples/{uuid4().hex}/sync-multipart.bin"
+    with blob.multipart_upload(multipart_pathname, access=access) as upload:
+        upload.upload_part((b"m" * (64 * 1024) for _ in range(80)), content_length=5 * 1024 * 1024)
+        upload.upload_part(b"tail")
+    try:
+        assert blob.get(upload.result.url, access=access).body == (
+            b"m" * (5 * 1024 * 1024) + b"tail"
+        )
+    finally:
+        blob.delete(upload.result.url)
+
     print("Sync Blob lifecycle passed; test object deleted.")
 
 
