@@ -2,7 +2,7 @@
 
 Opt-out usage telemetry for SDK operations, batched in process and flushed at exit.
 
-Lives in [[src/vercel-internal-telemetry]] and is exposed as [[src/vercel-internal-telemetry/vercel/internal/telemetry/__init__.py|vercel.internal.telemetry]]. Used by [[vercel]] (Blob, deployments, projects) and [[vercel-cache]].
+Lives in [[src/vercel-internal-telemetry]] and is exposed as [[src/vercel-internal-telemetry/vercel/internal/telemetry/__init__.py|vercel.internal.telemetry]]. Used by [[vercel]] (deployments, projects) and [[vercel-cache]].
 
 ## Event collection
 

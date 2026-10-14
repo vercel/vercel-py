@@ -12,7 +12,7 @@ Shared logic is written as `async` methods on a base client that talks to a [[sr
 
 `iter_coroutine` raises if the coroutine tries to suspend, so sync code paths must not await real async work such as `anyio.sleep` or user callbacks that may be async. The full migration recipe is the [[.agents/skills/iter-coroutine/SKILL.md|iter-coroutine skill]].
 
-The [[vercel]] REST and Blob clients, [[vercel-sandbox]], and [[vercel-connect]] use the shared transports and sessions, and their feature modules never construct HTTP clients directly. [[vercel-queue]] follows the same base-client pattern over its own HTTP runtime and its own copy of `iter_coroutine`. [[vercel-cache]], [[vercel-oidc]], and [[vercel-internal-telemetry]] call HTTPX2 directly.
+The [[vercel]] REST clients, [[vercel-blob]], [[vercel-sandbox]], and [[vercel-connect]] use the shared transports and sessions, and their feature modules never construct HTTP clients directly. [[vercel-queue]] follows the same base-client pattern over its own HTTP runtime and its own copy of `iter_coroutine`. [[vercel-cache]], [[vercel-oidc]], and [[vercel-internal-telemetry]] call HTTPX2 directly.
 
 ## SDK sessions
 

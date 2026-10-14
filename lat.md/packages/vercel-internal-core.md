@@ -24,6 +24,8 @@ Transports are the only place HTTP requests are built and sent, so service code 
 
 [[src/vercel-internal-core/vercel/_internal/core/http/transport.py#BaseTransport]] exposes one async-shaped API: plain `send`, plus scoped request and response streaming. [[src/vercel-internal-core/vercel/_internal/core/http/transport.py#SyncTransport]] implements it with blocking I/O and never suspends, which is what makes [[runtime#Sync and async parity]] work. Request bodies are explicit types (`JSONBody`, `BytesBody`, `RawBody`), and `ReadResponsePolicy` controls when a streamed response body is read eagerly.
 
+Finishing a request stream returns the server's response even when the server stopped reading early and a prior write failed, so callers can map the real error instead of a broken pipe. A success response that arrives before the body is complete raises `anyio.BrokenResourceError` rather than looking like a finished upload.
+
 [[src/vercel-internal-core/vercel/_internal/core/http/retry.py#RetryPolicy]] describes retry behavior. [[src/vercel-internal-core/vercel/_internal/core/http/transport.py#extract_structured_error]] normalizes Vercel API error bodies for the services that wrap them.
 
 ### Legacy httpx compatibility
@@ -37,7 +39,7 @@ HTTPX2 is the only HTTP family the SDK installs, but a session factory may retur
 Small utilities let one async-shaped implementation serve both public API modes.
 
 - [[src/vercel-internal-core/vercel/_internal/core/iter_coroutine.py#iter_coroutine]] drives a non-suspending coroutine to completion and raises if it ever suspends.
-- [[src/vercel-internal-core/vercel/_internal/core/byte_stream.py]] adapts sync and async byte sources to one `ReadableByteStream` protocol. It also provides a `StagingFileRuntime` for spooling uploads, with sync and async runtimes supplied by the session.
+- [[src/vercel-internal-core/vercel/_internal/core/byte_stream.py]] adapts sync and async byte sources to one `ReadableByteStream` protocol. The async runtime accepts only buffers and async readers and rejects blocking readers rather than offloading them to worker threads. It also provides a `StagingFileRuntime` for spooling uploads, with sync and async runtimes supplied by the session.
 - [[src/vercel-internal-core/vercel/_internal/core/time.py#coerce_duration]] and its siblings normalize numeric and `timedelta` durations.
 
 ## Agent detection
