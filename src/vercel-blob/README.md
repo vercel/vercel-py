@@ -419,17 +419,17 @@ object in `finally`. The async example also adapts a sync file and a sync iterat
 for streaming uploads. Both examples also stream multipart parts, verify the
 published content, and delete the resulting object.
 
-Their collection examples create a README, a nested CSV report, and an archived
-copy. They show three ways to use the query APIs with direct imports:
+The collection operations have separate, independently runnable examples:
 
-- Iterate over `query_blobs` to print a flat inventory and total stored bytes.
-- Iterate over `query_entries` to distinguish immediate objects from
-  `BlobPrefix` subfolders.
-- Recursively follow each returned prefix in `walk_blobs`, filtering the resulting
-  objects into a CSV download manifest.
+| Scenario | Async | Sync | What it demonstrates |
+| --- | --- | --- | --- |
+| Browse a documentation library | [Browse](examples/blob_browse_async.py) | [Browse](examples/blob_browse_sync.py) | Use `query_blobs` for an inventory and total storage size; recursively follow `BlobPrefix` entries from `query_entries` to print a directory tree. |
+| Publish a reviewed draft | [Copy](examples/blob_copy_async.py) | [Copy](examples/blob_copy_sync.py) | Copy a reviewed source revision with `copy_blob(if_match=...)`, configure the published document's metadata, and preview its content. |
 
-Both versions force pagination with a small `page_size`, verify the traversal
-results, and delete all example objects in `finally`.
+The browser examples create a small library with an index, two guides, and an API
+reference. They use a small `page_size` to exercise pagination. Each example seeds
+its own unique pathnames and removes its objects in `finally`. All use the same
+credential and access configuration as the lifecycle examples.
 
 From the repository root:
 
@@ -438,6 +438,13 @@ uv run poe test vercel-blob
 uv run poe qa vercel-blob
 uv run poe test vercel-blob -- -m live
 uv run poe test-examples vercel-blob
+```
+
+To run one scenario directly with your configured credentials:
+
+```sh
+uv run python src/vercel-blob/examples/blob_browse_sync.py
+uv run python src/vercel-blob/examples/blob_copy_async.py
 ```
 
 ### Live tests
