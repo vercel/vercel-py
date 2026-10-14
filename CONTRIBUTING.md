@@ -92,6 +92,14 @@ uv run poe fix
 
 The workspace task system is documented in `scripts/poe/README.md`.
 
+## Knowledge Graph
+
+Architecture, design decisions, and cross-package conventions are documented
+as a [lat.md](https://www.lat.md/) knowledge graph in `lat.md/`. Install the
+CLI with `npm install -g lat.md`, then browse it with `lat ui` or search it
+with `lat search`. Run `lat check` after changing code it references; CI runs
+the same check.
+
 ## News Fragments
 
 User-visible package changes need a news fragment:

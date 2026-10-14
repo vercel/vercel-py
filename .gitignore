@@ -127,3 +127,6 @@ venv.bak/
 **/*.env
 
 .claude
+.lat-build
+.mcp.json
+.codex

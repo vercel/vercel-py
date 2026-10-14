@@ -35,6 +35,25 @@ jobs:
       - name: Typecheck
         run: uv run poe typecheck
 
+  lat-check:
+    name: lat.md check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      # Validates links, source-symbol references, and section structure in
+      # lat.md/. Lat has not tagged a release of this action yet, so it is
+      # pinned to a commit and the checker version is pinned explicitly.
+      - name: Check knowledge graph
+        uses: vercel-labs/lat.md@1525a41cd6b51e9aa0ddddd6d849b1ba57e54d97 # main
+        with:
+          version: '0.1.1'
+
   test:
     name: Test (${{ matrix.os.name }}, py${{ matrix.python-version }}, anyio ${{ matrix.anyio }})
     runs-on: ${{ matrix.os.runner }}
@@ -226,6 +245,7 @@ jobs:
     if: always()
     needs:
       - build
+      - lat-check
       - lint-and-typecheck
       - test
       - release-dry-run
@@ -235,6 +255,7 @@ jobs:
       - name: Check CI results
         if: >-
           needs.build.result != 'success' ||
+          needs.lat-check.result != 'success' ||
           needs.lint-and-typecheck.result != 'success' ||
           needs.test.result != 'success' ||
           (needs.release-dry-run.result != 'success' && needs.release-dry-run.result != 'skipped')
