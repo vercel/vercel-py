@@ -14,6 +14,7 @@ from test_object_ops import _async_session, _credentials, _object_json, _sync_se
 
 from vercel import blob
 from vercel.blob import BlobCredentials, BlobError, CredentialKind
+from vercel.blob.sync import copy_blob, delete_blob
 
 pytestmark = pytest.mark.anyio
 
@@ -107,7 +108,7 @@ async def test_copy_metadata_options_and_single_request(sync: bool) -> None:
 
     async with runtime(sync, handler) as call:
         result = await call(
-            "copy",
+            "copy_blob",
             "source.bin",
             "copies/雪 &.bin",
             access="private",
@@ -137,7 +138,7 @@ async def test_delete_batch_in_one_request(sync: bool, targets: Any) -> None:
         return httpx.Response(200, json=None)
 
     async with runtime(sync, handler) as call:
-        assert await call("delete", targets) is None
+        assert await call("delete_blob", targets) is None
     assert len(requests) == 1
 
 
@@ -148,7 +149,7 @@ async def test_conditional_delete(sync: bool) -> None:
 
     async with runtime(sync, handler) as call:
         with pytest.raises(blob.BlobPreconditionFailedError):
-            await call("delete", ["a.bin"], if_match='"etag"')
+            await call("delete_blob", ["a.bin"], if_match='"etag"')
 
 
 @pytest.mark.parametrize(
@@ -161,17 +162,17 @@ async def test_conditional_delete(sync: bool) -> None:
         ("query_blobs", (), {"cursor": ""}),
         ("query_blobs", (), {"cursor": "a\nb"}),
         ("query_blobs", (), {"prefix": "\ud800"}),
-        ("delete", ([],), {}),
-        ("delete", (["a"] * 1001,), {}),
-        ("delete", (["a", ""],), {}),
-        ("delete", (b"a",), {}),
-        ("delete", (["a", "b"],), {"if_match": '"etag"'}),
-        ("delete", ("a",), {"if_match": ""}),
-        ("copy", ("https://evil.example/a", "b"), {"access": "public"}),
-        ("copy", ("a", "../b"), {"access": "public"}),
-        ("copy", ("a", "b"), {"access": "invalid"}),
-        ("copy", ("a", "b"), {"access": "public", "if_match": "a\rb"}),
-        ("copy", ("a", "b"), {"access": "public", "allow_overwrite": 1}),
+        ("delete_blob", ([],), {}),
+        ("delete_blob", (["a"] * 1001,), {}),
+        ("delete_blob", (["a", ""],), {}),
+        ("delete_blob", (b"a",), {}),
+        ("delete_blob", (["a", "b"],), {"if_match": '"etag"'}),
+        ("delete_blob", ("a",), {"if_match": ""}),
+        ("copy_blob", ("https://evil.example/a", "b"), {"access": "public"}),
+        ("copy_blob", ("a", "../b"), {"access": "public"}),
+        ("copy_blob", ("a", "b"), {"access": "invalid"}),
+        ("copy_blob", ("a", "b"), {"access": "public", "if_match": "a\rb"}),
+        ("copy_blob", ("a", "b"), {"access": "public", "allow_overwrite": 1}),
     ],
 )
 async def test_validation_before_credentials_and_http(
@@ -192,8 +193,8 @@ async def test_validation_before_credentials_and_http(
     ("operation", "args", "options"),
     [
         ("query_blobs", (), {}),
-        ("copy", ("a", "b"), {"access": "public"}),
-        ("delete", (["a", "b"],), {}),
+        ("copy_blob", ("a", "b"), {"access": "public"}),
+        ("delete_blob", (["a", "b"],), {}),
     ],
 )
 @pytest.mark.parametrize(
@@ -247,7 +248,7 @@ async def test_malformed_list_response(sync: bool, payload: Any) -> None:
 async def test_malformed_copy_response(sync: bool) -> None:
     async with runtime(sync, lambda r: httpx.Response(200, json={"pathname": "b"})) as call:
         with pytest.raises(blob.BlobStreamError):
-            await call("copy", "a", "b", access="public")
+            await call("copy_blob", "a", "b", access="public")
 
 
 async def test_copy_defaults_and_url_source(sync: bool) -> None:
@@ -264,7 +265,7 @@ async def test_copy_defaults_and_url_source(sync: bool) -> None:
         return httpx.Response(200, json=_object_json("b"))
 
     async with runtime(sync, handler) as call:
-        await call("copy", source, "/b", access="public")
+        await call("copy_blob", source, "/b", access="public")
 
 
 async def test_successful_conditional_delete(sync: bool) -> None:
@@ -274,14 +275,14 @@ async def test_successful_conditional_delete(sync: bool) -> None:
         return httpx.Response(200, json=None)
 
     async with runtime(sync, handler) as call:
-        assert await call("delete", "a", if_match='"etag"') is None
+        assert await call("delete_blob", "a", if_match='"etag"') is None
 
 
 @pytest.mark.parametrize(
     ("operation", "args", "options"),
     [
         ("query_blobs", (), {}),
-        ("copy", ("a", "b"), {"access": "public"}),
+        ("copy_blob", ("a", "b"), {"access": "public"}),
     ],
 )
 async def test_non_json_response(
@@ -302,8 +303,8 @@ def test_sync_collections_without_event_loop() -> None:
 
     with _sync_session(handler):
         assert list(blob.sync.query_blobs()) == []
-        assert blob.sync.copy("a", "b", access="public").pathname == "b"
-        blob.sync.delete_blob(["a", "b"])
+        assert copy_blob("a", "b", access="public").pathname == "b"
+        delete_blob(["a", "b"])
 
 
 @pytest.mark.parametrize("query_name", ["query_blobs", "query_entries"])

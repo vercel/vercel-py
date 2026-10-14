@@ -98,7 +98,7 @@ async def main() -> None:
     destination = prefix + "nested/copy.bin"
     try:
         original = await blob.put_blob(source, b"collection", access=access)
-        copied = await blob.copy(
+        copied = await blob.copy_blob(
             original.url,
             destination,
             access=access,
