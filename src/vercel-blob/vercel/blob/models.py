@@ -104,7 +104,7 @@ class CopyResult:
 
 @dataclass(frozen=True, slots=True)
 class ListBlob:
-    """Catalog entry returned by list; distinct from full HEAD metadata."""
+    """Catalog entry yielded by queries; distinct from full HEAD metadata."""
 
     url: str
     download_url: str
@@ -112,3 +112,10 @@ class ListBlob:
     size: int
     uploaded_at: datetime
     etag: str
+
+
+@dataclass(frozen=True, slots=True)
+class BlobPrefix:
+    """A virtual folder prefix, including its trailing slash."""
+
+    prefix: str

@@ -7,7 +7,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 from email.utils import parsedate_to_datetime
 from functools import partial
-from typing import Annotated, TypeVar
+from typing import Annotated, Literal, TypeVar
 from urllib.parse import quote
 
 import httpx2 as httpx
@@ -49,6 +49,7 @@ from vercel.blob.errors import (
 from vercel.blob.models import (
     Access,
     BlobCredentials,
+    BlobPrefix,
     CopyResult,
     DownloadMetadata,
     HeadResult,
@@ -56,13 +57,14 @@ from vercel.blob.models import (
     PutResult,
 )
 
-from .pagination import QueryBlobsPage
+from .pagination import QueryPage
 from .upload import _CHUNK_SIZE, _ChunkSource, send_streaming_upload
 from .validation import (
     validate_access,
     validate_bool_flag,
     validate_cache_control_max_age,
     validate_content_type,
+    validate_directory_prefix,
     validate_if_match,
     validate_list_text,
     validate_upload_pathname,
@@ -132,6 +134,11 @@ class _ListRequest(_ApiModel):
         }
 
 
+class _FoldedListRequest(_ListRequest):
+    prefix: Annotated[str | None, BeforeValidator(validate_directory_prefix)] = None
+    mode: Literal["folded"] = "folded"
+
+
 class _ListBlobResponse(_ApiModel):
     url: str
     download_url: str = Field(alias="downloadUrl")
@@ -162,11 +169,28 @@ class _ListResponse(_ApiModel):
             raise ValueError("hasMore requires a non-empty cursor")
         return self
 
-    def _to_result(self) -> QueryBlobsPage:
-        return QueryBlobsPage(
-            blobs=tuple(blob._to_result() for blob in self.blobs),
+    def _to_result(self) -> QueryPage[ListBlob]:
+        return QueryPage(
+            items=tuple(blob._to_result() for blob in self.blobs),
             next_cursor=self.cursor if self.has_more else None,
         )
+
+
+class _FoldedListResponse(_ListResponse):
+    folders: list[str] = Field(default_factory=list)
+
+    @field_validator("folders")
+    @classmethod
+    def _validate_folders(cls, folders: list[str]) -> list[str]:
+        if any(not prefix or not prefix.endswith("/") for prefix in folders):
+            raise ValueError("folders must contain non-empty prefixes ending with '/'")
+        return folders
+
+    def _to_entries_page(self) -> QueryPage[ListBlob | BlobPrefix]:
+        items: tuple[ListBlob | BlobPrefix, ...] = tuple(
+            blob._to_result() for blob in self.blobs
+        ) + tuple(BlobPrefix(prefix=prefix) for prefix in self.folders)
+        return QueryPage(items=items, next_cursor=self.cursor if self.has_more else None)
 
 
 class _DeleteRequest(_ApiModel):
@@ -572,11 +596,19 @@ class BlobApiClient:
 
     async def query_blobs_page(
         self, request: _ListRequest, *, credentials: BlobCredentials
-    ) -> QueryBlobsPage:
+    ) -> QueryPage[ListBlob]:
         response = await self._request(
             "GET", "", credentials=credentials, params=request._to_params()
         )
         return _parse_response(response, _ListResponse, "LIST")._to_result()
+
+    async def query_entries_page(
+        self, request: _FoldedListRequest, *, credentials: BlobCredentials
+    ) -> QueryPage[ListBlob | BlobPrefix]:
+        response = await self._request(
+            "GET", "", credentials=credentials, params=request._to_params()
+        )
+        return _parse_response(response, _FoldedListResponse, "LIST")._to_entries_page()
 
     async def copy(
         self, source: str, request: _CopyRequest, *, credentials: BlobCredentials

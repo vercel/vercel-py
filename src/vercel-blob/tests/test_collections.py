@@ -27,10 +27,10 @@ async def runtime(
     credentials = credentials or _credentials
 
     async def call(name: str, *args: Any, **options: Any) -> Any:
-        if name == "query_blobs":
+        if name in ("query_blobs", "query_entries"):
             if sync:
-                return list(blob.sync.query_blobs(*args, **options))
-            return [item async for item in blob.query_blobs(*args, **options)]
+                return list(getattr(blob.sync, name)(*args, **options))
+            return [item async for item in getattr(blob, name)(*args, **options)]
         if sync:
             return getattr(blob.sync, name)(*args, **options)
         return await getattr(blob, name)(*args, **options)
@@ -306,14 +306,18 @@ def test_sync_collections_without_event_loop() -> None:
         blob.sync.delete_blob(["a", "b"])
 
 
-async def test_query_blobs_is_lazy_and_fetches_pages_on_demand(sync: bool) -> None:
+@pytest.mark.parametrize("query_name", ["query_blobs", "query_entries"])
+async def test_queries_are_lazy_and_fetch_pages_on_demand(sync: bool, query_name: str) -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         assert request.url.params["prefix"] == "folder/"
         assert request.url.params["limit"] == "2"
-        assert "mode" not in request.url.params
+        if query_name == "query_entries":
+            assert request.url.params["mode"] == "folded"
+        else:
+            assert "mode" not in request.url.params
         if len(requests) == 1:
             assert request.url.params["cursor"] == "start+/="
             return httpx.Response(
@@ -329,7 +333,7 @@ async def test_query_blobs_is_lazy_and_fetches_pages_on_demand(sync: bool) -> No
 
     async with runtime(sync, handler):
         api = blob.sync if sync else blob
-        iterator: Any = api.query_blobs(prefix="folder/", page_size=2, cursor="start+/=")
+        iterator: Any = getattr(api, query_name)(prefix="folder/", page_size=2, cursor="start+/=")
         assert not requests
 
         async def advance() -> Any:
@@ -417,3 +421,205 @@ async def test_query_blobs_later_page_error_propagates_without_retry(sync: bool)
                     seen.append(item.pathname)
     assert seen == ["a"]
     assert len(requests) == 2
+
+
+async def test_folded_entries_mixed_and_folder_only_pages(sync: bool) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.url.params["mode"] == "folded"
+        assert request.url.params["prefix"] == "reports/雪 &/"
+        assert request.url.params["limit"] == "2"
+        if len(requests) == 1:
+            assert request.url.params["cursor"] == "start"
+            return httpx.Response(
+                200,
+                json={
+                    "blobs": [entry("reports/雪 &/a.bin")],
+                    "folders": ["reports/雪 &/nested/"],
+                    "hasMore": True,
+                    "cursor": "next+/=&",
+                },
+            )
+        if len(requests) == 2:
+            assert request.url.params["cursor"] == "next+/=&"
+            return httpx.Response(
+                200,
+                json={
+                    "blobs": [],
+                    "folders": ["reports/雪 &/other/"],
+                    "hasMore": True,
+                    "cursor": "last",
+                },
+            )
+        assert request.url.params["cursor"] == "last"
+        return httpx.Response(
+            200,
+            json={
+                "blobs": [entry("reports/雪 &/z.bin")],
+                "hasMore": False,
+            },
+        )
+
+    async with runtime(sync, handler) as call:
+        items = await call("query_entries", prefix="reports/雪 &/", page_size=2, cursor="start")
+    assert len(requests) == 3
+    assert [type(item) for item in items] == [
+        blob.ListBlob,
+        blob.BlobPrefix,
+        blob.BlobPrefix,
+        blob.ListBlob,
+    ]
+    assert items[0].pathname == "reports/雪 &/a.bin"
+    assert items[1] == blob.BlobPrefix(prefix="reports/雪 &/nested/")
+    assert items[2] == blob.BlobPrefix(prefix="reports/雪 &/other/")
+    assert items[3].pathname == "reports/雪 &/z.bin"
+
+
+@pytest.mark.parametrize("prefix", [None, ""])
+async def test_folded_entries_root(sync: bool, prefix: str | None) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 2:
+            assert request.url.params["prefix"] == "reports/"
+            return httpx.Response(200, json={"blobs": [], "hasMore": False})
+        if prefix is None:
+            assert "prefix" not in request.url.params
+        else:
+            assert request.url.params["prefix"] == ""
+        assert request.url.params["mode"] == "folded"
+        return httpx.Response(
+            200,
+            json={
+                "blobs": [entry("root.bin")],
+                "folders": ["reports/"],
+                "hasMore": False,
+            },
+        )
+
+    async with runtime(sync, handler) as call:
+        items = await call("query_entries", prefix=prefix)
+        assert items[1] == blob.BlobPrefix(prefix="reports/")
+        # Folder prefixes can be passed directly to another directory query.
+        await call("query_entries", prefix=items[1].prefix)
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"prefix": "reports"},
+        {"prefix": "reports-old"},
+        {"prefix": "a\n/"},
+        {"prefix": "\ud800/"},
+        {"page_size": 0},
+        {"page_size": 1001},
+        {"page_size": True},
+        {"cursor": ""},
+    ],
+)
+async def test_entries_validation_before_credentials(
+    sync: bool,
+    options: dict[str, Any],
+) -> None:
+    def credentials() -> BlobCredentials:
+        pytest.fail("invalid query resolved credentials")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        pytest.fail("invalid query reached HTTP")
+
+    async with runtime(sync, handler, credentials) as call:
+        with pytest.raises((BlobError, ValidationError)):
+            await call("query_entries", **options)
+
+
+@pytest.mark.parametrize("folders", [[1], None, "reports/", [""], ["reports"]])
+async def test_malformed_folder_response(sync: bool, folders: Any) -> None:
+    async with runtime(
+        sync,
+        lambda r: httpx.Response(
+            200,
+            json={
+                "blobs": [],
+                "folders": folders,
+                "hasMore": False,
+            },
+        ),
+    ) as call:
+        with pytest.raises(blob.BlobStreamError):
+            await call("query_entries")
+
+
+async def test_entries_early_exit_does_not_fetch_next_page(sync: bool) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "blobs": [],
+                "folders": ["reports/"],
+                "hasMore": True,
+                "cursor": "next",
+            },
+        )
+
+    async with runtime(sync, handler):
+        if sync:
+            for item in blob.sync.query_entries():
+                assert item == blob.BlobPrefix(prefix="reports/")
+                break
+        else:
+            async for item in blob.query_entries():
+                assert item == blob.BlobPrefix(prefix="reports/")
+                break
+    assert len(requests) == 1
+
+
+async def test_entries_later_page_error_propagates(sync: bool) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(
+                200,
+                json={
+                    "blobs": [],
+                    "folders": ["reports/"],
+                    "hasMore": True,
+                    "cursor": "next",
+                },
+            )
+        return httpx.Response(403)
+
+    seen: list[blob.ListBlob | blob.BlobPrefix] = []
+    async with runtime(sync, handler):
+        with pytest.raises(blob.BlobAccessError):
+            if sync:
+                for item in blob.sync.query_entries():
+                    seen.append(item)
+            else:
+                async for item in blob.query_entries():
+                    seen.append(item)
+    assert seen == [blob.BlobPrefix(prefix="reports/")]
+    assert len(requests) == 2
+
+
+def test_sync_entries_without_event_loop() -> None:
+    with _sync_session(
+        lambda r: httpx.Response(
+            200,
+            json={
+                "blobs": [entry("a")],
+                "folders": ["b/"],
+                "hasMore": False,
+            },
+        )
+    ):
+        entries = list(blob.sync.query_entries())
+    assert isinstance(entries[0], blob.ListBlob)
+    assert entries[1] == blob.BlobPrefix(prefix="b/")

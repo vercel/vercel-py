@@ -13,7 +13,7 @@ from ._internal.api_client import _PutRequest
 from ._internal.download import AsyncBlobDownload, AsyncDownloadContext
 from ._internal.multipart import AsyncMultipartUpload
 from ._internal.options import BlobServiceOptions
-from ._internal.pagination import query_blobs as _query_blobs
+from ._internal.pagination import query_blobs as _query_blobs, query_entries as _query_entries
 from ._internal.service import get_blob_service
 from .errors import (
     BlobAccessError,
@@ -37,6 +37,7 @@ from .models import (
     AsyncByteReader,
     BlobCredentials,
     BlobCredentialsFactory,
+    BlobPrefix,
     CopyResult,
     CredentialKind,
     DownloadMetadata,
@@ -182,6 +183,26 @@ def query_blobs(
     )
 
 
+def query_entries(
+    *,
+    prefix: str | None = None,
+    page_size: int | None = None,
+    cursor: str | None = None,
+) -> AsyncIterator[ListBlob | BlobPrefix]:
+    """Iterate over objects and virtual folders at one directory level.
+
+    Nonempty prefixes must end with '/'. Objects precede folder prefixes
+    within each page; no global sort order is guaranteed. Pagination follows
+    cursors lazily, including pages containing only folders.
+    """
+    return _query_entries(
+        get_blob_service(get_active_session()),
+        prefix=prefix,
+        page_size=page_size,
+        cursor=cursor,
+    )
+
+
 async def copy(
     source: str,
     pathname: str,
@@ -232,6 +253,7 @@ __all__ = [
     "BlobNotFoundError",
     "BlobPathnameMismatchError",
     "BlobPreconditionFailedError",
+    "BlobPrefix",
     "BlobServiceNotAvailable",
     "BlobServiceOptions",
     "BlobServiceRateLimited",
@@ -257,6 +279,7 @@ __all__ = [
     "multipart_upload_blob",
     "put_blob",
     "query_blobs",
+    "query_entries",
     "stream_blob",
     "sync",
 ]
