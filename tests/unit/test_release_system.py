@@ -1858,8 +1858,9 @@ def test_apscheduler_bundle_keeps_apscheduler_peer_dependency(
     )
 
 
-def test_sandbox_bundle_keeps_bounded_pydantic_external(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("package_name", ["vercel-sandbox", "vercel-connect", "vercel-blob"])
+def test_bundle_keeps_bounded_pydantic_external(
+    monkeypatch: pytest.MonkeyPatch, package_name: str
 ) -> None:
     packages = {
         name: workspace.Package(name, path, path / version_file, ())
@@ -1879,11 +1880,11 @@ def test_sandbox_bundle_keeps_bounded_pydantic_external(
     monkeypatch.setattr(workspace, "packages", lambda: packages)
     monkeypatch.setattr(bundle_release, "shared_vendored_version", lambda: "0.7.1")
     data = bundle_release._load_pyproject(  # noqa: SLF001
-        bundle_release.ROOT / "src/vercel-sandbox"
+        bundle_release.ROOT / "src" / package_name
     )
 
     vendored_requirements = bundle_release._derive_vendor_requirements(  # noqa: SLF001
-        "vercel-sandbox", data
+        package_name, data
     )
 
     assert all(
@@ -1892,7 +1893,7 @@ def test_sandbox_bundle_keeps_bounded_pydantic_external(
     )
 
     ext_deps = bundle_release._external_dependencies(  # noqa: SLF001
-        "vercel-sandbox", data, vendored_requirements
+        package_name, data, vendored_requirements
     )
     assert "pydantic>=2.7.0,<3" in ext_deps
 
