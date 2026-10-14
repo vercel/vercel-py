@@ -419,6 +419,18 @@ object in `finally`. The async example also adapts a sync file and a sync iterat
 for streaming uploads. Both examples also stream multipart parts, verify the
 published content, and delete the resulting object.
 
+Their collection examples create a README, a nested CSV report, and an archived
+copy. They show three ways to use the query APIs with direct imports:
+
+- Iterate over `query_blobs` to print a flat inventory and total stored bytes.
+- Iterate over `query_entries` to distinguish immediate objects from
+  `BlobPrefix` subfolders.
+- Recursively follow each returned prefix in `walk_blobs`, filtering the resulting
+  objects into a CSV download manifest.
+
+Both versions force pagination with a small `page_size`, verify the traversal
+results, and delete all example objects in `finally`.
+
 From the repository root:
 
 ```sh
