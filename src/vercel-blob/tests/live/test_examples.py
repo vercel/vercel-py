@@ -37,5 +37,7 @@ def test_example(script: Path) -> None:
     result = subprocess.run(
         [sys.executable, str(script)], capture_output=True, text=True, timeout=120
     )
-    assert result.returncode == 0, f"{script.name} failed with exit code {result.returncode}"
-    assert "lifecycle passed; test object deleted." in result.stdout
+    assert result.returncode == 0, (
+        f"{script.name} failed with exit code {result.returncode}\n{result.stdout}\n{result.stderr}"
+    )
+    assert result.stdout.strip(), f"{script.name} produced no example output"

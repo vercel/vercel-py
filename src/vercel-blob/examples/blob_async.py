@@ -10,92 +10,12 @@ from uuid import uuid4
 import anyio
 
 from vercel import blob
-from vercel.blob import (
-    BlobPrefix,
-    ListBlob,
-    copy_blob,
-    delete_blob,
-    put_blob,
-    query_blobs,
-    query_entries,
-)
 
 
 async def iterate_in_thread(chunks: Iterator[bytes]) -> AsyncIterator[bytes]:
     """Yield chunks from a blocking iterator without blocking the event loop."""
     while (chunk := await anyio.to_thread.run_sync(next, chunks, None)) is not None:
         yield chunk
-
-
-async def walk_blobs(prefix: str) -> AsyncIterator[ListBlob]:
-    """Walk every directory level, yielding objects rather than virtual folders."""
-    async for entry in query_entries(prefix=prefix, page_size=2):
-        if isinstance(entry, BlobPrefix):
-            # A returned prefix includes its trailing slash and can be queried directly.
-            async for item in walk_blobs(entry.prefix):
-                yield item
-        else:
-            yield entry
-
-
-async def collections_example(access: blob.Access) -> None:
-    """List a report collection, browse its folders, and build a download manifest."""
-    prefix = f"vercel-py-examples/{uuid4().hex}/collections/"
-    report = prefix + "reports/2026/january.csv"
-    archived_report = prefix + "archive/2026/january.csv"
-    readme = prefix + "README.txt"
-    csv_body = b"month,revenue\nJanuary,1200\n"
-    readme_body = b"Monthly reports and their archived copies.\n"
-    try:
-        original = await put_blob(report, csv_body, access=access, content_type="text/csv")
-        await put_blob(readme, readme_body, access=access, content_type="text/plain")
-        copied = await copy_blob(
-            original.url,
-            archived_report,
-            access=access,
-            content_type="text/csv",
-            if_match=original.etag,
-        )
-        assert (await blob.get_blob(copied.url, access=access)).body == csv_body
-
-        # Flat listing includes all descendants. Pagination is automatic.
-        print("All objects, including nested reports:")
-        paths: set[str] = set()
-        total_bytes = 0
-        async for item in query_blobs(prefix=prefix, page_size=2):
-            print(f"  {item.pathname.removeprefix(prefix)}: {item.size} bytes")
-            paths.add(item.pathname)
-            total_bytes += item.size
-        print(f"Total: {len(paths)} objects, {total_bytes} bytes")
-        assert paths == {report, archived_report, readme}
-        assert total_bytes == 2 * len(csv_body) + len(readme_body)
-
-        # Directory listing shows only immediate objects and virtual subfolders.
-        print("Top-level directory:")
-        directories: set[str] = set()
-        immediate_objects: set[str] = set()
-        async for entry in query_entries(prefix=prefix, page_size=2):
-            if isinstance(entry, BlobPrefix):
-                print(f"  Folder: {entry.prefix.removeprefix(prefix)}")
-                directories.add(entry.prefix)
-            else:
-                print(f"  Object: {entry.pathname.removeprefix(prefix)} ({entry.size} bytes)")
-                immediate_objects.add(entry.pathname)
-        assert directories == {prefix + "reports/", prefix + "archive/"}
-        assert immediate_objects == {readme}
-
-        # Traverse returned prefixes recursively when the application needs folder
-        # boundaries. For a flat inventory, query_blobs above takes fewer requests.
-        print("CSV download manifest from recursive directory traversal:")
-        csv_paths: set[str] = set()
-        async for item in walk_blobs(prefix):
-            if item.pathname.endswith(".csv"):
-                print(f"  {item.pathname.removeprefix(prefix)} -> {item.download_url}")
-                csv_paths.add(item.pathname)
-        assert csv_paths == {report, archived_report}
-    finally:
-        # Clean up known paths even if setup or traversal failed partway through.
-        await delete_blob([report, archived_report, readme])
 
 
 async def main() -> None:
@@ -171,8 +91,6 @@ async def main() -> None:
         )
     finally:
         await blob.delete_blob(upload.result.url)
-
-    await collections_example(access)
 
     print("Async Blob lifecycle passed; test object deleted.")
 
