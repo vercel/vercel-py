@@ -12,16 +12,18 @@ from vercel.blob.models import (
     Access,
     BlobCredentials,
     BlobCredentialsFactory,
+    BlobPrefix,
     CopyResult,
     DownloadMetadata,
     HeadResult,
+    ListBlob,
     PutResult,
 )
 
-from .api_client import BlobApiClient, _CopyRequest, _ListRequest, _PutRequest
+from .api_client import BlobApiClient, _CopyRequest, _FoldedListRequest, _ListRequest, _PutRequest
 from .credentials import adapt_sync_credentials_factory, normalize_credentials
 from .options import BlobServiceOptions, SyncBlobServiceOptions
-from .pagination import QueryBlobsPage
+from .pagination import QueryPage
 from .upload import (
     AnyPutBody,
     AsyncUploadRuntime,
@@ -119,11 +121,23 @@ class BlobService:
         page_size: int | None = None,
         prefix: str | None = None,
         cursor: str | None = None,
-    ) -> QueryBlobsPage:
+    ) -> QueryPage[ListBlob]:
         self.check_open()
         request = _ListRequest(page_size=page_size, prefix=prefix, cursor=cursor)
         credentials = await self._get_credentials()
         return await self._api_client.query_blobs_page(request, credentials=credentials)
+
+    async def query_entries_page(
+        self,
+        *,
+        page_size: int | None = None,
+        prefix: str | None = None,
+        cursor: str | None = None,
+    ) -> QueryPage[ListBlob | BlobPrefix]:
+        self.check_open()
+        request = _FoldedListRequest(page_size=page_size, prefix=prefix, cursor=cursor)
+        credentials = await self._get_credentials()
+        return await self._api_client.query_entries_page(request, credentials=credentials)
 
     async def copy(
         self,

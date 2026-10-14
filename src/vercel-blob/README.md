@@ -61,11 +61,12 @@ finally:
 | `head_blob` | Pathname or Blob delivery URL | `HeadResult` with size, upload time, and object metadata |
 | `delete_blob` | One target or a sequence of 1–1,000 pathnames or Blob delivery URLs | `None` |
 | `query_blobs` | Optional prefix, page size, and starting cursor | Iterator of `ListBlob` entries that follows pagination automatically |
+| `query_entries` | Optional directory prefix, page size, and starting cursor | Iterator of `ListBlob \| BlobPrefix` at one directory level |
 | `copy` | Source pathname or Blob delivery URL, destination pathname, required `access` | `CopyResult` from the copy response |
 | `multipart_upload_blob` | Pathname, required `access`, upload options | Context yielding a sequential part uploader; `result: PutResult` after successful exit |
 
 `put_blob`, `get_blob`, `head_blob`, `copy`, and `delete_blob` are awaited in the async API.
-Iterate over `query_blobs` with `async for`, without awaiting the call. Enter
+Iterate over `query_blobs` or `query_entries` with `async for`, without awaiting the call. Enter
 `stream_blob` with `async with`. The sync API uses ordinary calls, iterates over
 `query_blobs` with `for`, and enters `stream_blob` with `with`.
 
@@ -241,7 +242,7 @@ not delete remote parts or roll back an object that may already have published.
 
 ### Collections
 
-Both runtimes expose `query_blobs`, `copy`, and batch `delete_blob`. Like Sandbox's
+Both runtimes expose `query_blobs`, `query_entries`, `copy`, and batch `delete_blob`. Like Sandbox's
 `query_*` APIs, `query_blobs` lazily yields individual objects and automatically
 follows pagination cursors. Each `ListBlob` includes URL, download URL, pathname,
 size, upload date, and ETag.
@@ -268,8 +269,33 @@ does not fetch further pages. Like Sandbox, iteration stops at an empty page or
 when no next cursor remains. Errors propagate during iteration without restarting
 or retrying the listing. Iterate within the session's lifetime.
 
-Listing includes objects in nested folders. Folded folder listing and public page
-results are not exposed. Listing is not a snapshot while objects change.
+`query_blobs` includes objects in nested folders. For browsing a single directory
+level, use `query_entries`. It yields the same `ListBlob` instances for objects
+and frozen `BlobPrefix(prefix=...)` instances for virtual folders:
+
+```python
+async for entry in blob.query_entries(prefix="reports/", page_size=100):
+    match entry:
+        case blob.BlobPrefix(prefix=prefix):
+            print(f"Folder: {prefix}")
+        case blob.ListBlob(pathname=pathname, size=size):
+            print(f"Object: {pathname} ({size} bytes)")
+```
+
+Nonempty directory prefixes must end in `/`; `None` or `""` browses the root.
+Prefixes are literal, not normalized or URL-decoded. Each returned `BlobPrefix`
+includes its trailing slash and can be passed directly to another
+`query_entries(prefix=entry.prefix)` call. These prefixes represent virtual
+groupings, not stored objects with sizes or ETags.
+
+`query_entries` uses the same lazy pagination and starting-cursor conventions as
+`query_blobs`. Its `page_size` counts both objects and folder prefixes per service
+request. Objects precede folder prefixes within each page, preserving each
+service-provided sequence. There is no globally sorted order across pages.
+Folder-only pages are not empty: iteration continues through their next cursors.
+
+Synchronous browsing uses `for entry in blob.sync.query_entries(...)`. Neither
+query exposes public page results. Listing is not a snapshot while objects change.
 
 ```python
 copied = await blob.copy(
