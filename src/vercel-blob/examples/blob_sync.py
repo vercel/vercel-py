@@ -13,7 +13,9 @@ def main() -> None:
     access: blob.Access = "private" if os.getenv("BLOB_TEST_ACCESS") == "private" else "public"
     pathname = f"vercel-py-examples/{uuid4().hex}/sync.bin"
     payload = bytes(range(256)) * 1024
-    uploaded = blob.put_blob(pathname, payload, access=access, content_type="application/octet-stream")
+    uploaded = blob.put_blob(
+        pathname, payload, access=access, content_type="application/octet-stream"
+    )
     try:
         result = blob.get_blob(uploaded.url, access=access)
         assert result.body == payload
@@ -65,7 +67,7 @@ def main() -> None:
     destination = prefix + "nested/copy.bin"
     try:
         original = blob.put_blob(source, b"collection", access=access)
-        copied = blob.copy(
+        copied = blob.copy_blob(
             original.url,
             destination,
             access=access,

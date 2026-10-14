@@ -203,7 +203,7 @@ def query_entries(
     )
 
 
-async def copy(
+async def copy_blob(
     source: str,
     pathname: str,
     *,
@@ -272,7 +272,7 @@ __all__ = [
     "SyncBlobCredentialsFactory",
     "SyncByteReader",
     "SyncPutBody",
-    "copy",
+    "copy_blob",
     "delete_blob",
     "get_blob",
     "head_blob",
