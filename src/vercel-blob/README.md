@@ -59,16 +59,19 @@ finally:
 | `get_blob` | Pathname or Blob delivery URL, required `access` | `GetResult` with download metadata and the complete body as `bytes` |
 | `stream_blob` | Pathname or Blob delivery URL, required `access` | Context manager yielding an iterable byte download |
 | `head_blob` | Pathname or Blob delivery URL | `HeadResult` with size, upload time, and object metadata |
-| `delete_blob` | One pathname or Blob delivery URL | `None` |
+| `delete_blob` | One target or a sequence of 1–1,000 pathnames or Blob delivery URLs | `None` |
+| `list` | Optional prefix, cursor, page limit, and mode | `ListResult` with catalog entries, cursor, and `has_more` |
+| `copy` | Source pathname or Blob delivery URL, destination pathname, required `access` | `CopyResult` from the copy response |
 | `multipart_upload_blob` | Pathname, required `access`, upload options | Context yielding a sequential part uploader; `result: PutResult` after successful exit |
 
-`put_blob`, `get_blob`, `head_blob`, and `delete_blob` are awaited in the async
-API. `stream_blob` is not awaited; enter it with `async with`. The sync API uses
-ordinary calls and enters `stream_blob` with `with`.
+`put_blob`, `get_blob`, `head_blob`, `list`, `copy`, and `delete_blob` are awaited in the async API. `stream_blob` is not
+awaited; enter it with `async with`. The sync API uses ordinary calls and enters
+`stream_blob` with `with`.
 
 Pathnames are relative to the store. One leading slash is removed. Empty paths,
 control characters, invalid Unicode, `//`, and `.` or `..` path segments are
-rejected. `put_blob` accepts at most 950 UTF-16 code units in the original pathname,
+rejected. `put_blob` and copy destinations accept at most 950 UTF-16 code units in
+the original pathname,
 matching the TypeScript SDK. Characters outside the Unicode Basic Multilingual
 Plane count as two units. Reads do not inherit this upload limit.
 
@@ -219,7 +222,7 @@ are inferred, streaming lengths are required, and sources stay caller-owned.
 Each part must contain 1 byte through 5 GiB, with at most 10,000 parts. Every
 part except the last must be at least 5 MiB. After a smaller part, a further
 part is rejected before consuming its source or sending its request. An empty
-scope raises without completing; use `put_blob(pathname, b"", ...)` for an empty object.
+scope raises without completing; use `put(pathname, b"", ...)` for an empty object.
 
 A successful context exit publishes the object and makes `upload.result`
 available. Normal early `return` or `break` is a successful exit and publishes
@@ -234,6 +237,61 @@ Completion errors propagate from context exit and leave `result` unavailable.
 A lost completion response can leave publication uncertain; the SDK does not
 retry completion. The backend has no multipart abort action. Local cleanup does
 not delete remote parts or roll back an object that may already have published.
+
+### Collections
+
+Both runtimes expose `list`, `copy`, and batch `delete_blob`. Listing returns one
+immutable `ListResult` page; it never fetches another page automatically.
+Each `ListBlob` includes URL, download URL, pathname, size, upload date, and ETag.
+The default expanded mode lists all objects under a prefix. Folded mode returns
+root-level objects and folder prefixes in `page.folders`.
+
+```python
+cursor = None
+while True:
+    page = await blob.list(prefix="reports/", limit=100, cursor=cursor)
+    for item in page.blobs:
+        print(item.pathname, item.size)
+    if not page.has_more:
+        break
+    cursor = page.cursor
+```
+
+`limit` is an integer from 1 to 1,000 (the service defaults to 1,000).
+Prefixes are literal strings; cursors are opaque and must be passed unchanged.
+Use the same prefix and mode for subsequent pages. Listing is not a snapshot
+while objects change.
+
+```python
+copied = await blob.copy(
+    "reports/source.bin",
+    "reports/archive.bin",
+    access="private",
+    content_type="application/octet-stream",
+    cache_control_max_age=300,
+    if_match=source_etag,
+)
+await blob.delete_blob(["reports/source.bin", copied.url])
+```
+
+Copy runs on the server within the credential's store and returns `CopyResult`
+from the copy response without a download or preliminary HEAD. Source accepts
+a pathname or Blob delivery URL; destination is a pathname. As with PUT,
+`access` is required, and `add_random_suffix` and `allow_overwrite` default to
+`False`. Source metadata is not preserved: set content type and cache age
+explicitly when needed. Copy's `if_match` checks the **source** ETag, not the
+destination. A mismatch raises `BlobPreconditionFailedError`.
+
+Delete accepts one target or a sequence of 1–1,000 targets in one request.
+Every target is validated before credentials or HTTP. It does not split large
+batches, retry them, or promise atomic deletion; an error can leave a batch's
+outcome uncertain. Missing targets are harmless. `if_match` is supported only
+for a single target (including a sequence of length one), and checks that
+object's ETag. Invalid sizes and batch preconditions fail locally.
+
+For synchronous usage, call `blob.sync.list`, `blob.sync.copy`, and
+`blob.sync.delete_blob` without `await`. The package examples exercise cursor
+pagination, conditional copy, and batch cleanup in both runtimes.
 
 ### Downloads and ownership
 
@@ -361,5 +419,5 @@ Source the file instead of passing `uv run --env-file`. uv does not override
 variables that are already set, so a `VERCEL_OIDC_TOKEN` exported for another
 project wins, and the Blob API answers `403 Invalid token`.
 
-This release does not include unknown-length streaming uploads, listing,
-batch deletion, copying, or file-like `open` operations.
+This release does not include unknown-length streaming uploads or file-like
+`open` operations.
