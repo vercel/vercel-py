@@ -88,3 +88,37 @@ class GetResult:
 
     metadata: DownloadMetadata
     body: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class CopyResult:
+    """Metadata returned by a server-side copy, without an extra HEAD."""
+
+    url: str
+    download_url: str
+    pathname: str
+    content_type: str
+    content_disposition: str
+    etag: str
+
+
+@dataclass(frozen=True, slots=True)
+class ListBlob:
+    """Catalog entry returned by list; distinct from full HEAD metadata."""
+
+    url: str
+    download_url: str
+    pathname: str
+    size: int
+    uploaded_at: datetime
+    etag: str
+
+
+@dataclass(frozen=True, slots=True)
+class ListResult:
+    """One catalog page; pass cursor to list again when has_more is true."""
+
+    blobs: tuple[ListBlob, ...]
+    has_more: bool
+    cursor: str | None = None
+    folders: tuple[str, ...] = ()

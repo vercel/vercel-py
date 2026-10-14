@@ -92,6 +92,32 @@ async def main() -> None:
     finally:
         await blob.delete_blob(upload.result.url)
 
+    # Copy on the server, inspect one page at a time, then delete both objects.
+    prefix = f"vercel-py-examples/{uuid4().hex}/collections/"
+    source = prefix + "source.bin"
+    destination = prefix + "copy.bin"
+    try:
+        original = await blob.put_blob(source, b"collection", access=access)
+        copied = await blob.copy(
+            original.url,
+            destination,
+            access=access,
+            content_type="application/octet-stream",
+            if_match=original.etag,
+        )
+        assert (await blob.get_blob(copied.url, access=access)).body == b"collection"
+        paths: set[str] = set()
+        cursor = None
+        while True:
+            page = await blob.list(prefix=prefix, limit=1, cursor=cursor)
+            paths.update(item.pathname for item in page.blobs)
+            if not page.has_more:
+                break
+            cursor = page.cursor
+        assert paths == {source, destination}
+    finally:
+        await blob.delete_blob([source, destination])
+
     print("Async Blob lifecycle passed; test object deleted.")
 
 

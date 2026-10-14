@@ -1,0 +1,310 @@
+"""Collection contracts exercised through both public runtimes."""
+
+from __future__ import annotations
+
+import json
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
+from typing import Any
+
+import httpx2 as httpx
+import pytest
+from pydantic import ValidationError
+from test_object_ops import _async_session, _credentials, _object_json, _sync_session
+
+from vercel import blob
+from vercel.blob import BlobCredentials, BlobError, CredentialKind
+
+pytestmark = pytest.mark.anyio
+
+
+@asynccontextmanager
+async def runtime(
+    sync: bool,
+    handler: Callable[[httpx.Request], httpx.Response],
+    credentials: Callable[[], BlobCredentials] | None = None,
+) -> AsyncIterator[Callable[..., Any]]:
+    credentials = credentials or _credentials
+
+    async def call(name: str, *args: Any, **options: Any) -> Any:
+        if sync:
+            return getattr(blob.sync, name)(*args, **options)
+        return await getattr(blob, name)(*args, **options)
+
+    if sync:
+        with _sync_session(handler, credentials_factory=credentials):
+            yield call
+    else:
+        async with _async_session(handler, credentials_factory=credentials):
+            yield call
+
+
+@pytest.fixture(params=[False, True], ids=["async", "sync"])
+def sync(request: pytest.FixtureRequest) -> bool:
+    return request.param
+
+
+def entry(path: str) -> dict[str, Any]:
+    data = _object_json(path, size=7)
+    return {k: data[k] for k in ("url", "downloadUrl", "pathname", "size", "uploadedAt", "etag")}
+
+
+async def test_pagination_and_folded_listing(sync: bool) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.method == "GET"
+        assert request.headers["authorization"] == "Bearer oidc-test"
+        assert request.headers["x-vercel-blob-store-id"] == "teststore123"
+        assert request.headers["x-api-version"] == "12"
+        assert request.url.params["prefix"] == "folder/雪 &"
+        assert request.url.params["limit"] == "1"
+        if len(requests) == 1:
+            assert "cursor" not in request.url.params
+            return httpx.Response(
+                200, json={"blobs": [entry("folder/a")], "hasMore": True, "cursor": "opaque+/=&雪"}
+            )
+        assert request.url.params["cursor"] == "opaque+/=&雪"
+        assert request.url.params["mode"] == "folded"
+        return httpx.Response(200, json={"blobs": [], "hasMore": False, "folders": ["folder/sub/"]})
+
+    async with runtime(
+        sync,
+        handler,
+        lambda: BlobCredentials(
+            token="oidc-test", store_id="teststore123", kind=CredentialKind.OIDC
+        ),
+    ) as call:
+        first = await call("list", prefix="folder/雪 &", limit=1)
+        assert isinstance(first, blob.ListResult)
+        assert first.has_more and len(first.blobs) == 1
+        item = first.blobs[0]
+        assert isinstance(item, blob.ListBlob)
+        assert item.size == 7 and item.etag == "etag"
+        assert item.uploaded_at.isoformat() == "2026-09-29T12:00:00+00:00"
+        second = await call(
+            "list", prefix="folder/雪 &", limit=1, cursor=first.cursor, mode="folded"
+        )
+        assert not second.has_more and second.cursor is None
+        assert second.blobs == () and second.folders == ("folder/sub/",)
+    assert len(requests) == 2
+
+
+async def test_copy_metadata_options_and_single_request(sync: bool) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.method == "PUT"
+        assert dict(request.url.params) == {"pathname": "copies/雪 &.bin", "fromUrl": "source.bin"}
+        assert request.content == b""
+        assert request.headers["x-if-match"] == '"source-etag"'
+        assert request.headers["x-vercel-blob-access"] == "private"
+        assert request.headers["x-allow-overwrite"] == "1"
+        assert request.headers["x-add-random-suffix"] == "0"
+        assert request.headers["x-content-type"] == "application/octet-stream"
+        assert request.headers["x-cache-control-max-age"] == "300"
+        return httpx.Response(200, json=_object_json("copies/雪 &.bin"))
+
+    async with runtime(sync, handler) as call:
+        result = await call(
+            "copy",
+            "source.bin",
+            "copies/雪 &.bin",
+            access="private",
+            content_type="application/octet-stream",
+            cache_control_max_age=300,
+            allow_overwrite=True,
+            if_match='"source-etag"',
+        )
+    assert isinstance(result, blob.CopyResult)
+    assert result.pathname == "copies/雪 &.bin" and result.etag == "etag"
+    assert result.content_type == "text/plain" and result.content_disposition == "inline"
+    assert result.download_url == result.url + "?download=1"
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize("targets", ["a.bin", ["a.bin"], ("a.bin", "b.bin"), ["a.bin"] * 1000])
+async def test_delete_batch_in_one_request(sync: bool, targets: Any) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.method == "POST" and request.url.path == "/api/blob/delete"
+        assert json.loads(request.content) == {
+            "urls": [targets] if isinstance(targets, str) else list(targets)
+        }
+        assert "x-if-match" not in request.headers
+        return httpx.Response(200, json=None)
+
+    async with runtime(sync, handler) as call:
+        assert await call("delete", targets) is None
+    assert len(requests) == 1
+
+
+async def test_conditional_delete(sync: bool) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["x-if-match"] == '"etag"'
+        return httpx.Response(412, json={"error": {"code": "precondition_failed"}})
+
+    async with runtime(sync, handler) as call:
+        with pytest.raises(blob.BlobPreconditionFailedError):
+            await call("delete", ["a.bin"], if_match='"etag"')
+
+
+@pytest.mark.parametrize(
+    ("operation", "args", "options"),
+    [
+        ("list", (), {"limit": 0}),
+        ("list", (), {"limit": 1001}),
+        ("list", (), {"limit": True}),
+        ("list", (), {"limit": 1.5}),
+        ("list", (), {"mode": "invalid"}),
+        ("list", (), {"cursor": ""}),
+        ("list", (), {"cursor": "a\nb"}),
+        ("list", (), {"prefix": "\ud800"}),
+        ("delete", ([],), {}),
+        ("delete", (["a"] * 1001,), {}),
+        ("delete", (["a", ""],), {}),
+        ("delete", (b"a",), {}),
+        ("delete", (["a", "b"],), {"if_match": '"etag"'}),
+        ("delete", ("a",), {"if_match": ""}),
+        ("copy", ("https://evil.example/a", "b"), {"access": "public"}),
+        ("copy", ("a", "../b"), {"access": "public"}),
+        ("copy", ("a", "b"), {"access": "invalid"}),
+        ("copy", ("a", "b"), {"access": "public", "if_match": "a\rb"}),
+        ("copy", ("a", "b"), {"access": "public", "allow_overwrite": 1}),
+    ],
+)
+async def test_validation_before_credentials_and_http(
+    sync: bool, operation: str, args: tuple[Any, ...], options: dict[str, Any]
+) -> None:
+    def credentials() -> BlobCredentials:
+        pytest.fail("invalid request resolved credentials")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        pytest.fail("invalid request reached HTTP")
+
+    async with runtime(sync, handler, credentials) as call:
+        with pytest.raises((BlobError, ValidationError, TypeError, ValueError)):
+            await call(operation, *args, **options)
+
+
+@pytest.mark.parametrize(
+    ("operation", "args", "options"),
+    [
+        ("list", (), {}),
+        ("copy", ("a", "b"), {"access": "public"}),
+        ("delete", (["a", "b"],), {}),
+    ],
+)
+@pytest.mark.parametrize(
+    ("status", "error"),
+    [
+        (403, blob.BlobAccessError),
+        (404, blob.BlobNotFoundError),
+        (412, blob.BlobPreconditionFailedError),
+        (429, blob.BlobServiceRateLimited),
+    ],
+)
+async def test_service_errors_no_retry(
+    sync: bool,
+    operation: str,
+    args: tuple[Any, ...],
+    options: dict[str, Any],
+    status: int,
+    error: type[Exception],
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            status, json={"error": {"message": "failed"}}, headers={"retry-after": "5"}
+        )
+
+    async with runtime(sync, handler) as call:
+        with pytest.raises(error):
+            await call(operation, *args, **options)
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"blobs": [], "hasMore": "true"},
+        {"blobs": [], "hasMore": True},
+        {"blobs": [], "hasMore": False, "folders": [1]},
+        {"blobs": [{**entry("a"), "size": -1}], "hasMore": False},
+        {"blobs": [{**entry("a"), "uploadedAt": "bad-date"}], "hasMore": False},
+        {"blobs": [{**entry("a"), "etag": None}], "hasMore": False},
+    ],
+)
+async def test_malformed_list_response(sync: bool, payload: Any) -> None:
+    async with runtime(sync, lambda r: httpx.Response(200, json=payload)) as call:
+        with pytest.raises(blob.BlobStreamError):
+            await call("list")
+
+
+async def test_malformed_copy_response(sync: bool) -> None:
+    async with runtime(sync, lambda r: httpx.Response(200, json={"pathname": "b"})) as call:
+        with pytest.raises(blob.BlobStreamError):
+            await call("copy", "a", "b", access="public")
+
+
+async def test_copy_defaults_and_url_source(sync: bool) -> None:
+    source = _object_json("a")["url"] + "?download=1#fragment"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["fromUrl"] == source.split("#")[0]
+        assert request.url.params["pathname"] == "b"
+        assert request.headers["x-allow-overwrite"] == "0"
+        assert request.headers["x-add-random-suffix"] == "0"
+        assert "x-if-match" not in request.headers
+        assert "x-content-type" not in request.headers
+        assert "x-cache-control-max-age" not in request.headers
+        return httpx.Response(200, json=_object_json("b"))
+
+    async with runtime(sync, handler) as call:
+        await call("copy", source, "/b", access="public")
+
+
+async def test_successful_conditional_delete(sync: bool) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["x-if-match"] == '"etag"'
+        assert json.loads(request.content) == {"urls": ["a"]}
+        return httpx.Response(200, json=None)
+
+    async with runtime(sync, handler) as call:
+        assert await call("delete", "a", if_match='"etag"') is None
+
+
+@pytest.mark.parametrize(
+    ("operation", "args", "options"),
+    [
+        ("list", (), {}),
+        ("copy", ("a", "b"), {"access": "public"}),
+    ],
+)
+async def test_non_json_response(
+    sync: bool, operation: str, args: tuple[Any, ...], options: dict[str, Any]
+) -> None:
+    async with runtime(sync, lambda r: httpx.Response(200, content=b"invalid-json")) as call:
+        with pytest.raises(blob.BlobStreamError, match="not valid JSON"):
+            await call(operation, *args, **options)
+
+
+def test_sync_collections_without_event_loop() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json={"blobs": [], "hasMore": False})
+        if request.method == "PUT":
+            return httpx.Response(200, json=_object_json("b"))
+        return httpx.Response(200, json=None)
+
+    with _sync_session(handler):
+        assert blob.sync.list().blobs == ()
+        assert blob.sync.copy("a", "b", access="public").pathname == "b"
+        blob.sync.delete_blob(["a", "b"])

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from contextlib import AbstractAsyncContextManager
 from typing import Literal, overload
 
@@ -35,10 +36,13 @@ from .models import (
     AsyncByteReader,
     BlobCredentials,
     BlobCredentialsFactory,
+    CopyResult,
     CredentialKind,
     DownloadMetadata,
     GetResult,
     HeadResult,
+    ListBlob,
+    ListResult,
     PutBody,
     PutResult,
     SyncBlobCredentialsFactory,
@@ -157,12 +161,51 @@ async def head_blob(
     return await service.head(url_or_pathname)
 
 
-async def delete_blob(
-    url_or_pathname: str,
-) -> None:
-    """Delete a single object from Vercel Blob."""
+async def list(
+    *,
+    limit: int | None = None,
+    prefix: str | None = None,
+    cursor: str | None = None,
+    mode: Literal["expanded", "folded"] = "expanded",
+) -> ListResult:
+    """List one catalog page; explicitly pass the returned cursor for the next."""
     service = get_blob_service(get_active_session())
-    await service.delete(url_or_pathname)
+    return await service.list(limit=limit, prefix=prefix, cursor=cursor, mode=mode)
+
+
+async def copy(
+    source: str,
+    pathname: str,
+    *,
+    access: Literal["public", "private"],
+    content_type: str | None = None,
+    add_random_suffix: bool = False,
+    allow_overwrite: bool = False,
+    cache_control_max_age: int | None = None,
+    if_match: str | None = None,
+) -> CopyResult:
+    """Copy within a store; if_match checks the source ETag."""
+    service = get_blob_service(get_active_session())
+    return await service.copy(
+        source,
+        pathname,
+        access=access,
+        content_type=content_type,
+        add_random_suffix=add_random_suffix,
+        allow_overwrite=allow_overwrite,
+        cache_control_max_age=cache_control_max_age,
+        if_match=if_match,
+    )
+
+
+async def delete_blob(
+    url_or_pathname: str | Sequence[str],
+    *,
+    if_match: str | None = None,
+) -> None:
+    """Delete 1–1000 objects in one request; if_match requires a single target."""
+    service = get_blob_service(get_active_session())
+    await service.delete(url_or_pathname, if_match=if_match)
 
 
 __all__ = [
@@ -187,18 +230,23 @@ __all__ = [
     "BlobStoreSuspendedError",
     "BlobStreamError",
     "BlobUnknownError",
+    "CopyResult",
     "CredentialKind",
     "DownloadMetadata",
     "GetResult",
     "HeadResult",
+    "ListBlob",
+    "ListResult",
     "PutBody",
     "PutResult",
     "SyncBlobCredentialsFactory",
     "SyncByteReader",
     "SyncPutBody",
+    "copy",
     "delete_blob",
     "get_blob",
     "head_blob",
+    "list",
     "multipart_upload_blob",
     "put_blob",
     "stream_blob",

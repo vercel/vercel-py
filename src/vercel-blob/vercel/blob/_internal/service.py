@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import inspect
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from typing import Literal
 
 from vercel._internal.core.http import StreamingResponse
 from vercel._internal.core.session import SdkSession, SyncSdkSession
@@ -12,12 +13,14 @@ from vercel.blob.models import (
     Access,
     BlobCredentials,
     BlobCredentialsFactory,
+    CopyResult,
     DownloadMetadata,
     HeadResult,
+    ListResult,
     PutResult,
 )
 
-from .api_client import BlobApiClient, _PutRequest
+from .api_client import BlobApiClient, _CopyRequest, _ListRequest, _PutRequest
 from .credentials import adapt_sync_credentials_factory, normalize_credentials
 from .options import BlobServiceOptions, SyncBlobServiceOptions
 from .upload import (
@@ -32,6 +35,7 @@ from .validation import (
     is_url,
     parse_and_validate_delivery_url,
     validate_access,
+    validate_if_match,
     validate_pathname,
     validate_url_or_pathname,
 )
@@ -110,11 +114,64 @@ class BlobService:
         credentials = await self._get_credentials()
         return await self._api_client.get_metadata(target, credentials=credentials)
 
-    async def delete(self, url_or_pathname: str) -> None:
+    async def list(
+        self,
+        *,
+        limit: int | None = None,
+        prefix: str | None = None,
+        cursor: str | None = None,
+        mode: Literal["expanded", "folded"] = "expanded",
+    ) -> ListResult:
         self.check_open()
-        target = validate_url_or_pathname(url_or_pathname)
+        request = _ListRequest(limit=limit, prefix=prefix, cursor=cursor, mode=mode)
         credentials = await self._get_credentials()
-        await self._api_client.delete([target], credentials=credentials)
+        return await self._api_client.list(request, credentials=credentials)
+
+    async def copy(
+        self,
+        source: str,
+        pathname: str,
+        *,
+        access: Access,
+        content_type: str | None = None,
+        add_random_suffix: bool = False,
+        allow_overwrite: bool = False,
+        cache_control_max_age: int | None = None,
+        if_match: str | None = None,
+    ) -> CopyResult:
+        self.check_open()
+        target = validate_url_or_pathname(source)
+        request = _CopyRequest(
+            pathname=pathname,
+            access=access,
+            content_type=content_type,
+            add_random_suffix=add_random_suffix,
+            allow_overwrite=allow_overwrite,
+            cache_control_max_age=cache_control_max_age,
+            if_match=if_match,
+        )
+        credentials = await self._get_credentials()
+        return await self._api_client.copy(target, request, credentials=credentials)
+
+    async def delete(
+        self, url_or_pathname: str | Sequence[str], *, if_match: str | None = None
+    ) -> None:
+        self.check_open()
+        if isinstance(url_or_pathname, str):
+            targets = [validate_url_or_pathname(url_or_pathname)]
+        elif isinstance(url_or_pathname, Sequence) and not isinstance(
+            url_or_pathname, (bytes, bytearray)
+        ):
+            targets = [validate_url_or_pathname(target) for target in url_or_pathname]
+        else:
+            raise BlobError("delete requires a pathname, URL, or sequence of them")
+        if not 1 <= len(targets) <= 1000:
+            raise BlobError("delete requires between 1 and 1000 targets")
+        condition = validate_if_match(if_match)
+        if condition is not None and len(targets) != 1:
+            raise BlobError("if_match can only be used when deleting a single object")
+        credentials = await self._get_credentials()
+        await self._api_client.delete(targets, credentials=credentials, if_match=condition)
 
     async def open_download(
         self, url_or_pathname: str, *, access: Access
