@@ -8,7 +8,9 @@ from typing import Literal, overload
 from vercel._internal.core.iter_coroutine import iter_coroutine
 from vercel._internal.core.session import get_active_sync_session
 
+from .._internal.api_client import _PutRequest
 from .._internal.download import SyncBlobDownload, SyncDownloadContext
+from .._internal.multipart import SyncMultipartUpload
 from .._internal.options import SyncBlobServiceOptions
 from .._internal.service import get_sync_blob_service
 from ..errors import (
@@ -109,6 +111,28 @@ def get(
     return GetResult(metadata=download.metadata, body=body)
 
 
+def multipart_upload(
+    pathname: str,
+    *,
+    access: Literal["public", "private"],
+    content_type: str | None = None,
+    add_random_suffix: bool = False,
+    allow_overwrite: bool = False,
+    cache_control_max_age: int | None = None,
+) -> SyncMultipartUpload:
+    """Create a scoped upload that publishes on successful context exit."""
+    request = _PutRequest(
+        pathname=pathname,
+        access=access,
+        content_type=content_type,
+        add_random_suffix=add_random_suffix,
+        allow_overwrite=allow_overwrite,
+        cache_control_max_age=cache_control_max_age,
+    )
+    service = get_sync_blob_service(get_active_sync_session())
+    return SyncMultipartUpload(service, request)
+
+
 def stream(
     url_or_pathname: str,
     *,
@@ -168,10 +192,12 @@ __all__ = [
     "SyncBlobCredentialsFactory",
     "SyncBlobServiceOptions",
     "SyncByteReader",
+    "SyncMultipartUpload",
     "SyncPutBody",
     "delete",
     "get",
     "head",
+    "multipart_upload",
     "put",
     "stream",
 ]

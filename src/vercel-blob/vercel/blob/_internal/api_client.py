@@ -8,6 +8,7 @@ from datetime import datetime
 from email.utils import parsedate_to_datetime
 from functools import partial
 from typing import Annotated, TypeVar
+from urllib.parse import quote
 
 import httpx2 as httpx
 from pydantic import (
@@ -100,6 +101,15 @@ class _PutRequest(_ApiModel):
 
 class _DeleteRequest(_ApiModel):
     urls: list[str]
+
+
+class _MultipartCreated(_ApiModel):
+    key: str = Field(min_length=1)
+    upload_id: str = Field(alias="uploadId", min_length=1)
+
+
+class _MultipartReceipt(_ApiModel):
+    etag: str = Field(min_length=1)
 
 
 class _PutResponse(_ApiModel):
@@ -405,6 +415,86 @@ class BlobApiClient:
     async def get_metadata(self, url: str, *, credentials: BlobCredentials) -> HeadResult:
         response = await self._request("GET", "", credentials=credentials, params={"url": url})
         return _parse_head_response(response)
+
+    async def create_multipart(
+        self, request: _PutRequest, *, credentials: BlobCredentials
+    ) -> _MultipartCreated:
+        response = await self._request(
+            "POST",
+            "/mpu",
+            credentials=credentials,
+            params={"pathname": request.pathname},
+            headers=request._to_headers() | {"x-mpu-action": "create"},
+        )
+        return _parse_response(response, _MultipartCreated, "multipart create")
+
+    @staticmethod
+    def _multipart_headers(created: _MultipartCreated) -> dict[str, str]:
+        return {
+            "x-mpu-key": quote(created.key, safe="~()*!.'-"),
+            "x-mpu-upload-id": created.upload_id,
+        }
+
+    async def upload_part(
+        self,
+        request: _PutRequest,
+        created: _MultipartCreated,
+        number: int,
+        body: bytes | _ChunkSource,
+        content_length: int,
+        *,
+        credentials: BlobCredentials,
+    ) -> str:
+        headers = (
+            request._to_headers()
+            | self._multipart_headers(created)
+            | {
+                "x-mpu-action": "upload",
+                "x-mpu-part-number": str(number),
+                "content-length": str(content_length),
+            }
+        )
+        if isinstance(body, bytes):
+            response = await self._request(
+                "POST",
+                "/mpu",
+                credentials=credentials,
+                params={"pathname": request.pathname},
+                headers=headers,
+                body=RawBody(body),
+            )
+        else:
+            cm = self._transport.request_stream(
+                "POST",
+                f"{self._base_url}/mpu",
+                token=credentials.token,
+                params={"pathname": request.pathname},
+                headers=self._headers(credentials) | headers,
+                follow_redirects=False,
+                read_response=ReadResponsePolicy.ALWAYS,
+            )
+            response = await send_streaming_upload(cm, body, content_length, _map_http_error)
+        return _parse_response(response, _MultipartReceipt, "multipart upload").etag
+
+    async def complete_multipart(
+        self,
+        request: _PutRequest,
+        created: _MultipartCreated,
+        parts: list[dict[str, str | int]],
+        *,
+        credentials: BlobCredentials,
+    ) -> PutResult:
+        response = await self._request(
+            "POST",
+            "/mpu",
+            credentials=credentials,
+            params={"pathname": request.pathname},
+            headers=request._to_headers()
+            | self._multipart_headers(created)
+            | {"x-mpu-action": "complete"},
+            body=JSONBody(parts),
+        )
+        return _parse_put_response(response)
 
     async def delete(self, urls: Sequence[str], *, credentials: BlobCredentials) -> None:
         request = _DeleteRequest(urls=list(urls))

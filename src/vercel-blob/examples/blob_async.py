@@ -75,6 +75,23 @@ async def main() -> None:
     finally:
         await blob.delete(iter_uploaded.url)
 
+    # The caller chooses complete parts and their order. Successful exit publishes.
+    multipart_pathname = f"vercel-py-examples/{uuid4().hex}/async-multipart.bin"
+
+    async def part_chunks() -> AsyncIterator[bytes]:
+        for _ in range(80):
+            yield b"m" * (64 * 1024)
+
+    async with blob.multipart_upload(multipart_pathname, access=access) as upload:
+        await upload.upload_part(part_chunks(), content_length=5 * 1024 * 1024)
+        await upload.upload_part(b"tail")
+    try:
+        assert (await blob.get(upload.result.url, access=access)).body == (
+            b"m" * (5 * 1024 * 1024) + b"tail"
+        )
+    finally:
+        await blob.delete(upload.result.url)
+
     print("Async Blob lifecycle passed; test object deleted.")
 
 

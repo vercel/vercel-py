@@ -8,7 +8,9 @@ from typing import Literal, overload
 from vercel._internal.core.session import get_active_session
 
 from . import sync
+from ._internal.api_client import _PutRequest
 from ._internal.download import AsyncBlobDownload, AsyncDownloadContext
+from ._internal.multipart import AsyncMultipartUpload
 from ._internal.options import BlobServiceOptions
 from ._internal.service import get_blob_service
 from .errors import (
@@ -109,6 +111,28 @@ async def get(
     return GetResult(metadata=download.metadata, body=body)
 
 
+def multipart_upload(
+    pathname: str,
+    *,
+    access: Literal["public", "private"],
+    content_type: str | None = None,
+    add_random_suffix: bool = False,
+    allow_overwrite: bool = False,
+    cache_control_max_age: int | None = None,
+) -> AsyncMultipartUpload:
+    """Create a scoped upload that publishes on successful context exit."""
+    request = _PutRequest(
+        pathname=pathname,
+        access=access,
+        content_type=content_type,
+        add_random_suffix=add_random_suffix,
+        allow_overwrite=allow_overwrite,
+        cache_control_max_age=cache_control_max_age,
+    )
+    service = get_blob_service(get_active_session())
+    return AsyncMultipartUpload(service, request)
+
+
 def stream(
     url_or_pathname: str,
     *,
@@ -144,6 +168,7 @@ async def delete(
 __all__ = [
     "Access",
     "AsyncByteReader",
+    "AsyncMultipartUpload",
     "BlobAccessError",
     "BlobContentLengthError",
     "BlobContentTypeNotAllowedError",
@@ -174,6 +199,7 @@ __all__ = [
     "delete",
     "get",
     "head",
+    "multipart_upload",
     "put",
     "stream",
     "sync",

@@ -26,6 +26,76 @@ def _pathname(name: str) -> str:
 
 
 @pytest.mark.asyncio
+async def test_async_multipart(store: LiveStore) -> None:
+    async def part() -> AsyncIterator[bytes]:
+        for _ in range(80):
+            yield b"m" * _CHUNK_SIZE
+
+    async with session():
+        async with blob.multipart_upload(
+            _pathname("async-multipart.bin"), access=store.access
+        ) as upload:
+            await upload.upload_part(part(), content_length=5 * 1024 * 1024)
+            await upload.upload_part(part(), content_length=5 * 1024 * 1024)
+            await upload.upload_part(b"tail")
+        try:
+            assert (await blob.get(upload.result.url, access=store.access)).body == (
+                b"m" * (10 * 1024 * 1024) + b"tail"
+            )
+            assert (await blob.head(upload.result.url)).etag == upload.result.etag
+        finally:
+            await blob.delete(upload.result.url)
+
+
+def test_sync_multipart(store: LiveStore) -> None:
+    with session():
+        with blob.sync.multipart_upload(
+            _pathname("sync-multipart.bin"), access=store.access
+        ) as upload:
+            for _ in range(2):
+                upload.upload_part(
+                    (b"m" * _CHUNK_SIZE for _ in range(80)), content_length=5 * 1024 * 1024
+                )
+            upload.upload_part(b"tail")
+        try:
+            assert blob.sync.get(upload.result.url, access=store.access).body == (
+                b"m" * (10 * 1024 * 1024) + b"tail"
+            )
+            assert blob.sync.head(upload.result.url).etag == upload.result.etag
+        finally:
+            blob.sync.delete(upload.result.url)
+
+
+@pytest.mark.asyncio
+async def test_async_failed_multipart_does_not_publish(store: LiveStore) -> None:
+    pathname = _pathname("async-failed-multipart.bin")
+    async with session():
+        try:
+            with pytest.raises(ValueError, match="stop"):
+                async with blob.multipart_upload(pathname, access=store.access) as upload:
+                    await upload.upload_part(b"prefix")
+                    raise ValueError("stop")
+            with pytest.raises(blob.BlobNotFoundError):
+                await blob.head(pathname)
+        finally:
+            await blob.delete(pathname)
+
+
+def test_sync_failed_multipart_does_not_publish(store: LiveStore) -> None:
+    pathname = _pathname("sync-failed-multipart.bin")
+    with session():
+        try:
+            with pytest.raises(ValueError, match="stop"):
+                with blob.sync.multipart_upload(pathname, access=store.access) as upload:
+                    upload.upload_part(b"prefix")
+                    raise ValueError("stop")
+            with pytest.raises(blob.BlobNotFoundError):
+                blob.sync.head(pathname)
+        finally:
+            blob.sync.delete(pathname)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("payload", _PAYLOADS, ids=["empty", "multi-chunk"])
 async def test_async_lifecycle(store: LiveStore, payload: bytes) -> None:
     async with session():
