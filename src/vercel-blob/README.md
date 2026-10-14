@@ -55,7 +55,7 @@ finally:
 
 | Operation | Input | Result |
 | --- | --- | --- |
-| `put` | Pathname, `bytes`, required `access` | `PutResult` from the upload response |
+| `put` | Pathname, `bytes` or streaming body, required `access` | `PutResult` from the upload response |
 | `get` | Pathname or Blob delivery URL, required `access` | `GetResult` with download metadata and the complete body as `bytes` |
 | `stream` | Pathname or Blob delivery URL, required `access` | Context manager yielding an iterable byte download |
 | `head` | Pathname or Blob delivery URL | `HeadResult` with size, upload time, and object metadata |
@@ -89,15 +89,16 @@ must not use untrusted object names as commands or unchecked local file paths.
 | Keyword | Default | Behavior |
 | --- | --- | --- |
 | `access` | Required | `"public"` or `"private"` |
+| `content_length` | `None` | Byte length; optional for buffers, required for streaming bodies |
 | `content_type` | `None` | Explicit media type; otherwise the service determines it |
 | `add_random_suffix` | `False` | Set to `True` to add a random suffix and avoid pathname collisions |
 | `allow_overwrite` | `False` | Permit replacement of an existing object when enabled |
 | `cache_control_max_age` | `None` | Cache lifetime in whole seconds; otherwise use the service default |
 
-`put` accepts only `bytes`, including `b""`. It infers content length and never
-chooses multipart upload, reads an iterable, or stages data in a temporary file.
-Uploads use a stable pathname by default, matching the TypeScript SDK. To replace
-an existing object, set `allow_overwrite=True`. To create distinct objects with
+`put` accepts in-memory buffers (`bytes`, `bytearray`, `memoryview`) and streaming
+sources with a known length. It infers content length for buffers and snapshots them
+at call time. Uploads use a stable pathname by default, matching the TypeScript SDK.
+To replace an existing object, set `allow_overwrite=True`. To create distinct objects with
 random suffixes, set `add_random_suffix=True` and use the returned `pathname` or
 `url` when referring to each upload.
 
@@ -105,6 +106,73 @@ random suffixes, set `add_random_suffix=True` and use the returned `pathname` or
 `content_disposition`, and `etag`. It does not contain size or upload time.
 `head` returns those additional fields without downloading the object's content.
 No extra metadata request runs after `put`.
+
+### Streaming uploads
+
+`put` also accepts byte readers and byte iterables when `content_length` is provided.
+Each API accepts only sources of its own shape:
+
+- **Async API**: `AsyncByteReader` (an object with `async def read`) or
+  `AsyncIterable[bytes]`.
+- **Sync API**: `SyncByteReader` (an object with a blocking `read`) or `Iterable[bytes]`.
+
+The async API does not run blocking reads on worker threads for you. It rejects sync
+readers and sync iterables with a `TypeError`; adapt them as shown below.
+
+Streaming uploads require an explicit `content_length` in bytes. Unknown-length streams
+and spooling to temporary files are not supported. The SDK validates that the uploaded
+stream matches the declared length:
+
+- If the source ends before `content_length` bytes, `BlobContentLengthError` is raised.
+- If the source yields more than `content_length` bytes, `BlobContentLengthError` is
+  raised and the excess data is never sent.
+- Uploads send an explicit `Content-Length` header without chunked transfer encoding.
+
+Sources remain caller-owned. The SDK does not close, seek, or retry caller sources. If
+an upload fails, the source's stream position is unspecified.
+
+Upload a local file with the sync API:
+
+```python
+from pathlib import Path
+from vercel.blob import sync as blob
+
+path = Path("report.pdf")
+size = path.stat().st_size
+with path.open("rb") as file:
+    uploaded = blob.put("report.pdf", file, access="public", content_length=size)
+```
+
+In async code, open the file with `anyio.open_file`:
+
+```python
+import anyio
+from vercel import blob
+
+async def upload_report() -> blob.PutResult:
+    path = anyio.Path("report.pdf")
+    size = (await path.stat()).st_size
+    async with await anyio.open_file(path, "rb") as file:
+        return await blob.put("report.pdf", file, access="public", content_length=size)
+```
+
+Wrap a sync file object you already have with `anyio.wrap_file(file)`. Adapt a sync
+iterator into an async iterable. An async generator is enough for in-memory chunks;
+if producing a chunk can block, pull each chunk on a worker thread:
+
+```python
+from collections.abc import AsyncIterator, Iterable, Iterator
+
+import anyio
+
+async def from_memory(chunks: Iterable[bytes]) -> AsyncIterator[bytes]:
+    for chunk in chunks:
+        yield chunk
+
+async def from_blocking(chunks: Iterator[bytes]) -> AsyncIterator[bytes]:
+    while (chunk := await anyio.to_thread.run_sync(next, chunks, None)) is not None:
+        yield chunk
+```
 
 ### Downloads and ownership
 
@@ -190,7 +258,8 @@ are configured through the SDK session's `httpx_client_factory`, not through Blo
 
 [Async lifecycle](examples/blob_async.py) and [sync lifecycle](examples/blob_sync.py)
 upload a unique object, compare downloaded bytes, inspect metadata, and delete the
-object in `finally`.
+object in `finally`. The async example also adapts a sync file and a sync iterator
+for streaming uploads.
 
 From the repository root:
 
@@ -230,5 +299,5 @@ Source the file instead of passing `uv run --env-file`. uv does not override
 variables that are already set, so a `VERCEL_OIDC_TOKEN` exported for another
 project wins, and the Blob API answers `403 Invalid token`.
 
-This release does not include streaming uploads, multipart uploads, listing,
+This release does not include unknown-length streaming uploads, multipart uploads, listing,
 batch deletion, copying, or file-like `open` operations.

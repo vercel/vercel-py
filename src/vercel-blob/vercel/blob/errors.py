@@ -189,8 +189,16 @@ class BlobStreamError(BlobError, OSError):
     """A Blob stream response was malformed or unusable."""
 
 
+class BlobContentLengthError(BlobError):
+    """The upload body length did not match the declared content length."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, status_code=None, code="content_length_mismatch")
+
+
 __all__ = [
     "BlobAccessError",
+    "BlobContentLengthError",
     "BlobContentTypeNotAllowedError",
     "BlobCredentialsError",
     "BlobError",

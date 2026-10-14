@@ -532,6 +532,88 @@ def test_sync_response_line_stream_closes_on_failure() -> None:
     assert body.closed
 
 
+class _EarlyResponseSyncTransport(httpx.BaseTransport):
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(413, json={"error": "too big"})
+
+
+class _EarlyResponseAsyncTransport(httpx.AsyncBaseTransport):
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(413, json={"error": "too big"})
+
+
+def test_sync_request_stream_recovers_early_response_after_write_failure() -> None:
+    client = httpx.Client(transport=_EarlyResponseSyncTransport())
+    transport = SyncTransport(client)
+
+    async def operation() -> None:
+        async with transport.request_stream(
+            "PUT", "https://example.com/upload", read_response=ReadResponsePolicy.ALWAYS
+        ) as request:
+            with pytest.raises(anyio.BrokenResourceError):
+                for _ in range(10):
+                    await request.write(b"x" * 1024)
+            response = await request.finish()
+            assert response.response.status_code == 413
+
+    iter_coroutine(operation())
+
+
+def test_sync_request_stream_early_2xx_before_eof_raises_broken_resource_error() -> None:
+    class _Early2xxSyncTransport(httpx.BaseTransport):
+        def handle_request(self, request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"ok": True})
+
+    client = httpx.Client(transport=_Early2xxSyncTransport())
+    transport = SyncTransport(client)
+
+    async def operation() -> None:
+        async with transport.request_stream(
+            "PUT", "https://example.com/upload", read_response=ReadResponsePolicy.ALWAYS
+        ) as request:
+            with pytest.raises(anyio.BrokenResourceError):
+                for _ in range(10):
+                    await request.write(b"x" * 1024)
+            with pytest.raises(anyio.BrokenResourceError):
+                await request.finish()
+
+    iter_coroutine(operation())
+
+
+@pytest.mark.anyio
+async def test_async_request_stream_recovers_early_response_after_write_failure() -> None:
+    client = httpx.AsyncClient(transport=_EarlyResponseAsyncTransport())
+    transport = AsyncTransport(client)
+
+    async with transport.request_stream(
+        "PUT", "https://example.com/upload", read_response=ReadResponsePolicy.ALWAYS
+    ) as request:
+        with pytest.raises(anyio.BrokenResourceError):
+            for _ in range(10):
+                await request.write(b"x" * 1024)
+        response = await request.finish()
+        assert response.response.status_code == 413
+
+
+@pytest.mark.anyio
+async def test_async_request_stream_early_2xx_before_eof_raises_broken_resource_error() -> None:
+    class _Early2xxAsyncTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"ok": True})
+
+    client = httpx.AsyncClient(transport=_Early2xxAsyncTransport())
+    transport = AsyncTransport(client)
+
+    async with transport.request_stream(
+        "PUT", "https://example.com/upload", read_response=ReadResponsePolicy.ALWAYS
+    ) as request:
+        with pytest.raises(anyio.BrokenResourceError):
+            for _ in range(10):
+                await request.write(b"x" * 1024)
+        with pytest.raises(anyio.BrokenResourceError):
+            await request.finish()
+
+
 @pytest.mark.anyio
 async def test_async_response_line_stream_closes_on_failure() -> None:
     error = RuntimeError("stream failed")

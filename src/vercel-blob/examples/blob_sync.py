@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from uuid import uuid4
 
 from vercel.blob import sync as blob
@@ -26,6 +27,26 @@ def main() -> None:
         assert metadata.size == len(payload)
     finally:
         blob.delete(uploaded.url)
+
+    # Stream upload from a temporary file reader
+    stream_pathname = f"vercel-py-examples/{uuid4().hex}/sync-stream.bin"
+    with tempfile.NamedTemporaryFile("w+b") as tmp:
+        tmp.write(payload)
+        tmp.flush()
+        tmp.seek(0)
+        stream_uploaded = blob.put(
+            stream_pathname,
+            tmp,
+            access=access,
+            content_length=len(payload),
+            content_type="application/octet-stream",
+        )
+    try:
+        stream_result = blob.get(stream_uploaded.url, access=access)
+        assert stream_result.body == payload
+    finally:
+        blob.delete(stream_uploaded.url)
+
     print("Sync Blob lifecycle passed; test object deleted.")
 
 

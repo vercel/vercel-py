@@ -1,0 +1,1 @@
+Recover early server error responses in `request_stream` when a prior `write` failed because the server terminated reading early, while raising `BrokenResourceError` if a server responds with 2xx before request stream EOF.

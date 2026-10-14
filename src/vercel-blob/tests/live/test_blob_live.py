@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import io
+from collections.abc import AsyncIterator
+from pathlib import Path
 from uuid import uuid4
 
+import anyio
 import httpx2 as httpx
 import pytest
 
@@ -188,3 +192,148 @@ async def test_early_exit_closes_download(store: LiveStore) -> None:
             assert metadata.size == len(payload)
         finally:
             await blob.delete(uploaded.url)
+
+
+@pytest.mark.asyncio
+async def test_async_streaming_round_trip(store: LiveStore, tmp_path: Path) -> None:
+    payload = bytes(range(256)) * 1024
+    pathname_reader = _pathname("async-streaming-reader.bin")
+    pathname_iter = _pathname("async-streaming-iter.bin")
+    path = tmp_path / "payload.bin"
+    path.write_bytes(payload)
+
+    async with session():
+        async with await anyio.open_file(path, "rb") as file:
+            uploaded_reader = await blob.put(
+                pathname_reader, file, access=store.access, content_length=len(payload)
+            )
+        try:
+            result = await blob.get(uploaded_reader.url, access=store.access)
+            assert result.body == payload
+
+            size = (await blob.head(uploaded_reader.url)).size
+            async with blob.stream(uploaded_reader.url, access=store.access) as download:
+                uploaded_copy = await blob.put(
+                    _pathname("async-streaming-copy.bin"),
+                    download,
+                    access=store.access,
+                    content_length=size,
+                )
+            try:
+                result = await blob.get(uploaded_copy.url, access=store.access)
+                assert result.body == payload
+            finally:
+                await blob.delete(uploaded_copy.url)
+        finally:
+            await blob.delete(uploaded_reader.url)
+
+        async def chunks() -> AsyncIterator[bytes]:
+            chunk_size = 64 * 1024
+            for offset in range(0, len(payload), chunk_size):
+                yield payload[offset : offset + chunk_size]
+
+        uploaded_iter = await blob.put(
+            pathname_iter, chunks(), access=store.access, content_length=len(payload)
+        )
+        try:
+            result = await blob.get(uploaded_iter.url, access=store.access)
+            assert result.body == payload
+        finally:
+            await blob.delete(uploaded_iter.url)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "tag,data,declared",
+    [
+        ("short", b"abc", 10),
+        ("oversized", b"x" * 11, 10),
+        ("zero-with-data", b"extra", 0),
+    ],
+)
+async def test_async_streaming_length_mismatch_creates_no_object(
+    store: LiveStore, tag: str, data: bytes, declared: int
+) -> None:
+    pathname = _pathname(f"async-bad-len-{tag}.bin")
+    async with session():
+        try:
+            with pytest.raises(blob.BlobContentLengthError):
+                await blob.put(
+                    pathname,
+                    anyio.wrap_file(io.BytesIO(data)),
+                    access=store.access,
+                    content_length=declared,
+                )
+            with pytest.raises(blob.BlobNotFoundError):
+                await blob.head(pathname)
+        finally:
+            await blob.delete(pathname)
+
+
+def test_sync_streaming_round_trip(store: LiveStore) -> None:
+    payload = bytes(range(256)) * 1024
+    pathname_reader = _pathname("sync-streaming-reader.bin")
+    pathname_iter = _pathname("sync-streaming-iter.bin")
+
+    with session():
+        reader = io.BytesIO(payload)
+        uploaded_reader = blob.sync.put(
+            pathname_reader, reader, access=store.access, content_length=len(payload)
+        )
+        try:
+            result = blob.sync.get(uploaded_reader.url, access=store.access)
+            assert result.body == payload
+
+            size = blob.sync.head(uploaded_reader.url).size
+            with blob.sync.stream(uploaded_reader.url, access=store.access) as download:
+                uploaded_copy = blob.sync.put(
+                    _pathname("sync-streaming-copy.bin"),
+                    download,
+                    access=store.access,
+                    content_length=size,
+                )
+            try:
+                result = blob.sync.get(uploaded_copy.url, access=store.access)
+                assert result.body == payload
+            finally:
+                blob.sync.delete(uploaded_copy.url)
+        finally:
+            blob.sync.delete(uploaded_reader.url)
+
+        def chunks():
+            chunk_size = 64 * 1024
+            for offset in range(0, len(payload), chunk_size):
+                yield payload[offset : offset + chunk_size]
+
+        uploaded_iter = blob.sync.put(
+            pathname_iter, chunks(), access=store.access, content_length=len(payload)
+        )
+        try:
+            result = blob.sync.get(uploaded_iter.url, access=store.access)
+            assert result.body == payload
+        finally:
+            blob.sync.delete(uploaded_iter.url)
+
+
+@pytest.mark.parametrize(
+    "tag,data,declared",
+    [
+        ("short", b"abc", 10),
+        ("oversized", b"x" * 11, 10),
+        ("zero-with-data", b"extra", 0),
+    ],
+)
+def test_sync_streaming_length_mismatch_creates_no_object(
+    store: LiveStore, tag: str, data: bytes, declared: int
+) -> None:
+    pathname = _pathname(f"sync-bad-len-{tag}.bin")
+    with session():
+        try:
+            with pytest.raises(blob.BlobContentLengthError):
+                blob.sync.put(
+                    pathname, io.BytesIO(data), access=store.access, content_length=declared
+                )
+            with pytest.raises(blob.BlobNotFoundError):
+                blob.sync.head(pathname)
+        finally:
+            blob.sync.delete(pathname)
