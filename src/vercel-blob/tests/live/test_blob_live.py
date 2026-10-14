@@ -431,22 +431,12 @@ async def test_async_collections(store: LiveStore) -> None:
             assert metadata.etag == copied.etag
             assert metadata.content_type == "application/octet-stream"
             assert metadata.cache_control == "public, max-age=300"
-            paths: set[str] = set()
-            cursor = None
-            while True:
-                page = await blob.list(prefix=prefix, limit=1, cursor=cursor)
-                paths.update(item.pathname for item in page.blobs)
-                if not page.has_more:
-                    break
-                cursor = page.cursor
+            paths = {item.pathname async for item in blob.query_blobs(prefix=prefix, page_size=1)}
             assert paths == {source, destination}
-            folded = await blob.list(prefix=prefix, mode="folded")
-            assert {item.pathname for item in folded.blobs} == {source}
-            assert folded.folders == (prefix + "nested/",)
             with pytest.raises(blob.BlobPreconditionFailedError):
                 await blob.delete_blob(source, if_match='"wrong"')
             await blob.delete_blob([source, destination])
-            assert not (await blob.list(prefix=prefix)).blobs
+            assert not [item async for item in blob.query_blobs(prefix=prefix)]
         finally:
             await blob.delete_blob([source, destination])
 
@@ -472,21 +462,11 @@ def test_sync_collections(store: LiveStore) -> None:
             assert metadata.etag == copied.etag
             assert metadata.content_type == "application/octet-stream"
             assert metadata.cache_control == "public, max-age=300"
-            paths: set[str] = set()
-            cursor = None
-            while True:
-                page = blob.sync.list(prefix=prefix, limit=1, cursor=cursor)
-                paths.update(item.pathname for item in page.blobs)
-                if not page.has_more:
-                    break
-                cursor = page.cursor
+            paths = {item.pathname for item in blob.sync.query_blobs(prefix=prefix, page_size=1)}
             assert paths == {source, destination}
-            folded = blob.sync.list(prefix=prefix, mode="folded")
-            assert {item.pathname for item in folded.blobs} == {source}
-            assert folded.folders == (prefix + "nested/",)
             with pytest.raises(blob.BlobPreconditionFailedError):
                 blob.sync.delete_blob(source, if_match='"wrong"')
             blob.sync.delete_blob([source, destination])
-            assert not (blob.sync.list(prefix=prefix)).blobs
+            assert not list(blob.sync.query_blobs(prefix=prefix))
         finally:
             blob.sync.delete_blob([source, destination])

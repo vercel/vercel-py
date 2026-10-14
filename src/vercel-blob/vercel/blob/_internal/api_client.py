@@ -7,7 +7,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 from email.utils import parsedate_to_datetime
 from functools import partial
-from typing import Annotated, Literal, TypeVar
+from typing import Annotated, TypeVar
 from urllib.parse import quote
 
 import httpx2 as httpx
@@ -53,10 +53,10 @@ from vercel.blob.models import (
     DownloadMetadata,
     HeadResult,
     ListBlob,
-    ListResult,
     PutResult,
 )
 
+from .pagination import QueryBlobsPage
 from .upload import _CHUNK_SIZE, _ChunkSource, send_streaming_upload
 from .validation import (
     validate_access,
@@ -117,17 +117,19 @@ class _CopyRequest(_PutRequest):
 
 
 class _ListRequest(_ApiModel):
-    limit: int | None = Field(default=None, ge=1, le=1000)
+    page_size: int | None = Field(default=None, ge=1, le=1000, serialization_alias="limit")
     prefix: Annotated[str | None, BeforeValidator(partial(validate_list_text, name="prefix"))] = (
         None
     )
     cursor: Annotated[str | None, BeforeValidator(partial(validate_list_text, name="cursor"))] = (
         None
     )
-    mode: Literal["expanded", "folded"] = "expanded"
 
     def _to_params(self) -> dict[str, str]:
-        return {key: str(value) for key, value in self.model_dump(exclude_none=True).items()}
+        return {
+            key: str(value)
+            for key, value in self.model_dump(by_alias=True, exclude_none=True).items()
+        }
 
 
 class _ListBlobResponse(_ApiModel):
@@ -153,7 +155,6 @@ class _ListResponse(_ApiModel):
     blobs: list[_ListBlobResponse]
     has_more: bool = Field(alias="hasMore")
     cursor: str | None = None
-    folders: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _check_cursor(self) -> _ListResponse:
@@ -161,12 +162,10 @@ class _ListResponse(_ApiModel):
             raise ValueError("hasMore requires a non-empty cursor")
         return self
 
-    def _to_result(self) -> ListResult:
-        return ListResult(
+    def _to_result(self) -> QueryBlobsPage:
+        return QueryBlobsPage(
             blobs=tuple(blob._to_result() for blob in self.blobs),
-            has_more=self.has_more,
-            cursor=self.cursor,
-            folders=tuple(self.folders),
+            next_cursor=self.cursor if self.has_more else None,
         )
 
 
@@ -571,7 +570,9 @@ class BlobApiClient:
         )
         return _parse_put_response(response)
 
-    async def list(self, request: _ListRequest, *, credentials: BlobCredentials) -> ListResult:
+    async def query_blobs_page(
+        self, request: _ListRequest, *, credentials: BlobCredentials
+    ) -> QueryBlobsPage:
         response = await self._request(
             "GET", "", credentials=credentials, params=request._to_params()
         )

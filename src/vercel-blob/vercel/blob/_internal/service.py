@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Callable, Sequence
-from typing import Literal
 
 from vercel._internal.core.http import StreamingResponse
 from vercel._internal.core.session import SdkSession, SyncSdkSession
@@ -16,13 +15,13 @@ from vercel.blob.models import (
     CopyResult,
     DownloadMetadata,
     HeadResult,
-    ListResult,
     PutResult,
 )
 
 from .api_client import BlobApiClient, _CopyRequest, _ListRequest, _PutRequest
 from .credentials import adapt_sync_credentials_factory, normalize_credentials
 from .options import BlobServiceOptions, SyncBlobServiceOptions
+from .pagination import QueryBlobsPage
 from .upload import (
     AnyPutBody,
     AsyncUploadRuntime,
@@ -114,18 +113,17 @@ class BlobService:
         credentials = await self._get_credentials()
         return await self._api_client.get_metadata(target, credentials=credentials)
 
-    async def list(
+    async def query_blobs_page(
         self,
         *,
-        limit: int | None = None,
+        page_size: int | None = None,
         prefix: str | None = None,
         cursor: str | None = None,
-        mode: Literal["expanded", "folded"] = "expanded",
-    ) -> ListResult:
+    ) -> QueryBlobsPage:
         self.check_open()
-        request = _ListRequest(limit=limit, prefix=prefix, cursor=cursor, mode=mode)
+        request = _ListRequest(page_size=page_size, prefix=prefix, cursor=cursor)
         credentials = await self._get_credentials()
-        return await self._api_client.list(request, credentials=credentials)
+        return await self._api_client.query_blobs_page(request, credentials=credentials)
 
     async def copy(
         self,
