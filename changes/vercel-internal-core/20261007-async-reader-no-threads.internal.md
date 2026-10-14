@@ -1,0 +1,1 @@
+`AsyncByteStreamRuntime.reader` no longer runs blocking readers on worker threads. It accepts buffers and async readers and raises `TypeError` for sync readers. `AsyncByteSource` now means `BytesLike | AsyncByteReader`, and `RawByteSource` is removed.

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import AbstractAsyncContextManager
-from typing import Literal
+from typing import Literal, overload
 
 from vercel._internal.core.session import get_active_session
 
@@ -13,6 +13,7 @@ from ._internal.options import BlobServiceOptions
 from ._internal.service import get_blob_service
 from .errors import (
     BlobAccessError,
+    BlobContentLengthError,
     BlobContentTypeNotAllowedError,
     BlobCredentialsError,
     BlobError,
@@ -29,33 +30,67 @@ from .errors import (
 )
 from .models import (
     Access,
+    AsyncByteReader,
     BlobCredentials,
     BlobCredentialsFactory,
     CredentialKind,
     DownloadMetadata,
     GetResult,
     HeadResult,
+    PutBody,
     PutResult,
     SyncBlobCredentialsFactory,
+    SyncByteReader,
+    SyncPutBody,
 )
+
+
+@overload
+async def put(
+    pathname: str,
+    body: bytes | bytearray | memoryview,
+    *,
+    access: Literal["public", "private"],
+    content_length: int | None = None,
+    content_type: str | None = None,
+    add_random_suffix: bool = False,
+    allow_overwrite: bool = False,
+    cache_control_max_age: int | None = None,
+) -> PutResult: ...
+
+
+@overload
+async def put(
+    pathname: str,
+    body: PutBody,
+    *,
+    access: Literal["public", "private"],
+    content_length: int,
+    content_type: str | None = None,
+    add_random_suffix: bool = False,
+    allow_overwrite: bool = False,
+    cache_control_max_age: int | None = None,
+) -> PutResult: ...
 
 
 async def put(
     pathname: str,
-    body: bytes,
+    body: bytes | bytearray | memoryview | PutBody,
     *,
     access: Literal["public", "private"],
+    content_length: int | None = None,
     content_type: str | None = None,
     add_random_suffix: bool = False,
     allow_overwrite: bool = False,
     cache_control_max_age: int | None = None,
 ) -> PutResult:
-    """Store an object in Vercel Blob with bytes payload."""
+    """Store an object in Vercel Blob with bytes or streaming payload."""
     service = get_blob_service(get_active_session())
     return await service.put(
         pathname,
         body,
         access=access,
+        content_length=content_length,
         content_type=content_type,
         add_random_suffix=add_random_suffix,
         allow_overwrite=allow_overwrite,
@@ -108,7 +143,9 @@ async def delete(
 
 __all__ = [
     "Access",
+    "AsyncByteReader",
     "BlobAccessError",
+    "BlobContentLengthError",
     "BlobContentTypeNotAllowedError",
     "BlobCredentials",
     "BlobCredentialsError",
@@ -129,8 +166,11 @@ __all__ = [
     "DownloadMetadata",
     "GetResult",
     "HeadResult",
+    "PutBody",
     "PutResult",
     "SyncBlobCredentialsFactory",
+    "SyncByteReader",
+    "SyncPutBody",
     "delete",
     "get",
     "head",

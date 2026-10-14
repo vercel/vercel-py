@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import AbstractContextManager
-from typing import Literal
+from typing import Literal, overload
 
 from vercel._internal.core.iter_coroutine import iter_coroutine
 from vercel._internal.core.session import get_active_sync_session
@@ -13,6 +13,7 @@ from .._internal.options import SyncBlobServiceOptions
 from .._internal.service import get_sync_blob_service
 from ..errors import (
     BlobAccessError,
+    BlobContentLengthError,
     BlobContentTypeNotAllowedError,
     BlobCredentialsError,
     BlobError,
@@ -37,26 +38,58 @@ from ..models import (
     HeadResult,
     PutResult,
     SyncBlobCredentialsFactory,
+    SyncByteReader,
+    SyncPutBody,
 )
+
+
+@overload
+def put(
+    pathname: str,
+    body: bytes | bytearray | memoryview,
+    *,
+    access: Literal["public", "private"],
+    content_length: int | None = None,
+    content_type: str | None = None,
+    add_random_suffix: bool = False,
+    allow_overwrite: bool = False,
+    cache_control_max_age: int | None = None,
+) -> PutResult: ...
+
+
+@overload
+def put(
+    pathname: str,
+    body: SyncPutBody,
+    *,
+    access: Literal["public", "private"],
+    content_length: int,
+    content_type: str | None = None,
+    add_random_suffix: bool = False,
+    allow_overwrite: bool = False,
+    cache_control_max_age: int | None = None,
+) -> PutResult: ...
 
 
 def put(
     pathname: str,
-    body: bytes,
+    body: bytes | bytearray | memoryview | SyncPutBody,
     *,
     access: Literal["public", "private"],
+    content_length: int | None = None,
     content_type: str | None = None,
     add_random_suffix: bool = False,
     allow_overwrite: bool = False,
     cache_control_max_age: int | None = None,
 ) -> PutResult:
-    """Store an object in Vercel Blob synchronously."""
+    """Store an object in Vercel Blob synchronously with bytes or streaming payload."""
     service = get_sync_blob_service(get_active_sync_session())
     return iter_coroutine(
         service.put(
             pathname,
             body,
             access=access,
+            content_length=content_length,
             content_type=content_type,
             add_random_suffix=add_random_suffix,
             allow_overwrite=allow_overwrite,
@@ -111,6 +144,7 @@ def delete(
 __all__ = [
     "Access",
     "BlobAccessError",
+    "BlobContentLengthError",
     "BlobContentTypeNotAllowedError",
     "BlobCredentials",
     "BlobCredentialsError",
@@ -133,6 +167,8 @@ __all__ = [
     "PutResult",
     "SyncBlobCredentialsFactory",
     "SyncBlobServiceOptions",
+    "SyncByteReader",
+    "SyncPutBody",
     "delete",
     "get",
     "head",
