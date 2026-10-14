@@ -29,7 +29,8 @@ class _MultipartUpload:
         self._entered = False
         self._closed = False
         self._failed = False
-        self._busy = Lock()
+        self._state_lock = Lock()
+        self._busy = False
         self._parts: list[dict[str, str | int]] = []
         self._last_size = 0
         self._result: PutResult | None = None
@@ -42,10 +43,11 @@ class _MultipartUpload:
         return self._result
 
     async def _start(self) -> None:
-        if self._entered:
-            self._failed = True
-            raise BlobError("multipart context cannot be entered more than once")
-        self._entered = True
+        with self._state_lock:
+            if self._entered:
+                self._failed = True
+                raise BlobError("multipart context cannot be entered more than once")
+            self._entered = True
         try:
             self._service.check_open()
             credentials = await self._service._get_credentials()
@@ -53,18 +55,24 @@ class _MultipartUpload:
                 self._request, credentials=credentials
             )
         except BaseException:
-            self._closed = True
-            self._failed = True
+            with self._state_lock:
+                self._closed = True
+                self._failed = True
             raise
 
     async def _upload_part(self, body: AnyPutBody, content_length: int | None) -> None:
-        if not self._busy.acquire(blocking=False):
-            self._failed = True
-            raise BlobError("overlapping multipart part uploads are not supported")
+        # Record overlap under the same lock used by the completion decision.
+        # A rejected thread must not leave a window in which exit can publish.
+        with self._state_lock:
+            if self._busy:
+                self._failed = True
+                raise BlobError("overlapping multipart part uploads are not supported")
+            self._busy = True
         try:
             self._service.check_open()
-            if self._closed or self._created is None or self._failed:
-                raise BlobError("multipart upload is not active or has failed")
+            with self._state_lock:
+                if self._closed or self._created is None or self._failed:
+                    raise BlobError("multipart upload is not active or has failed")
             if len(self._parts) >= _MAX_PARTS:
                 raise BlobError("multipart uploads support at most 10,000 parts")
             if self._parts and self._last_size < _MIN_PART_SIZE:
@@ -87,29 +95,33 @@ class _MultipartUpload:
                 upload.content_length,
                 credentials=credentials,
             )
-            if self._closed or self._failed:
-                raise BlobError("multipart upload failed while a part was in flight")
-            self._parts.append({"partNumber": number, "etag": etag})
-            self._last_size = upload.content_length
+            with self._state_lock:
+                if self._closed or self._failed:
+                    raise BlobError("multipart upload failed while a part was in flight")
+                self._parts.append({"partNumber": number, "etag": etag})
+                self._last_size = upload.content_length
         except BaseException:
-            self._failed = True
+            with self._state_lock:
+                self._failed = True
             raise
         finally:
-            self._busy.release()
+            with self._state_lock:
+                self._busy = False
 
     async def _finish(self, exc_type: type[BaseException] | None) -> None:
-        if self._closed:
-            raise BlobError("multipart context is already closed")
-        self._closed = True
-        if exc_type is not None:
-            self._failed = True
-            return
-        if self._busy.locked() or self._failed:
-            self._failed = True
-            raise BlobError("multipart upload failed; object was not completed")
-        if not self._parts or self._created is None:
-            self._failed = True
-            raise BlobError("multipart upload requires at least one nonempty part")
+        with self._state_lock:
+            if self._closed:
+                raise BlobError("multipart context is already closed")
+            self._closed = True
+            if exc_type is not None:
+                self._failed = True
+                return
+            if self._busy or self._failed:
+                self._failed = True
+                raise BlobError("multipart upload failed; object was not completed")
+            if not self._parts or self._created is None:
+                self._failed = True
+                raise BlobError("multipart upload requires at least one nonempty part")
         try:
             self._service.check_open()
             credentials = await self._service._get_credentials()
@@ -117,7 +129,8 @@ class _MultipartUpload:
                 self._request, self._created, self._parts, credentials=credentials
             )
         except BaseException:
-            self._failed = True
+            with self._state_lock:
+                self._failed = True
             raise
 
 
@@ -160,7 +173,8 @@ class AsyncMultipartUpload(_MultipartUpload):
                 await anyio.lowlevel.checkpoint()
             await self._finish(exc_type)
         finally:
-            self._closed = True
+            with self._state_lock:
+                self._closed = True
 
 
 class SyncMultipartUpload(_MultipartUpload):

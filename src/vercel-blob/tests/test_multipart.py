@@ -6,9 +6,9 @@ import inspect
 import io
 import json
 from collections.abc import AsyncIterator
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from contextlib import AsyncExitStack, asynccontextmanager
-from threading import Event
+from threading import Event, local
 from typing import Any
 
 import anyio
@@ -383,4 +383,79 @@ def test_sync_overlapping_threads_cannot_publish_a_prefix() -> None:
                         release.set()
                     with pytest.raises(blob.BlobError, match="failed"):
                         first.result(timeout=5)
+    assert "complete" not in backend.actions
+
+
+def test_sync_exit_while_overlap_failure_recording_is_paused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = Backend()
+    source_started = Event()
+    release_source = Event()
+    overlap_detected = Event()
+    release_rejected = Event()
+    exiting = Event()
+    thread_state = local()
+
+    class Reader(io.BytesIO):
+        def read(self, size: int | None = -1) -> bytes:
+            source_started.set()
+            assert release_source.wait(timeout=5)
+            return super().read(size)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return backend.respond(request, request.read())
+
+    # Pause precisely between detecting overlap and recording the failure.
+    # The completion decision must remain excluded throughout that interval.
+    def pause_failure(instance: Any, name: str, value: Any) -> None:
+        if name == "_failed" and value is True and getattr(thread_state, "rejecting", False):
+            thread_state.rejecting = False
+            overlap_detected.set()
+            assert release_rejected.wait(timeout=5)
+        object.__setattr__(instance, name, value)
+
+    monkeypatch.setattr(blob.sync.SyncMultipartUpload, "__setattr__", pause_failure)
+    with _sync_session(handler):
+        handle = upload(blob.sync)
+        handle.__enter__()
+        handle.upload_part(_PART)
+
+        def reject_part() -> None:
+            thread_state.rejecting = True
+            handle.upload_part(b"rejected")
+
+        def exit_scope() -> None:
+            exiting.set()
+            handle.__exit__(None, None, None)
+
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            active = pool.submit(handle.upload_part, Reader(b"tail"), content_length=4)
+            try:
+                assert source_started.wait(timeout=5)
+                rejected = pool.submit(reject_part)
+                assert overlap_detected.wait(timeout=5)
+                release_source.set()
+                # The original implementation lets the active part finish here.
+                # With the fix it waits for the rejected call's state transition.
+                try:
+                    active.result(timeout=0.5)
+                except FutureTimeoutError:
+                    pass
+                exit_result = pool.submit(exit_scope)
+                assert exiting.wait(timeout=5)
+                with pytest.raises(FutureTimeoutError):
+                    exit_result.result(timeout=0.5)
+                assert "complete" not in backend.actions
+            finally:
+                release_source.set()
+                release_rejected.set()
+            with pytest.raises(blob.BlobError, match="overlapping"):
+                rejected.result(timeout=5)
+            with pytest.raises(blob.BlobError, match="failed"):
+                active.result(timeout=5)
+            with pytest.raises(blob.BlobError, match="failed"):
+                exit_result.result(timeout=5)
+        with pytest.raises(blob.BlobError):
+            _ = handle.result
     assert "complete" not in backend.actions
