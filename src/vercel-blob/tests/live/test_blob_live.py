@@ -200,7 +200,9 @@ def test_overwrite_policy(store: LiveStore) -> None:
         first = blob.sync.put_blob(pathname, b"first", access=store.access, add_random_suffix=False)
         try:
             with pytest.raises(blob.BlobError) as error:
-                blob.sync.put_blob(pathname, b"second", access=store.access, add_random_suffix=False)
+                blob.sync.put_blob(
+                    pathname, b"second", access=store.access, add_random_suffix=False
+                )
             assert error.value.status_code == 400
 
             second = blob.sync.put_blob(
@@ -417,8 +419,8 @@ async def test_async_collections(store: LiveStore) -> None:
         try:
             original = await blob.put_blob(source, b"collection", access=store.access)
             with pytest.raises(blob.BlobPreconditionFailedError):
-                await blob.copy(source, destination, access=store.access, if_match='"wrong"')
-            copied = await blob.copy(
+                await blob.copy_blob(source, destination, access=store.access, if_match='"wrong"')
+            copied = await blob.copy_blob(
                 original.url,
                 destination,
                 access=store.access,
@@ -460,8 +462,8 @@ def test_sync_collections(store: LiveStore) -> None:
         try:
             original = blob.sync.put_blob(source, b"collection", access=store.access)
             with pytest.raises(blob.BlobPreconditionFailedError):
-                blob.sync.copy(source, destination, access=store.access, if_match='"wrong"')
-            copied = blob.sync.copy(
+                blob.sync.copy_blob(source, destination, access=store.access, if_match='"wrong"')
+            copied = blob.sync.copy_blob(
                 original.url,
                 destination,
                 access=store.access,

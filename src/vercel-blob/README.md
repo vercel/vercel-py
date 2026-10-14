@@ -62,19 +62,19 @@ finally:
 | `delete_blob` | One target or a sequence of 1–1,000 pathnames or Blob delivery URLs | `None` |
 | `query_blobs` | Optional prefix, page size, and starting cursor | Iterator of `ListBlob` entries that follows pagination automatically |
 | `query_entries` | Optional directory prefix, page size, and starting cursor | Iterator of `ListBlob \| BlobPrefix` at one directory level |
-| `copy` | Source pathname or Blob delivery URL, destination pathname, required `access` | `CopyResult` from the copy response |
+| `copy_blob` | Source pathname or Blob delivery URL, destination pathname, required `access` | `CopyResult` from the copy response |
 | `multipart_upload_blob` | Pathname, required `access`, upload options | Context yielding a sequential part uploader; `result: PutResult` after successful exit |
 
-`put_blob`, `get_blob`, `head_blob`, `copy`, and `delete_blob` are awaited in the async API.
-Iterate over `query_blobs` or `query_entries` with `async for`, without awaiting the call. Enter
+`put_blob`, `get_blob`, `head_blob`, `copy_blob`, and `delete_blob` are awaited in
+the async API. Iterate over `query_blobs` or `query_entries` with `async for`,
+without awaiting the call. Enter
 `stream_blob` with `async with`. The sync API uses ordinary calls, iterates over
 `query_blobs` with `for`, and enters `stream_blob` with `with`.
 
 Pathnames are relative to the store. One leading slash is removed. Empty paths,
 control characters, invalid Unicode, `//`, and `.` or `..` path segments are
 rejected. `put_blob` and copy destinations accept at most 950 UTF-16 code units in
-the original pathname,
-matching the TypeScript SDK. Characters outside the Unicode Basic Multilingual
+the original pathname, matching the TypeScript SDK. Characters outside the Unicode Basic Multilingual
 Plane count as two units. Reads do not inherit this upload limit.
 
 Pathnames are literal object names, not URL-encoded strings or local file paths.
@@ -224,7 +224,7 @@ are inferred, streaming lengths are required, and sources stay caller-owned.
 Each part must contain 1 byte through 5 GiB, with at most 10,000 parts. Every
 part except the last must be at least 5 MiB. After a smaller part, a further
 part is rejected before consuming its source or sending its request. An empty
-scope raises without completing; use `put(pathname, b"", ...)` for an empty object.
+scope raises without completing; use `put_blob(pathname, b"", ...)` for an empty object.
 
 A successful context exit publishes the object and makes `upload.result`
 available. Normal early `return` or `break` is a successful exit and publishes
@@ -242,8 +242,9 @@ not delete remote parts or roll back an object that may already have published.
 
 ### Collections
 
-Both runtimes expose `query_blobs`, `query_entries`, `copy`, and batch `delete_blob`. Like Sandbox's
-`query_*` APIs, `query_blobs` lazily yields individual objects and automatically
+Both runtimes expose `query_blobs`, `query_entries`, `copy_blob`, and batch
+`delete_blob`. Like Sandbox's `query_*` APIs, `query_blobs` lazily yields
+individual objects and automatically
 follows pagination cursors. Each `ListBlob` includes URL, download URL, pathname,
 size, upload date, and ETag.
 
@@ -298,7 +299,9 @@ Synchronous browsing uses `for entry in blob.sync.query_entries(...)`. Neither
 query exposes public page results. Listing is not a snapshot while objects change.
 
 ```python
-copied = await blob.copy(
+from vercel.blob import copy_blob, delete_blob
+
+copied = await copy_blob(
     "reports/source.bin",
     "reports/archive.bin",
     access="private",
@@ -306,7 +309,7 @@ copied = await blob.copy(
     cache_control_max_age=300,
     if_match=source_etag,
 )
-await blob.delete_blob(["reports/source.bin", copied.url])
+await delete_blob(["reports/source.bin", copied.url])
 ```
 
 Copy runs on the server within the credential's store and returns `CopyResult`
@@ -324,7 +327,7 @@ outcome uncertain. Missing targets are harmless. `if_match` is supported only
 for a single target (including a sequence of length one), and checks that
 object's ETag. Invalid sizes and batch preconditions fail locally.
 
-For synchronous usage, iterate over `blob.sync.query_blobs` and call `blob.sync.copy` and
+For synchronous usage, iterate over `blob.sync.query_blobs` and call `blob.sync.copy_blob` and
 `blob.sync.delete_blob` without `await`. The package examples exercise cursor
 pagination, conditional copy, and batch cleanup in both runtimes.
 

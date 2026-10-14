@@ -206,7 +206,7 @@ def query_entries(
     )
 
 
-def copy(
+def copy_blob(
     source: str,
     pathname: str,
     *,
@@ -275,7 +275,7 @@ __all__ = [
     "SyncByteReader",
     "SyncMultipartUpload",
     "SyncPutBody",
-    "copy",
+    "copy_blob",
     "delete_blob",
     "get_blob",
     "head_blob",
