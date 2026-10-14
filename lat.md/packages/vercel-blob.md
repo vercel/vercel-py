@@ -1,8 +1,8 @@
 # vercel-blob
 
-Client for Vercel Blob object storage: uploads, downloads, metadata, deletion, and multipart uploads.
+Client for Vercel Blob object storage: uploads, downloads, metadata, server-side copy, batch deletion, lazy catalog queries, and multipart uploads.
 
-Lives in [[src/vercel-blob]] and is exposed as [[src/vercel-blob/vercel/blob/__init__.py|vercel.blob]] (async) and [[src/vercel-blob/vercel/blob/sync/__init__.py|vercel.blob.sync]]. It replaced the Blob module that [[vercel]] used to own; that distribution now depends on it. Function names follow [[vercel-sandbox]]: resource-suffixed verbs such as [[src/vercel-blob/vercel/blob/__init__.py#put_blob]] and [[src/vercel-blob/vercel/blob/__init__.py#delete_blob]].
+Lives in [[src/vercel-blob]] and is exposed as [[src/vercel-blob/vercel/blob/__init__.py|vercel.blob]] (async) and [[src/vercel-blob/vercel/blob/sync/__init__.py|vercel.blob.sync]]. It replaced the Blob module that [[vercel]] used to own; that distribution now depends on it. Function names follow [[vercel-sandbox]]: resource-suffixed verbs such as [[src/vercel-blob/vercel/blob/__init__.py#put_blob]] and lazy `query_*` iterators.
 
 ## Layering
 
@@ -26,7 +26,7 @@ Each operation obtains credentials from the session's factory, which defaults to
 
 Targets are store-relative pathnames or delivery URLs on the standard Blob host, both validated strictly before use.
 
-Pathnames are literal object names: one leading slash is stripped, while empty paths, control characters, lone surrogates, `//`, and dot segments are rejected. Uploads are capped at 950 UTF-16 code units to match the TypeScript SDK. Delivery URLs must be HTTPS on `<store>.<access>.blob.vercel-storage.com`; custom domains are unsupported, and redirects are never followed.
+Pathnames are literal object names: one leading slash is stripped, while empty paths, control characters, lone surrogates, `//`, and dot segments are rejected. Uploads and copy destinations are capped at 950 UTF-16 code units to match the TypeScript SDK. Delivery URLs must be HTTPS on `<store>.<access>.blob.vercel-storage.com`; custom domains are unsupported, and redirects are never followed.
 
 Downloads build the delivery URL themselves rather than asking the API. A public URL can be downloaded without credentials. Private downloads attach credentials only after confirming that the URL's store matches the credential's store.
 
@@ -53,6 +53,14 @@ Downloads are streamed with one owner per response; the buffered form is a thin 
 [[src/vercel-blob/vercel/blob/__init__.py#stream_blob]] returns a context that opens the response on entry. [[src/vercel-blob/vercel/blob/_internal/download.py#AsyncBlobDownload]] and [[src/vercel-blob/vercel/blob/_internal/download.py#SyncBlobDownload]] may be iterated once, reject concurrent reads, and close the response at EOF, on error, on cancellation, or on context exit. [[src/vercel-blob/vercel/blob/__init__.py#get_blob]] joins that stream into `bytes` and returns a result that outlives the session.
 
 Download metadata comes from response headers, with no preliminary HEAD request. Missing headers stay `None`, even when the body has been read.
+
+## Collections
+
+Catalog queries are lazy iterators that follow cursors on demand, mirroring Sandbox's `query_*` APIs.
+
+[[src/vercel-blob/vercel/blob/__init__.py#query_blobs]] yields every object under a prefix, and [[src/vercel-blob/vercel/blob/__init__.py#query_entries]] yields one directory level as objects plus frozen [[src/vercel-blob/vercel/blob/models.py#BlobPrefix]] folders. Both share the cursor loop in [[src/vercel-blob/vercel/blob/_internal/pagination.py]]: no request is sent until iteration begins, one page is held at a time, and iteration stops at an empty page or a missing cursor. Folder-only pages carry entries, so browsing continues through them. Page results stay internal.
+
+[[src/vercel-blob/vercel/blob/__init__.py#copy_blob]] copies on the server without downloading, and its `if_match` checks the source ETag. [[src/vercel-blob/vercel/blob/__init__.py#delete_blob]] takes one target or a batch of 1–1,000 sent as one request, validates the whole batch first, and allows `if_match` only for a single target. Batches are not split, retried, or atomic.
 
 ## Errors
 
