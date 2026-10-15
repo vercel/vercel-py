@@ -1822,6 +1822,10 @@ async def _flush_hook_lifecycle_events(
                     return
                 events_created = True
 
+    # Catch errors so anyio does not cancel sibling token groups.
+    # For now, raise just the first failure as the TS SDK does. We can add a
+    # manual ExceptionGroup aggregation later, which would require a Python
+    # 3.10 backport dependency like what anyio does.
     failures: list[Exception] = []
 
     async def settle_group(hooks: list[Hook]) -> None:
@@ -1978,7 +1982,6 @@ async def _workflow_replay_pass(
         return None
 
     events_created, immediate_replay_reasons = await _flush_hook_lifecycle_events(context)
-    steps_to_queue: list[Callable[[], Coroutine[Any, Any, str]]] = []
     async with anyio.create_task_group() as tg:
         for sus in context.suspensions.values():
             if sus.has_created_event or isinstance(sus, Hook):
@@ -1997,20 +2000,17 @@ async def _workflow_replay_pass(
                     # a previous invoker may have crashed between
                     # creating the event and enqueueing.
                     #
-                    # Instead we use an idempotency_key to pervent
+                    # Instead we use an idempotency_key to prevent
                     # duplicate queueing.
-                    steps_to_queue.append(
-                        functools.partial(
-                            world.queue,
-                            w.get_queue_name(workflow_run.workflow_name, namespace),
-                            w.WorkflowInvokePayload(
-                                run_id=run_id,
-                                step_id=s.correlation_id,
-                                step_name=s.step.name,
-                                requested_at=datetime.now(UTC),
-                            ),
-                            idempotency_key=s.correlation_id,
-                        )
+                    await world.queue(
+                        w.get_queue_name(workflow_run.workflow_name, namespace),
+                        w.WorkflowInvokePayload(
+                            run_id=run_id,
+                            step_id=s.correlation_id,
+                            step_name=s.step.name,
+                            requested_at=datetime.now(UTC),
+                        ),
+                        idempotency_key=s.correlation_id,
                     )
 
                 tg.start_soon(create_step)
@@ -2046,10 +2046,6 @@ async def _workflow_replay_pass(
 
                 tg.start_soon(set_attr)
                 events_created = True
-
-    async with anyio.create_task_group() as tg:
-        for queue_step in steps_to_queue:
-            tg.start_soon(queue_step)
 
     if not context.suspensions and events_created:
         # A disposed hook can clear the last suspension while its lifecycle
