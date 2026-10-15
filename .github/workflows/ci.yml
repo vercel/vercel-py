@@ -57,7 +57,9 @@ jobs:
   test:
     name: Test (${{ matrix.os.name }}, py${{ matrix.python-version }}, anyio ${{ matrix.anyio }})
     runs-on: ${{ matrix.os.runner }}
-    environment: ci
+    environment:
+      name: ci
+      deployment: false
     permissions:
       contents: read
     defaults:
