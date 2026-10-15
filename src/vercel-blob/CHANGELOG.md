@@ -1,1 +1,46 @@
 # Changelog
+
+## 0.5.0 - 2026-10-15
+
+### Breaking Changes
+
+- Replace the legacy `vercel.blob` API with a new Blob SDK in the standalone
+  `vercel-blob` distribution. Async operations live in `vercel.blob`, and the
+  same operations run without an event loop in `vercel.blob.sync`. The legacy
+  `put`, `get`, `head`, `delete`, `copy`, `list_objects`, and `iter_objects`
+  functions and their `*_async` variants, `BlobClient` and `AsyncBlobClient`,
+  `upload_file`, `download_file`, `create_folder`, `get_download_url`, upload
+  progress callbacks, per-call `token=` overrides, and the multipart helpers are
+  removed without compatibility aliases. (#464)
+
+  - `put_blob` uploads `bytes`, `bytearray`, or `memoryview` buffers, snapshotted
+    at call time, and known-length streaming bodies when `content_length` is
+    given: async byte readers and async iterables in `vercel.blob`, sync readers
+    and iterables in `vercel.blob.sync`. The async API does not run blocking
+    reads on worker threads. Lengths are enforced exactly without spooling or
+    chunked transfer encoding, and mismatches raise `BlobContentLengthError`.
+    `access` is required, and uploads keep the given pathname without
+    overwriting unless `add_random_suffix` or `allow_overwrite` is set, matching
+    the TypeScript SDK.
+  - `multipart_upload_blob` is a context for uploading caller-sized parts in
+    order. The SDK numbers parts, keeps their receipts, and publishes on
+    successful exit, after which `upload.result` holds the `PutResult`. Failed
+    parts, exceptions, cancellation, and overlapping calls prevent publication,
+    and empty uploads raise.
+  - `get_blob` buffers the complete body into a `GetResult` with separate
+    `metadata` and `body`, `stream_blob` is a context manager for streaming
+    downloads, and `head_blob` returns object metadata without the content.
+  - `query_blobs` and `query_blob_entries` are lazy iterators that follow
+    pagination cursors, with `query_blob_entries` yielding `BlobPrefix` virtual
+    folders for a single directory level. `copy_blob` copies on the server with
+    an optional source ETag precondition, and `delete_blob` deletes one object
+    or a batch of up to 1,000, with an ETag precondition for a single object.
+  - Credentials come from Vercel OIDC with `BLOB_STORE_ID` or from a read-write
+    token, or from a credentials factory configured on the SDK session with
+    `BlobServiceOptions` (`SyncBlobServiceOptions` for `vercel.blob.sync`).
+  - Pathnames and delivery URLs are validated before credentials are resolved or
+    requests are sent: uploads are limited to 950 UTF-16 code units, and
+    ambiguous separators, invalid Unicode, and control or dot segments are
+    rejected. Service errors raise `BlobError` subclasses such as
+    `BlobNotFoundError` and `BlobPreconditionFailedError`.
+

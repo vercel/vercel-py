@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.1 - 2026-10-15
+
+- Update dependencies.
+
 ## 0.9.0 - 2026-10-07
 
 ### Breaking Changes

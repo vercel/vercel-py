@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.12.0 - 2026-10-15
+
+### Breaking Changes
+
+- Move `vercel.blob` into the standalone `vercel-blob` distribution, which `vercel` now depends on, and remove the legacy Blob operations, clients, multipart helpers, and related types. The replacement async `vercel.blob` and synchronous `vercel.blob.sync` APIs are described in the `vercel-blob` changelog. (#464)
+
 ## 0.11.6 - 2026-10-07
 
 - Update dependencies.

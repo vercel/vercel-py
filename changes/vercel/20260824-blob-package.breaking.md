@@ -1,1 +1,0 @@
-Move `vercel.blob` into the standalone `vercel-blob` distribution, which `vercel` now depends on, and remove the legacy Blob operations, clients, multipart helpers, and related types. The replacement async `vercel.blob` and synchronous `vercel.blob.sync` APIs are described in the `vercel-blob` changelog.

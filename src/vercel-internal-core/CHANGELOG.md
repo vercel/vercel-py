@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.2 - 2026-10-15
+
+### Bug Fixes
+
+- Recover early server error responses in `request_stream` when a prior `write` failed because the server terminated reading early, while raising `BrokenResourceError` if a server responds with 2xx before request stream EOF. (#464)
+
+### Internal
+
+- `AsyncByteStreamRuntime.reader` no longer runs blocking readers on worker threads. It accepts buffers and async readers and raises `TypeError` for sync readers. `AsyncByteSource` now means `BytesLike | AsyncByteReader`, and `RawByteSource` is removed. (#464)
+
 ## 0.2.1 - 2026-10-06
 
 ### Bug Fixes

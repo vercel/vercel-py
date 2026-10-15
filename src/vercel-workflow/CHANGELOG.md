@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.11.2 - 2026-10-15
+
+### Bug Fixes
+
+- Send `isWebhook: false` on `hook_created`, so hooks are no longer treated as webhooks: they were resumable through the public webhook URL, and are refused by `resumeHook(token)` in newer Workflow SDKs. (#448)
+
 ## 0.11.1 - 2026-10-06
 
 ### Bug Fixes
