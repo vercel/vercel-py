@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import dataclasses
 import importlib.util
 import subprocess
+import tempfile
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import cast
 
 import pytest
+from hypothesis import given, strategies as st
 
 from scripts import bundle_release, clogedit, hatch_build, release, verify_dist, workspace
 
@@ -100,6 +103,93 @@ def test_compute_releases_promotes_any_unpublished_fragment_to_initial_minor(
     releases = release.compute_releases()
 
     assert [(item.old_version, item.new_version) for item in releases] == [("0.0.0", "0.1.0")]
+
+
+def _release_single_package(
+    monkeypatch: pytest.MonkeyPatch,
+    root: Path,
+    *,
+    version: str,
+    kind: str,
+    previous: str | None = None,
+) -> list[release.Release]:
+    fragment_dir = root / "changes/pkg"
+    fragment_dir.mkdir(parents=True)
+    (fragment_dir / f"change.{kind}.md").write_text("Change package.\n", encoding="utf-8")
+    package_path = root / "pkg"
+    package_path.mkdir()
+    version_file = package_path / "version.py"
+    version_file.write_text(f'__version__ = "{version}"\n', encoding="utf-8")
+    if previous is not None:
+        (package_path / "pyproject.toml").write_text(
+            f'[tool.vercel.release]\nprevious-version = "{previous}"\n', encoding="utf-8"
+        )
+    packages = {"pkg": workspace.Package("pkg", package_path, version_file, ())}
+    monkeypatch.setattr(release, "CHANGES", root / "changes")
+    monkeypatch.setattr(workspace, "packages", lambda: packages)
+    return release.compute_releases()
+
+
+@pytest.mark.parametrize(
+    ("version", "previous", "kind", "expected"),
+    [
+        ("0.0.0", "0.4.2", "breaking", ("0.4.2", "0.5.0")),
+        ("0.0.0", "0.4.2", "feature", ("0.4.2", "0.5.0")),
+        ("0.0.0", "0.4.2", "bugfix", ("0.4.2", "0.4.3")),
+        ("0.0.0", "1.2.3", "breaking", ("1.2.3", "2.0.0")),
+        ("0.5.0", "0.4.2", "bugfix", ("0.5.0", "0.5.1")),
+    ],
+    ids=["breaking", "feature", "bugfix", "major", "ignored-once-published"],
+)
+def test_compute_releases_continues_unpublished_package_from_previous_version(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    version: str,
+    previous: str,
+    kind: str,
+    expected: tuple[str, str],
+) -> None:
+    releases = _release_single_package(
+        monkeypatch, tmp_path, version=version, kind=kind, previous=previous
+    )
+
+    assert [(item.old_version, item.new_version) for item in releases] == [expected]
+
+
+@given(
+    previous=st.tuples(st.integers(0, 20), st.integers(0, 20), st.integers(0, 20)).filter(
+        lambda parts: parts != (0, 0, 0)
+    ),
+    kind=st.sampled_from(sorted(release.FRAGMENT_TYPES)),
+)
+def test_first_release_after_previous_version_matches_a_published_package(
+    previous: tuple[int, int, int], kind: str
+) -> None:
+    previous_version = ".".join(str(part) for part in previous)
+    with tempfile.TemporaryDirectory() as directory, pytest.MonkeyPatch.context() as patch:
+        adopted = _release_single_package(
+            patch,
+            Path(directory) / "adopted",
+            version="0.0.0",
+            kind=kind,
+            previous=previous_version,
+        )
+    with tempfile.TemporaryDirectory() as directory, pytest.MonkeyPatch.context() as patch:
+        published = _release_single_package(
+            patch, Path(directory) / "published", version=previous_version, kind=kind
+        )
+
+    assert adopted == [dataclasses.replace(published[0], fragments=adopted[0].fragments)]
+
+
+@pytest.mark.parametrize("previous", ["0.0.0", "1.0", "v0.4.2", "0.4.2b1"])
+def test_compute_releases_rejects_invalid_previous_version(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, previous: str
+) -> None:
+    with pytest.raises(SystemExit, match="invalid previous-version"):
+        _release_single_package(
+            monkeypatch, tmp_path, version="0.0.0", kind="feature", previous=previous
+        )
 
 
 def test_compute_releases_does_not_cascade_to_unpublished_dependent(
@@ -1858,8 +1948,9 @@ def test_apscheduler_bundle_keeps_apscheduler_peer_dependency(
     )
 
 
-def test_sandbox_bundle_keeps_bounded_pydantic_external(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("package_name", ["vercel-sandbox", "vercel-connect", "vercel-blob"])
+def test_bundle_keeps_bounded_pydantic_external(
+    monkeypatch: pytest.MonkeyPatch, package_name: str
 ) -> None:
     packages = {
         name: workspace.Package(name, path, path / version_file, ())
@@ -1879,11 +1970,11 @@ def test_sandbox_bundle_keeps_bounded_pydantic_external(
     monkeypatch.setattr(workspace, "packages", lambda: packages)
     monkeypatch.setattr(bundle_release, "shared_vendored_version", lambda: "0.7.1")
     data = bundle_release._load_pyproject(  # noqa: SLF001
-        bundle_release.ROOT / "src/vercel-sandbox"
+        bundle_release.ROOT / "src" / package_name
     )
 
     vendored_requirements = bundle_release._derive_vendor_requirements(  # noqa: SLF001
-        "vercel-sandbox", data
+        package_name, data
     )
 
     assert all(
@@ -1892,7 +1983,7 @@ def test_sandbox_bundle_keeps_bounded_pydantic_external(
     )
 
     ext_deps = bundle_release._external_dependencies(  # noqa: SLF001
-        "vercel-sandbox", data, vendored_requirements
+        package_name, data, vendored_requirements
     )
     assert "pydantic>=2.7.0,<3" in ext_deps
 

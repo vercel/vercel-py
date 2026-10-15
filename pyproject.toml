@@ -32,14 +32,14 @@ dev = [
     "tomli>=2.0.0,<3; python_version < '3.11'",
     "vendoring>=1,<2",
     "lograil~=0.8.1",
-    "ggt>=1.6.0; python_version >= '3.11'",
+    "ggt>=1.6.1; python_version >= '3.11'",
 ]
 
 [tool.uv]
 default-groups = ["dev"]
 package = false
 exclude-newer = "2 days"
-exclude-newer-package = { ggt = "2026-09-01T00:00:00Z", lograil = "2026-08-21T00:00:00Z" }
+exclude-newer-package = { ggt = false, lograil = "2026-08-21T00:00:00Z" }
 
 [tool.uv.workspace]
 members = ["src/*", "integrations/*"]
@@ -91,6 +91,7 @@ ignore_missing_imports = true
 explicit_package_bases = true
 mypy_path = [
     "src",
+    "src/vercel-blob",
     "src/vercel-cache",
     "src/vercel-connect",
     "src/vercel-headers",
@@ -98,6 +99,7 @@ mypy_path = [
     "src/vercel-oidc",
     "src/vercel-internal-core",
     "src/vercel-internal-telemetry",
+    "src/vercel-proxy",
     "src/vercel-sandbox",
     "src/vercel-workflow",
     "integrations/vercel-apscheduler",

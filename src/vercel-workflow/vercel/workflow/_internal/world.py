@@ -821,6 +821,11 @@ class Hook(BaseModel):
 class HookCreatedEventData(BaseModel):
     token: str
     metadata: bytes | None = pydantic.Field(default=None, exclude_if=lambda e: e is None)
+    # Always sent: a backend reads a `hook_created` without `isWebhook` as a
+    # legacy webhook, which would make the hook resumable through the public
+    # webhook endpoint and refused by `resumeHook(token)`. This SDK has no
+    # webhooks, so every hook it creates is `False`.
+    is_webhook: bool = pydantic.Field(default=False, alias="isWebhook")
     is_system: bool | None = pydantic.Field(
         default=None, alias="isSystem", exclude_if=lambda e: e is None
     )

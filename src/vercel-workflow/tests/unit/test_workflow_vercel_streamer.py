@@ -15,6 +15,7 @@ import pytest
 
 import vendor.respx as respx
 from vercel.workflow._internal import world as w
+from vercel.workflow._internal.worlds import vercel as vercel_world
 from vercel.workflow._internal.worlds.vercel import VercelWorld
 
 RUN_ID = "wrun_test"
@@ -38,13 +39,19 @@ def world() -> VercelWorld:
 
 @pytest.fixture(autouse=True)
 def _fast_retries(monkeypatch) -> None:
-    """Collapse the retry backoff so the retry tests do not sleep for real."""
-    import asyncio
+    """Collapse the retry backoff so the retry tests do not sleep for real.
 
-    async def no_sleep(_delay: float) -> None:
+    Patches the backoff helper rather than ``asyncio.sleep``: AnyIO before 4.12
+    imports its asyncio backend lazily, and a backend first imported while
+    ``asyncio.sleep`` is patched keeps the no-op for the rest of the process.
+    Every AnyIO checkpoint then stops yielding, and the next task to hit one
+    inside a cancelled scope spins forever.
+    """
+
+    async def no_delay(_attempt: int, _retry_after: str | None) -> None:
         return None
 
-    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(vercel_world, "_stream_retry_delay", no_delay)
 
 
 class TestWrite:

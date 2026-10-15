@@ -56,6 +56,20 @@ and dependency-only cascades. Add a fragment deliberately when such a package
 is ready to publish; its first release is promoted to `0.1.0` regardless of the
 fragment type.
 
+A package that takes over a distribution name with existing PyPI releases still
+starts at `0.0.0`, and declares the last of those releases in its
+`pyproject.toml`:
+
+```toml
+[tool.vercel.release]
+previous-version = "0.4.2"
+```
+
+While the package is unpublished, its first release is computed from that
+version with the normal fragment rules instead of being promoted to `0.1.0`, so
+a `breaking` fragment releases it as `0.5.0`. The setting is ignored once the
+version file has moved past `0.0.0`.
+
 ## Release Prep
 
 Run:
