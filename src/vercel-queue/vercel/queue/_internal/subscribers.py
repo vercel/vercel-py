@@ -8,6 +8,7 @@ import threading
 import weakref
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
+from datetime import timedelta
 from importlib import import_module
 from itertools import count
 from types import MappingProxyType
@@ -61,6 +62,8 @@ _Subscriber: TypeAlias = Callable[..., Any | Awaitable[Any]]
 _SubscriberRef: TypeAlias = weakref.ReferenceType[_Subscriber]
 _SubscriptionTopic: TypeAlias = "str | SanitizedName | Topic[Any] | TopicPattern[Any]"
 """Anything ``subscribe()`` accepts: one topic, or a pattern matching several."""
+MaxDuration: TypeAlias = "Duration | Callable[[], Duration | None]"
+"""A concrete duration, or a zero-argument callable resolved by :func:`get_subscriptions`."""
 P = ParamSpec("P")
 R = TypeVar("R")
 R_co = TypeVar("R_co", covariant=True)
@@ -172,6 +175,7 @@ class _Subscription:
     initial_delay_seconds: int | None = None
     max_concurrency: int | None = None
     max_attempts: int | None = None
+    max_duration: int | Callable[[], Duration | None] | None = None
 
     def func(self) -> _Subscriber | None:
         return self.func_ref()
@@ -331,6 +335,7 @@ class Subscription:
     initial_delay_seconds: int | None = None
     max_concurrency: int | None = None
     max_attempts: int | None = None
+    max_duration_seconds: int | None = None
 
 
 def _subscriber_ref(func: _Subscriber) -> _SubscriberRef:
@@ -700,6 +705,43 @@ def _optional_bounded_duration(
     return seconds
 
 
+_MAX_DURATION_MINIMUM = 1
+_MAX_DURATION_MAXIMUM = 1800  # 30 minutes, platform maximum for functions
+
+
+def _optional_max_duration(
+    value: MaxDuration | None,
+) -> int | Callable[[], Duration | None] | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float, timedelta)):
+        return _optional_bounded_duration(
+            "max_duration",
+            value,
+            minimum=_MAX_DURATION_MINIMUM,
+            maximum=_MAX_DURATION_MAXIMUM,
+        )
+    if callable(value):
+        return value
+    raise TypeError(
+        "max_duration must be an int or float number of seconds, "
+        "datetime.timedelta, or a callable returning one"
+    )
+
+
+def _resolve_max_duration_seconds(
+    value: int | Callable[[], Duration | None] | None,
+) -> int | None:
+    if value is None or isinstance(value, int):
+        return value
+    return _optional_bounded_duration(
+        "max_duration",
+        value(),
+        minimum=_MAX_DURATION_MINIMUM,
+        maximum=_MAX_DURATION_MAXIMUM,
+    )
+
+
 def _topic_prefix(pattern: str) -> str | None:
     if pattern == "*":
         return ""
@@ -749,6 +791,7 @@ def _register_subscription(
     initial_delay: Duration | None = None,
     max_concurrency: int | None = None,
     max_attempts: int | None = None,
+    max_duration: MaxDuration | None = None,
 ) -> QueueSubscriber[P, R]:
     topic_name = _normalize_subscription_topic(topic)
     payload_annotation = topic_payload_annotation(topic)
@@ -787,6 +830,7 @@ def _register_subscription(
         ),
         max_concurrency=_optional_non_negative_int("max_concurrency", max_concurrency),
         max_attempts=_optional_non_negative_int("max_attempts", max_attempts),
+        max_duration=_optional_max_duration(max_duration),
     )
     with _subscriptions_lock:
         current = _prune_registry_snapshot_locked()
@@ -840,6 +884,7 @@ def subscribe(
     initial_delay: Duration | None = None,
     max_concurrency: int | None = None,
     max_attempts: int | None = None,
+    max_duration: MaxDuration | None = None,
 ) -> Callable[[Callable[P, R]], QueueSubscriber[P, R]]: ...
 
 
@@ -852,6 +897,7 @@ def subscribe(
     initial_delay: Duration | None = None,
     max_concurrency: int | None = None,
     max_attempts: int | None = None,
+    max_duration: MaxDuration | None = None,
 ) -> Callable[[Callable[P, R]], QueueSubscriber[P, R]]: ...
 
 
@@ -864,6 +910,7 @@ def subscribe(
     initial_delay: Duration | None = None,
     max_concurrency: int | None = None,
     max_attempts: int | None = None,
+    max_duration: MaxDuration | None = None,
 ) -> _TypedTopicSubscriberDecorator[T]: ...
 
 
@@ -878,6 +925,7 @@ def subscribe(
     initial_delay: Duration | None = None,
     max_concurrency: int | None = None,
     max_attempts: int | None = None,
+    max_duration: MaxDuration | None = None,
 ) -> Callable[[Callable[P, R]], QueueSubscriber[P, R]]: ...
 
 
@@ -892,6 +940,7 @@ def subscribe(
     initial_delay: Duration | None = None,
     max_concurrency: int | None = None,
     max_attempts: int | None = None,
+    max_duration: MaxDuration | None = None,
 ) -> Callable[[Callable[P, R]], QueueSubscriber[P, R]]: ...
 
 
@@ -906,6 +955,7 @@ def subscribe(
     initial_delay: Duration | None = None,
     max_concurrency: int | None = None,
     max_attempts: int | None = None,
+    max_duration: MaxDuration | None = None,
 ) -> _TypedTopicSubscriberDecorator[T]: ...
 
 
@@ -919,6 +969,7 @@ def subscribe(
     initial_delay: Duration | None = None,
     max_concurrency: int | None = None,
     max_attempts: int | None = None,
+    max_duration: MaxDuration | None = None,
 ) -> _Subscriber | Callable[[_Subscriber], _Subscriber]:
     """Register a function as a queue subscriber.
 
@@ -935,6 +986,7 @@ def subscribe(
             consumers start processing.
         max_concurrency: Optional push dispatcher concurrency cap.
         max_attempts: Optional push dispatcher delivery attempt cap.
+        max_duration: Optional execution time limit for the deployed function.
 
     Returns:
         The original function, or a decorator when called with arguments.
@@ -956,6 +1008,7 @@ def subscribe(
             initial_delay=initial_delay,
             max_concurrency=max_concurrency,
             max_attempts=max_attempts,
+            max_duration=max_duration,
         )
 
     return decorator(func) if func is not None else decorator
@@ -978,6 +1031,7 @@ def get_subscriptions() -> tuple[Subscription, ...]:
                     initial_delay_seconds=sub.initial_delay_seconds,
                     max_concurrency=sub.max_concurrency,
                     max_attempts=sub.max_attempts,
+                    max_duration_seconds=_resolve_max_duration_seconds(sub.max_duration),
                 )
             )
     return tuple(subscriptions)
