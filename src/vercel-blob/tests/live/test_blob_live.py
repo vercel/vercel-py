@@ -409,3 +409,89 @@ def test_sync_streaming_length_mismatch_creates_no_object(
                 blob.sync.head_blob(pathname)
         finally:
             blob.sync.delete_blob(pathname)
+
+
+@pytest.mark.asyncio
+async def test_async_collections(store: LiveStore) -> None:
+    prefix = _pathname("collections/")
+    source, destination = prefix + "source.bin", prefix + "nested/copy.bin"
+    async with session():
+        try:
+            original = await blob.put_blob(source, b"collection", access=store.access)
+            with pytest.raises(blob.BlobPreconditionFailedError):
+                await blob.copy_blob(source, destination, access=store.access, if_match='"wrong"')
+            copied = await blob.copy_blob(
+                original.url,
+                destination,
+                access=store.access,
+                if_match=original.etag,
+                content_type="application/octet-stream",
+                cache_control_max_age=300,
+            )
+            assert (await blob.get_blob(copied.url, access=store.access)).body == b"collection"
+            metadata = await blob.head_blob(destination)
+            assert metadata.etag == copied.etag
+            assert metadata.content_type == "application/octet-stream"
+            assert metadata.cache_control == "public, max-age=300"
+            paths = {item.pathname async for item in blob.query_blobs(prefix=prefix, page_size=1)}
+            assert paths == {source, destination}
+            entries = [item async for item in blob.query_blob_entries(prefix=prefix, page_size=1)]
+            assert {item.pathname for item in entries if isinstance(item, blob.ListBlob)} == {
+                source
+            }
+            folders = [item for item in entries if isinstance(item, blob.BlobPrefix)]
+            assert folders == [blob.BlobPrefix(prefix=prefix + "nested/")]
+            nested = [
+                item
+                async for item in blob.query_blob_entries(prefix=folders[0].prefix, page_size=1)
+            ]
+            assert len(nested) == 1
+            assert isinstance(nested[0], blob.ListBlob)
+            assert nested[0].pathname == destination
+            with pytest.raises(blob.BlobPreconditionFailedError):
+                await blob.delete_blob(source, if_match='"wrong"')
+            await blob.delete_blob([source, destination])
+            assert not [item async for item in blob.query_blobs(prefix=prefix)]
+        finally:
+            await blob.delete_blob([source, destination])
+
+
+def test_sync_collections(store: LiveStore) -> None:
+    prefix = _pathname("collections/")
+    source, destination = prefix + "source.bin", prefix + "nested/copy.bin"
+    with session():
+        try:
+            original = blob.sync.put_blob(source, b"collection", access=store.access)
+            with pytest.raises(blob.BlobPreconditionFailedError):
+                blob.sync.copy_blob(source, destination, access=store.access, if_match='"wrong"')
+            copied = blob.sync.copy_blob(
+                original.url,
+                destination,
+                access=store.access,
+                if_match=original.etag,
+                content_type="application/octet-stream",
+                cache_control_max_age=300,
+            )
+            assert (blob.sync.get_blob(copied.url, access=store.access)).body == b"collection"
+            metadata = blob.sync.head_blob(destination)
+            assert metadata.etag == copied.etag
+            assert metadata.content_type == "application/octet-stream"
+            assert metadata.cache_control == "public, max-age=300"
+            paths = {item.pathname for item in blob.sync.query_blobs(prefix=prefix, page_size=1)}
+            assert paths == {source, destination}
+            entries = list(blob.sync.query_blob_entries(prefix=prefix, page_size=1))
+            assert {item.pathname for item in entries if isinstance(item, blob.ListBlob)} == {
+                source
+            }
+            folders = [item for item in entries if isinstance(item, blob.BlobPrefix)]
+            assert folders == [blob.BlobPrefix(prefix=prefix + "nested/")]
+            nested = list(blob.sync.query_blob_entries(prefix=folders[0].prefix, page_size=1))
+            assert len(nested) == 1
+            assert isinstance(nested[0], blob.ListBlob)
+            assert nested[0].pathname == destination
+            with pytest.raises(blob.BlobPreconditionFailedError):
+                blob.sync.delete_blob(source, if_match='"wrong"')
+            blob.sync.delete_blob([source, destination])
+            assert not list(blob.sync.query_blobs(prefix=prefix))
+        finally:
+            blob.sync.delete_blob([source, destination])
