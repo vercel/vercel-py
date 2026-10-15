@@ -30,7 +30,7 @@ Every user-visible package change carries a fragment at `changes/<package>/<id>.
 
 Types map to bumps: `breaking` is major (minor while a package is `0.x`), `feature` is minor, and `bugfix`, `docs`, and `internal` are patch; the largest bump per package wins. [[scripts/release.py#compute_releases]] adds dependency-only patch releases for dependents whose workspace lower bounds must move.
 
-Packages at the unpublished `0.0.0` sentinel are exempt from enforcement and cascades; their first fragment promotes them to `0.1.0`. CI enforces fragments with `uv run poe check-news-fragments`.
+Packages at the unpublished `0.0.0` sentinel are exempt from enforcement and cascades; their first fragment promotes them to `0.1.0`. A package adopting a distribution name that already has PyPI releases declares the last one as `previous-version`, and [[scripts/release.py#previous_version]] makes its first release continue from there. CI enforces fragments with `uv run poe check-news-fragments`.
 
 ### Dynamic dependencies
 

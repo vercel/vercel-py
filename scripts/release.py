@@ -19,6 +19,11 @@ try:
 except ImportError:  # pragma: no cover - script execution path
     import workspace  # type: ignore[no-redef]
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
+    import tomli as tomllib  # type: ignore[no-redef]
+
 
 ROOT = Path(__file__).resolve().parent.parent
 CHANGES = ROOT / "changes"
@@ -26,6 +31,7 @@ IGNORED_FRAGMENT_FILES = {".gitignore", ".gitkeep", ".keep"}
 BUMP_ORDER = {"patch": 0, "minor": 1, "major": 2}
 BUMP_NAMES = {value: key for key, value in BUMP_ORDER.items()}
 UNPUBLISHED_VERSION = "0.0.0"
+RELEASED_VERSION_RE = re.compile(r"\d+\.\d+\.\d+")
 FRAGMENT_TYPES = {
     "breaking": "Breaking Changes",
     "feature": "Features",
@@ -132,6 +138,43 @@ def _bump_for_fragment(kind: str, version: str) -> str:
     return bump
 
 
+def previous_version(package: workspace.Package) -> str | None:
+    """The last version already on PyPI under this package's name, if any.
+
+    A distribution name adopted from another maintainer arrives with its own
+    release history, so the first release from this workspace has to continue
+    after it instead of starting at `0.1.0` and colliding with versions that
+    already exist. Packages declare that history as
+    `[tool.vercel.release] previous-version`. It only matters while the package
+    is still at the unpublished sentinel; after the first release the version
+    file carries on from there.
+    """
+    path = package.path / "pyproject.toml"
+    if not path.exists():
+        return None
+    with path.open("rb") as fp:
+        data = tomllib.load(fp)
+    value = data.get("tool", {}).get("vercel", {}).get("release", {}).get("previous-version")
+    if value is None:
+        return None
+    if (
+        not isinstance(value, str)
+        or RELEASED_VERSION_RE.fullmatch(value) is None
+        or value == UNPUBLISHED_VERSION
+    ):
+        raise SystemExit(
+            f"invalid previous-version {value!r} for {package.name}; "
+            "expected a released MAJOR.MINOR.PATCH version"
+        )
+    return value
+
+
+def _release_base_version(package: workspace.Package, version: str) -> str:
+    if version != UNPUBLISHED_VERSION:
+        return version
+    return previous_version(package) or version
+
+
 def _larger(left: str, right: str) -> str:
     return left if BUMP_ORDER[left] >= BUMP_ORDER[right] else right
 
@@ -151,12 +194,16 @@ def compute_releases(*, force_bump: str | None = None) -> list[Release]:
         name: workspace.read_version(package.version_file)
         for name, package in packages_by_name.items()
     }
+    base_versions = {
+        name: _release_base_version(package, versions[name])
+        for name, package in packages_by_name.items()
+    }
     fragments = parse_fragments(set(packages_by_name))
     fragments_by_package: dict[str, list[Fragment]] = {name: [] for name in packages_by_name}
     bumps: dict[str, str] = {}
     for fragment in fragments:
         fragments_by_package[fragment.package].append(fragment)
-        bump = _bump_for_fragment(fragment.kind, versions[fragment.package])
+        bump = _bump_for_fragment(fragment.kind, base_versions[fragment.package])
         bumps[fragment.package] = _larger(bumps.get(fragment.package, "patch"), bump)
 
     if force_bump:
@@ -181,8 +228,8 @@ def compute_releases(*, force_bump: str | None = None) -> list[Release]:
     return [
         Release(
             package=name,
-            old_version=versions[name],
-            new_version=bump_version(versions[name], bumps[name]),
+            old_version=base_versions[name],
+            new_version=bump_version(base_versions[name], bumps[name]),
             bump=bumps[name],
             fragments=tuple(fragments_by_package[name]),
             dependency_only=not force_bump and not fragments_by_package[name],
