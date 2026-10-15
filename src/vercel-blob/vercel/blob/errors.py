@@ -103,7 +103,7 @@ class BlobPathnameMismatchError(BlobError):
     ) -> None:
         super().__init__(
             f"Pathname mismatch, {message}. "
-            "Check the pathname used in upload() or put() "
+            "Check the pathname used in upload() or put_blob() "
             "matches the one from the client token.",
             status_code=status_code,
             code=code,

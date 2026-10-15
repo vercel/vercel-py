@@ -2,7 +2,7 @@
 
 Client for Vercel Blob object storage: uploads, downloads, metadata, deletion, and multipart uploads.
 
-Lives in [[src/vercel-blob]] and is exposed as [[src/vercel-blob/vercel/blob/__init__.py|vercel.blob]] (async) and [[src/vercel-blob/vercel/blob/sync/__init__.py|vercel.blob.sync]]. It replaced the Blob module that [[vercel]] used to own; that distribution now depends on it.
+Lives in [[src/vercel-blob]] and is exposed as [[src/vercel-blob/vercel/blob/__init__.py|vercel.blob]] (async) and [[src/vercel-blob/vercel/blob/sync/__init__.py|vercel.blob.sync]]. It replaced the Blob module that [[vercel]] used to own; that distribution now depends on it. Function names follow [[vercel-sandbox]]: resource-suffixed verbs such as [[src/vercel-blob/vercel/blob/__init__.py#put_blob]] and [[src/vercel-blob/vercel/blob/__init__.py#delete_blob]].
 
 ## Layering
 
@@ -50,7 +50,7 @@ Any failure poisons the handle: a failed or overlapping part, cancellation, or a
 
 Downloads are streamed with one owner per response; the buffered form is a thin wrapper over the streamed one.
 
-[[src/vercel-blob/vercel/blob/__init__.py#stream]] returns a context that opens the response on entry. [[src/vercel-blob/vercel/blob/_internal/download.py#AsyncBlobDownload]] and [[src/vercel-blob/vercel/blob/_internal/download.py#SyncBlobDownload]] may be iterated once, reject concurrent reads, and close the response at EOF, on error, on cancellation, or on context exit. [[src/vercel-blob/vercel/blob/__init__.py#get]] joins that stream into `bytes` and returns a result that outlives the session.
+[[src/vercel-blob/vercel/blob/__init__.py#stream_blob]] returns a context that opens the response on entry. [[src/vercel-blob/vercel/blob/_internal/download.py#AsyncBlobDownload]] and [[src/vercel-blob/vercel/blob/_internal/download.py#SyncBlobDownload]] may be iterated once, reject concurrent reads, and close the response at EOF, on error, on cancellation, or on context exit. [[src/vercel-blob/vercel/blob/__init__.py#get_blob]] joins that stream into `bytes` and returns a result that outlives the session.
 
 Download metadata comes from response headers, with no preliminary HEAD request. Missing headers stay `None`, even when the body has been read.
 
