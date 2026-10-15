@@ -19,18 +19,18 @@ The access value must match the store.
 from vercel import blob
 
 async def round_trip() -> None:
-	uploaded = await blob.put("hello.txt", b"hello, Blob!", access="public")
+	uploaded = await blob.put_blob("hello.txt", b"hello, Blob!", access="public")
 	try:
-		result = await blob.get(uploaded.url, access="public")
+		result = await blob.get_blob(uploaded.url, access="public")
 		print(result.metadata.content_type)
 		print(result.body)
-		async with blob.stream(uploaded.url, access="public") as download:
+		async with blob.stream_blob(uploaded.url, access="public") as download:
 			async for chunk in download:
 				print(chunk)
-		metadata = await blob.head(uploaded.url)
+		metadata = await blob.head_blob(uploaded.url)
 		print(metadata.size)
 	finally:
-		await blob.delete(uploaded.url)
+		await blob.delete_blob(uploaded.url)
 ```
 
 The sync API needs no event loop:
@@ -38,37 +38,37 @@ The sync API needs no event loop:
 ```python
 from vercel.blob import sync as blob
 
-uploaded = blob.put("hello.txt", b"hello, Blob!", access="public")
+uploaded = blob.put_blob("hello.txt", b"hello, Blob!", access="public")
 try:
-	result = blob.get(uploaded.url, access="public")
+	result = blob.get_blob(uploaded.url, access="public")
 	print(result.metadata.content_type)
 	print(result.body)
-	with blob.stream(uploaded.url, access="public") as download:
+	with blob.stream_blob(uploaded.url, access="public") as download:
 		for chunk in download:
 			print(chunk)
-	print(blob.head(uploaded.url).size)
+	print(blob.head_blob(uploaded.url).size)
 finally:
-	blob.delete(uploaded.url)
+	blob.delete_blob(uploaded.url)
 ```
 
 ## Operations
 
 | Operation | Input | Result |
 | --- | --- | --- |
-| `put` | Pathname, `bytes` or streaming body, required `access` | `PutResult` from the upload response |
-| `get` | Pathname or Blob delivery URL, required `access` | `GetResult` with download metadata and the complete body as `bytes` |
-| `stream` | Pathname or Blob delivery URL, required `access` | Context manager yielding an iterable byte download |
-| `head` | Pathname or Blob delivery URL | `HeadResult` with size, upload time, and object metadata |
-| `delete` | One pathname or Blob delivery URL | `None` |
-| `multipart_upload` | Pathname, required `access`, upload options | Context yielding a sequential part uploader; `result: PutResult` after successful exit |
+| `put_blob` | Pathname, `bytes` or streaming body, required `access` | `PutResult` from the upload response |
+| `get_blob` | Pathname or Blob delivery URL, required `access` | `GetResult` with download metadata and the complete body as `bytes` |
+| `stream_blob` | Pathname or Blob delivery URL, required `access` | Context manager yielding an iterable byte download |
+| `head_blob` | Pathname or Blob delivery URL | `HeadResult` with size, upload time, and object metadata |
+| `delete_blob` | One pathname or Blob delivery URL | `None` |
+| `multipart_upload_blob` | Pathname, required `access`, upload options | Context yielding a sequential part uploader; `result: PutResult` after successful exit |
 
-`put`, `get`, `head`, and `delete` are awaited in the async API. `stream` is not
-awaited; enter it with `async with`. The sync API uses ordinary calls and enters
-`stream` with `with`.
+`put_blob`, `get_blob`, `head_blob`, and `delete_blob` are awaited in the async
+API. `stream_blob` is not awaited; enter it with `async with`. The sync API uses
+ordinary calls and enters `stream_blob` with `with`.
 
 Pathnames are relative to the store. One leading slash is removed. Empty paths,
 control characters, invalid Unicode, `//`, and `.` or `..` path segments are
-rejected. `put` accepts at most 950 UTF-16 code units in the original pathname,
+rejected. `put_blob` accepts at most 950 UTF-16 code units in the original pathname,
 matching the TypeScript SDK. Characters outside the Unicode Basic Multilingual
 Plane count as two units. Reads do not inherit this upload limit.
 
@@ -96,7 +96,7 @@ must not use untrusted object names as commands or unchecked local file paths.
 | `allow_overwrite` | `False` | Permit replacement of an existing object when enabled |
 | `cache_control_max_age` | `None` | Cache lifetime in whole seconds; otherwise use the service default |
 
-`put` accepts in-memory buffers (`bytes`, `bytearray`, `memoryview`) and streaming
+`put_blob` accepts in-memory buffers (`bytes`, `bytearray`, `memoryview`) and streaming
 sources with a known length. It infers content length for buffers and snapshots them
 at call time. Uploads use a stable pathname by default, matching the TypeScript SDK.
 To replace an existing object, set `allow_overwrite=True`. To create distinct objects with
@@ -105,12 +105,12 @@ random suffixes, set `add_random_suffix=True` and use the returned `pathname` or
 
 `PutResult` contains `url`, `download_url`, `pathname`, `content_type`,
 `content_disposition`, and `etag`. It does not contain size or upload time.
-`head` returns those additional fields without downloading the object's content.
-No extra metadata request runs after `put`.
+`head_blob` returns those additional fields without downloading the object's content.
+No extra metadata request runs after `put_blob`.
 
 ### Streaming uploads
 
-`put` also accepts byte readers and byte iterables when `content_length` is provided.
+`put_blob` also accepts byte readers and byte iterables when `content_length` is provided.
 Each API accepts only sources of its own shape:
 
 - **Async API**: `AsyncByteReader` (an object with `async def read`) or
@@ -141,7 +141,7 @@ from vercel.blob import sync as blob
 path = Path("report.pdf")
 size = path.stat().st_size
 with path.open("rb") as file:
-    uploaded = blob.put("report.pdf", file, access="public", content_length=size)
+    uploaded = blob.put_blob("report.pdf", file, access="public", content_length=size)
 ```
 
 In async code, open the file with `anyio.open_file`:
@@ -154,7 +154,7 @@ async def upload_report() -> blob.PutResult:
     path = anyio.Path("report.pdf")
     size = (await path.stat()).st_size
     async with await anyio.open_file(path, "rb") as file:
-        return await blob.put("report.pdf", file, access="public", content_length=size)
+        return await blob.put_blob("report.pdf", file, access="public", content_length=size)
 ```
 
 Wrap a sync file object you already have with `anyio.wrap_file(file)`. Adapt a sync
@@ -177,8 +177,8 @@ async def from_blocking(chunks: Iterator[bytes]) -> AsyncIterator[bytes]:
 
 ### Multipart uploads
 
-Use `multipart_upload` when you want to choose complete parts explicitly. It
-accepts the same metadata, suffix, and overwrite options as `put`. Enter the
+Use `multipart_upload_blob` when you want to choose complete parts explicitly. It
+accepts the same metadata, suffix, and overwrite options as `put_blob`. Enter the
 context with `async with` (or `with` for `blob.sync`); do not await its creation.
 
 ```python
@@ -190,7 +190,7 @@ async def first_part() -> AsyncIterator[bytes]:
         yield b"x" * (64 * 1024)
 
 async def upload_parts() -> blob.PutResult:
-    async with blob.multipart_upload("parts.bin", access="public") as upload:
+    async with blob.multipart_upload_blob("parts.bin", access="public") as upload:
         await upload.upload_part(first_part(), content_length=5 * 1024 * 1024)
         await upload.upload_part(b"tail")
     return upload.result
@@ -201,7 +201,7 @@ The sync API accepts sync readers and iterables:
 ```python
 from vercel.blob import sync as blob
 
-with blob.multipart_upload("parts.bin", access="public") as upload:
+with blob.multipart_upload_blob("parts.bin", access="public") as upload:
     upload.upload_part(
         (b"x" * (64 * 1024) for _ in range(80)), content_length=5 * 1024 * 1024
     )
@@ -214,12 +214,12 @@ and retains successful ETags internally. There is no part-number argument,
 receipt list, or manual completion step. Upload one part at a time; overlapping
 calls fail the handle. There is no background scheduling or automatic retry.
 
-Parts accept the same sources and exact-length checks as `put`: buffer lengths
+Parts accept the same sources and exact-length checks as `put_blob`: buffer lengths
 are inferred, streaming lengths are required, and sources stay caller-owned.
 Each part must contain 1 byte through 5 GiB, with at most 10,000 parts. Every
 part except the last must be at least 5 MiB. After a smaller part, a further
 part is rejected before consuming its source or sending its request. An empty
-scope raises without completing; use `put(pathname, b"", ...)` for an empty object.
+scope raises without completing; use `put_blob(pathname, b"", ...)` for an empty object.
 
 A successful context exit publishes the object and makes `upload.result`
 available. Normal early `return` or `break` is a successful exit and publishes
@@ -237,20 +237,20 @@ not delete remote parts or roll back an object that may already have published.
 
 ### Downloads and ownership
 
-`get` buffers the complete body in memory and returns a frozen, slotted
+`get_blob` buffers the complete body in memory and returns a frozen, slotted
 `GetResult` with `metadata: DownloadMetadata` and `body: bytes`. It closes the
 response before returning, and the result remains usable after the session closes.
 Read errors raise an exception rather than returning a partial body. There is no
 `max_bytes` parameter or decoding helper.
 
-`stream` provides incremental reads without buffering the complete body. Entering
+`stream_blob` provides incremental reads without buffering the complete body. Entering
 its context obtains the response. Both APIs accept the same pathname or Blob
 delivery URL and require `access`. Neither issues a preliminary HEAD request.
 
 `result.metadata` and `download.metadata` contain the URL, status code, and
 response-derived headers such as size, content type, ETag, and last-modified time.
 Header-derived fields are `None` when the server omits them. In particular,
-`metadata.size` stays `None` when the size header is absent, even after `get`
+`metadata.size` stays `None` when the size header is absent, even after `get_blob`
 reads the body. Use `len(result.body)` for the actual number of downloaded bytes.
 
 A streamed download has one consumer. Iterate it once inside its context. It yields
@@ -260,7 +260,7 @@ uses `await download.aclose()` or `download.close()`. Closed downloads reject
 further reads. There is no automatic restart after a partial download.
 
 The session owns the HTTP client; each streamed download owns its response.
-Exiting a download does not close the session. Enter `stream` contexts inside their
+Exiting a download does not close the session. Enter `stream_blob` contexts inside their
 session scope. Operations and streaming reads reject a closed session. Module
 calls outside an explicit session use the SDK's default session.
 
@@ -270,7 +270,7 @@ attach credentials only after validating the delivery URL and store.
 
 ### Errors
 
-`get`, `stream`, and `head` raise `BlobNotFoundError` for missing objects.
+`get_blob`, `stream_blob`, and `head_blob` raise `BlobNotFoundError` for missing objects.
 Deleting an absent object succeeds when the backend returns its normal successful
 deletion response.
 Other deletion errors, including an unknown store, are not suppressed.
@@ -304,7 +304,7 @@ async def credentials() -> blob.BlobCredentials:
 async def inspect_object() -> None:
 	options = blob.BlobServiceOptions(credentials_factory=credentials)
 	async with session(service_options=[options]):
-		print(await blob.head("hello.txt"))
+		print(await blob.head_blob("hello.txt"))
 ```
 
 Set `kind=blob.CredentialKind.OIDC` for an OIDC token. The factory runs for each

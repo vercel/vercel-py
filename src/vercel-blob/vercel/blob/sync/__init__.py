@@ -46,7 +46,7 @@ from ..models import (
 
 
 @overload
-def put(
+def put_blob(
     pathname: str,
     body: bytes | bytearray | memoryview,
     *,
@@ -60,7 +60,7 @@ def put(
 
 
 @overload
-def put(
+def put_blob(
     pathname: str,
     body: SyncPutBody,
     *,
@@ -73,7 +73,7 @@ def put(
 ) -> PutResult: ...
 
 
-def put(
+def put_blob(
     pathname: str,
     body: bytes | bytearray | memoryview | SyncPutBody,
     *,
@@ -100,18 +100,18 @@ def put(
     )
 
 
-def get(
+def get_blob(
     url_or_pathname: str,
     *,
     access: Literal["public", "private"],
 ) -> GetResult:
     """Download the complete object into memory and close its response."""
-    with stream(url_or_pathname, access=access) as download:
+    with stream_blob(url_or_pathname, access=access) as download:
         body = b"".join(download)
     return GetResult(metadata=download.metadata, body=body)
 
 
-def multipart_upload(
+def multipart_upload_blob(
     pathname: str,
     *,
     access: Literal["public", "private"],
@@ -133,7 +133,7 @@ def multipart_upload(
     return SyncMultipartUpload(service, request)
 
 
-def stream(
+def stream_blob(
     url_or_pathname: str,
     *,
     access: Literal["public", "private"],
@@ -149,7 +149,7 @@ def stream(
     return SyncDownloadContext(opener)
 
 
-def head(
+def head_blob(
     url_or_pathname: str,
 ) -> HeadResult:
     """Retrieve catalog metadata for a Blob object synchronously."""
@@ -157,7 +157,7 @@ def head(
     return iter_coroutine(service.head(url_or_pathname))
 
 
-def delete(
+def delete_blob(
     url_or_pathname: str,
 ) -> None:
     """Delete a single object from Vercel Blob synchronously."""
@@ -194,10 +194,10 @@ __all__ = [
     "SyncByteReader",
     "SyncMultipartUpload",
     "SyncPutBody",
-    "delete",
-    "get",
-    "head",
-    "multipart_upload",
-    "put",
-    "stream",
+    "delete_blob",
+    "get_blob",
+    "head_blob",
+    "multipart_upload_blob",
+    "put_blob",
+    "stream_blob",
 ]
