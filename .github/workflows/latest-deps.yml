@@ -11,6 +11,7 @@ jobs:
   lint-test-and-build:
     name: latest deps (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     environment:
       name: ci
       deployment: false

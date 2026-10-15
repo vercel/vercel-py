@@ -9,6 +9,7 @@ jobs:
   check-news-fragments:
     name: Check news fragments
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:

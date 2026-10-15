@@ -13,6 +13,7 @@ jobs:
   lint-and-typecheck:
     name: Lint and typecheck
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -38,6 +39,7 @@ jobs:
   lat-check:
     name: lat.md check
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -57,6 +59,9 @@ jobs:
   test:
     name: Test (${{ matrix.os.name }}, py${{ matrix.python-version }}, anyio ${{ matrix.anyio }})
     runs-on: ${{ matrix.os.runner }}
+    # A healthy run finishes in under 7 minutes on every OS. Without a cap, a
+    # single hung test holds its matrix slot until GitHub's 6-hour default.
+    timeout-minutes: 20
     environment:
       name: ci
       deployment: false
@@ -173,6 +178,7 @@ jobs:
     env:
       ANYIO_VERSION: ${{ matrix.anyio }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -207,6 +213,7 @@ jobs:
       github.event.pull_request.base.ref == 'main' &&
       contains(github.event.pull_request.labels.*.name, 'release')
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -252,6 +259,7 @@ jobs:
       - test
       - release-dry-run
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions: {}
     steps:
       - name: Check CI results
