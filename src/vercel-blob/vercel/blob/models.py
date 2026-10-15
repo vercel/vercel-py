@@ -88,3 +88,34 @@ class GetResult:
 
     metadata: DownloadMetadata
     body: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class CopyResult:
+    """Metadata returned by a server-side copy, without an extra HEAD."""
+
+    url: str
+    download_url: str
+    pathname: str
+    content_type: str
+    content_disposition: str
+    etag: str
+
+
+@dataclass(frozen=True, slots=True)
+class ListBlob:
+    """Catalog entry yielded by queries; distinct from full HEAD metadata."""
+
+    url: str
+    download_url: str
+    pathname: str
+    size: int
+    uploaded_at: datetime
+    etag: str
+
+
+@dataclass(frozen=True, slots=True)
+class BlobPrefix:
+    """A virtual folder prefix, including its trailing slash."""
+
+    prefix: str

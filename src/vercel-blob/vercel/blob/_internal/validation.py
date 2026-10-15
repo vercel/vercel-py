@@ -212,3 +212,35 @@ def construct_delivery_url(
     clean_path = validate_pathname(pathname)
     quoted_path = quote(clean_path, safe="/")
     return f"https://{clean_store_id.lower()}.{access}{_DELIVERY_DOMAIN_SUFFIX}/{quoted_path}"
+
+
+def validate_if_match(value: object) -> str | None:
+    if value is None:
+        return None
+    if (
+        not isinstance(value, str)
+        or not value
+        or not value.isascii()
+        or has_control_character(value)
+    ):
+        raise BlobError("if_match must be a non-empty ASCII string without control characters")
+    return value
+
+
+def validate_list_text(value: object, *, name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or has_control_character(value):
+        raise BlobError(f"{name} must be a string without control characters")
+    if any(0xD800 <= ord(char) <= 0xDFFF for char in value):
+        raise BlobError(f"{name} must contain valid Unicode")
+    if name == "cursor" and not value:
+        raise BlobError("cursor cannot be empty")
+    return value
+
+
+def validate_directory_prefix(value: object) -> str | None:
+    prefix = validate_list_text(value, name="prefix")
+    if prefix and not prefix.endswith("/"):
+        raise BlobError("query_blob_entries prefix must be empty or end with '/'")
+    return prefix

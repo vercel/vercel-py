@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Sequence
 from contextlib import AbstractContextManager
 from typing import Literal, overload
 
@@ -12,6 +13,10 @@ from .._internal.api_client import _PutRequest
 from .._internal.download import SyncBlobDownload, SyncDownloadContext
 from .._internal.multipart import SyncMultipartUpload
 from .._internal.options import SyncBlobServiceOptions
+from .._internal.pagination import (
+    query_blob_entries_sync as _query_blob_entries,
+    query_blobs_sync as _query_blobs,
+)
 from .._internal.service import get_sync_blob_service
 from ..errors import (
     BlobAccessError,
@@ -34,10 +39,13 @@ from ..models import (
     Access,
     BlobCredentials,
     BlobCredentialsFactory,
+    BlobPrefix,
+    CopyResult,
     CredentialKind,
     DownloadMetadata,
     GetResult,
     HeadResult,
+    ListBlob,
     PutResult,
     SyncBlobCredentialsFactory,
     SyncByteReader,
@@ -157,12 +165,82 @@ def head_blob(
     return iter_coroutine(service.head(url_or_pathname))
 
 
-def delete_blob(
-    url_or_pathname: str,
-) -> None:
-    """Delete a single object from Vercel Blob synchronously."""
+def query_blobs(
+    *,
+    prefix: str | None = None,
+    page_size: int | None = None,
+    cursor: str | None = None,
+) -> Iterator[ListBlob]:
+    """Iterate over Blobs, transparently following pagination cursors.
+
+    Args:
+        prefix: Literal pathname prefix to filter objects.
+        page_size: Maximum number of objects fetched per API request (1–1,000).
+        cursor: Cursor at which to begin pagination.
+    """
+    return _query_blobs(
+        get_sync_blob_service(get_active_sync_session()),
+        prefix=prefix,
+        page_size=page_size,
+        cursor=cursor,
+    )
+
+
+def query_blob_entries(
+    *,
+    prefix: str | None = None,
+    page_size: int | None = None,
+    cursor: str | None = None,
+) -> Iterator[ListBlob | BlobPrefix]:
+    """Iterate over objects and virtual folders at one directory level.
+
+    Nonempty prefixes must end with '/'. Objects precede folder prefixes
+    within each page; no global sort order is guaranteed. Pagination follows
+    cursors lazily, including pages containing only folders.
+    """
+    return _query_blob_entries(
+        get_sync_blob_service(get_active_sync_session()),
+        prefix=prefix,
+        page_size=page_size,
+        cursor=cursor,
+    )
+
+
+def copy_blob(
+    source: str,
+    pathname: str,
+    *,
+    access: Literal["public", "private"],
+    content_type: str | None = None,
+    add_random_suffix: bool = False,
+    allow_overwrite: bool = False,
+    cache_control_max_age: int | None = None,
+    if_match: str | None = None,
+) -> CopyResult:
+    """Copy within a store; if_match checks the source ETag."""
     service = get_sync_blob_service(get_active_sync_session())
-    iter_coroutine(service.delete(url_or_pathname))
+    return iter_coroutine(
+        service.copy(
+            source,
+            pathname,
+            access=access,
+            content_type=content_type,
+            add_random_suffix=add_random_suffix,
+            allow_overwrite=allow_overwrite,
+            cache_control_max_age=cache_control_max_age,
+            if_match=if_match,
+        )
+    )
+
+
+def delete_blob(
+    url_or_pathname: str | Sequence[str],
+    *,
+    if_match: str | None = None,
+) -> None:
+    """Delete 1–1000 objects in one request; if_match requires a single target."""
+    service = get_sync_blob_service(get_active_sync_session())
+    iter_coroutine(service.delete(url_or_pathname, if_match=if_match))
 
 
 __all__ = [
@@ -178,26 +256,32 @@ __all__ = [
     "BlobNotFoundError",
     "BlobPathnameMismatchError",
     "BlobPreconditionFailedError",
+    "BlobPrefix",
     "BlobServiceNotAvailable",
     "BlobServiceRateLimited",
     "BlobStoreNotFoundError",
     "BlobStoreSuspendedError",
     "BlobStreamError",
     "BlobUnknownError",
+    "CopyResult",
     "CredentialKind",
     "DownloadMetadata",
     "GetResult",
     "HeadResult",
+    "ListBlob",
     "PutResult",
     "SyncBlobCredentialsFactory",
     "SyncBlobServiceOptions",
     "SyncByteReader",
     "SyncMultipartUpload",
     "SyncPutBody",
+    "copy_blob",
     "delete_blob",
     "get_blob",
     "head_blob",
     "multipart_upload_blob",
     "put_blob",
+    "query_blobs",
+    "query_blob_entries",
     "stream_blob",
 ]

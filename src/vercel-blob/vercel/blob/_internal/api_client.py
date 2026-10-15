@@ -7,7 +7,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 from email.utils import parsedate_to_datetime
 from functools import partial
-from typing import Annotated, TypeVar
+from typing import Annotated, Literal, TypeVar
 from urllib.parse import quote
 
 import httpx2 as httpx
@@ -46,14 +46,27 @@ from vercel.blob.errors import (
     BlobStreamError,
     BlobUnknownError,
 )
-from vercel.blob.models import Access, BlobCredentials, DownloadMetadata, HeadResult, PutResult
+from vercel.blob.models import (
+    Access,
+    BlobCredentials,
+    BlobPrefix,
+    CopyResult,
+    DownloadMetadata,
+    HeadResult,
+    ListBlob,
+    PutResult,
+)
 
+from .pagination import QueryPage
 from .upload import _CHUNK_SIZE, _ChunkSource, send_streaming_upload
 from .validation import (
     validate_access,
     validate_bool_flag,
     validate_cache_control_max_age,
     validate_content_type,
+    validate_directory_prefix,
+    validate_if_match,
+    validate_list_text,
     validate_upload_pathname,
 )
 
@@ -97,6 +110,87 @@ class _PutRequest(_ApiModel):
                 by_alias=True, exclude={"pathname"}, exclude_none=True
             ).items()
         }
+
+
+class _CopyRequest(_PutRequest):
+    if_match: Annotated[str | None, BeforeValidator(validate_if_match)] = Field(
+        default=None, serialization_alias="x-if-match"
+    )
+
+
+class _ListRequest(_ApiModel):
+    page_size: int | None = Field(default=None, ge=1, le=1000, serialization_alias="limit")
+    prefix: Annotated[str | None, BeforeValidator(partial(validate_list_text, name="prefix"))] = (
+        None
+    )
+    cursor: Annotated[str | None, BeforeValidator(partial(validate_list_text, name="cursor"))] = (
+        None
+    )
+
+    def _to_params(self) -> dict[str, str]:
+        return {
+            key: str(value)
+            for key, value in self.model_dump(by_alias=True, exclude_none=True).items()
+        }
+
+
+class _FoldedListRequest(_ListRequest):
+    prefix: Annotated[str | None, BeforeValidator(validate_directory_prefix)] = None
+    mode: Literal["folded"] = "folded"
+
+
+class _ListBlobResponse(_ApiModel):
+    url: str
+    download_url: str = Field(alias="downloadUrl")
+    pathname: str
+    size: int = Field(ge=0)
+    uploaded_at: datetime = Field(alias="uploadedAt")
+    etag: str
+
+    @field_validator("uploaded_at", mode="before")
+    @classmethod
+    def _parse_uploaded_at(cls, value: object) -> datetime:
+        if not isinstance(value, str):
+            raise ValueError("uploadedAt must be a string")
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+    def _to_result(self) -> ListBlob:
+        return ListBlob(**self.model_dump())
+
+
+class _ListResponse(_ApiModel):
+    blobs: list[_ListBlobResponse]
+    has_more: bool = Field(alias="hasMore")
+    cursor: str | None = None
+
+    @model_validator(mode="after")
+    def _check_cursor(self) -> _ListResponse:
+        if self.has_more and not self.cursor:
+            raise ValueError("hasMore requires a non-empty cursor")
+        return self
+
+    def _to_result(self) -> QueryPage[ListBlob]:
+        return QueryPage(
+            items=tuple(blob._to_result() for blob in self.blobs),
+            next_cursor=self.cursor if self.has_more else None,
+        )
+
+
+class _FoldedListResponse(_ListResponse):
+    folders: list[str] = Field(default_factory=list)
+
+    @field_validator("folders")
+    @classmethod
+    def _validate_folders(cls, folders: list[str]) -> list[str]:
+        if any(not prefix or not prefix.endswith("/") for prefix in folders):
+            raise ValueError("folders must contain non-empty prefixes ending with '/'")
+        return folders
+
+    def _to_entries_page(self) -> QueryPage[ListBlob | BlobPrefix]:
+        items: tuple[ListBlob | BlobPrefix, ...] = tuple(
+            blob._to_result() for blob in self.blobs
+        ) + tuple(BlobPrefix(prefix=prefix) for prefix in self.folders)
+        return QueryPage(items=items, next_cursor=self.cursor if self.has_more else None)
 
 
 class _DeleteRequest(_ApiModel):
@@ -230,9 +324,9 @@ def _parse_response(
         field = error["loc"][0] if error["loc"] else None
         if field is None:
             message = f"Blob {operation} response must be a JSON object"
-        elif field == "size":
+        elif field == "size" and operation == "HEAD":
             message = "Blob HEAD response has invalid size field"
-        elif field == "uploadedAt":
+        elif field == "uploadedAt" and operation == "HEAD":
             if error["type"] == "missing" or not isinstance(error["input"], str):
                 message = "Blob HEAD response 'uploadedAt' must be a string"
             else:
@@ -240,7 +334,11 @@ def _parse_response(
         elif field == "contentType" and operation == "HEAD":
             message = "Blob HEAD response 'contentType' must be a string or null"
         else:
-            message = f"Blob {operation} response '{field}' must be a string"
+            message = (
+                f"Blob {operation} response '{field}' must be a string"
+                if operation in ("HEAD", "PUT")
+                else f"Blob {operation} response has invalid {field} field"
+            )
         raise BlobStreamError(message) from exc
 
 
@@ -496,10 +594,45 @@ class BlobApiClient:
         )
         return _parse_put_response(response)
 
-    async def delete(self, urls: Sequence[str], *, credentials: BlobCredentials) -> None:
+    async def query_blobs_page(
+        self, request: _ListRequest, *, credentials: BlobCredentials
+    ) -> QueryPage[ListBlob]:
+        response = await self._request(
+            "GET", "", credentials=credentials, params=request._to_params()
+        )
+        return _parse_response(response, _ListResponse, "LIST")._to_result()
+
+    async def query_blob_entries_page(
+        self, request: _FoldedListRequest, *, credentials: BlobCredentials
+    ) -> QueryPage[ListBlob | BlobPrefix]:
+        response = await self._request(
+            "GET", "", credentials=credentials, params=request._to_params()
+        )
+        return _parse_response(response, _FoldedListResponse, "LIST")._to_entries_page()
+
+    async def copy(
+        self, source: str, request: _CopyRequest, *, credentials: BlobCredentials
+    ) -> CopyResult:
+        response = await self._request(
+            "PUT",
+            "",
+            credentials=credentials,
+            params={"pathname": request.pathname, "fromUrl": source},
+            headers=request._to_headers(),
+        )
+        parsed = _parse_response(response, _PutResponse, "COPY")
+        return CopyResult(**parsed.model_dump())
+
+    async def delete(
+        self, urls: Sequence[str], *, credentials: BlobCredentials, if_match: str | None = None
+    ) -> None:
         request = _DeleteRequest(urls=list(urls))
         await self._request(
-            "POST", "/delete", credentials=credentials, body=JSONBody(request.model_dump())
+            "POST",
+            "/delete",
+            credentials=credentials,
+            body=JSONBody(request.model_dump()),
+            headers={"x-if-match": if_match} if if_match is not None else None,
         )
 
     async def open_download(
