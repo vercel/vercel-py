@@ -150,10 +150,11 @@ can actually carry it:
   themselves: racing finishers compute the same canonical successor under the
   same idempotency key, and the queue accepts it once. An evicted document
   never strands the chain.
-- **Code-declared jobs are durable because code is the backup.** Whenever the
-  store's documents are missing, reconciliation rewrites declared jobs from
-  the declarations. The store holds nothing code cannot restate: jobs are
-  immutable at runtime.
+- **Code-declared jobs are durable because code is the backup.** The store
+  keeps one record per declared job, the declarations are the index, and a
+  record that is missing, unreadable, or written for a different declared
+  schedule is rebuilt from its declaration at the point of use. The store
+  holds nothing code cannot restate: jobs are immutable at runtime.
 - **Scheduler lifecycle flags are best-effort.** A `pause()` can be lost to
   cache eviction, after which traffic reactivates the scheduler. `pause()`
   publishes a queue-borne control message so the flag reaches the process
