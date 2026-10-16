@@ -504,7 +504,7 @@ class TestZstandardRestrictions:
         _raises_in_sandbox("import zstandard; zstandard.open('file.zst')")
         assert callable(zstandard.open)
 
-    def test_httpx2_import_succeeds_with_zstandard(self, monkeypatch: pytest.MonkeyPatch):
+    def test_httpx2_import_succeeds_with_zstandard(self):
         """httpx2 importing zstandard inside the sandbox should succeed."""
 
         class _HideDevDeps:
@@ -512,8 +512,13 @@ class TestZstandardRestrictions:
                 if fullname.split(".")[0] in ("rich", "pygments", "click"):
                     raise ModuleNotFoundError(f"No module named {fullname}")
 
-        monkeypatch.setattr(sys, "meta_path", [_HideDevDeps(), *sys.meta_path])
-        ns = _run_in_sandbox("import httpx2; result = httpx2.__name__")
+        finder = _HideDevDeps()
+        sys.meta_path.insert(0, finder)
+        try:
+            ns = _run_in_sandbox("import httpx2; result = httpx2.__name__")
+        finally:
+            # Keep the sandbox finder if this test installed it for the first time.
+            sys.meta_path.remove(finder)
         assert ns["result"] == "httpx2"
 
 
