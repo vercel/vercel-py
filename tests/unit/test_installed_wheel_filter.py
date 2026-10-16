@@ -7,10 +7,10 @@ affected tests attempt real network calls. The script therefore deselects every
 test that touches respx, deciding by scanning each test's source.
 
 That scan understands three shapes: respx named in the test body, respx named in a
-decorator, and a call to (or fixture request for) a module-level helper that names
-respx. These tests assert that every respx test in the repo stays within those
-shapes, so a test written in a shape the scanner cannot see fails here instead of
-failing the publish workflow.
+decorator, and a call to (or fixture request for) a module-level helper that reaches
+respx, directly or through other module-level helpers. These tests assert that
+every respx test in the repo stays within those shapes, so a test written in a
+shape the scanner cannot see fails here instead of failing the publish workflow.
 """
 
 import ast
@@ -63,24 +63,53 @@ def test_decorator_only_respx_usage_is_detected() -> None:
     assert scanner["uses_respx"](source, node, set()) is True  # type: ignore[operator]
 
 
-def test_helper_and_fixture_indirection_is_detected() -> None:
+@pytest.mark.parametrize(
+    ("helpers_source", "expected_helpers"),
+    [
+        pytest.param(
+            "def route_helper():\n    return respx.post('https://example.test')\n",
+            {"route_helper"},
+            id="direct",
+        ),
+        pytest.param(
+            "class _Api:\n"
+            "    def __init__(self, router: respx.MockRouter) -> None: ...\n"
+            "\n"
+            "def _open():\n"
+            "    return _Api(None)\n"
+            "\n"
+            "@pytest.fixture\n"
+            "def route_helper(request):\n"
+            "    with _open() as opened:\n"
+            "        yield opened\n",
+            {"_Api", "_open", "route_helper"},
+            id="chained",
+        ),
+    ],
+)
+def test_helper_and_fixture_indirection_is_detected(
+    helpers_source: str, expected_helpers: set[str]
+) -> None:
     scanner = _load_scanner()
-    source = (
-        "def route_helper():\n"
-        "    return respx.post('https://example.test')\n"
+    source = helpers_source + (
         "\n"
         "def test_calls_helper():\n"
         "    route_helper()\n"
         "\n"
         "def test_requests_fixture(route_helper):\n"
         "    pass\n"
+        "\n"
+        "def test_unrelated(other):\n"
+        "    pass\n"
     )
     module = ast.parse(source)
     helpers = scanner["respx_helper_names"](source, module)  # type: ignore[operator]
 
-    assert helpers == {"route_helper"}
-    for node in module.body[1:]:
-        assert scanner["uses_respx"](source, node, helpers) is True  # type: ignore[operator]
+    assert helpers == expected_helpers
+    tests = {node.name: node for node in module.body if node.name.startswith("test_")}  # type: ignore[attr-defined]
+    for name in ("test_calls_helper", "test_requests_fixture"):
+        assert scanner["uses_respx"](source, tests[name], helpers) is True  # type: ignore[operator]
+    assert scanner["uses_respx"](source, tests["test_unrelated"], helpers) is False  # type: ignore[operator]
 
 
 @pytest.mark.parametrize("path", _test_modules(), ids=lambda p: f"{p.parent.parent.name}/{p.name}")
@@ -88,7 +117,7 @@ def test_every_respx_test_is_deselectable(path: Path) -> None:
     """Every respx test must be visible to the scanner.
 
     If this fails, the test uses respx through a route the scanner cannot follow
-    (a conftest fixture, a chain of helpers, or `usefixtures` by string). Either
+    (a conftest fixture, or `usefixtures` by string). Either
     move the respx usage into the test module, or teach the scanner about the new
     shape.
     """

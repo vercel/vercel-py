@@ -301,17 +301,28 @@ def node_source(text: str, node: ast.AST) -> str:
 
 
 def respx_helper_names(text: str, module: ast.Module) -> set[str]:
-    """Module-level helpers and fixtures that touch respx.
+    """Module-level helpers, classes, and fixtures that reach respx.
 
     A test that only calls `some_route()` or requests a respx fixture never
-    mentions respx itself, so those names have to be collected first.
+    mentions respx itself, and that fixture may in turn only reach respx
+    through another helper, so names are collected until no new ones appear.
     """
-    return {
-        node.name
+    candidates = [
+        node
         for node in module.body
-        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
-        and "respx" in node_source(text, node)
-    }
+        if isinstance(node, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef)
+        and not node.name.startswith("test_")
+    ]
+    helpers: set[str] = set()
+    while True:
+        found = {
+            node.name
+            for node in candidates
+            if node.name not in helpers and uses_respx(text, node, helpers)
+        }
+        if not found:
+            return helpers
+        helpers |= found
 
 
 def uses_respx(text: str, node: ast.AST, helper_names: set[str]) -> bool:
