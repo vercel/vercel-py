@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator, Iterator
 from pathlib import PurePosixPath
 from typing import Any, cast
 
+import anyio
 import httpx2 as httpx
 import pytest
 from hypothesis import HealthCheck, given, settings, strategies as st
@@ -1332,3 +1333,132 @@ async def test_read_bytes_and_read_text_still_work(mock_env_clear: None) -> None
         assert text == "content"
 
     assert response_count == 2
+
+
+class _FaultingSyncReaderStream(_TrackedSyncStream):
+    def __init__(self, primary: BaseException | None) -> None:
+        super().__init__([b"partial"], failure=primary)
+        self.cleanup_error = RuntimeError("cleanup failed")
+        self.close_calls = 0
+
+    def close(self) -> None:
+        self.close_calls += 1
+        raise self.cleanup_error
+
+
+class _FaultingAsyncReaderStream(_TrackedAsyncStream):
+    def __init__(self, primary: BaseException | None, *, block: bool = False) -> None:
+        super().__init__([b"partial"], failure=primary)
+        self.cleanup_error = RuntimeError("cleanup failed")
+        self.close_calls = 0
+        self.completed = False
+        self.block = block
+        self.started = anyio.Event()
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        yield b"partial"
+        if self.block:
+            self.started.set()
+            await anyio.sleep_forever()
+        if self._failure is not None:
+            raise self._failure
+
+    async def aclose(self) -> None:
+        self.close_calls += 1
+        await anyio.lowlevel.checkpoint()
+        self.completed = True
+        raise self.cleanup_error
+
+
+@pytest.mark.parametrize("fail_read", [False, True])
+@respx.mock
+def test_sync_binary_reader_cleanup_failure(mock_env_clear: None, fail_read: bool) -> None:
+    primary = RuntimeError("read failed") if fail_read else None
+    body = _FaultingSyncReaderStream(primary)
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/read").mock(
+        return_value=httpx.Response(200, stream=body)
+    )
+    with session(service_options=_session_options()):
+        box = sandbox_sync.create_sandbox(name="preview")
+        with box.fs.open("data.bin", "rb") as reader:
+            with pytest.raises(RuntimeError) as caught:
+                if fail_read:
+                    reader.read()
+                else:
+                    assert reader.read(1) == b"p"
+                    reader.close()
+            assert caught.value is (primary or body.cleanup_error)
+            if not fail_read:
+                assert reader.closed
+            reader.close()
+            assert reader.closed
+            reader.close()
+    assert body.close_calls == 1
+
+
+@pytest.mark.parametrize("fail_read", [False, True])
+@respx.mock
+async def test_async_binary_reader_cleanup_failure(mock_env_clear: None, fail_read: bool) -> None:
+    primary = RuntimeError("read failed") if fail_read else None
+    body = _FaultingAsyncReaderStream(primary)
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/read").mock(
+        return_value=httpx.Response(200, stream=body)
+    )
+    async with session(service_options=_session_options()):
+        box = await sandbox.create_sandbox(name="preview")
+        async with box.fs.open("data.bin", "rb") as reader:
+            with pytest.raises(RuntimeError) as caught:
+                if fail_read:
+                    await reader.read()
+                else:
+                    assert await reader.read(1) == b"p"
+                    await reader.aclose()
+            assert caught.value is (primary or body.cleanup_error)
+            if not fail_read:
+                assert reader.closed
+            await reader.aclose()
+            assert reader.closed
+            await reader.aclose()
+    assert body.completed
+    assert body.close_calls == 1
+
+
+@respx.mock
+async def test_async_binary_reader_cancellation_cleanup(mock_env_clear: None) -> None:
+    body = _FaultingAsyncReaderStream(None, block=True)
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/read").mock(
+        return_value=httpx.Response(200, stream=body)
+    )
+    async with session(service_options=_session_options()):
+        box = await sandbox.create_sandbox(name="preview")
+        async with box.fs.open("data.bin", "rb") as reader:
+            scopes: list[anyio.CancelScope] = []
+            cancelled = []
+
+            async def read() -> None:
+                with anyio.CancelScope() as scope:
+                    scopes.append(scope)
+                    try:
+                        await reader.read()
+                    except anyio.get_cancelled_exc_class() as exc:
+                        cancelled.append(exc)
+                        raise
+
+            async with anyio.create_task_group() as tasks:
+                tasks.start_soon(read)
+                await body.started.wait()
+                scopes[0].cancel()
+            assert len(cancelled) == 1
+            assert body.completed
+        assert reader.closed
+        await reader.aclose()
+    assert body.close_calls == 1
