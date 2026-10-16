@@ -35,10 +35,11 @@ def classify_sandbox_lifecycle_error(error: BaseException) -> SandboxLifecycle |
     api_error: SandboxApiError | None
     if isinstance(error, SandboxApiError):
         api_error = error
-    elif isinstance(error, SandboxFilesystemWriteError) and isinstance(
-        getattr(error, "cause", None), SandboxApiError
-    ):
-        api_error = error.cause
+    elif isinstance(error, SandboxFilesystemWriteError):
+        cause = getattr(error, "cause", None)
+        if not isinstance(cause, SandboxApiError):
+            return None
+        api_error = cause
     else:
         return None
     if api_error.status_code == 410:
