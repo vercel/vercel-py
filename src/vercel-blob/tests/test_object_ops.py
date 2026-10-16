@@ -2294,10 +2294,6 @@ def test_sync_malformed_stream_metadata_closes_response(
 
 
 @pytest.mark.anyio
-@pytest.mark.xfail(
-    strict=True,
-    reason="Core streaming-response adapters suppress explicit close errors",
-)
 async def test_explicit_close_errors_preserved() -> None:
     class FailingCloseAsyncStream(_TrackingAsyncStream):
         async def aclose(self) -> None:
@@ -2314,10 +2310,6 @@ async def test_explicit_close_errors_preserved() -> None:
             assert stream.yielded_count == 0
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Core streaming-response adapters suppress explicit close errors",
-)
 def test_sync_explicit_close_errors_preserved() -> None:
     class FailingCloseSyncStream(_TrackingSyncStream):
         def close(self) -> None:

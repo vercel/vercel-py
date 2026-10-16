@@ -17,30 +17,7 @@ _URL = "https://localstore.public.blob.vercel-storage.com/core.bin"
 _CHUNK = b"a" * (64 * 1024)
 _HEADERS = {"content-type": "application/octet-stream", "etag": "lifecycle-etag"}
 _Scenario = Literal["eof", "explicit", "eof-close-error", "explicit-close-error", "read", "session"]
-_CLOSE_ERROR_XFAIL = pytest.mark.xfail(
-    strict=True,
-    reason="Core streaming-response adapters suppress explicit close errors",
-)
-_CANCEL_CLEANUP_XFAIL = pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="httpx2 automatic response cleanup is interrupted by cancellation",
-)
-_SCENARIOS = (
-    "eof",
-    "explicit",
-    "eof-close-error",
-    pytest.param("explicit-close-error", marks=_CLOSE_ERROR_XFAIL),
-    pytest.param(
-        "read",
-        marks=pytest.mark.xfail(
-            strict=True,
-            raises=RuntimeError,
-            reason="httpx2 automatic response cleanup replaces the original read error",
-        ),
-    ),
-    "session",
-)
+_SCENARIOS = ("eof", "explicit", "eof-close-error", "explicit-close-error", "read", "session")
 
 
 class _ReadFailure(BaseException):
@@ -313,10 +290,10 @@ async def test_public_async_handle_eof_and_idempotency() -> None:
 @pytest.mark.parametrize(
     ("explicit", "close_error"),
     [
-        pytest.param(False, False, marks=_CANCEL_CLEANUP_XFAIL, id="read"),
-        pytest.param(False, True, marks=_CANCEL_CLEANUP_XFAIL, id="read-close-error"),
+        pytest.param(False, False, id="read"),
+        pytest.param(False, True, id="read-close-error"),
         pytest.param(True, False, id="explicit"),
-        pytest.param(True, True, marks=_CLOSE_ERROR_XFAIL, id="explicit-close-error"),
+        pytest.param(True, True, id="explicit-close-error"),
     ],
 )
 async def test_async_cleanup_checkpoints_under_cancellation(
