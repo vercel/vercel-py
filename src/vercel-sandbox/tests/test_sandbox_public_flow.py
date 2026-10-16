@@ -135,10 +135,14 @@ def _drive_response(
     current_session_id: str | None = "sbx_123",
     current_sandbox_name: str | None = "preview",
     updated_at: int = 2,
+    parent_drive_id: str | None = None,
+    root_drive_id: str | None = None,
 ) -> dict[str, object]:
     return {
         "drive": {
             "id": drive_id,
+            **({"parentDriveId": parent_drive_id} if parent_drive_id is not None else {}),
+            **({"rootDriveId": root_drive_id} if root_drive_id is not None else {}),
             "name": name,
             "projectId": project_id,
             "region": region,
@@ -4391,3 +4395,391 @@ def test_sync_drive_delete_uses_credentials_project(mock_env_clear: None) -> Non
         "teamId": "team_123",
         "projectId": "project-name",
     }
+
+
+@respx.mock
+async def test_drive_fork(mock_env_clear: None) -> None:
+    respx.get("https://sandbox.test/v2/sandboxes/drives/cache%2Fwith%20space").mock(
+        return_value=httpx.Response(200, json=_drive_response(name="cache/with space"))
+    )
+    fork_route = respx.post(
+        "https://sandbox.test/v2/sandboxes/drives/cache%2Fwith%20space/fork"
+    ).mock(
+        side_effect=[
+            httpx.Response(
+                201,
+                json=_drive_response(
+                    drive_id=drive_id,
+                    name=name,
+                    parent_drive_id="drive_123",
+                    root_drive_id="drive_root",
+                    current_session_id=None,
+                    current_sandbox_name=None,
+                ),
+            )
+            for drive_id, name in [
+                ("drive_fork", "cache-fork"),
+                ("drive_fork_by_name", "cache-fork-by-name"),
+            ]
+        ]
+    )
+    delete_route = respx.delete("https://sandbox.test/v2/sandboxes/drives/cache-fork").mock(
+        return_value=httpx.Response(
+            200,
+            json=_drive_response(
+                drive_id="drive_fork",
+                name="cache-fork",
+                parent_drive_id="drive_123",
+                root_drive_id="drive_root",
+            ),
+        )
+    )
+    delete_by_name_route = respx.delete(
+        "https://sandbox.test/v2/sandboxes/drives/cache-fork-by-name"
+    ).mock(
+        return_value=httpx.Response(
+            200,
+            json=_drive_response(
+                drive_id="drive_fork_by_name",
+                name="cache-fork-by-name",
+                parent_drive_id="drive_123",
+                root_drive_id="drive_root",
+            ),
+        )
+    )
+    async with session(service_options=_session_options(project_id="prj_other")):
+        drive = await sandbox.get_drive(name_or_id="cache/with space")
+        assert drive.parent_drive_id is None
+        assert drive.root_drive_id is None
+        forked = await drive.fork(name="cache-fork")
+        assert isinstance(forked, sandbox.Drive)
+        assert forked is not drive
+        assert forked.id == "drive_fork"
+        assert forked.name == "cache-fork"
+        assert forked.parent_drive_id == "drive_123"
+        assert forked.root_drive_id == "drive_root"
+        assert forked.project_id == drive.project_id
+        assert forked.region == drive.region
+        assert forked.max_size_bytes == drive.max_size_bytes
+        assert forked.current_session_id is None
+        assert forked.current_sandbox_name is None
+        assert forked.snapshot() == DriveMount(forked, mode="snapshot")
+        forked_by_name = await sandbox.fork_drive(
+            source="cache/with space", name="cache-fork-by-name"
+        )
+        assert isinstance(forked_by_name, sandbox.Drive)
+        assert forked_by_name is not forked
+        assert forked_by_name.id == "drive_fork_by_name"
+        assert forked_by_name.name == "cache-fork-by-name"
+        for attribute in (
+            "parent_drive_id",
+            "root_drive_id",
+            "project_id",
+            "region",
+            "max_size_bytes",
+            "current_session_id",
+            "current_sandbox_name",
+            "created_at",
+            "updated_at",
+        ):
+            assert getattr(forked_by_name, attribute) == getattr(forked, attribute)
+        assert forked_by_name.snapshot() == DriveMount(forked_by_name, mode="snapshot")
+        await forked_by_name.delete()
+        assert delete_by_name_route.call_count == 1
+        with pytest.raises(AttributeError):
+            forked.parent_drive_id = "other"  # type: ignore[misc]
+        await forked.delete()
+        assert delete_route.call_count == 1
+        assert drive.id == "drive_123"
+        assert drive.name == "cache/with space"
+        assert drive.parent_drive_id is None
+        assert drive.current_session_id == "sbx_123"
+    assert fork_route.call_count == 2
+    for call, name in zip(fork_route.calls, ("cache-fork", "cache-fork-by-name"), strict=True):
+        request = call.request
+        assert dict(request.url.params) == {"teamId": "team_123", "projectId": "prj_other"}
+        assert request.headers["authorization"] == "Bearer token"
+        assert json.loads(request.content) == {"name": name}
+    # Both forks and both deletes reuse the service; only the initial lookup is needed.
+    assert len(respx.calls) == 5
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("status_code", "code", "message"),
+    [
+        (404, "not_found", "Drive not found."),
+        (409, "conflict", 'Drive "cache-fork" already exists.'),
+        (
+            409,
+            "drive_not_initialized",
+            "The source drive has no committed data. Mount it as read-write first.",
+        ),
+        (
+            403,
+            "forbidden",
+            "Drive forking is in private beta. Request access at https://vercel.com/help.",
+        ),
+    ],
+)
+async def test_drive_fork_errors(
+    mock_env_clear: None, status_code: int, code: str, message: str
+) -> None:
+    respx.get("https://sandbox.test/v2/sandboxes/drives/cache%2Fwith%20space").mock(
+        return_value=httpx.Response(200, json=_drive_response(name="cache/with space"))
+    )
+    data = {"error": {"code": code, "message": message}}
+    fork_route = respx.post(
+        "https://sandbox.test/v2/sandboxes/drives/cache%2Fwith%20space/fork"
+    ).mock(return_value=httpx.Response(status_code, json=data))
+    async with session(service_options=_session_options(project_id="prj_other")):
+        drive = await sandbox.get_drive(name_or_id="cache/with space")
+        with pytest.raises(SandboxApiError) as exc_info:
+            await drive.fork(name="cache-fork")
+        assert exc_info.value.status_code == status_code
+        assert exc_info.value.code == code
+        assert exc_info.value.data == data
+        assert message in str(exc_info.value)
+        assert drive.id == "drive_123"
+        assert drive.name == "cache/with space"
+        assert drive.parent_drive_id is None
+        assert drive.current_session_id == "sbx_123"
+    assert fork_route.call_count == 1
+    request = fork_route.calls.last.request
+    assert dict(request.url.params) == {"teamId": "team_123", "projectId": "prj_other"}
+    assert request.headers["authorization"] == "Bearer token"
+    assert json.loads(request.content) == {"name": "cache-fork"}
+
+
+@respx.mock
+def test_sync_drive_fork(mock_env_clear: None) -> None:
+    respx.get("https://sandbox.test/v2/sandboxes/drives/cache%2Fwith%20space").mock(
+        return_value=httpx.Response(200, json=_drive_response(name="cache/with space"))
+    )
+    fork_route = respx.post(
+        "https://sandbox.test/v2/sandboxes/drives/cache%2Fwith%20space/fork"
+    ).mock(
+        side_effect=[
+            httpx.Response(
+                201,
+                json=_drive_response(
+                    drive_id=drive_id,
+                    name=name,
+                    parent_drive_id="drive_123",
+                    root_drive_id="drive_root",
+                    current_session_id=None,
+                    current_sandbox_name=None,
+                ),
+            )
+            for drive_id, name in [
+                ("drive_fork", "cache-fork"),
+                ("drive_fork_by_name", "cache-fork-by-name"),
+            ]
+        ]
+    )
+    delete_route = respx.delete("https://sandbox.test/v2/sandboxes/drives/cache-fork").mock(
+        return_value=httpx.Response(
+            200,
+            json=_drive_response(
+                drive_id="drive_fork",
+                name="cache-fork",
+                parent_drive_id="drive_123",
+                root_drive_id="drive_root",
+            ),
+        )
+    )
+    delete_by_name_route = respx.delete(
+        "https://sandbox.test/v2/sandboxes/drives/cache-fork-by-name"
+    ).mock(
+        return_value=httpx.Response(
+            200,
+            json=_drive_response(
+                drive_id="drive_fork_by_name",
+                name="cache-fork-by-name",
+                parent_drive_id="drive_123",
+                root_drive_id="drive_root",
+            ),
+        )
+    )
+    with session(service_options=_session_options(project_id="prj_other")):
+        drive = sandbox_sync.get_drive(name_or_id="cache/with space")
+        assert drive.parent_drive_id is None
+        assert drive.root_drive_id is None
+        forked = drive.fork(name="cache-fork")
+        assert isinstance(forked, sandbox_sync.SyncDrive)
+        assert forked is not drive
+        assert forked.id == "drive_fork"
+        assert forked.name == "cache-fork"
+        assert forked.parent_drive_id == "drive_123"
+        assert forked.root_drive_id == "drive_root"
+        assert forked.project_id == drive.project_id
+        assert forked.region == drive.region
+        assert forked.max_size_bytes == drive.max_size_bytes
+        assert forked.current_session_id is None
+        assert forked.current_sandbox_name is None
+        assert forked.snapshot() == DriveMount(forked, mode="snapshot")
+        forked_by_name = sandbox_sync.fork_drive(
+            source="cache/with space", name="cache-fork-by-name"
+        )
+        assert isinstance(forked_by_name, sandbox_sync.SyncDrive)
+        assert forked_by_name is not forked
+        assert forked_by_name.id == "drive_fork_by_name"
+        assert forked_by_name.name == "cache-fork-by-name"
+        for attribute in (
+            "parent_drive_id",
+            "root_drive_id",
+            "project_id",
+            "region",
+            "max_size_bytes",
+            "current_session_id",
+            "current_sandbox_name",
+            "created_at",
+            "updated_at",
+        ):
+            assert getattr(forked_by_name, attribute) == getattr(forked, attribute)
+        assert forked_by_name.snapshot() == DriveMount(forked_by_name, mode="snapshot")
+        forked_by_name.delete()
+        assert delete_by_name_route.call_count == 1
+        with pytest.raises(AttributeError):
+            forked.parent_drive_id = "other"  # type: ignore[misc]
+        forked.delete()
+        assert delete_route.call_count == 1
+        assert drive.id == "drive_123"
+        assert drive.name == "cache/with space"
+        assert drive.parent_drive_id is None
+        assert drive.current_session_id == "sbx_123"
+    assert fork_route.call_count == 2
+    for call, name in zip(fork_route.calls, ("cache-fork", "cache-fork-by-name"), strict=True):
+        request = call.request
+        assert dict(request.url.params) == {"teamId": "team_123", "projectId": "prj_other"}
+        assert request.headers["authorization"] == "Bearer token"
+        assert json.loads(request.content) == {"name": name}
+    # Both forks and both deletes reuse the service; only the initial lookup is needed.
+    assert len(respx.calls) == 5
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("status_code", "code", "message"),
+    [
+        (404, "not_found", "Drive not found."),
+        (409, "conflict", 'Drive "cache-fork" already exists.'),
+        (
+            409,
+            "drive_not_initialized",
+            "The source drive has no committed data. Mount it as read-write first.",
+        ),
+        (
+            403,
+            "forbidden",
+            "Drive forking is in private beta. Request access at https://vercel.com/help.",
+        ),
+    ],
+)
+def test_sync_drive_fork_errors(
+    mock_env_clear: None, status_code: int, code: str, message: str
+) -> None:
+    respx.get("https://sandbox.test/v2/sandboxes/drives/cache%2Fwith%20space").mock(
+        return_value=httpx.Response(200, json=_drive_response(name="cache/with space"))
+    )
+    data = {"error": {"code": code, "message": message}}
+    fork_route = respx.post(
+        "https://sandbox.test/v2/sandboxes/drives/cache%2Fwith%20space/fork"
+    ).mock(return_value=httpx.Response(status_code, json=data))
+    with session(service_options=_session_options(project_id="prj_other")):
+        drive = sandbox_sync.get_drive(name_or_id="cache/with space")
+        with pytest.raises(SandboxApiError) as exc_info:
+            drive.fork(name="cache-fork")
+        assert exc_info.value.status_code == status_code
+        assert exc_info.value.code == code
+        assert exc_info.value.data == data
+        assert message in str(exc_info.value)
+        assert drive.id == "drive_123"
+        assert drive.name == "cache/with space"
+        assert drive.parent_drive_id is None
+        assert drive.current_session_id == "sbx_123"
+    assert fork_route.call_count == 1
+    request = fork_route.calls.last.request
+    assert dict(request.url.params) == {"teamId": "team_123", "projectId": "prj_other"}
+    assert request.headers["authorization"] == "Bearer token"
+    assert json.loads(request.content) == {"name": "cache-fork"}
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("status_code", "code", "message"),
+    [
+        (404, "not_found", "Drive not found."),
+        (409, "conflict", 'Drive "cache-fork" already exists.'),
+        (
+            409,
+            "drive_not_initialized",
+            "The source drive has no committed data. Mount it as read-write first.",
+        ),
+        (
+            403,
+            "forbidden",
+            "Drive forking is in private beta. Request access at https://vercel.com/help.",
+        ),
+    ],
+)
+async def test_drive_fork_errors_by_name(
+    mock_env_clear: None, status_code: int, code: str, message: str
+) -> None:
+    data = {"error": {"code": code, "message": message}}
+    fork_route = respx.post(
+        "https://sandbox.test/v2/sandboxes/drives/cache%2Fwith%20space/fork"
+    ).mock(return_value=httpx.Response(status_code, json=data))
+    async with session(service_options=_session_options(project_id="prj_other")):
+        with pytest.raises(SandboxApiError) as exc_info:
+            await sandbox.fork_drive(source="cache/with space", name="cache-fork")
+        assert exc_info.value.status_code == status_code
+        assert exc_info.value.code == code
+        assert exc_info.value.data == data
+        assert message in str(exc_info.value)
+    assert fork_route.call_count == 1
+    request = fork_route.calls.last.request
+    assert dict(request.url.params) == {"teamId": "team_123", "projectId": "prj_other"}
+    assert request.headers["authorization"] == "Bearer token"
+    assert json.loads(request.content) == {"name": "cache-fork"}
+    assert len(respx.calls) == 1
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("status_code", "code", "message"),
+    [
+        (404, "not_found", "Drive not found."),
+        (409, "conflict", 'Drive "cache-fork" already exists.'),
+        (
+            409,
+            "drive_not_initialized",
+            "The source drive has no committed data. Mount it as read-write first.",
+        ),
+        (
+            403,
+            "forbidden",
+            "Drive forking is in private beta. Request access at https://vercel.com/help.",
+        ),
+    ],
+)
+def test_sync_drive_fork_errors_by_name(
+    mock_env_clear: None, status_code: int, code: str, message: str
+) -> None:
+    data = {"error": {"code": code, "message": message}}
+    fork_route = respx.post(
+        "https://sandbox.test/v2/sandboxes/drives/cache%2Fwith%20space/fork"
+    ).mock(return_value=httpx.Response(status_code, json=data))
+    with session(service_options=_session_options(project_id="prj_other")):
+        with pytest.raises(SandboxApiError) as exc_info:
+            sandbox_sync.fork_drive(source="cache/with space", name="cache-fork")
+        assert exc_info.value.status_code == status_code
+        assert exc_info.value.code == code
+        assert exc_info.value.data == data
+        assert message in str(exc_info.value)
+    assert fork_route.call_count == 1
+    request = fork_route.calls.last.request
+    assert dict(request.url.params) == {"teamId": "team_123", "projectId": "prj_other"}
+    assert request.headers["authorization"] == "Bearer token"
+    assert json.loads(request.content) == {"name": "cache-fork"}
+    assert len(respx.calls) == 1

@@ -1,5 +1,6 @@
 """Live semantic parity scenarios for `vercel.sandbox`."""
 
+from contextlib import AsyncExitStack
 from datetime import timedelta
 from uuid import uuid4
 
@@ -484,3 +485,99 @@ async def test_snapshot_mount_and_next_session_mount_updates() -> None:
                 drive_name=drive_name,
                 original_error=original_error,
             )
+
+
+@requires_sandbox_credentials
+@pytest.mark.live
+@pytest.mark.asyncio
+async def test_drive_fork_and_fork_by_name_copy_committed_data_independently() -> None:
+    """Requires a team with access to the Drive forking private beta."""
+    suffix = uuid4().hex[:10]
+    source_name = f"vercel-py-drive-source-{suffix}"
+    handle_fork_name = f"vercel-py-drive-handle-fork-{suffix}"
+    named_fork_name = f"vercel-py-drive-named-fork-{suffix}"
+    initializer_name = f"vercel-py-drive-fork-initialize-{suffix}"
+    verifier_name = f"vercel-py-drive-fork-verify-{suffix}"
+    known_sandboxes: dict[str, object] = {}
+    original_error: BaseException | None = None
+    creating_name: str | None = None
+    content = f"committed source data {suffix}\n"
+
+    async with session():
+        try:
+            source, _ = await sandbox.get_or_create_drive(
+                name=source_name, region="iad1", max_size_bytes=1024**3
+            )
+            creating_name = initializer_name
+            initializer = await sandbox.create_sandbox(
+                name=initializer_name,
+                region=source.region,
+                mounts={"/data": source},
+                execution_time_limit=timedelta(minutes=2),
+            )
+            creating_name = None
+            known_sandboxes[initializer_name] = initializer
+            await initializer.fs.write_text("/data/probe.txt", content)
+            await initializer.stop()
+            await initializer.destroy()
+            known_sandboxes.pop(initializer_name)
+
+            handle_fork = await source.fork(name=handle_fork_name)
+            named_fork = await sandbox.fork_drive(source=source_name, name=named_fork_name)
+            assert len({source.id, handle_fork.id, named_fork.id}) == 3
+            assert handle_fork.name == handle_fork_name
+            assert named_fork.name == named_fork_name
+            for forked in (handle_fork, named_fork):
+                assert forked.parent_drive_id == source.id
+                assert forked.root_drive_id == source.id
+                assert forked.project_id == source.project_id
+                assert forked.region == source.region
+                assert forked.max_size_bytes == source.max_size_bytes
+                assert forked.current_session_id is None
+                assert forked.current_sandbox_name is None
+
+            creating_name = verifier_name
+            verifier = await sandbox.create_sandbox(
+                name=verifier_name,
+                region=source.region,
+                mounts={"/source": source.snapshot(), "/handle": handle_fork, "/named": named_fork},
+                execution_time_limit=timedelta(minutes=2),
+            )
+            creating_name = None
+            known_sandboxes[verifier_name] = verifier
+            for mount in ("/source", "/handle", "/named"):
+                assert await verifier.fs.read_text(f"{mount}/probe.txt") == content
+            await verifier.fs.write_text("/handle/probe.txt", "handle fork changed\n")
+            assert await verifier.fs.read_text("/named/probe.txt") == content
+            assert await verifier.fs.read_text("/source/probe.txt") == content
+            await verifier.fs.write_text("/named/probe.txt", "named fork changed\n")
+            assert await verifier.fs.read_text("/handle/probe.txt") == "handle fork changed\n"
+            assert await verifier.fs.read_text("/named/probe.txt") == "named fork changed\n"
+            assert await verifier.fs.read_text("/source/probe.txt") == content
+        except SandboxTerminalStateError as error:
+            if creating_name is not None and error.sandbox is not None:
+                known_sandboxes[creating_name] = error.sandbox
+            original_error = error
+            raise
+        except BaseException as error:
+            original_error = error
+            raise
+        finally:
+            # Attempt every Drive even if creation failed after allocating it or
+            # another cleanup fails. Sandboxes must be stopped before deletion.
+            async with AsyncExitStack() as cleanup:
+                for drive_name in (handle_fork_name, named_fork_name):
+                    cleanup.push_async_callback(
+                        reconcile_sandbox_drive_cleanup,
+                        names=(),
+                        known_sandboxes={},
+                        drive_name=drive_name,
+                        original_error=original_error,
+                    )
+                cleanup.push_async_callback(
+                    reconcile_sandbox_drive_cleanup,
+                    names=(initializer_name, verifier_name),
+                    known_sandboxes=known_sandboxes,
+                    drive_name=source_name,
+                    original_error=original_error,
+                )
