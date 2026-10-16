@@ -164,6 +164,11 @@ jobs:
         env:
           VERCEL_DEVALUE_JS: ${{ runner.temp }}/devalue
           VERCEL_WORKFLOW_CLI: ${{ runner.temp }}/workflow-cli/node_modules/workflow
+          # Where tests run under pytest (Python 3.10, which ggt does not
+          # support), dump every thread's stack once a test runs this long, so
+          # a hang shows where it is stuck instead of idling silently until
+          # the job timeout. ggt does not read this variable.
+          PYTEST_ADDOPTS: -o faulthandler_timeout=120
 
       - name: Test examples
         if: matrix.python-version == '3.12'
