@@ -38,6 +38,11 @@ def run_script(input_text: str, script: str) -> str:
             batch.write_text("workspace/tool.py", script)
             batch.write_text("workspace/input.txt", input_text)
 
+        # The wrapped script only touches local files, so cut off outbound
+        # network access before running it. `update(network_policy=...)` saves
+        # the policy for future sessions and applies it to the running session.
+        box.update(network_policy=sandbox.NetworkPolicy.deny_all())
+
         # `run_process` streams output to this process while waiting. Use
         # `create_process` when signaling or separate readers are needed.
         box.run_process(
