@@ -4,12 +4,15 @@ from typing import Annotated, Any, cast
 
 import inspect
 import json
+import threading
 from collections.abc import AsyncIterable, AsyncIterator, Iterable, Iterator
 from dataclasses import dataclass
 from datetime import timedelta
 
+import anyio
 import pytest
 import time_machine
+from anyio import to_thread
 from pydantic import BaseModel
 
 from vercel.headers import get_headers, set_headers
@@ -31,7 +34,7 @@ from vercel.queue import (
     get_subscriptions,
     subscribe,
 )
-from vercel.queue._internal import lease as queue_lease
+from vercel.queue._internal import embedded as queue_embedded, lease as queue_lease
 from vercel.queue._internal.client import _AsyncMessageLifecycle
 from vercel.queue._internal.client_sync import _MessageLifecycle
 from vercel.queue._internal.constants import (
@@ -1451,6 +1454,110 @@ def test_accept_and_handle_raised_retry_after_extends_without_ack(
     assert not stored.acknowledged
 
 
+class _SlowRenewals:
+    """Hold automatic renewals in the embedded broker until RetryAfter lands.
+
+    This recreates the service still processing a renewal that the client has
+    already given up on, the window in which a late renewal used to overwrite
+    the handler's retry delay.
+    """
+
+    renewal_seconds = 30
+    timeout_seconds = 10.0
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.renewal_arrived = threading.Event()
+        self.renewal_applied = threading.Event()
+        # Both requests are handled on the broker's event loop.
+        self._retry_arrived: anyio.Event | None = None
+        handle_lease = queue_embedded.EmbeddedQueueAsgiApp._handle_lease
+        slow = self
+
+        async def slow_handle_lease(
+            self: queue_embedded.EmbeddedQueueAsgiApp,
+            topic: str,
+            consumer: str,
+            receipt_handle: str,
+            request: Any,
+        ) -> Any:
+            if request.method != "PATCH":
+                return await handle_lease(self, topic, consumer, receipt_handle, request)
+            seconds = json.loads(await request.body())["visibilityTimeoutSeconds"]
+            if seconds != slow.renewal_seconds:
+                if slow._retry_arrived is not None:
+                    slow._retry_arrived.set()
+                return await handle_lease(self, topic, consumer, receipt_handle, request)
+            slow._retry_arrived = anyio.Event()
+            slow.renewal_arrived.set()
+            # A client that abandons this renewal sends RetryAfter at once. One
+            # that waits for it gets released by the bound instead.
+            with anyio.move_on_after(0.2):
+                await slow._retry_arrived.wait()
+            try:
+                return await handle_lease(self, topic, consumer, receipt_handle, request)
+            finally:
+                slow.renewal_applied.set()
+
+        monkeypatch.setattr(queue_embedded.EmbeddedQueueAsgiApp, "_handle_lease", slow_handle_lease)
+        # Make the first automatic renewal due while the handler runs.
+        monkeypatch.setattr(queue_lease, "_next_extension_delay", lambda *_args: 0.0)
+
+
+def test_accept_and_handle_retry_after_is_not_overwritten_by_in_flight_renewal(
+    eqs: EmbeddedQueueDevServer,
+    isolated_subscriptions: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    renewals = _SlowRenewals(monkeypatch)
+    delivery = sync_delivery(eqs, {"ok": True})
+
+    @callback_subscribe(topic="emails")
+    def handle(payload: object) -> None:
+        del payload
+        assert renewals.renewal_arrived.wait(renewals.timeout_seconds)
+        raise RetryAfter(45)
+
+    assert isinstance(delivery.client, SyncQueueClient)
+    delivery.client.accept_and_handle(
+        delivery.body,
+        delivery.headers,
+        lease_duration=renewals.renewal_seconds,
+    )
+
+    assert renewals.renewal_applied.wait(renewals.timeout_seconds)
+    stored = eqs.state.by_id[delivery.message_id]
+    assert stored.lease_deadline_by_consumer["tests"] == (eqs.state.now + timedelta(seconds=45))
+    assert not stored.acknowledged
+
+
+@pytest.mark.anyio
+async def test_async_accept_and_handle_retry_after_is_not_overwritten_by_in_flight_renewal(
+    eqs: EmbeddedQueueDevServer,
+    isolated_subscriptions: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    renewals = _SlowRenewals(monkeypatch)
+    delivery = await async_delivery(eqs, {"ok": True})
+
+    @callback_subscribe(topic="emails")
+    async def handle(payload: object) -> None:
+        del payload
+        assert await to_thread.run_sync(renewals.renewal_arrived.wait, renewals.timeout_seconds)
+        raise RetryAfter(45)
+
+    assert isinstance(delivery.client, QueueClient)
+    await delivery.client.accept_and_handle(
+        delivery.body,
+        delivery.headers,
+        lease_duration=renewals.renewal_seconds,
+    )
+
+    assert await to_thread.run_sync(renewals.renewal_applied.wait, renewals.timeout_seconds)
+    stored = eqs.state.by_id[delivery.message_id]
+    assert stored.lease_deadline_by_consumer["tests"] == (eqs.state.now + timedelta(seconds=45))
+    assert not stored.acknowledged
+
+
 def test_accept_and_handle_raised_retry_after_zero_releases_without_ack(
     eqs: EmbeddedQueueDevServer,
     isolated_subscriptions: None,
@@ -1498,9 +1605,7 @@ def test_accept_and_handle_raised_retry_after_rejects_above_server_max(
 async def test_async_accept_and_handle_retry_after_extends_without_ack(
     eqs: EmbeddedQueueDevServer,
     isolated_subscriptions: None,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(queue_lease, "_LEASE_STOP_WAIT_TIMEOUT_SECONDS", 0.01)
     delivery = await async_delivery(eqs, {"ok": True})
 
     @callback_subscribe(topic="emails")

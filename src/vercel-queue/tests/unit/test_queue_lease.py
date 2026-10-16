@@ -1256,7 +1256,59 @@ async def test_lease_debug_logs_client_error_stop(
 
 
 @pytest.mark.anyio
-async def test_lease_worker_processes_stop_while_extension_is_in_flight() -> None:
+async def test_lease_worker_waited_stop_lets_in_flight_extension_finish() -> None:
+    # A waited stop precedes an explicit visibility change. Cancelling the
+    # extension client-side could not retract a request the service already
+    # has, so the stop must wait for it to land instead.
+    started = anyio.Event()
+    release = anyio.Event()
+    finished: list[bool] = []
+
+    async def extend(message: Message[Any], duration: int) -> None:
+        del message, duration
+        started.set()
+        await release.wait()
+        finished.append(True)
+
+    queue_lease_anyio = queue_lease_anyio_module()
+    command_send, command_receive = queue_lease_anyio.create_memory_object_stream(10)
+    done_send, done_receive = queue_lease_anyio.create_memory_object_stream[None](1)
+    request = _lease_request(
+        Message(payload=None, metadata=make_leased_metadata("emails")),
+        lease_seconds=30,
+        client=_FakeLeaseClient(extend),
+    )
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(_lease_worker_async, command_receive)
+        await command_send.send(
+            _LeaseExtensionStart(request=request, scheduled_event=threading.Event())
+        )
+        await started.wait()
+        await command_send.send(_LeaseExtensionStop(token=request.token, done_send=done_send))
+
+        with anyio.move_on_after(0.05) as scope:
+            await done_receive.receive()
+        assert scope.cancel_called
+
+        release.set()
+
+        with anyio.fail_after(10):
+            await done_receive.receive()
+        assert finished == [True]
+
+        await command_send.aclose()
+        task_group.cancel_scope.cancel()
+
+    await done_send.aclose()
+    await done_receive.aclose()
+
+
+@pytest.mark.anyio
+async def test_lease_worker_waited_stop_cancels_stalled_extension_after_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("vercel.queue._internal.lease._LEASE_STOP_WAIT_TIMEOUT_SECONDS", 0.05)
     started = anyio.Event()
     cancelled = anyio.Event()
     after_cancel_release = anyio.Event()
@@ -1288,7 +1340,8 @@ async def test_lease_worker_processes_stop_while_extension_is_in_flight() -> Non
         )
         await started.wait()
         await command_send.send(_LeaseExtensionStop(token=request.token, done_send=done_send))
-        await cancelled.wait()
+        with anyio.fail_after(10):
+            await cancelled.wait()
 
         with anyio.move_on_after(0.05) as scope:
             await done_receive.receive()
@@ -1296,7 +1349,7 @@ async def test_lease_worker_processes_stop_while_extension_is_in_flight() -> Non
 
         after_cancel_release.set()
 
-        with anyio.fail_after(0.5):
+        with anyio.fail_after(10):
             await done_receive.receive()
 
         await command_send.aclose()

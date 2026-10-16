@@ -66,7 +66,7 @@ Leases are extended in the background while handlers run, through one process-wi
 
 [[src/vercel-queue/vercel/queue/_internal/lease.py#LeaseRenewal]] registers a message with a daemon thread running an AnyIO worker, which runs one renewal task per message. Starting a renewal waits for the worker to schedule it, but not for the first extension, so handler startup never waits on renewal network I/O.
 
-Stopping cancels in-flight extensions. The `RetryAfter` path waits for that cancellation so a late renewal cannot overwrite the explicit visibility change, while acknowledgement skips the wait because a late renewal after acknowledgement is harmless. Each renewal handle is single-use, and at most one extension per message is in flight.
+Acknowledgement stops renewal without waiting and cancels any in-flight extension, because a late renewal after acknowledgement is harmless. The `RetryAfter` and `Handoff` paths wait for the stop instead, and a waited stop lets an in-flight extension finish rather than cancelling it: a request the service has already received cannot be retracted, so only its completion guarantees a late renewal cannot overwrite the explicit visibility change. An extension that outlasts the stop timeout is cancelled. Each renewal handle is single-use, and at most one extension per message is in flight.
 
 ## Polling
 

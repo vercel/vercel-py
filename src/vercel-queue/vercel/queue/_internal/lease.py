@@ -10,16 +10,20 @@ but it does not wait for the first lease extension to complete. This surfaces
 delivery failures at handler startup without coupling startup to renewal
 network I/O. Fire-and-forget stop paths are still logged asynchronously.
 
-Stopping a renewal removes future work and cancels any in-flight extension. The
-RetryAfter path waits for that cancellation so a late automatic renewal cannot
-overwrite the handler's explicit visibility update, while acknowledge paths can
-avoid that tail latency because late renewals are harmless after ACK.
+Stopping a renewal removes future work. A fire-and-forget stop also cancels any
+in-flight extension, because acknowledge paths can avoid that tail latency:
+late renewals are harmless after ACK. A waited stop instead lets an in-flight
+extension finish, up to the stop timeout. Cancelling a request client-side
+cannot retract it once it has reached the service, so only completion
+guarantees that a late automatic renewal cannot overwrite the visibility
+update the RetryAfter path applies next.
 
 Lease renewal invariants:
 
 - A renewal handle is single-use and idempotently stoppable.
 - Start waits for worker scheduling, not lease extension I/O.
-- Stop with wait=True waits for in-flight renewal cancellation or completion.
+- Stop with wait=True waits for an in-flight renewal to complete, cancelling it
+  only once the stop timeout has passed.
 - At most one renewal for a token may be in flight at a time.
 - Command submission uses a large bounded AnyIO memory stream.
 """
@@ -150,6 +154,7 @@ class _LeaseRenewalTask:
     request: _LeaseExtensionRequest
     cancel_scope: anyio.CancelScope
     stop_waiters: list[_LeaseExtensionStop]
+    extension_in_flight: bool = False
 
 
 @dataclass(kw_only=True)
@@ -788,6 +793,15 @@ async def _handle_lease_extension_stop(
     if renewal_task is not None:
         if command.done_send is not None or command.done_event is not None:
             renewal_task.stop_waiters.append(command)
+            if renewal_task.extension_in_flight:
+                # The caller is about to change visibility itself. Cancelling
+                # the request cannot retract it once the service has it, so
+                # let it land first, but no longer than the caller waits.
+                renewal_task.cancel_scope.deadline = min(
+                    renewal_task.cancel_scope.deadline,
+                    anyio.current_time() + _LEASE_STOP_WAIT_TIMEOUT_SECONDS,
+                )
+                return
         renewal_task.cancel_scope.cancel()
         return
 
@@ -871,7 +885,11 @@ async def _run_lease_renewal_task(
                 await anyio.sleep(max(0.0, request.next_extension_at - time.monotonic()))
                 if state.active.get(request.token) is not renewal_task:
                     return
-                await _run_lease_extension(request, _LeaseTaskActiveMap(state.active))
+                renewal_task.extension_in_flight = True
+                try:
+                    await _run_lease_extension(request, _LeaseTaskActiveMap(state.active))
+                finally:
+                    renewal_task.extension_in_flight = False
     finally:
         with anyio.CancelScope(shield=True):
             if state.active.get(request.token) is renewal_task:
