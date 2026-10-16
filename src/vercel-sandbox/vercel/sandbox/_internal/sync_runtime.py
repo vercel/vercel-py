@@ -80,6 +80,14 @@ from vercel.sandbox._internal.process_output import (
     ProcessOutputRouter,
     _validate_reader_destination,
 )
+from vercel.sandbox._internal.process_stdin import (
+    ProcessInput,
+    StdinMode,
+    SyncProcessStdin,
+    _coerce_input,
+    _sync_stdin,
+    _validate_stdin,
+)
 from vercel.sandbox._internal.recovery import (
     SandboxLifecycle,
     classify_sandbox_lifecycle_error,
@@ -135,11 +143,15 @@ class SyncProcess(_ProcessHandleState):
     The ``stdout`` and ``stderr`` readers each consume their process log
     stream once; reads make forward progress through the stream and cannot
     rewind. A reader is ``None`` when its stream was dropped with
-    ``subprocess.DEVNULL`` or merged with ``subprocess.STDOUT``.
+    ``subprocess.DEVNULL`` or merged with ``subprocess.STDOUT``. ``stdin`` is
+    ``None`` for a process created without ``stdin=subprocess.PIPE``; a
+    looked-up process always has a writer, which fails on first use if the
+    process has no stdin.
     """
 
-    __slots__ = ("_service", "stderr", "stdout")
+    __slots__ = ("_service", "stderr", "stdin", "stdout")
 
+    stdin: SyncProcessStdin | None
     stdout: SyncTextReader | None
     stderr: SyncTextReader | None
 
@@ -148,11 +160,13 @@ class SyncProcess(_ProcessHandleState):
         *,
         payload: ProcessState,
         service: SandboxService,
+        stdin: StdinMode = "fetched",
         stdout: int = subprocess.PIPE,
         stderr: int = subprocess.PIPE,
     ) -> None:
         super().__init__(payload)
         self._service = service
+        self.stdin = _sync_stdin(service, payload, stdin)
         self.stdout, self.stderr = _sync_text_readers(
             lambda: service.process_logs_response(session_id=self._session_id, process_id=self.id),
             stdout=stdout,
@@ -182,12 +196,16 @@ class SyncProcess(_ProcessHandleState):
             raise SandboxResponseError("Wait response did not include a process return code")
         return self.returncode
 
-    def communicate(self, input: None = None) -> tuple[str | None, str | None]:
-        """Read all output and wait for the process to exit.
+    def communicate(self, input: ProcessInput | None = None) -> tuple[str | None, str | None]:
+        """Send input, read all output, and wait for the process to exit.
 
         Args:
-            input: Reserved for subprocess compatibility. Process standard
-                input is not supported and must be ``None``.
+            input: Data written to stdin before it is closed; text is
+                encoded as UTF-8. Requires ``stdin=subprocess.PIPE``. A
+                process created with stdin has it closed even without input,
+                while a looked-up process only has it closed when given input
+                or written to through this handle. A process that exits or
+                stops reading before taking all of it is not an error.
 
         Returns:
             A ``(stdout, stderr)`` tuple. A stream without a reader is
@@ -195,10 +213,16 @@ class SyncProcess(_ProcessHandleState):
             ``(merged, None)``.
 
         Raises:
-            NotImplementedError: If ``input`` is not ``None``.
+            ValueError: If ``input`` is given to a process created without
+                stdin.
+            SandboxStdinError: If writing or closing stdin fails, including
+                when a looked-up process has no stdin.
         """
-        if input is not None:
-            raise NotImplementedError("process stdin is not supported")
+        data = None if input is None else _coerce_input(input)
+        if self.stdin is not None:
+            self.stdin._communicate(data)
+        elif data is not None:
+            raise ValueError("input requires a process created with stdin=subprocess.PIPE")
         stdout = None if self.stdout is None else self.stdout.read()
         stderr = None if self.stderr is None else self.stderr.read()
         self.wait()
@@ -999,6 +1023,7 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         stdout: TextIO | int | None = None,
         stderr: TextIO | int | None = None,
         capture_output: bool = False,
+        input: ProcessInput | None = None,
     ) -> CompletedProcess:
         """Run a process to completion.
 
@@ -1017,6 +1042,10 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
                 stderr. ``None`` inherits the local stderr stream; ``STDOUT``
                 merges stderr into the stdout destination.
             capture_output: Whether to capture stdout and stderr in the result.
+            input: Data written to the process's stdin, which is then closed;
+                text is encoded as UTF-8. Without it the process reads an
+                empty stdin. A process that exits or stops reading before
+                taking all of it is not an error.
 
         Returns:
             The completed process result.
@@ -1024,10 +1053,13 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         Raises:
             subprocess.CalledProcessError: If ``check`` is true and the process
                 exits unsuccessfully.
+            SandboxStdinError: If writing ``input`` fails. The process is
+                killed, since nothing else could stop it waiting for input.
         """
         output_router = ProcessOutputRouter(
             stdout=stdout, stderr=stderr, capture_output=capture_output
         )
+        data = None if input is None else _coerce_input(input)
         state = iter_coroutine(
             self._service.run_process(
                 session_id=self.id,
@@ -1038,6 +1070,7 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
                 sudo=sudo,
                 kill_after=parse_duration_seconds(kill_after),
                 output_router=output_router,
+                input=data,
             )
         )
         assert state.process.returncode is not None
@@ -1065,6 +1098,7 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         env: Mapping[str, str] | None = None,
         sudo: bool = False,
         kill_after: float | timedelta | None = None,
+        stdin: int | None = None,
         stdout: int = subprocess.PIPE,
         stderr: int = subprocess.PIPE,
     ) -> SyncProcess:
@@ -1078,6 +1112,8 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
             sudo: Whether to run with elevated privileges.
             kill_after: Duration after which the service kills the process
                 with ``SIGKILL``.
+            stdin: ``subprocess.PIPE`` for a writer at ``stdin``, or ``None``
+                (default) or ``subprocess.DEVNULL`` for an empty stdin.
             stdout: ``subprocess.PIPE`` (default) for a live reader or
                 ``subprocess.DEVNULL`` to drop the stream.
             stderr: ``subprocess.PIPE`` (default), ``subprocess.DEVNULL``, or
@@ -1089,6 +1125,7 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         """
         stdout = _validate_reader_destination(stdout, name="stdout")
         stderr = _validate_reader_destination(stderr, name="stderr", allow_stdout_merge=True)
+        attach_stdin = _validate_stdin(stdin)
         state = iter_coroutine(
             self._service.create_process(
                 session_id=self.id,
@@ -1098,9 +1135,16 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
                 env=env,
                 sudo=sudo,
                 kill_after=parse_duration_seconds(kill_after),
+                attach_stdin=attach_stdin,
             )
         )
-        return SyncProcess(payload=state, service=self._service, stdout=stdout, stderr=stderr)
+        return SyncProcess(
+            payload=state,
+            service=self._service,
+            stdin="attached" if attach_stdin else None,
+            stdout=stdout,
+            stderr=stderr,
+        )
 
     def open_interactive(
         self,
@@ -1148,7 +1192,18 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         )
 
     def get_process(self, process_id: str, *, wait: bool = False) -> SyncProcess:
-        """Get a process in this session."""
+        """Get a process in this session.
+
+        Args:
+            process_id: Process identifier.
+            wait: Whether the API call should wait for process completion.
+
+        Returns:
+            A process handle populated with the latest state. Its ``stdin``
+            writer continues after any input already written, so it can take
+            over from the handle that started the process; only one handle
+            should write at a time.
+        """
         state = iter_coroutine(
             self._service.get_process(session_id=self.id, process_id=process_id, wait=wait)
         )
@@ -1400,6 +1455,7 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         stdout: TextIO | int | None = None,
         stderr: TextIO | int | None = None,
         capture_output: bool = False,
+        input: ProcessInput | None = None,
     ) -> CompletedProcess:
         """Run a process to completion in the current session.
 
@@ -1408,6 +1464,7 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         output_router = ProcessOutputRouter(
             stdout=stdout, stderr=stderr, capture_output=capture_output
         )
+        data = None if input is None else _coerce_input(input)
         parsed_kill_after = parse_duration_seconds(kill_after)
         state = iter_coroutine(
             execute_with_sandbox_recovery(
@@ -1420,6 +1477,7 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
                     sudo=sudo,
                     kill_after=parsed_kill_after,
                     output_router=output_router,
+                    input=data,
                 ),
                 coordinator=self,
             )
@@ -1449,6 +1507,7 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         env: Mapping[str, str] | None = None,
         sudo: bool = False,
         kill_after: float | timedelta | None = None,
+        stdin: int | None = None,
         stdout: int = subprocess.PIPE,
         stderr: int = subprocess.PIPE,
     ) -> SyncProcess:
@@ -1461,6 +1520,7 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         """
         stdout = _validate_reader_destination(stdout, name="stdout")
         stderr = _validate_reader_destination(stderr, name="stderr", allow_stdout_merge=True)
+        attach_stdin = _validate_stdin(stdin)
         parsed_args = list(args) if args is not None else None
         parsed_kill_after = parse_duration_seconds(kill_after)
         state = iter_coroutine(
@@ -1473,11 +1533,18 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
                     env=env,
                     sudo=sudo,
                     kill_after=parsed_kill_after,
+                    attach_stdin=attach_stdin,
                 ),
                 coordinator=self,
             )
         )
-        return SyncProcess(payload=state, service=self._service, stdout=stdout, stderr=stderr)
+        return SyncProcess(
+            payload=state,
+            service=self._service,
+            stdin="attached" if attach_stdin else None,
+            stdout=stdout,
+            stderr=stderr,
+        )
 
     def open_interactive(
         self,

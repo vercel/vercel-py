@@ -16,6 +16,7 @@ from vercel.sandbox._internal.errors import (
     SandboxInvalidHandleError,
     SandboxPathNotFoundError,
     SandboxResponseError,
+    SandboxStdinError,
     SandboxStreamError,
     SandboxTerminalStateError,
     SandboxTimeoutError as SandboxTimeoutError,
@@ -73,6 +74,7 @@ from vercel.sandbox._internal.options import (
     SyncSandboxCredentialsFactory,
     SyncSandboxServiceOptions as SandboxServiceOptions,
 )
+from vercel.sandbox._internal.process_stdin import SyncProcessStdin
 from vercel.sandbox._internal.service import SandboxService, get_sync_sandbox_service
 from vercel.sandbox._internal.state import SnapshotRetentionState
 from vercel.sandbox._internal.sync_filesystem_handle import (
@@ -637,6 +639,7 @@ __all__ = [
     "SandboxQueryByStatusUpdatedAt",
     "SandboxResponseError",
     "SandboxInteractiveError",
+    "SandboxStdinError",
     "SandboxStreamError",
     "SandboxServiceOptions",
     "SandboxSource",
@@ -656,6 +659,7 @@ __all__ = [
     "SyncInteractiveSessionOperation",
     "SyncInteractiveStream",
     "SyncProcess",
+    "SyncProcessStdin",
     "SyncSandboxFilesystem",
     "SyncSandboxFilesystemBatch",
     "SyncSandboxRuntimeSession",
