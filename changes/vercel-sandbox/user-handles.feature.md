@@ -1,0 +1,1 @@
+Add immutable Linux user handles with permission-enforced command and filesystem operations, account provisioning and selection, and shared synchronous and asynchronous execution and filesystem Protocols.

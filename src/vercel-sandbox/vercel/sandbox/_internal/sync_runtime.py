@@ -120,6 +120,8 @@ from vercel.sandbox._internal.text_reader import SyncTextReader, _sync_text_read
 if TYPE_CHECKING:
     from _typeshed import ReadableBuffer, WriteableBuffer
 
+    from vercel.sandbox.sync.user import SyncSandboxUser
+
 
 def _terminal_error(error: _SandboxTerminalState, sandbox: object) -> SandboxTerminalStateError:
     return SandboxTerminalStateError(
@@ -986,6 +988,37 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
                 stacklevel=2,
             )
 
+    def as_user(self, username: str) -> "SyncSandboxUser":
+        """Select an existing account without I/O; validate the username now.
+
+        The account's actual home is resolved lazily on first use.
+        This handle stays pinned to this runtime session.
+        """
+        from vercel.sandbox._internal.user_core import UserContext
+        from vercel.sandbox.sync.user import SyncSandboxUser
+
+        context = UserContext(
+            username=username,
+            service=self._service,
+            execution=self.fs._execution,
+            home_dir="/root" if username == "root" else None,
+        )
+        filesystem = SyncSandboxFilesystem(
+            service=context.service,
+            execution=context.filesystem_execution,
+            write_files_cwd=context.write_files_cwd,
+        )
+        return SyncSandboxUser(context, filesystem)
+
+    def create_user(self, username: str) -> "SyncSandboxUser":
+        """Create a Linux account with /bin/bash and a private (0700) home.
+
+        Existing accounts cause an error; use ``as_user()`` to reuse one.
+        """
+        user = self.as_user(username)
+        iter_coroutine(user._context.provision())
+        return user
+
     def run_process(
         self,
         command: str,
@@ -1386,6 +1419,37 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         exact session identity on exit.
         """
         return iter_coroutine(self._acquire_session())
+
+    def as_user(self, username: str) -> "SyncSandboxUser":
+        """Select an existing account without I/O; validate the username now.
+
+        The account's actual home is resolved lazily on first use.
+        This handle follows this sandbox through lazy resume.
+        """
+        from vercel.sandbox._internal.user_core import UserContext
+        from vercel.sandbox.sync.user import SyncSandboxUser
+
+        context = UserContext(
+            username=username,
+            service=self._service,
+            execution=self.fs._execution,
+            home_dir="/root" if username == "root" else None,
+        )
+        filesystem = SyncSandboxFilesystem(
+            service=context.service,
+            execution=context.filesystem_execution,
+            write_files_cwd=context.write_files_cwd,
+        )
+        return SyncSandboxUser(context, filesystem)
+
+    def create_user(self, username: str) -> "SyncSandboxUser":
+        """Create a Linux account with /bin/bash and a private (0700) home.
+
+        Existing accounts cause an error; use ``as_user()`` to reuse one.
+        """
+        user = self.as_user(username)
+        iter_coroutine(user._context.provision())
+        return user
 
     def run_process(
         self,

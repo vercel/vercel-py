@@ -108,6 +108,8 @@ from vercel.sandbox._internal.sync_runtime import (
     resume_sandbox as _resume_sandbox,
 )
 from vercel.sandbox._internal.text_reader import SyncTextReader
+from vercel.sandbox.protocols import SyncSandboxExecution, SyncSandboxFilesystemOperations
+from vercel.sandbox.sync.user import SyncSandboxUser
 
 from .client import SyncSandboxClient
 
@@ -593,6 +595,9 @@ def get_snapshot(*, snapshot_id: str) -> SyncSnapshot:
 
 
 __all__ = [
+    "SyncSandboxUser",
+    "SyncSandboxExecution",
+    "SyncSandboxFilesystemOperations",
     "DriveHandle",
     "DriveMount",
     "DriveReference",

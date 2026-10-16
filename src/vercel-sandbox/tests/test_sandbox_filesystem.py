@@ -484,6 +484,7 @@ async def test_async_active_writer_finish_lifecycle_failure_does_not_resume(
             async with box.fs.open("stream.txt", "wb", size=7) as writer:
                 await writer.write(b"partial")
 
+    assert isinstance(exc_info.value.cause, SandboxApiError)
     assert exc_info.value.cause.code == "sandbox_stopped"
     assert write_route.call_count == 1
     assert sandbox_route.call_count == 2
@@ -512,6 +513,7 @@ def test_sync_active_writer_finish_lifecycle_failure_does_not_resume(
             with box.fs.open("stream.txt", "wb", size=7) as writer:
                 writer.write(b"partial")
 
+    assert isinstance(exc_info.value.cause, SandboxApiError)
     assert exc_info.value.cause.code == "sandbox_stopped"
     assert write_route.call_count == 1
     assert sandbox_route.call_count == 2
@@ -826,6 +828,7 @@ async def test_filesystem_write_wraps_api_error(mock_env_clear: None) -> None:
     error = exc_info.value
     assert error.paths == ("a.txt", "b.bin")
     assert error.cwd == "/vercel/sandbox/workspace"
+    assert isinstance(error.cause, SandboxApiError)
     assert error.cause.code == "too_large"
 
 
@@ -1001,6 +1004,7 @@ async def test_filesystem_failures_use_filesystem_error_contract(mock_env_clear:
         with pytest.raises(SandboxPathNotFoundError) as missing:
             await box.fs.read_bytes("missing")
         assert missing.value.path == "missing"
+        assert isinstance(missing.value.cause, SandboxApiError)
         assert missing.value.cause.code == "not_found"
 
         with pytest.raises(SandboxApiError):
@@ -1303,6 +1307,7 @@ async def test_read_bytes_missing_path(mock_env_clear: None) -> None:
             await box.fs.read_bytes(PurePosixPath("missing.txt"))
         assert exc_info.value.path == "missing.txt"
         assert exc_info.value.operation == "read_bytes"
+        assert isinstance(exc_info.value.cause, SandboxApiError)
         assert exc_info.value.cause.code == "not_found"
 
 
