@@ -1,14 +1,22 @@
 import json
+import math
+import queue
 import subprocess
+import threading
 from collections.abc import AsyncIterator, Iterator
 
 import anyio
 import httpx2 as httpx
 import pytest
+from hypothesis import example, given, settings, strategies as st
 
 from vercel._internal.core.http import StreamingResponse
 from vercel.sandbox._internal.errors import SandboxStreamError
-from vercel.sandbox._internal.text_reader import _sync_text_readers, _text_readers
+from vercel.sandbox._internal.text_reader import (
+    SyncTextReader,
+    _sync_text_readers,
+    _text_readers,
+)
 
 
 class _TestStreamingResponse(StreamingResponse):
@@ -354,3 +362,127 @@ def test_sync_text_readers_with_no_streams_never_open_response(stderr: int) -> N
     readers = _sync_text_readers(open_response, stdout=subprocess.DEVNULL, stderr=stderr)
     assert readers == (None, None)
     assert opened == 0
+
+
+# Each turn is one server reply: a run of stdout/stderr records containing at
+# least one stdout line, like a stdio JSON-RPC server logging to stderr while it
+# answers on stdout. The server only replies once the client waits for it.
+_TURNS = st.lists(
+    st.lists(st.sampled_from(["stdout", "stderr"]), min_size=1, max_size=4).filter(
+        lambda streams: "stdout" in streams
+    ),
+    min_size=1,
+    max_size=4,
+)
+
+
+def _conversation(turns: list[list[str]]) -> list[list[dict[str, str]]]:
+    return [
+        [
+            {"stream": stream, "data": f"{stream}-{turn}-{index}\n"}
+            for index, stream in enumerate(streams)
+        ]
+        for turn, streams in enumerate(turns)
+    ]
+
+
+def _lines(conversation: list[list[dict[str, str]]], stream: str) -> list[str]:
+    return [
+        record["data"]
+        for records in conversation
+        for record in records
+        if record["stream"] == stream
+    ]
+
+
+@pytest.mark.parametrize("backend", ["asyncio", "trio"])
+@settings(max_examples=25, deadline=None)
+@given(turns=_TURNS)
+@example(turns=[["stdout"], ["stdout"]])
+@example(turns=[["stderr", "stdout"], ["stdout", "stderr"]])
+def test_async_text_readers_read_stdout_while_another_task_reads_stderr(
+    backend: str, turns: list[list[str]]
+) -> None:
+    conversation = _conversation(turns)
+
+    async def converse() -> list[str]:
+        send, receive = anyio.create_memory_object_stream[bytes](math.inf)
+
+        class ServerStream(httpx.AsyncByteStream):
+            async def __aiter__(self) -> AsyncIterator[bytes]:
+                async for chunk in receive:
+                    yield chunk
+
+        async def open_response() -> StreamingResponse:
+            return _streaming(httpx.Response(200, stream=ServerStream()))
+
+        stdout, stderr = _text_readers(open_response)
+        assert stdout is not None and stderr is not None
+        forwarded: list[str] = []
+
+        async def forward_stderr() -> None:
+            async for line in stderr:
+                forwarded.append(line)
+
+        async def reply(records: list[dict[str, str]]) -> None:
+            # Let both readers settle into waiting before the server answers.
+            for _ in range(10):
+                await anyio.lowlevel.checkpoint()
+            await send.send(_logs_body(*records))
+
+        async with anyio.create_task_group() as group:
+            group.start_soon(forward_stderr)
+            for records in conversation:
+                group.start_soon(reply, records)
+                for record in records:
+                    if record["stream"] == "stdout":
+                        with anyio.fail_after(1):
+                            assert await stdout.readline() == record["data"]
+            send.close()
+        return forwarded
+
+    assert anyio.run(converse, backend=backend) == _lines(conversation, "stderr")
+
+
+def _readline_within(reader: SyncTextReader, timeout: float = 1) -> str:
+    result: queue.Queue[str] = queue.Queue()
+    threading.Thread(target=lambda: result.put(reader.readline()), daemon=True).start()
+    try:
+        return result.get(timeout=timeout)
+    except queue.Empty:
+        raise TimeoutError("readline did not return") from None
+
+
+@settings(max_examples=25, deadline=None)
+@given(turns=_TURNS)
+@example(turns=[["stdout"], ["stdout"]])
+@example(turns=[["stderr", "stdout"], ["stdout", "stderr"]])
+def test_sync_text_readers_read_stdout_while_another_thread_reads_stderr(
+    turns: list[list[str]],
+) -> None:
+    conversation = _conversation(turns)
+    chunks: queue.Queue[bytes | None] = queue.Queue()
+
+    class ServerStream(httpx.SyncByteStream):
+        def __iter__(self) -> Iterator[bytes]:
+            while (chunk := chunks.get()) is not None:
+                yield chunk
+
+    stdout, stderr = _sync_text_readers(
+        lambda: _streaming(httpx.Response(200, stream=ServerStream()))
+    )
+    assert stdout is not None and stderr is not None
+    forwarded: list[str] = []
+    forwarder = threading.Thread(target=lambda: forwarded.extend(stderr), daemon=True)
+    forwarder.start()
+    try:
+        for records in conversation:
+            threading.Timer(0.02, chunks.put, (_logs_body(*records),)).start()
+            for record in records:
+                if record["stream"] == "stdout":
+                    assert _readline_within(stdout) == record["data"]
+    finally:
+        chunks.put(None)
+    forwarder.join(timeout=1)
+    assert not forwarder.is_alive()
+    assert forwarded == _lines(conversation, "stderr")
