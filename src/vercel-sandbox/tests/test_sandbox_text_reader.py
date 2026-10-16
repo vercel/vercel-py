@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator, Iterator
 import anyio
 import httpx2 as httpx
 import pytest
+from hypothesis import given, strategies as st
 
 from vercel._internal.core.http import StreamingResponse
 from vercel.sandbox._internal.errors import SandboxStreamError
@@ -57,6 +58,10 @@ def _logs_response(*records: object) -> StreamingResponse:
 
 def _logs_body(*records: object) -> bytes:
     return ("\n".join(json.dumps(record) for record in records) + "\n").encode()
+
+
+async def _no_sleep(seconds: float) -> None:
+    pass
 
 
 class _TrackingAsyncStream(httpx.AsyncByteStream):
@@ -165,15 +170,20 @@ async def test_async_text_reader_breaks_peer_after_transport_failure(
             raise httpx.ReadError("connection failed")
             yield b""  # pragma: no cover
 
+    opened = 0
+
     async def open_response() -> StreamingResponse:
+        nonlocal opened
+        opened += 1
         return _streaming(httpx.Response(200, stream=FailedStream()))
 
-    reader, peer = _text_readers(open_response)
+    reader, peer = _text_readers(open_response, sleep=_no_sleep)
     assert reader is not None and peer is not None
     with pytest.raises(httpx.ReadError, match="connection failed"):
         await reader.read()
     with pytest.raises(anyio.BrokenResourceError):
         await peer.read()
+    assert opened == 3
 
 
 @pytest.mark.anyio
@@ -354,3 +364,61 @@ def test_sync_text_readers_with_no_streams_never_open_response(stderr: int) -> N
     readers = _sync_text_readers(open_response, stdout=subprocess.DEVNULL, stderr=stderr)
     assert readers == (None, None)
     assert opened == 0
+
+
+class _CutStream(httpx.SyncByteStream):
+    def __init__(self, content: bytes, cut: int | None) -> None:
+        self.content = content
+        self.cut = cut
+
+    def __iter__(self) -> Iterator[bytes]:
+        if self.cut is None:
+            yield self.content
+            return
+        yield self.content[: self.cut]
+        raise httpx.ReadError("connection reset")
+
+
+_records = st.lists(
+    st.tuples(st.sampled_from(["stdout", "stderr"]), st.text(min_size=1)), max_size=6
+)
+
+
+@given(output=_records, replays=st.lists(st.tuples(_records, st.integers(0, 200)), max_size=2))
+def test_sync_readers_deliver_interrupted_output_exactly_once(
+    output: list[tuple[str, str]], replays: list[tuple[list[tuple[str, str]], int]]
+) -> None:
+    """Every connection replays the same output under arbitrary record boundaries."""
+    expected = {
+        stream: "".join(data for name, data in output if name == stream)
+        for stream in ("stdout", "stderr")
+    }
+
+    def body(records: list[tuple[str, str]]) -> bytes:
+        return "".join(
+            json.dumps({"stream": stream, "data": data}, ensure_ascii=False) + "\n"
+            for stream, data in records
+        ).encode()
+
+    def rechunk(records: list[tuple[str, str]]) -> list[tuple[str, str]]:
+        # Re-split the expected output at the replay's own record boundaries.
+        remaining = dict(expected)
+        chunks: list[tuple[str, str]] = []
+        for stream, data in records:
+            size = len(data)
+            chunk, remaining[stream] = remaining[stream][:size], remaining[stream][size:]
+            if chunk:
+                chunks.append((stream, chunk))
+        chunks.extend((stream, rest) for stream, rest in remaining.items() if rest)
+        return chunks
+
+    connections = [_CutStream(body(rechunk(records)), cut) for records, cut in replays] + [
+        _CutStream(body(output), None)
+    ]
+    responses = iter(connections)
+
+    stdout, stderr = _sync_text_readers(
+        lambda: _streaming(httpx.Response(200, stream=next(responses))), sleep=_no_sleep
+    )
+    assert stdout is not None and stderr is not None
+    assert (stdout.read(), stderr.read()) == (expected["stdout"], expected["stderr"])
