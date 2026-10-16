@@ -10,7 +10,7 @@ from vercel._internal.core.byte_stream import (
     StagingFileRuntime,
 )
 from vercel._internal.core.http import StreamingResponse
-from vercel.sandbox._internal.api_client import SandboxApiClient
+from vercel.sandbox._internal.api_client import ProcessStream, SandboxApiClient
 from vercel.sandbox._internal.errors import (
     SandboxApiError,
     SandboxFilesystemCommandError,
@@ -761,6 +761,28 @@ class SandboxService:
             sudo=sudo,
             kill_after=kill_after,
             output_router=output_router,
+        )
+
+    async def open_process(
+        self,
+        *,
+        session_id: str,
+        command: str,
+        args: Sequence[str] | None = None,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        sudo: bool = False,
+        kill_after: timedelta | None = None,
+    ) -> ProcessStream:
+        self._ensure_open()
+        return await self._api_client.open_process(
+            session_id=session_id,
+            command=command,
+            args=args,
+            cwd=cwd,
+            env=env,
+            sudo=sudo,
+            kill_after=kill_after,
         )
 
     async def create_process(

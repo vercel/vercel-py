@@ -4,7 +4,7 @@ import json
 import os
 import platform
 import sys
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import timedelta
@@ -957,6 +957,169 @@ def _parse_run_process_record(line: str) -> JSONObject:
     return cast(JSONObject, record)
 
 
+async def _read_record(lines: AsyncIterator[str]) -> JSONObject | None:
+    """Return the next non-empty NDJSON record, or ``None`` at end of stream."""
+    while True:
+        try:
+            line = await anext(lines)
+        except StopAsyncIteration:
+            return None
+        if line:
+            return _parse_run_process_record(line)
+
+
+def _output_log(record: JSONObject) -> ProcessLog:
+    """Return the output event in ``record``.
+
+    Raises:
+        SandboxStreamError: If the record is an in-band stream failure.
+        SandboxResponseError: If the record is neither output nor a failure.
+    """
+    stream = record.get("stream")
+    data = record.get("data")
+    if (stream == "stdout" or stream == "stderr") and isinstance(data, str):
+        return ProcessLog(stream=ProcessLogStream(stream), data=data)
+    if stream == "error" and isinstance(data, dict):
+        code = data.get("code")
+        message = data.get("message")
+        if isinstance(code, str) and isinstance(message, str):
+            raise SandboxStreamError(message, code=code)
+    raise SandboxResponseError(
+        "Sandbox process response included an unexpected NDJSON record",
+        data=record,
+    )
+
+
+class ProcessStream:
+    """An open NDJSON stream for a process started with ``wait`` and ``logs``.
+
+    Opening reads through the initial command record, so the process identity
+    is known before any output is routed. Records are consumed once. Callers
+    either step through output with ``next_event`` and then ``finish``, or
+    drain everything with ``route``. ``aclose`` abandons the stream.
+    """
+
+    __slots__ = ("_lines", "_response", "final", "initial")
+
+    def __init__(
+        self,
+        *,
+        response: StreamingResponse,
+        lines: AsyncIterator[str],
+        initial: ProcessState,
+    ) -> None:
+        self._response = response
+        self._lines = lines
+        self.initial = initial
+        self.final: ProcessState | None = None
+
+    @classmethod
+    async def open(cls, response: StreamingResponse) -> "ProcessStream":
+        lines = response.aiter_lines()
+        try:
+            initial = await _read_initial_process(lines)
+        except BaseException:
+            await response.aclose()
+            raise
+        return cls(response=response, lines=lines, initial=initial)
+
+    async def next_event(self) -> ProcessLog | None:
+        """Read the next output event, or return ``None`` at the final record.
+
+        The final record is validated against the initial process as it is
+        read and stored on ``final``. Records after it are rejected by
+        ``finish``.
+
+        Raises:
+            SandboxStreamError: If the service reports an in-band failure.
+            SandboxResponseError: If the stream is malformed, ends before its
+                final metadata, or its final metadata names another process.
+        """
+        if self.final is not None:
+            return None
+        record = await _read_record(self._lines)
+        if record is None:
+            raise SandboxResponseError("Sandbox process response is missing final metadata")
+        if "command" not in record:
+            return _output_log(record)
+        process = _validate_response(_CommandResponse, record).to_command()
+        if process.id != self.initial.id or process.session_id != self.initial.session_id:
+            raise SandboxResponseError(
+                "Sandbox process response returned a different final process identity",
+                data={"initial": self.initial, "final": process},
+            )
+        self.final = process
+        return None
+
+    async def finish(self) -> ProcessState:
+        """Read to the end of the stream and return validated final metadata.
+
+        Call this after ``next_event`` has returned ``None``.
+
+        Raises:
+            SandboxStreamError: If a trailing record is an in-band failure.
+            SandboxResponseError: If a record follows the final metadata, or the
+                final metadata has no return code.
+        """
+        final = self.final
+        if final is None:
+            raise RuntimeError("finish() requires the final process metadata")
+        while (record := await _read_record(self._lines)) is not None:
+            if "command" in record:
+                raise SandboxResponseError(
+                    "Sandbox process response included extra process metadata",
+                    data=record,
+                )
+            _output_log(record)
+            raise SandboxResponseError(
+                "Sandbox process response included output outside process metadata",
+                data=record,
+            )
+        if final.returncode is None:
+            raise SandboxResponseError(
+                "Sandbox process response final metadata is missing a return code",
+                data=final,
+            )
+        return final
+
+    async def route(
+        self,
+        sink: Callable[[ProcessLog], None],
+        *,
+        on_final: Callable[[ProcessState], None] | None = None,
+    ) -> ProcessState:
+        """Route all output to ``sink`` and return validated final metadata.
+
+        Args:
+            sink: Receives each output event in arrival order.
+            on_final: Called with the final process metadata once the final
+                record has been read, before the stream ends.
+        """
+        while (event := await self.next_event()) is not None:
+            sink(event)
+        if on_final is not None:
+            assert self.final is not None
+            on_final(self.final)
+        return await self.finish()
+
+    async def aclose(self) -> None:
+        """Close the response. Safe to call more than once."""
+        await self._response.aclose()
+
+
+async def _read_initial_process(lines: AsyncIterator[str]) -> ProcessState:
+    record = await _read_record(lines)
+    if record is None:
+        raise SandboxResponseError("Sandbox process response is missing initial metadata")
+    if "command" not in record:
+        _output_log(record)
+        raise SandboxResponseError(
+            "Sandbox process response included output outside process metadata",
+            data=record,
+        )
+    return _validate_response(_CommandResponse, record).to_command()
+
+
 @dataclass(frozen=True, slots=True)
 class _PreparedSandboxCreation:
     credentials: SandboxCredentials
@@ -1742,7 +1905,7 @@ class SandboxApiClient:
         )
         return _validate_response(_CommandResponse, data).to_command()
 
-    async def run_process(
+    async def open_process(
         self,
         *,
         session_id: str,
@@ -1752,8 +1915,12 @@ class SandboxApiClient:
         env: Mapping[str, str] | None = None,
         sudo: bool = False,
         kill_after: timedelta | None = None,
-        output_router: ProcessOutputRouter,
-    ) -> CompletedProcessState:
+    ) -> ProcessStream:
+        """Start a process and read through its initial metadata.
+
+        The returned stream holds the response open. The caller must drain it
+        with ``ProcessStream.route`` or close it with ``ProcessStream.aclose``.
+        """
         credentials = await self._credentials_factory()
         request = _RunCommandRequest(
             command=command,
@@ -1774,63 +1941,33 @@ class SandboxApiClient:
             headers={"connection": "close"},
             timeout=NO_TIMEOUT,
         )
+        return await ProcessStream.open(response)
 
-        initial: ProcessState | None = None
-        final: ProcessState | None = None
+    async def run_process(
+        self,
+        *,
+        session_id: str,
+        command: str,
+        args: Sequence[str] | None = None,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        sudo: bool = False,
+        kill_after: timedelta | None = None,
+        output_router: ProcessOutputRouter,
+    ) -> CompletedProcessState:
+        stream = await self.open_process(
+            session_id=session_id,
+            command=command,
+            args=args,
+            cwd=cwd,
+            env=env,
+            sudo=sudo,
+            kill_after=kill_after,
+        )
         try:
-            async for line in response.aiter_lines():
-                if not line:
-                    continue
-                record = _parse_run_process_record(line)
-                if "command" in record:
-                    process = _validate_response(_CommandResponse, record).to_command()
-                    if initial is None:
-                        initial = process
-                    elif final is None:
-                        final = process
-                    else:
-                        raise SandboxResponseError(
-                            "Sandbox process response included extra process metadata",
-                            data=record,
-                        )
-                    continue
-
-                stream = record.get("stream")
-                data = record.get("data")
-                if (stream == "stdout" or stream == "stderr") and isinstance(data, str):
-                    if initial is None or final is not None:
-                        raise SandboxResponseError(
-                            "Sandbox process response included output outside process metadata",
-                            data=record,
-                        )
-                    output_router.route(ProcessLog(stream=ProcessLogStream(stream), data=data))
-                    continue
-                if stream == "error" and isinstance(data, dict):
-                    code = data.get("code")
-                    message = data.get("message")
-                    if isinstance(code, str) and isinstance(message, str):
-                        raise SandboxStreamError(message, code=code)
-                raise SandboxResponseError(
-                    "Sandbox process response included an unexpected NDJSON record",
-                    data=record,
-                )
+            final = await stream.route(output_router.route)
         finally:
-            await response.aclose()
-
-        if initial is None:
-            raise SandboxResponseError("Sandbox process response is missing initial metadata")
-        if final is None:
-            raise SandboxResponseError("Sandbox process response is missing final metadata")
-        if initial.id != final.id or initial.session_id != final.session_id:
-            raise SandboxResponseError(
-                "Sandbox process response returned a different final process identity",
-                data={"initial": initial, "final": final},
-            )
-        if final.returncode is None:
-            raise SandboxResponseError(
-                "Sandbox process response final metadata is missing a return code",
-                data=final,
-            )
+            await stream.aclose()
         stdout, stderr = output_router.captured()
         return CompletedProcessState(process=final, stdout=stdout, stderr=stderr)
 

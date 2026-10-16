@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import io
 import subprocess
 import tempfile
 import time
@@ -42,6 +43,18 @@ _SESSION_STOP_POLL_INTERVAL_SECONDS = 0.5
 INTERACTIVE_TIMEOUT_SECONDS = 60
 _READY = "PTY_READY"
 _DONE = "PTY_DONE"
+
+OPEN_PROCESS_TIMEOUT_SECONDS = 60
+_OPEN_PROCESS_RELEASE_PATH = "/tmp/vercel-py-open-process-release"
+_OPEN_PROCESS_SCRIPT = (
+    "import os, sys, time\n"
+    "print('ready', flush=True)\n"
+    "while not os.path.exists(sys.argv[1]):\n"
+    "    time.sleep(0.05)\n"
+    "print('done', flush=True)\n"
+    "print('warn', file=sys.stderr, flush=True)\n"
+    "raise SystemExit(5)\n"
+)
 
 
 def _marker_on_own_line(output: str, marker: str) -> bool:
@@ -176,6 +189,30 @@ class PersistentObservation:
 
 
 @dataclass(frozen=True, slots=True)
+class OpenProcessObservation:
+    live_output: str
+    running_while_live: bool
+    returncode: int
+    sink_output: str
+    stderr: str
+
+
+class _MarkerTextIO(io.StringIO):
+    """A text sink that calls back once output containing ``marker`` arrives."""
+
+    def __init__(self, marker: str, on_marker: Callable[[], None]) -> None:
+        super().__init__()
+        self._marker = marker
+        self._on_marker = on_marker
+
+    def write(self, value: str) -> int:
+        written = super().write(value)
+        if self._marker in value:
+            self._on_marker()
+        return written
+
+
+@dataclass(frozen=True, slots=True)
 class ProcessFilesystemObservation:
     stdout: str
     stderr: str
@@ -218,6 +255,11 @@ class _ScenarioDriver:
     async def ephemeral_sandbox(self, name: str) -> AsyncIterator[Any]:
         raise NotImplementedError
         yield
+
+    async def open_process_live(
+        self, box: Any, script: str, release_path: str
+    ) -> OpenProcessObservation:
+        raise NotImplementedError
 
     async def create_persistent(self, name: str, tags: dict[str, str]) -> Any:
         raise NotImplementedError
@@ -487,6 +529,29 @@ class AsyncDriver(_ScenarioDriver):
     ) -> Any:
         return await box.create_process(command, args, kill_after=kill_after)
 
+    async def open_process_live(
+        self, box: Any, script: str, release_path: str
+    ) -> OpenProcessObservation:
+        ready = anyio.Event()
+        sink = _MarkerTextIO("ready", ready.set)
+        async with box.open_process(
+            "python", ["-c", script, release_path], stdout=sink, stderr=subprocess.PIPE
+        ) as proc:
+            with anyio.fail_after(OPEN_PROCESS_TIMEOUT_SECONDS):
+                await ready.wait()
+            live_output = sink.getvalue()
+            running_while_live = proc.returncode is None
+            await self.write_text(box, release_path, "go")
+            with anyio.fail_after(OPEN_PROCESS_TIMEOUT_SECONDS):
+                result = await proc.wait()
+        return OpenProcessObservation(
+            live_output=live_output,
+            running_while_live=running_while_live,
+            returncode=result.returncode,
+            sink_output=sink.getvalue(),
+            stderr=result.stderr or "",
+        )
+
     @asynccontextmanager
     async def open_interactive(self, box: Any) -> AsyncIterator[Any]:
         async with box.open_interactive("/bin/bash", cols=100, rows=30) as pty:
@@ -728,6 +793,28 @@ class SyncDriver(_ScenarioDriver):
     async def interactive_wait(self, pty: Any) -> int | None:
         return pty.wait()
 
+    async def open_process_live(
+        self, box: Any, script: str, release_path: str
+    ) -> OpenProcessObservation:
+        sink = io.StringIO()
+        with box.open_process(
+            "python", ["-c", script, release_path], stdout=sink, stderr=subprocess.PIPE
+        ) as proc:
+            for event in proc:
+                if "ready" in event.data:
+                    break
+            live_output = sink.getvalue()
+            running_while_live = proc.returncode is None
+            await self.write_text(box, release_path, "go")
+            result = proc.wait()
+        return OpenProcessObservation(
+            live_output=live_output,
+            running_while_live=running_while_live,
+            returncode=result.returncode,
+            sink_output=sink.getvalue(),
+            stderr=result.stderr or "",
+        )
+
     async def wait(self, command: Any) -> int | None:
         return command.wait()
 
@@ -907,6 +994,14 @@ async def process_filesystem_flow(
         missing_read_failed=missing_read_failed,
         invalid_write_failed=invalid_write_failed,
     )
+
+
+async def open_process_flow(driver: _ScenarioDriver, name: str) -> OpenProcessObservation:
+    async with driver.session():
+        async with driver.ephemeral_sandbox(name) as box:
+            return await driver.open_process_live(
+                box, _OPEN_PROCESS_SCRIPT, _OPEN_PROCESS_RELEASE_PATH
+            )
 
 
 async def streaming_transfer_flow(

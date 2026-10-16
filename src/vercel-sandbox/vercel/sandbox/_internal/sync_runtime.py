@@ -3,6 +3,7 @@
 import io
 import signal as signal_module
 import subprocess
+import threading
 import warnings
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager
@@ -16,6 +17,7 @@ from vercel._internal.core.byte_stream import SyncByteStreamRuntime
 from vercel._internal.core.iter_coroutine import iter_coroutine
 from vercel._internal.core.polyfills import Self
 from vercel._internal.core.time import parse_duration_seconds, parse_required_duration_seconds
+from vercel.sandbox._internal.api_client import ProcessStream
 from vercel.sandbox._internal.errors import (
     SandboxApiError,
     SandboxCleanupError,
@@ -91,6 +93,7 @@ from vercel.sandbox._internal.runtime_common import (
     SandboxHandleBase,
     SnapshotHandleBase,
     _coerce_remote_path,
+    _completed_process,
     _normalize_tar_path,
     _ProcessHandleState,
     _SandboxFilesystemBatchBase,
@@ -100,6 +103,7 @@ from vercel.sandbox._internal.runtime_common import (
 )
 from vercel.sandbox._internal.service import SandboxService, _SandboxTerminalState
 from vercel.sandbox._internal.state import (
+    CompletedProcessState,
     DriveState,
     InteractiveSessionState,
     ProcessState,
@@ -232,6 +236,264 @@ class SyncProcess(_ProcessHandleState):
     def kill(self) -> None:
         """Terminate the process immediately with ``SIGKILL``."""
         self.send_signal(ProcessSignal.SIGKILL)
+
+
+_BLOCK_EXITED_MESSAGE = "open_process() block exited before the process completed"
+
+
+class SyncRunningProcess(_ProcessHandleState):
+    """Observe and control a process whose output the caller reads.
+
+    The handle owns no thread. Output is read from the connection only while
+    the caller iterates the handle or calls ``wait``. Each event is written to
+    its destination and then yielded, so unread output stays in the connection
+    rather than in a buffer. Iteration can be broken off and resumed. It ends
+    when the final metadata arrives, and ``wait`` returns the completed result.
+
+    Only one thread reads at a time. ``send_signal``, ``terminate``, and
+    ``kill`` never wait for a reader, so they can be called from another
+    thread while ``wait`` is pumping.
+    """
+
+    __slots__ = (
+        "_failure",
+        "_output",
+        "_pump_lock",
+        "_result",
+        "_service",
+        "_state_lock",
+        "_stream",
+    )
+
+    def __init__(
+        self,
+        *,
+        stream: ProcessStream,
+        output: ProcessOutputRouter,
+        service: SandboxService,
+    ) -> None:
+        super().__init__(stream.initial)
+        self._stream = stream
+        self._output = output
+        self._service = service
+        self._pump_lock = threading.Lock()
+        self._state_lock = threading.Lock()
+        self._result: CompletedProcess | None = None
+        self._failure: BaseException | None = None
+
+    @property
+    def result(self) -> CompletedProcess:
+        """The completed process result.
+
+        The result is available once the process has completed, either by
+        ``wait`` or by iterating to the end, and before the block exits.
+
+        Raises:
+            RuntimeError: If the process has not completed, or the block exited
+                before it did.
+        """
+        if self._result is None:
+            raise RuntimeError(
+                "process has not completed; the result is available after wait() "
+                "returns or the open_process() block exits normally"
+            )
+        return self._result
+
+    def __iter__(self) -> "SyncRunningProcess":
+        return self
+
+    def __next__(self) -> ProcessLog:
+        """Read, route, and return the next output event.
+
+        The event is written to its destination before it is returned. The
+        iteration ends when the final metadata arrives. The process result is
+        complete by then, so ``wait`` returns it without reading more.
+
+        Raises:
+            Exception: The output-stream failure that ended routing, if any.
+        """
+        with self._pump_lock:
+            if self._result is not None:
+                raise StopIteration
+            if self._failure is not None:
+                raise self._failure
+            event = self._pump_once()
+            if event is None:
+                raise StopIteration
+            return event
+
+    def wait(self) -> CompletedProcess:
+        """Read the rest of the output and return the completed result.
+
+        Output is routed to its destinations while this runs. Waiting does not
+        check the exit code; ``check`` applies when the block exits. Calling it
+        again returns the same result.
+
+        Raises:
+            Exception: The output-stream failure that ended routing, if any.
+            RuntimeError: If the block exited before the process completed.
+        """
+        for _ in self:
+            pass
+        return self._settled_result()
+
+    def send_signal(self, signal: int | str | signal_module.Signals | ProcessSignal) -> None:
+        """Send a signal to the running process.
+
+        Safe to call from another thread while ``wait`` or iteration is
+        reading output.
+
+        Args:
+            signal: Numeric signal, ``ProcessSignal`` member, or name such as
+                ``"TERM"`` or ``"SIGTERM"``.
+        """
+        payload = iter_coroutine(
+            self._service.send_process_signal(
+                session_id=self._session_id,
+                process_id=self.id,
+                signal=_signal_number(signal),
+            )
+        )
+        with self._state_lock:
+            # The reader's final metadata is authoritative. A signal response
+            # that raced with process exit must not reset ``returncode``.
+            if self.returncode is None:
+                self._apply_payload(payload)
+
+    def terminate(self) -> None:
+        """Request graceful process termination with ``SIGTERM``."""
+        self.send_signal(ProcessSignal.SIGTERM)
+
+    def kill(self) -> None:
+        """Terminate the process immediately with ``SIGKILL``."""
+        self.send_signal(ProcessSignal.SIGKILL)
+
+    def _pump_once(self) -> ProcessLog | None:
+        """Advance the stream by one event. Must hold the pump lock."""
+        stream = self._stream
+        try:
+            event = iter_coroutine(stream.next_event())
+            if event is None:
+                final = stream.final
+                assert final is not None
+                with self._state_lock:
+                    self._apply_payload(final)
+                completed = iter_coroutine(stream.finish())
+                iter_coroutine(stream.aclose())
+                stdout, stderr = self._output.captured()
+                self._complete(
+                    _completed_process(
+                        CompletedProcessState(process=completed, stdout=stdout, stderr=stderr)
+                    )
+                )
+                return None
+            self._output.route(event)
+        except Exception as error:
+            self._fail(error)
+            iter_coroutine(stream.aclose())
+            raise
+        except BaseException:
+            self._fail(RuntimeError(_BLOCK_EXITED_MESSAGE))
+            iter_coroutine(stream.aclose())
+            raise
+        return event
+
+    def _settled_result(self) -> CompletedProcess:
+        if self._failure is not None:
+            raise self._failure
+        if self._result is None:
+            raise RuntimeError(_BLOCK_EXITED_MESSAGE)
+        return self._result
+
+    def _complete(self, result: CompletedProcess) -> None:
+        with self._state_lock:
+            self._result = result
+
+    def _fail(self, error: BaseException) -> None:
+        """Record a failure unless the process already completed or failed."""
+        with self._state_lock:
+            if self._result is None and self._failure is None:
+                self._failure = error
+
+    def _abandon(self) -> None:
+        """Stop reading and close the stream without waiting for the process."""
+        self._fail(RuntimeError(_BLOCK_EXITED_MESSAGE))
+        iter_coroutine(self._stream.aclose())
+
+
+class SyncOpenProcessOperation:
+    """Scope one process whose output the caller reads inside a block.
+
+    Entering starts the process and yields a ``SyncRunningProcess`` without
+    reading any output. Output is read only when the caller iterates the handle
+    or calls ``wait``. Leaving the block normally drains the remaining output,
+    waits for exit, and then applies ``check``. Leaving it through an exception
+    closes the stream without waiting, and does not kill the process; call
+    ``kill`` inside the block for that.
+
+    The operation can be entered once and has no direct call form.
+    """
+
+    __slots__ = ("_check", "_consumed", "_handle", "_open_stream", "_output", "_service")
+
+    def __init__(
+        self,
+        *,
+        open_stream: Callable[[], ProcessStream],
+        output: ProcessOutputRouter,
+        service: SandboxService,
+        check: bool,
+    ) -> None:
+        self._consumed = False
+        self._open_stream = open_stream
+        self._output = output
+        self._service = service
+        self._check = check
+        self._handle: SyncRunningProcess | None = None
+
+    def _mark_consumed(self) -> None:
+        if self._consumed:
+            raise RuntimeError("open_process() operations can only be used once")
+        self._consumed = True
+
+    def __enter__(self) -> SyncRunningProcess:
+        self._mark_consumed()
+        stream = self._open_stream()
+        handle = SyncRunningProcess(stream=stream, output=self._output, service=self._service)
+        self._handle = handle
+        return handle
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> bool | None:
+        handle = self._handle
+        assert handle is not None
+        if exc_type is not None:
+            handle._abandon()
+            return None
+        try:
+            result = handle.wait()
+        except BaseException:
+            # An interrupt while draining must close the stream too, so output
+            # does not keep arriving after the block has raised.
+            handle._abandon()
+            raise
+        if self._check:
+            result.check_returncode()
+        return None
+
+    def __del__(self) -> None:
+        if self._consumed:
+            return
+        warnings.warn(
+            "open_process() operation was never entered; use "
+            "`with box.open_process(...)` to run the process",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
 
 class SyncInteractiveStream(io.RawIOBase):
@@ -1040,21 +1302,84 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
                 output_router=output_router,
             )
         )
-        assert state.process.returncode is not None
-        result = CompletedProcess(
-            id=state.process.id,
-            name=state.process.name,
-            args=(state.process.name, *state.process.args),
-            cwd=state.process.cwd,
-            session_id=state.process.session_id,
-            started_at=state.process.started_at,
-            returncode=state.process.returncode,
-            stdout=state.stdout,
-            stderr=state.stderr,
-        )
+        result = _completed_process(state)
         if check:
             result.check_returncode()
         return result
+
+    def open_process(
+        self,
+        command: str,
+        args: Sequence[str] | None = None,
+        *,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        sudo: bool = False,
+        kill_after: float | timedelta | None = None,
+        check: bool = False,
+        stdout: TextIO | int | None = None,
+        stderr: TextIO | int | None = None,
+        capture_output: bool = False,
+    ) -> SyncOpenProcessOperation:
+        """Start a process and read its output inside a ``with`` block.
+
+        The process starts on entry and yields a ``SyncRunningProcess`` whose
+        ``id`` is available immediately, before any output is read. The caller
+        drives the output: iterating the handle reads and routes one event at a
+        time, and ``wait`` reads the rest. Output the caller has not read stays
+        in the connection, so nothing is buffered beyond what ``run_process``
+        already keeps for captured output. Leaving the block normally drains
+        the remaining output and waits for exit. Leaving it through an exception
+        closes the output stream without waiting, and does not kill the process.
+
+        Args:
+            command: Executable or command name.
+            args: Command arguments, excluding the executable.
+            cwd: Process working directory.
+            env: Environment variables added to the process.
+            sudo: Whether to run with elevated privileges.
+            kill_after: Duration after which the service kills the process
+                with ``SIGKILL``.
+            check: Whether to raise for a nonzero exit code when the block exits
+                normally.
+            stdout: Writable text stream or subprocess output sentinel for
+                stdout. ``None`` inherits the local stdout stream.
+            stderr: Writable text stream or subprocess output sentinel for
+                stderr. ``None`` inherits the local stderr stream; ``STDOUT``
+                merges stderr into the stdout destination.
+            capture_output: Whether to capture stdout and stderr in the result.
+
+        Returns:
+            A single-use operation to enter with ``with``.
+
+        Raises:
+            ValueError: If the output options are invalid. Raised before any
+                request is sent.
+
+        Example::
+
+            with session.open_process("pytest", capture_output=True) as proc:
+                print(proc.id)
+                result = proc.wait()
+        """
+        output = ProcessOutputRouter(stdout=stdout, stderr=stderr, capture_output=capture_output)
+        parsed_kill_after = parse_duration_seconds(kill_after)
+        return SyncOpenProcessOperation(
+            open_stream=lambda: iter_coroutine(
+                self._service.open_process(
+                    session_id=self.id,
+                    command=command,
+                    args=args,
+                    cwd=cwd,
+                    env=env,
+                    sudo=sudo,
+                    kill_after=parsed_kill_after,
+                )
+            ),
+            output=output,
+            service=self._service,
+            check=check,
+        )
 
     def create_process(
         self,
@@ -1424,21 +1749,53 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
                 coordinator=self,
             )
         )
-        assert state.process.returncode is not None
-        result = CompletedProcess(
-            id=state.process.id,
-            name=state.process.name,
-            args=(state.process.name, *state.process.args),
-            cwd=state.process.cwd,
-            session_id=state.process.session_id,
-            started_at=state.process.started_at,
-            returncode=state.process.returncode,
-            stdout=state.stdout,
-            stderr=state.stderr,
-        )
+        result = _completed_process(state)
         if check:
             result.check_returncode()
         return result
+
+    def open_process(
+        self,
+        command: str,
+        args: Sequence[str] | None = None,
+        *,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        sudo: bool = False,
+        kill_after: float | timedelta | None = None,
+        check: bool = False,
+        stdout: TextIO | int | None = None,
+        stderr: TextIO | int | None = None,
+        capture_output: bool = False,
+    ) -> SyncOpenProcessOperation:
+        """Start a process in the current session and route its output live.
+
+        See ``SyncSandboxRuntimeSession.open_process`` for argument behavior.
+        Only the open step, which starts the process and reads its initial
+        metadata, is retried after a lifecycle recovery. The block body is never
+        replayed.
+        """
+        output = ProcessOutputRouter(stdout=stdout, stderr=stderr, capture_output=capture_output)
+        parsed_kill_after = parse_duration_seconds(kill_after)
+        return SyncOpenProcessOperation(
+            open_stream=lambda: iter_coroutine(
+                execute_with_sandbox_recovery(
+                    lambda session_id: self._service.open_process(
+                        session_id=session_id,
+                        command=command,
+                        args=args,
+                        cwd=cwd,
+                        env=env,
+                        sudo=sudo,
+                        kill_after=parsed_kill_after,
+                    ),
+                    coordinator=self,
+                )
+            ),
+            output=output,
+            service=self._service,
+            check=check,
+        )
 
     def create_process(
         self,

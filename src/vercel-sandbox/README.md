@@ -291,6 +291,69 @@ context exits, and the stream carries raw terminal bytes including escape
 sequences. Programs that repaint the screen need a terminal emulator on the
 consuming side to interpret those sequences.
 
+## Observing a running process
+
+`run_process` only returns once the process exits. `open_process` starts the
+process and yields a handle right away, so you can record its ID or wait for
+readiness while its output is still being written to the destinations you
+passed. This is the Python counterpart of the TypeScript `runCommand({ onStart })`
+callback, scoped to a block instead of a callback:
+
+```python
+import asyncio
+
+from vercel import sandbox
+
+
+async def main() -> None:
+    async with sandbox.create_sandbox() as box:
+        async with box.open_process("npm", ["run", "dev"]) as proc:
+            print("started", proc.id)  # available immediately, output still streams
+            await asyncio.sleep(30)
+            await proc.kill()  # leaving the block normally waits for exit
+        print(proc.result.returncode)
+
+
+asyncio.run(main())
+```
+
+The synchronous handle owns no thread. It reads output only while you iterate
+it or call `wait()`, so the caller decides when output moves. Each event is
+written to its destination and then yielded. Iteration can be broken off and
+resumed, and it ends when the process exits:
+
+```python
+import sys
+
+from vercel.sandbox import sync as sandbox
+
+with sandbox.create_sandbox() as box:
+    with box.open_process("npm", ["run", "dev"], stdout=sys.stdout) as proc:
+        print(proc.id)  # nothing has been read yet
+        for event in proc:
+            if "ready" in event.data:
+                break
+        run_smoke_tests()  # output waits in the connection meanwhile
+        proc.kill()
+
+    with box.open_process("pytest", capture_output=True) as proc:
+        print(proc.id)
+        result = proc.wait()
+```
+
+Output the caller has not read stays in the connection rather than in an SDK
+buffer, as with `SyncProcess` readers. Captured output still accumulates in
+memory, as it does for `run_process`. To wait in one thread while signalling from
+another, pass the handle to a thread pool and call `proc.kill()` from the calling
+thread. `send_signal`, `terminate`, and `kill` never wait for the reader.
+
+Leaving the block normally drains any unread output and waits for the process
+to exit, and `check=True` raises `CalledProcessError` at that point. Leaving the
+block through an exception or cancellation closes the output stream without
+waiting, and does not kill the process. Call `proc.kill()` inside the block if you
+want that. Output failures are raised from the iteration, `wait()`, or the
+block's exit that reads the failing output.
+
 ## Session lifecycles
 
 Sandbox-level process and filesystem operations resume a stopped sandbox

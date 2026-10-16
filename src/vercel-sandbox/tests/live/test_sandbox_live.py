@@ -14,6 +14,7 @@ from ._sandbox_scenarios import (
     AsyncDriver,
     InteractiveObservation,
     NetworkPolicyObservation,
+    OpenProcessObservation,
     PersistentObservation,
     ProcessFilesystemObservation,
     StreamingTransferObservation,
@@ -21,6 +22,7 @@ from ._sandbox_scenarios import (
     WorkspaceObservation,
     interactive_session_flow,
     network_policy_flow,
+    open_process_flow,
     persistent_snapshot_flow,
     process_filesystem_flow,
     reconcile_sandbox_drive_cleanup,
@@ -167,6 +169,24 @@ async def test_process_filesystem_flow_has_sync_async_semantic_parity() -> None:
 
     _assert_process_filesystem(async_result)
     _assert_process_filesystem(sync_result)
+
+
+@requires_sandbox_credentials
+@pytest.mark.live
+@pytest.mark.asyncio
+async def test_open_process_flow_routes_output_live_and_has_sync_async_semantic_parity() -> None:
+    expected = OpenProcessObservation(
+        live_output="ready\n",
+        running_while_live=True,
+        returncode=5,
+        sink_output="ready\ndone\n",
+        stderr="warn\n",
+    )
+    async_result = await open_process_flow(AsyncDriver(), _name("open-process", "async"))
+    sync_result = await open_process_flow(SyncDriver(), _name("open-process", "sync"))
+
+    assert async_result == expected
+    assert sync_result == expected
 
 
 @requires_sandbox_credentials

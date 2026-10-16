@@ -15,6 +15,7 @@ import anyio
 from vercel._internal.core.byte_stream import AsyncByteStreamRuntime
 from vercel._internal.core.polyfills import Self
 from vercel._internal.core.time import parse_duration_seconds, parse_required_duration_seconds
+from vercel.sandbox._internal.api_client import ProcessStream
 from vercel.sandbox._internal.async_filesystem_handle import (
     SandboxBinaryReader,
     SandboxBinaryWriter,
@@ -99,6 +100,7 @@ from vercel.sandbox._internal.runtime_common import (
     SandboxHandleBase,
     SnapshotHandleBase,
     _coerce_remote_path,
+    _completed_process,
     _normalize_tar_path,
     _ProcessHandleState,
     _SandboxFilesystemBatchBase,
@@ -108,6 +110,7 @@ from vercel.sandbox._internal.runtime_common import (
 )
 from vercel.sandbox._internal.service import SandboxService, _SandboxTerminalState
 from vercel.sandbox._internal.state import (
+    CompletedProcessState,
     DriveState,
     InteractiveSessionState,
     ProcessState,
@@ -226,6 +229,230 @@ class Process(_ProcessHandleState):
     async def kill(self) -> None:
         """Terminate the process immediately with ``SIGKILL``."""
         await self.send_signal(ProcessSignal.SIGKILL)
+
+
+class RunningProcess(_ProcessHandleState):
+    """Observe and control a process while its output is routed live.
+
+    Entering ``open_process`` yields this handle. Output goes to the
+    destinations given to ``open_process`` while the block runs, so the handle
+    has no stdout or stderr readers. After the process exits, ``result``
+    returns the completed result, the same shape ``run_process`` returns.
+    """
+
+    __slots__ = ("_done", "_failure", "_result", "_service")
+
+    def __init__(self, *, payload: ProcessState, service: SandboxService) -> None:
+        super().__init__(payload)
+        self._service = service
+        self._done = anyio.Event()
+        self._result: CompletedProcess | None = None
+        self._failure: BaseException | None = None
+
+    @property
+    def result(self) -> CompletedProcess:
+        """The completed process result.
+
+        The result is available once the ``open_process`` block has exited
+        normally.
+
+        Raises:
+            RuntimeError: If the process has not completed, or the block exited
+                before it did.
+        """
+        if self._result is None:
+            raise RuntimeError(
+                "process has not completed; the result is available after the "
+                "open_process() block exits normally"
+            )
+        return self._result
+
+    async def wait(self) -> CompletedProcess:
+        """Wait for the process to exit and return its completed result.
+
+        Output keeps routing to its destinations while this waits. Waiting does
+        not check the exit code; ``check`` applies when the block exits.
+
+        Raises:
+            Exception: The output-stream failure that ended routing, if any.
+            RuntimeError: If the block exited before the process completed.
+        """
+        await self._done.wait()
+        return self._settled_result()
+
+    async def send_signal(self, signal: int | str | signal_module.Signals | ProcessSignal) -> None:
+        """Send a signal to the running process.
+
+        Args:
+            signal: Numeric signal, ``ProcessSignal`` member, or name such as
+                ``"TERM"`` or ``"SIGTERM"``.
+        """
+        payload = await self._service.send_process_signal(
+            session_id=self._session_id,
+            process_id=self.id,
+            signal=_signal_number(signal),
+        )
+        # The output pump's final metadata is authoritative. A signal response
+        # that raced with process exit must not reset ``returncode``.
+        if self.returncode is None:
+            self._apply_payload(payload)
+
+    async def terminate(self) -> None:
+        """Request graceful process termination with ``SIGTERM``."""
+        await self.send_signal(ProcessSignal.SIGTERM)
+
+    async def kill(self) -> None:
+        """Terminate the process immediately with ``SIGKILL``."""
+        await self.send_signal(ProcessSignal.SIGKILL)
+
+    def _settled_result(self) -> CompletedProcess:
+        if self._failure is not None:
+            raise self._failure
+        if self._result is None:
+            raise RuntimeError("open_process() block exited before the process completed")
+        return self._result
+
+    def _complete(self, result: CompletedProcess) -> None:
+        if not self._done.is_set():
+            self._result = result
+            self._done.set()
+
+    def _fail(self, error: BaseException) -> None:
+        if not self._done.is_set():
+            self._failure = error
+            self._done.set()
+
+
+class OpenProcessOperation:
+    """Scope one process whose output is routed while a block runs.
+
+    Entering starts the process, yields a ``RunningProcess``, and pumps output
+    to the destinations in arrival order. Leaving the block normally waits for
+    the process to exit, then applies ``check``. Leaving it through an
+    exception or cancellation stops routing and closes the response, and does
+    not kill the process; call ``kill`` inside the block for that. An output
+    failure cancels the block and is raised from its exit as the original
+    exception.
+
+    The operation can be entered once and cannot be awaited.
+    """
+
+    __slots__ = (
+        "_check",
+        "_consumed",
+        "_group",
+        "_handle",
+        "_open_stream",
+        "_output",
+        "_service",
+        "_stream",
+    )
+
+    def __init__(
+        self,
+        *,
+        open_stream: Callable[[], Awaitable[ProcessStream]],
+        output: ProcessOutputRouter,
+        service: SandboxService,
+        check: bool,
+    ) -> None:
+        self._consumed = False
+        self._open_stream = open_stream
+        self._output = output
+        self._service = service
+        self._check = check
+        self._group: anyio.abc.TaskGroup | None = None
+        self._handle: RunningProcess | None = None
+        self._stream: ProcessStream | None = None
+
+    def _mark_consumed(self) -> None:
+        if self._consumed:
+            raise RuntimeError("open_process() operations can only be used once")
+        self._consumed = True
+
+    async def __aenter__(self) -> RunningProcess:
+        self._mark_consumed()
+        stream = await self._open_stream()
+        handle = RunningProcess(payload=stream.initial, service=self._service)
+        group = anyio.create_task_group()
+        await group.__aenter__()
+        self._stream = stream
+        self._handle = handle
+        self._group = group
+        group.start_soon(self._pump)
+        return handle
+
+    async def _pump(self) -> None:
+        stream = self._stream
+        handle = self._handle
+        assert stream is not None and handle is not None
+        try:
+            final = await stream.route(self._output.route, on_final=handle._apply_payload)
+        except Exception as error:
+            # Record the failure before it reaches the task group, so the
+            # block's exit can raise it unwrapped.
+            handle._fail(error)
+            raise
+        else:
+            stdout, stderr = self._output.captured()
+            handle._complete(
+                _completed_process(
+                    CompletedProcessState(process=final, stdout=stdout, stderr=stderr)
+                )
+            )
+        finally:
+            with anyio.CancelScope(shield=True):
+                await stream.aclose()
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        group = self._group
+        stream = self._stream
+        handle = self._handle
+        assert group is not None and stream is not None and handle is not None
+        if exc_type is not None:
+            group.cancel_scope.cancel()
+        failure: BaseException | None = None
+        try:
+            await group.__aexit__(None, None, None)
+        except BaseException:
+            # The pump records its own failure before its exception reaches the
+            # group. A group error with no recorded failure is an outer
+            # cancellation, which must keep propagating.
+            if handle._failure is None:
+                raise
+        finally:
+            failure = handle._failure
+            with anyio.CancelScope(shield=True):
+                await stream.aclose()
+            # Every path that did not complete the process settles the handle, so
+            # ``wait()`` cannot hang. This is a no-op once the pump has settled it.
+            handle._fail(RuntimeError("open_process() block exited before the process completed"))
+
+        if exc_type is not None:
+            if failure is not None and isinstance(exc, anyio.get_cancelled_exc_class()):
+                raise failure from None
+            return None
+        if failure is not None:
+            raise failure
+        result = handle.result
+        if self._check:
+            result.check_returncode()
+        return None
+
+    def __del__(self) -> None:
+        if self._consumed:
+            return
+        warnings.warn(
+            "open_process() operation was never entered; use "
+            "`async with box.open_process(...)` to run the process",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
 
 class InteractiveStream(anyio.abc.ByteStream):
@@ -974,21 +1201,79 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
             kill_after=parse_duration_seconds(kill_after),
             output_router=output_router,
         )
-        assert state.process.returncode is not None
-        result = CompletedProcess(
-            id=state.process.id,
-            name=state.process.name,
-            args=(state.process.name, *state.process.args),
-            cwd=state.process.cwd,
-            session_id=state.process.session_id,
-            started_at=state.process.started_at,
-            returncode=state.process.returncode,
-            stdout=state.stdout,
-            stderr=state.stderr,
-        )
+        result = _completed_process(state)
         if check:
             result.check_returncode()
         return result
+
+    def open_process(
+        self,
+        command: str,
+        args: Sequence[str] | None = None,
+        *,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        sudo: bool = False,
+        kill_after: float | timedelta | None = None,
+        check: bool = False,
+        stdout: TextIO | int | None = None,
+        stderr: TextIO | int | None = None,
+        capture_output: bool = False,
+    ) -> OpenProcessOperation:
+        """Start a process and route its output while an ``async with`` block runs.
+
+        The process starts on entry and yields a ``RunningProcess`` whose ``id``
+        is available immediately. Output is written to the destinations in
+        arrival order for as long as the block runs. Leaving the block normally
+        waits for the process to exit; leaving it through an exception or
+        cancellation closes the output stream without killing the process.
+
+        Args:
+            command: Executable or command name.
+            args: Command arguments, excluding the executable.
+            cwd: Process working directory.
+            env: Environment variables added to the process.
+            sudo: Whether to run with elevated privileges.
+            kill_after: Duration after which the service kills the process
+                with ``SIGKILL``.
+            check: Whether to raise for a nonzero exit code when the block exits
+                normally.
+            stdout: Writable text stream or subprocess output sentinel for
+                stdout. ``None`` inherits the local stdout stream.
+            stderr: Writable text stream or subprocess output sentinel for
+                stderr. ``None`` inherits the local stderr stream; ``STDOUT``
+                merges stderr into the stdout destination.
+            capture_output: Whether to capture stdout and stderr in the result.
+
+        Returns:
+            A single-use operation to enter with ``async with``.
+
+        Raises:
+            ValueError: If the output options are invalid. Raised before any
+                request is sent.
+
+        Example::
+
+            async with session.open_process("npm", ["run", "dev"]) as proc:
+                await registry.record(proc.id)
+            result = proc.result
+        """
+        output = ProcessOutputRouter(stdout=stdout, stderr=stderr, capture_output=capture_output)
+        parsed_kill_after = parse_duration_seconds(kill_after)
+        return OpenProcessOperation(
+            open_stream=lambda: self._service.open_process(
+                session_id=self.id,
+                command=command,
+                args=args,
+                cwd=cwd,
+                env=env,
+                sudo=sudo,
+                kill_after=parsed_kill_after,
+            ),
+            output=output,
+            service=self._service,
+            check=check,
+        )
 
     async def create_process(
         self,
@@ -1304,21 +1589,50 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
             ),
             coordinator=self,
         )
-        assert state.process.returncode is not None
-        result = CompletedProcess(
-            id=state.process.id,
-            name=state.process.name,
-            args=(state.process.name, *state.process.args),
-            cwd=state.process.cwd,
-            session_id=state.process.session_id,
-            started_at=state.process.started_at,
-            returncode=state.process.returncode,
-            stdout=state.stdout,
-            stderr=state.stderr,
-        )
+        result = _completed_process(state)
         if check:
             result.check_returncode()
         return result
+
+    def open_process(
+        self,
+        command: str,
+        args: Sequence[str] | None = None,
+        *,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        sudo: bool = False,
+        kill_after: float | timedelta | None = None,
+        check: bool = False,
+        stdout: TextIO | int | None = None,
+        stderr: TextIO | int | None = None,
+        capture_output: bool = False,
+    ) -> OpenProcessOperation:
+        """Start a process in the current session and route its output live.
+
+        See ``SandboxRuntimeSession.open_process`` for argument behavior. Only
+        the open step, which starts the process and reads its initial metadata,
+        is retried after a lifecycle recovery. The block body is never replayed.
+        """
+        output = ProcessOutputRouter(stdout=stdout, stderr=stderr, capture_output=capture_output)
+        parsed_kill_after = parse_duration_seconds(kill_after)
+        return OpenProcessOperation(
+            open_stream=lambda: execute_with_sandbox_recovery(
+                lambda session_id: self._service.open_process(
+                    session_id=session_id,
+                    command=command,
+                    args=args,
+                    cwd=cwd,
+                    env=env,
+                    sudo=sudo,
+                    kill_after=parsed_kill_after,
+                ),
+                coordinator=self,
+            ),
+            output=output,
+            service=self._service,
+            check=check,
+        )
 
     async def create_process(
         self,
