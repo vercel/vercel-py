@@ -87,6 +87,20 @@ class SandboxStreamError(SandboxError):
         self.code = code
 
 
+class SandboxStdinError(SandboxError):
+    """Raised when writing to or closing process standard input fails.
+
+    ``cause`` holds the underlying API or connection error. Unless the service
+    rejected the request before applying any of it, part of the data may have
+    reached the process, so the stream refuses further writes; it can still
+    be closed.
+    """
+
+    def __init__(self, message: str, *, cause: BaseException) -> None:
+        super().__init__(message)
+        self.cause = cause
+
+
 class SandboxInteractiveError(SandboxError):
     """Raised when an interactive PTY session connection fails."""
 
