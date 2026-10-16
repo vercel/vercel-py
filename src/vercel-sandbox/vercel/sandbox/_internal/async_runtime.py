@@ -1117,20 +1117,28 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
             )
         )
 
-    async def get_process(self, process_id: str, *, wait: bool = False) -> Process:
+    async def get_process(
+        self, process_id: str, *, wait: bool = False, stdin: int | None = None
+    ) -> Process:
         """Get a process in this session.
 
         Args:
             process_id: Process identifier.
             wait: Whether the API call should wait for process completion.
+            stdin: ``subprocess.PIPE`` for a writer at ``stdin``, for a
+                process started with ``stdin=subprocess.PIPE`` elsewhere.
+                Writes resume after whatever was already written, so only
+                one handle should write at a time. If the process has no
+                stdin attached, writing raises ``anyio.BrokenResourceError``.
 
         Returns:
             A process handle populated with the latest state.
         """
+        attach_stdin = _validate_stdin(stdin)
         state = await self._service.get_process(
             session_id=self.id, process_id=process_id, wait=wait
         )
-        return Process(payload=state, service=self._service)
+        return Process(payload=state, service=self._service, stdin=attach_stdin)
 
     async def query_processes(self) -> list[Process]:
         """Return handles for the processes in this session."""
@@ -1441,8 +1449,14 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
             )
         )
 
-    async def get_process(self, process_id: str, *, wait: bool = False) -> Process:
-        """Get a process from the current session."""
+    async def get_process(
+        self, process_id: str, *, wait: bool = False, stdin: int | None = None
+    ) -> Process:
+        """Get a process from the current session.
+
+        See ``SandboxRuntimeSession.get_process`` for argument behavior.
+        """
+        attach_stdin = _validate_stdin(stdin)
         state = await execute_with_sandbox_recovery(
             lambda session_id: self._service.get_process(
                 session_id=session_id,
@@ -1451,7 +1465,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
             ),
             coordinator=self,
         )
-        return Process(payload=state, service=self._service)
+        return Process(payload=state, service=self._service, stdin=attach_stdin)
 
     async def query_processes(self) -> list[Process]:
         """Return handles for processes in the current session."""

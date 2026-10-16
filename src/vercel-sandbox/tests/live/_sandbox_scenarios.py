@@ -319,6 +319,9 @@ class _ScenarioDriver:
     ) -> Any:
         raise NotImplementedError
 
+    async def get_process(self, box: Any, process_id: str, *, stdin: int | None = None) -> Any:
+        raise NotImplementedError
+
     async def write_stdin(self, process: Any, data: bytes) -> None:
         raise NotImplementedError
 
@@ -526,6 +529,9 @@ class AsyncDriver(_ScenarioDriver):
         stdin: int | None = None,
     ) -> Any:
         return await box.create_process(command, args, kill_after=kill_after, stdin=stdin)
+
+    async def get_process(self, box: Any, process_id: str, *, stdin: int | None = None) -> Any:
+        return await box.get_process(process_id, stdin=stdin)
 
     async def write_stdin(self, process: Any, data: bytes) -> None:
         await process.stdin.send(data)
@@ -771,6 +777,9 @@ class SyncDriver(_ScenarioDriver):
         stdin: int | None = None,
     ) -> Any:
         return box.create_process(command, args, kill_after=kill_after, stdin=stdin)
+
+    async def get_process(self, box: Any, process_id: str, *, stdin: int | None = None) -> Any:
+        return box.get_process(process_id, stdin=stdin)
 
     async def write_stdin(self, process: Any, data: bytes) -> None:
         process.stdin.write(data)
@@ -1236,12 +1245,16 @@ async def process_stdin_flow(driver: _ScenarioDriver, name: str) -> StdinObserva
                 box, "python", ["-u", "-c", _STDIO_SERVER], stdin=subprocess.PIPE
             )
             responses: list[object] = []
+            writer = server
             for request_id, params in enumerate(["ping", "héllo", "x" * 100_000]):
                 request = {"jsonrpc": "2.0", "id": request_id, "method": "echo", "params": params}
-                await driver.write_stdin(server, (json.dumps(request) + "\n").encode())
+                await driver.write_stdin(writer, (json.dumps(request) + "\n").encode())
                 response = json.loads(await driver.readline(server))
                 responses.append((response["id"], response["result"]["echo"] == params))
-            await driver.close_stdin(server)
+                # Later requests go through a second handle that attaches to
+                # the running process and resumes after the first one's input.
+                writer = await driver.get_process(box, server.id, stdin=subprocess.PIPE)
+            await driver.close_stdin(writer)
             server_exit_code = await driver.wait(server)
 
             # Larger than one stdin request, so it is split and reassembled.

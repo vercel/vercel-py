@@ -279,7 +279,12 @@ with sandbox.create_sandbox() as box:
 ```
 
 `communicate(input)` writes the input, closes stdin, and then reads the
-output. Each write returns once the process has accepted the bytes, and
+output. `get_process(process_id, stdin=subprocess.PIPE)` attaches a writer to
+a process that was started with stdin elsewhere, such as by another program;
+its writes continue after whatever was already written. Write through one
+handle at a time: each handle tracks how much the process has received, and
+the service drops bytes it believes it already has, so overlapping writers
+lose input. Each write returns once the process has accepted the bytes, and
 concurrent writes reach the process in the order they were made. Large writes
 are split into several requests, and requests that fail in transit are resent
 without duplicating input. Writing after the process exits or stops reading
