@@ -172,6 +172,13 @@ class BlobUnknownError(BlobError):
         super().__init__(message, status_code=status_code, code=code)
 
 
+class BlobTimeoutError(BlobUnknownError):
+    """The request exceeded an HTTP timeout; the operation may still have completed."""
+
+    def __init__(self, message: str = "Blob request timed out") -> None:
+        super().__init__(message)
+
+
 class BlobPreconditionFailedError(BlobError):
     """The object changed while an operation was in flight."""
 
@@ -211,5 +218,6 @@ __all__ = [
     "BlobStoreNotFoundError",
     "BlobStoreSuspendedError",
     "BlobStreamError",
+    "BlobTimeoutError",
     "BlobUnknownError",
 ]

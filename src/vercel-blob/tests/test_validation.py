@@ -17,10 +17,7 @@ from vercel.blob._internal.validation import (
 from vercel.blob.errors import BlobError
 
 _HOST = "teststore.public.blob.vercel-storage.com"
-_CHARACTERS = st.characters(
-    exclude_categories=["Cs"],
-    exclude_characters="/" + "".join(chr(i) for i in range(32)) + "\x7f",
-)
+_CHARACTERS = st.characters(exclude_categories=["Cc", "Cs"], exclude_characters="/")
 _SEGMENT = st.text(_CHARACTERS, max_size=24).map(lambda value: "name-" + value)
 _PATHNAMES = st.lists(_SEGMENT, min_size=1, max_size=5).map("/".join)
 
@@ -112,7 +109,8 @@ def test_surrogates_rejected_before_encoding(segment: str, codepoint: int) -> No
         validate_pathname(segment + chr(codepoint))
 
 
-@given(segment=_SEGMENT, control=st.sampled_from([*map(chr, range(32)), "\x7f"]))
+@given(segment=_SEGMENT, control=st.characters(categories=["Cc"]))
+@example(segment="name-", control="\x85")
 def test_controls_rejected_in_pathnames_and_encoded_delivery_urls(
     segment: str, control: str
 ) -> None:
@@ -163,6 +161,13 @@ def test_read_pathnames_do_not_inherit_upload_limit(pathname: str) -> None:
     assert validate_pathname(pathname) == pathname
     url = construct_delivery_url("teststore", pathname, "public")
     assert parse_and_validate_delivery_url(url)[0] == url
+
+
+@given(segment=_SEGMENT, escape=st.sampled_from(["%", "%2", "%zz", "%g0", "%0x"]))
+def test_delivery_url_rejects_malformed_percent_escapes(segment: str, escape: str) -> None:
+    url = f"https://{_HOST}/{quote(segment, safe='')}{escape}.txt"
+    with pytest.raises(BlobError, match="malformed percent-encoding"):
+        parse_and_validate_delivery_url(url)
 
 
 @pytest.mark.parametrize("encoded", ["%ff", "%ed%a0%80"])

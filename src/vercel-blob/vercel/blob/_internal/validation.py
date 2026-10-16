@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Literal
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
@@ -11,10 +12,12 @@ from vercel.blob.errors import BlobError
 _STORE_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 _DELIVERY_DOMAIN_SUFFIX = ".blob.vercel-storage.com"
 _URL_SCHEME_PATTERN = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
+_MALFORMED_PERCENT_PATTERN = re.compile(r"%(?![0-9a-fA-F]{2})")
 
 
 def has_control_character(value: str) -> bool:
-    return any(ord(char) < 32 or ord(char) == 127 for char in value)
+    """Match Unicode category Cc: C0 controls, DEL, and C1 controls."""
+    return any(unicodedata.category(char) == "Cc" for char in value)
 
 
 def normalize_store_id(store_id: str) -> str:
@@ -179,6 +182,9 @@ def parse_and_validate_delivery_url(
             msg = f"URL store ID '{url_store_id}' does not match credential store ID"
             raise BlobError(f"{msg} '{expected_norm}'")
 
+    if _MALFORMED_PERCENT_PATTERN.search(parsed.path):
+        # The service decodes the path with decodeURIComponent, which rejects these.
+        raise BlobError("Blob URL pathname contains a malformed percent-encoding")
     try:
         decoded_path = unquote(parsed.path, errors="strict")
     except UnicodeDecodeError as exc:

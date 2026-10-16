@@ -72,17 +72,18 @@ without awaiting the call. Enter
 `query_blobs` with `for`, and enters `stream_blob` with `with`.
 
 Pathnames are relative to the store. One leading slash is removed. Empty paths,
-control characters, invalid Unicode, `//`, and `.` or `..` path segments are
-rejected. `put_blob` and copy destinations accept at most 950 UTF-16 code units in
+control characters (Unicode category Cc, including C1 controls), invalid Unicode,
+`//`, and `.` or `..` path segments are rejected by every operation. `put_blob` and copy destinations accept at most 950 UTF-16 code units in
 the original pathname, matching the TypeScript SDK. Characters outside the Unicode Basic Multilingual
 Plane count as two units. Reads do not inherit this upload limit.
 
 Pathnames are literal object names, not URL-encoded strings or local file paths.
 Characters such as `?`, `#`, and `%` are preserved and encoded when constructing
 a delivery URL. Delivery URLs must use HTTPS and a standard
-`<store>.<access>.blob.vercel-storage.com` host. Their path is checked after one
-UTF-8 percent-decode, including for control characters and dot segments. The
-encoded path is preserved, queries are retained, and fragments are removed.
+`<store>.<access>.blob.vercel-storage.com` host. Their path must not contain a
+malformed percent-encoding, and is checked after one UTF-8 percent-decode,
+including for control characters and dot segments. The encoded path is preserved
+and the service reads it literally, queries are retained, and fragments are removed.
 Private URL downloads must belong to the credential's store. Redirects are not
 followed. Custom delivery domains are not supported.
 
@@ -345,9 +346,10 @@ delivery URL and require `access`. Neither issues a preliminary HEAD request.
 
 `result.metadata` and `download.metadata` contain the URL, status code, and
 response-derived headers such as size, content type, ETag, and last-modified time.
-Header-derived fields are `None` when the server omits them. In particular,
-`metadata.size` stays `None` when the size header is absent, even after `get_blob`
-reads the body. Use `len(result.body)` for the actual number of downloaded bytes.
+Header-derived fields are `None` when the server omits them. A streamed download's
+`metadata.size` is the `content-length` header, or `None` when the header is absent
+or describes a compressed response that is decoded as it is read. `get_blob` reports
+the length of the decoded body it returns.
 
 A streamed download has one consumer. Iterate it once inside its context. It yields
 byte chunks of at most 64 KiB, with a smaller final chunk. It closes its response at
@@ -375,13 +377,17 @@ Service errors inherit from `BlobError` and expose `status_code` and `code` when
 available. Common subclasses include `BlobAccessError`, `BlobStoreNotFoundError`,
 `BlobPreconditionFailedError`, and `BlobServiceRateLimited`. Malformed responses
 raise `BlobStreamError`; missing or invalid credentials raise `BlobCredentialsError`.
+Network failures raise `BlobUnknownError`, and its subclass `BlobTimeoutError` when an
+HTTP timeout expires. A timed-out upload or copy may still have completed on the
+service, so check before retrying with `allow_overwrite=False`.
 Invalid arguments fail before credential factories or HTTP requests run.
 
 ## Session configuration
 
 Default credential discovery uses OIDC with `BLOB_STORE_ID` when both are
-available, then `BLOB_READ_WRITE_TOKEN` or `VERCEL_BLOB_READ_WRITE_TOKEN`.
-Store IDs may include the `store_` prefix.
+available, then `BLOB_READ_WRITE_TOKEN` or `VERCEL_BLOB_READ_WRITE_TOKEN`. The OIDC
+token, which may be refreshed over the network in local development, is looked up only
+when `BLOB_STORE_ID` is set. Store IDs may include the `store_` prefix.
 
 For application-managed credentials, configure a factory on the session:
 
@@ -410,6 +416,17 @@ must continue to identify the same store.
 Use `vercel.blob.sync.SyncBlobServiceOptions` with a synchronous factory for sync
 calls. An async factory supplied to the sync API is rejected. Custom HTTP clients
 are configured through the SDK session's `httpx_client_factory`, not through Blob.
+
+Uploads, multipart parts and completion, and copies take longer as objects grow, so
+they use the `transfer_timeout` option instead of the HTTP client's timeout. It
+defaults to five minutes and applies to each phase of the request, including waiting
+for the response after the body is sent:
+
+```python
+from datetime import timedelta
+
+options = blob.BlobServiceOptions(transfer_timeout=timedelta(minutes=30))
+```
 
 ## Examples and verification
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.utils import parsedate_to_datetime
 from functools import partial
 from typing import Annotated, Literal, TypeVar
@@ -28,6 +28,7 @@ from vercel._internal.core.http import (
     RawBody,
     ReadResponsePolicy,
     RequestBody,
+    RequestTimeout,
     StreamingResponse,
 )
 from vercel._internal.core.http._compat import http_errors
@@ -58,7 +59,7 @@ from vercel.blob.models import (
 )
 
 from .pagination import QueryPage
-from .upload import _CHUNK_SIZE, _ChunkSource, send_streaming_upload
+from .upload import _CHUNK_SIZE, _ChunkSource, send_streaming_upload, transport_failure
 from .validation import (
     validate_access,
     validate_bool_flag,
@@ -275,14 +276,19 @@ class _DownloadHeaders(_ApiModel):
     last_modified: Annotated[datetime, BeforeValidator(_parse_http_date)] | None = Field(
         default=None, alias="last-modified"
     )
+    content_encoding: str | None = Field(default=None, alias="content-encoding")
 
     def _to_metadata(
         self, url: str, status_code: int, headers: Mapping[str, str]
     ) -> DownloadMetadata:
+        # The body is decoded on read, so an encoded content-length is not the object size.
+        encoded = self.content_encoding is not None and (
+            self.content_encoding.strip().lower() not in ("", "identity")
+        )
         return DownloadMetadata(
             url=url,
             status_code=status_code,
-            size=self.size,
+            size=None if encoded else self.size,
             content_type=self.content_type,
             content_disposition=self.content_disposition,
             cache_control=self.cache_control,
@@ -434,13 +440,17 @@ def _map_http_error(response: httpx.Response) -> Exception:
 
 
 class BlobApiClient:
-    def __init__(self, *, base_url: str, transport: BaseTransport) -> None:
+    def __init__(
+        self, *, base_url: str, transport: BaseTransport, transfer_timeout: timedelta
+    ) -> None:
         self._base_url = base_url.rstrip("/")
         self._transport = transport
+        # Applied to requests whose duration grows with object size.
+        self._transfer_timeout = transfer_timeout
 
     @staticmethod
     def _headers(credentials: BlobCredentials | None) -> dict[str, str]:
-        headers = {"x-api-version": "12"}
+        headers = {"x-api-version": "13"}
         if credentials is not None and credentials.kind == "oidc":
             headers["x-vercel-blob-store-id"] = credentials.store_id
         return headers
@@ -454,6 +464,7 @@ class BlobApiClient:
         params: Mapping[str, str] | None = None,
         headers: Mapping[str, str] | None = None,
         body: RequestBody = None,
+        timeout: RequestTimeout = None,
     ) -> httpx.Response:
         try:
             response = await self._transport.send(
@@ -463,11 +474,12 @@ class BlobApiClient:
                 params=params,
                 headers=self._headers(credentials) | dict(headers or {}),
                 body=body,
+                timeout=timeout,
                 follow_redirects=False,
                 read_response=ReadResponsePolicy.ALWAYS,
             )
         except http_errors() as exc:
-            raise BlobUnknownError() from exc
+            raise transport_failure(exc) from exc
         if not response.is_success:
             raise _map_http_error(response)
         return response
@@ -482,6 +494,7 @@ class BlobApiClient:
             params={"pathname": request.pathname},
             headers=request._to_headers(),
             body=RawBody(body),
+            timeout=self._transfer_timeout,
         )
         return _parse_put_response(response)
 
@@ -504,6 +517,7 @@ class BlobApiClient:
             token=credentials.token,
             params={"pathname": request.pathname},
             headers=headers,
+            timeout=self._transfer_timeout,
             follow_redirects=False,
             read_response=ReadResponsePolicy.ALWAYS,
         )
@@ -560,6 +574,7 @@ class BlobApiClient:
                 params={"pathname": request.pathname},
                 headers=headers,
                 body=RawBody(body),
+                timeout=self._transfer_timeout,
             )
         else:
             cm = self._transport.request_stream(
@@ -568,6 +583,7 @@ class BlobApiClient:
                 token=credentials.token,
                 params={"pathname": request.pathname},
                 headers=self._headers(credentials) | headers,
+                timeout=self._transfer_timeout,
                 follow_redirects=False,
                 read_response=ReadResponsePolicy.ALWAYS,
             )
@@ -591,6 +607,7 @@ class BlobApiClient:
             | self._multipart_headers(created)
             | {"x-mpu-action": "complete"},
             body=JSONBody(parts),
+            timeout=self._transfer_timeout,
         )
         return _parse_put_response(response)
 
@@ -619,6 +636,7 @@ class BlobApiClient:
             credentials=credentials,
             params={"pathname": request.pathname, "fromUrl": source},
             headers=request._to_headers(),
+            timeout=self._transfer_timeout,
         )
         parsed = _parse_response(response, _PutResponse, "COPY")
         return CopyResult(**parsed.model_dump())
@@ -649,7 +667,7 @@ class BlobApiClient:
                 chunk_size=_CHUNK_SIZE,
             )
         except http_errors() as exc:
-            raise BlobUnknownError() from exc
+            raise transport_failure(exc) from exc
         try:
             metadata = _validate_and_parse_download_response(url, stream.response)
         except BaseException:

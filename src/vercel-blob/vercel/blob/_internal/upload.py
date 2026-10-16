@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import sys
 from collections.abc import AsyncIterable, AsyncIterator, Callable, Iterable, Iterator
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
@@ -24,7 +25,7 @@ from vercel.blob._internal.validation import (
     validate_content_length,
     validate_optional_content_length,
 )
-from vercel.blob.errors import BlobContentLengthError, BlobUnknownError
+from vercel.blob.errors import BlobContentLengthError, BlobTimeoutError, BlobUnknownError
 from vercel.blob.models import PutBody, SyncPutBody
 
 # Every body accepted by the sync or async public ``put_blob``. Each runtime rejects
@@ -47,6 +48,18 @@ _STREAMING_TRANSPORT_ERRORS: tuple[type[Exception], ...] = (
     anyio.BrokenResourceError,
     anyio.ClosedResourceError,
 )
+
+
+def transport_failure(exc: BaseException) -> BlobUnknownError:
+    """Map a failed HTTP exchange to the Blob error raised in its place."""
+    timeout_types: list[type[BaseException]] = [httpx.TimeoutException]
+    # Sessions may use a legacy HTTPX client, which raises its own exception family.
+    legacy = getattr(sys.modules.get("httpx"), "TimeoutException", None)
+    if isinstance(legacy, type) and issubclass(legacy, BaseException):
+        timeout_types.append(legacy)
+    if isinstance(exc, tuple(timeout_types)):
+        return BlobTimeoutError()
+    return BlobUnknownError()
 
 
 def _normalize_chunk(chunk: object) -> bytes:
@@ -238,11 +251,11 @@ async def _transport_write(
         try:
             stream_resp = await streaming_request.finish()
         except _STREAMING_TRANSPORT_ERRORS:
-            raise BlobUnknownError() from exc
+            raise transport_failure(exc) from exc
         await stream_resp.aclose()
         if not stream_resp.response.is_success:
             raise map_http_error(stream_resp.response) from exc
-        raise BlobUnknownError() from exc
+        raise transport_failure(exc) from exc
 
 
 async def _write_exact_length(
@@ -283,7 +296,7 @@ async def send_streaming_upload(
         try:
             streaming_response = await streaming_request.finish()
         except _STREAMING_TRANSPORT_ERRORS as exc:
-            raise BlobUnknownError() from exc
+            raise transport_failure(exc) from exc
         await streaming_response.aclose()
         response = streaming_response.response
         if not response.is_success:

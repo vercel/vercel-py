@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import gzip
+import inspect
 import io
 import json
+import zlib
 from collections.abc import AsyncIterator, Callable, Coroutine, Iterator
-from contextlib import ExitStack, asynccontextmanager, contextmanager
+from contextlib import AsyncExitStack, ExitStack, asynccontextmanager, contextmanager
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +36,7 @@ from vercel.blob import (
     BlobServiceRateLimited,
     BlobStoreNotFoundError,
     BlobStreamError,
+    BlobTimeoutError,
     BlobUnknownError,
     DownloadMetadata,
     HeadResult,
@@ -171,7 +176,7 @@ async def test_async_put_success() -> None:
     req = captured_requests[0]
     assert req.method == "PUT"
     assert req.headers["authorization"] == f"Bearer {TEST_TOKEN}"
-    assert req.headers["x-api-version"] == "12"
+    assert req.headers["x-api-version"] == "13"
     assert req.headers["x-vercel-blob-access"] == "public"
     assert req.headers["x-add-random-suffix"] == "0"
     assert req.headers["x-allow-overwrite"] == "1"
@@ -1621,6 +1626,7 @@ async def test_async_get_buffered(chunks: list[bytes], fail: bool) -> None:
         assert result.metadata == DownloadMetadata(
             url=_URL,
             status_code=200,
+            size=len(result.body),
             content_type="application/octet-stream",
             etag="buffered-etag",
             headers=headers,
@@ -1652,10 +1658,51 @@ def test_sync_get_buffered(chunks: list[bytes], fail: bool) -> None:
         assert result.metadata == DownloadMetadata(
             url=_URL,
             status_code=200,
+            size=len(result.body),
             content_type="application/octet-stream",
             etag="buffered-etag",
             headers=headers,
         )
+
+
+_ENCODED_PAYLOAD = b"compressible " * 1000
+_ENCODINGS: dict[str, Callable[[bytes], bytes]] = {
+    "gzip": gzip.compress,
+    "deflate": zlib.compress,
+    "identity": lambda body: body,
+}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("sync", [False, True], ids=["async", "sync"])
+@pytest.mark.parametrize("encoding", [*_ENCODINGS, None])
+async def test_download_size_reports_decoded_length_or_none(
+    encoding: str | None, sync: bool
+) -> None:
+    wire = _ENCODINGS[encoding](_ENCODED_PAYLOAD) if encoding else _ENCODED_PAYLOAD
+    headers = {"content-length": str(len(wire))}
+    if encoding:
+        headers["content-encoding"] = encoding
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers=headers, content=wire)
+
+    expected_stream_size = len(wire) if encoding in (None, "identity") else None
+    if sync:
+        with _sync_session(handler):
+            with blob.sync.stream_blob(_URL, access="public") as download:
+                assert download.metadata.size == expected_stream_size
+                assert b"".join(download) == _ENCODED_PAYLOAD
+            result = blob.sync.get_blob(_URL, access="public")
+    else:
+        async with _async_session(handler):
+            async with blob.stream_blob(_URL, access="public") as async_download:
+                assert async_download.metadata.size == expected_stream_size
+                assert b"".join([chunk async for chunk in async_download]) == _ENCODED_PAYLOAD
+            result = await blob.get_blob(_URL, access="public")
+    assert result.body == _ENCODED_PAYLOAD
+    assert result.metadata.size == len(_ENCODED_PAYLOAD)
+    assert result.metadata.headers["content-length"] == str(len(wire))
 
 
 @pytest.mark.anyio
@@ -2352,7 +2399,7 @@ def _lifecycle_handler(
     storage: dict[str, bytes], *, asynchronous: bool
 ) -> Callable[[httpx.Request], httpx.Response]:
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.headers["x-api-version"] == "12"
+        assert request.headers["x-api-version"] == "13"
         if request.method == "PUT":
             pathname = request.url.params["pathname"]
             storage[pathname] = request.content
@@ -2513,7 +2560,7 @@ async def test_default_credentials_env(
         assert request.method == "GET"
         assert str(request.url) == expected_url
         assert request.headers["authorization"] == f"Bearer {token}"
-        assert request.headers["x-api-version"] == "12"
+        assert request.headers["x-api-version"] == "13"
         assert "x-vercel-blob-store-id" not in request.headers
         return httpx.Response(200, stream=stream)
 
@@ -2549,6 +2596,244 @@ async def test_default_credentials_env(
     assert len(requests) == int(has_credentials)
     assert stream.yielded_count == int(has_credentials)
     assert stream.closed == has_credentials
+
+
+_ENV_TOKEN = "vercel_blob_rw_envstore123_sec999"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize(
+    "store_id,oidc_token,read_write,expected,oidc_lookups",
+    [
+        pytest.param(None, "oidc-token", _ENV_TOKEN, f"Bearer {_ENV_TOKEN}", 0, id="rw-only"),
+        pytest.param("envstore123", "oidc-token", _ENV_TOKEN, "Bearer oidc-token", 1, id="oidc"),
+        pytest.param("envstore123", None, _ENV_TOKEN, f"Bearer {_ENV_TOKEN}", 1, id="oidc-gone"),
+        pytest.param(None, "oidc-token", None, "BLOB_STORE_ID is required", 1, id="no-store"),
+        pytest.param("envstore123", None, None, "Missing Blob credentials", 1, id="none"),
+        pytest.param(None, None, None, "Missing Blob credentials", 1, id="empty"),
+    ],
+)
+async def test_default_credentials_consult_oidc_only_when_usable(
+    monkeypatch: pytest.MonkeyPatch,
+    asynchronous: bool,
+    store_id: str | None,
+    oidc_token: str | None,
+    read_write: str | None,
+    expected: str,
+    oidc_lookups: int,
+) -> None:
+    from vercel import oidc
+    from vercel.oidc import aio as oidc_aio
+
+    for variable, value in (("BLOB_STORE_ID", store_id), ("BLOB_READ_WRITE_TOKEN", read_write)):
+        if value is None:
+            monkeypatch.delenv(variable, raising=False)
+        else:
+            monkeypatch.setenv(variable, value)
+    monkeypatch.delenv("VERCEL_BLOB_READ_WRITE_TOKEN", raising=False)
+    lookups = 0
+
+    def lookup() -> str:
+        # A lookup may refresh the token over the network outside a deployment.
+        nonlocal lookups
+        lookups += 1
+        if oidc_token is None:
+            raise oidc.VercelOidcTokenError("no OIDC token")
+        return oidc_token
+
+    async def async_lookup() -> str:
+        return lookup()
+
+    monkeypatch.setattr(oidc, "get_vercel_oidc_token_sync", lookup)
+    monkeypatch.setattr(oidc_aio, "get_vercel_oidc_token", async_lookup)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["authorization"] == expected
+        return httpx.Response(200, json=_object_json("env.txt", size=1))
+
+    transport = httpx.MockTransport(handler)
+    if asynchronous:
+        async with session(
+            service_options=[BlobServiceOptions()],
+            httpx_client_factory=lambda: httpx.AsyncClient(transport=transport),
+        ):
+            if expected.startswith("Bearer"):
+                await blob.head_blob("env.txt")
+            else:
+                with pytest.raises(BlobCredentialsError, match=expected):
+                    await blob.head_blob("env.txt")
+    else:
+        with session(
+            service_options=[SyncBlobServiceOptions()],
+            httpx_client_factory=lambda: httpx.Client(transport=transport),
+        ):
+            if expected.startswith("Bearer"):
+                blob.sync.head_blob("env.txt")
+            else:
+                with pytest.raises(BlobCredentialsError, match=expected):
+                    blob.sync.head_blob("env.txt")
+    assert lookups == oidc_lookups
+
+
+_CLIENT_TIMEOUT = 7.0
+_TRANSFER_TIMEOUT = timedelta(seconds=123)
+
+
+async def _maybe_await(value: Any) -> Any:
+    return await value if inspect.isawaitable(value) else value
+
+
+async def _run_every_operation(api: Any, sync: bool) -> None:
+    """Drive each Blob operation once, buffered and streamed where both exist."""
+    reader = io.BytesIO(b"streamed")
+    streamed = reader if sync else anyio.wrap_file(reader)
+    await _maybe_await(api.put_blob("put.bin", b"buffered", access="public"))
+    await _maybe_await(api.put_blob("streamed.bin", streamed, access="public", content_length=8))
+    upload = api.multipart_upload_blob("mpu.bin", access="public")
+    async with AsyncExitStack() as stack:
+        handle = stack.enter_context(upload) if sync else await stack.enter_async_context(upload)
+        await _maybe_await(handle.upload_part(b"a" * (5 * 1024 * 1024)))
+        part = io.BytesIO(b"tail")
+        tail = part if sync else anyio.wrap_file(part)
+        await _maybe_await(handle.upload_part(tail, content_length=4))
+    await _maybe_await(api.copy_blob("put.bin", "copy.bin", access="public"))
+    await _maybe_await(api.head_blob("put.bin"))
+    await _maybe_await(api.delete_blob("put.bin"))
+    if sync:
+        list(api.query_blobs())
+        api.get_blob("put.bin", access="public")
+    else:
+        [item async for item in api.query_blobs()]
+        await api.get_blob("put.bin", access="public")
+
+
+def _operation(request: httpx.Request) -> str:
+    if request.url.host.endswith(".blob.vercel-storage.com"):
+        return "download"
+    if request.url.path.endswith("/mpu"):
+        return "mpu-" + request.headers["x-mpu-action"]
+    if request.url.path.endswith("/delete"):
+        return "delete"
+    if request.method == "PUT":
+        return "copy" if "fromUrl" in request.url.params else "put"
+    return "head" if "url" in request.url.params else "list"
+
+
+def _respond(request: httpx.Request) -> httpx.Response:
+    operation = _operation(request)
+    if operation == "download":
+        return httpx.Response(200, content=b"x")
+    if operation == "mpu-create":
+        return httpx.Response(200, json={"key": "mpu.bin", "uploadId": "upload-id"})
+    if operation == "mpu-upload":
+        return httpx.Response(200, json={"etag": '"part"'})
+    if operation == "delete":
+        return httpx.Response(200, json={})
+    if operation == "list":
+        return httpx.Response(200, json={"blobs": [], "hasMore": False})
+    return httpx.Response(200, json=_object_json("put.bin", size=1))
+
+
+@asynccontextmanager
+async def _blob_runtime(
+    sync: bool, handler: Callable[[httpx.Request], httpx.Response], **options: Any
+) -> AsyncIterator[Any]:
+    """Run either facade over one handler that sees fully read request bodies."""
+
+    def sync_handler(request: httpx.Request) -> httpx.Response:
+        b"".join(request.stream)  # type: ignore[arg-type]
+        return handler(request)
+
+    async def async_handler(request: httpx.Request) -> httpx.Response:
+        [chunk async for chunk in request.stream]  # type: ignore[union-attr]
+        return handler(request)
+
+    if sync:
+        sync_options = SyncBlobServiceOptions(credentials_factory=_credentials, **options)
+        with session(
+            service_options=[sync_options],
+            httpx_client_factory=lambda: httpx.Client(
+                timeout=_CLIENT_TIMEOUT, transport=_StreamingMockTransport(sync_handler)
+            ),
+        ):
+            yield blob.sync
+    else:
+        async_options = BlobServiceOptions(credentials_factory=_credentials, **options)
+        async with session(
+            service_options=[async_options],
+            httpx_client_factory=lambda: httpx.AsyncClient(
+                timeout=_CLIENT_TIMEOUT, transport=_AsyncStreamingMockTransport(async_handler)
+            ),
+        ):
+            yield blob
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("sync", [False, True], ids=["async", "sync"])
+@pytest.mark.parametrize(
+    "configured,transfer_seconds",
+    [(_TRANSFER_TIMEOUT, 123.0), (None, 300.0)],
+    ids=["configured", "default"],
+)
+async def test_transfer_timeout_covers_size_dependent_operations(
+    sync: bool, configured: timedelta | None, transfer_seconds: float
+) -> None:
+    read_timeouts: dict[str, set[float]] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        timeout = request.extensions["timeout"]
+        assert len(set(timeout.values())) == 1, "one value applies to every phase"
+        read_timeouts.setdefault(_operation(request), set()).add(timeout["read"])
+        return _respond(request)
+
+    options = {} if configured is None else {"transfer_timeout": configured}
+    async with _blob_runtime(sync, handler, **options) as api:
+        await _run_every_operation(api, sync)
+
+    transfers = {"put", "copy", "mpu-upload", "mpu-complete"}
+    assert read_timeouts == {
+        operation: {transfer_seconds if operation in transfers else _CLIENT_TIMEOUT}
+        for operation in (*transfers, "mpu-create", "head", "delete", "list", "download")
+    }
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("sync", [False, True], ids=["async", "sync"])
+@pytest.mark.parametrize(
+    "failure,expected",
+    [
+        (httpx.ConnectTimeout, BlobTimeoutError),
+        (httpx.ReadTimeout, BlobTimeoutError),
+        (httpx.WriteTimeout, BlobTimeoutError),
+        (httpx.PoolTimeout, BlobTimeoutError),
+        (httpx.ConnectError, BlobUnknownError),
+        (httpx.RemoteProtocolError, BlobUnknownError),
+    ],
+)
+@pytest.mark.parametrize(
+    "target", ["put", "put-streamed", "mpu-upload", "mpu-upload-streamed", "head", "download"]
+)
+async def test_transport_failures_distinguish_timeouts(
+    sync: bool, failure: type[httpx.TransportError], expected: type[BlobError], target: str
+) -> None:
+    def failure_point(request: httpx.Request) -> str:
+        operation = _operation(request)
+        streamed = request.url.params.get("pathname") == "streamed.bin" or (
+            request.headers.get("x-mpu-part-number") == "2"
+        )
+        return f"{operation}-streamed" if streamed else operation
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if failure_point(request) == target:
+            raise failure("transport failed", request=request)
+        return _respond(request)
+
+    async with _blob_runtime(sync, handler) as api:
+        with pytest.raises(BlobUnknownError) as raised:
+            await _run_every_operation(api, sync)
+    assert type(raised.value) is expected
+    assert isinstance(raised.value.__cause__, failure)
 
 
 @pytest.mark.anyio
