@@ -1,0 +1,1 @@
+Read `VERCEL_OIDC_TOKEN_FILE` on every lookup, ahead of the environment token and behind the request header. Propagate missing or unreadable file errors and reject empty files without falling back to environment tokens or CLI refresh, matching the TypeScript OIDC SDK.
