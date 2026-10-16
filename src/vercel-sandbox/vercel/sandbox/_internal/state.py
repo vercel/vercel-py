@@ -139,6 +139,8 @@ class DriveState:
     current_sandbox_name: str | None
     created_at: int
     updated_at: int
+    parent_drive_id: str | None = None
+    root_drive_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

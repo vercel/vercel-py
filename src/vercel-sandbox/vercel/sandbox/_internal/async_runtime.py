@@ -414,6 +414,15 @@ class Drive(DriveHandleBase):
         super().__init__(payload)
         self._service = service
 
+    async def fork(self, *, name: str) -> "Drive":
+        """Fork this Drive's committed data, inheriting its region and maximum size.
+
+        Return a new handle using the same service without changing this Drive.
+        API failures propagate as SandboxApiError, including private-beta access
+        (403), missing source (404), and conflicting or uninitialized Drives (409).
+        """
+        return await fork_drive(self._service, source=self.name, name=name)
+
     def snapshot(self) -> DriveMount:
         """Return a read-only snapshot mount for this Drive."""
         return DriveMount(self, mode="snapshot")
@@ -2221,6 +2230,13 @@ def resume_sandbox_operation(
             include_system_routes=include_system_routes,
             private_parameters=private_parameters,
         ),
+    )
+
+
+async def fork_drive(service: SandboxService, *, source: str, name: str) -> Drive:
+    return Drive(
+        payload=await service.fork_drive(name=source, fork_name=name),
+        service=service,
     )
 
 
