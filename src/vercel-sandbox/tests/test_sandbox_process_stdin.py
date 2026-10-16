@@ -62,6 +62,8 @@ class _StdinServer:
         self.data = bytearray()
         self.closed = False
         self.exited = False
+        self.attached = True
+        self.reading = True
         self.bodies: list[dict[str, Any]] = []
         self.faults: deque[Fault] = deque()
 
@@ -70,7 +72,7 @@ class _StdinServer:
         close = bool(body.get("close"))
         if self.exited:
             return _failure(404, "command_not_found_or_exited")
-        if self.closed and (chunk or close):
+        if not self.attached or ((self.closed or not self.reading) and (chunk or close)):
             return _failure(400, "command_stdin_unavailable")
         offset = body.get("offset")
         if self.legacy or offset is None:
@@ -165,6 +167,7 @@ class _Api:
         router.get(f"{_BASE}/cmd/cmd_1/logs").mock(
             side_effect=lambda _: httpx.Response(200, text=self._stdout_record() + "\n")
         )
+        router.get(f"{_BASE}/cmd").mock(return_value=_json({"commands": [_COMMAND]}))
         router.get(f"{_BASE}/cmd/cmd_1").mock(
             return_value=_json({"command": {**_COMMAND, "exitCode": 0}})
         )
@@ -233,8 +236,11 @@ class _Driver:
     def create_process(self, **kwargs: Any) -> _Handle:
         return _Handle(self._call(self.box.create_process, "cat", **kwargs), self.portal)
 
-    def get_process(self, **kwargs: Any) -> _Handle:
-        return _Handle(self._call(self.box.get_process, "cmd_1", **kwargs), self.portal)
+    def get_process(self) -> _Handle:
+        return _Handle(self._call(self.box.get_process, "cmd_1"), self.portal)
+
+    def query_processes(self) -> list[_Handle]:
+        return [_Handle(process, self.portal) for process in self._call(self.box.query_processes)]
 
     def run_process(self, **kwargs: Any) -> sandbox.CompletedProcess:
         return self._call(self.box.run_process, "cat", **kwargs)  # type: ignore[no-any-return]
@@ -313,30 +319,66 @@ def test_writes_reach_the_process_in_order_and_close_sends_eof(driver: _Driver) 
     assert process.communicate() == ("hello world\n", "")
 
 
-def test_a_fetched_process_can_attach_and_resume_its_stdin(driver: _Driver) -> None:
+@pytest.mark.parametrize("lookup", ["get_process", "query_processes"])
+def test_a_looked_up_process_continues_after_input_already_written(
+    driver: _Driver, lookup: str
+) -> None:
     started = driver.create_process(stdin=subprocess.PIPE)
     started.write(b"first ")
-    assert driver.get_process().process.stdin is None
 
-    attached = driver.get_process(stdin=subprocess.PIPE)
-    attached.write(b"second\n")
-    attached.close()
+    if lookup == "get_process":
+        fetched = driver.get_process()
+    else:
+        (fetched,) = driver.query_processes()
+    fetched.write(b"second\n")
+    fetched.close()
 
     assert driver.server.data == b"first second\n"
     assert driver.server.closed
     assert [body.get("offset") for body in driver.server.writes()] == [0, 6, 13]
 
 
-def test_attaching_to_a_process_without_stdin_breaks_the_pipe(driver: _Driver) -> None:
-    driver.server.faults.append(
-        lambda server, request, body: _failure(400, "command_stdin_unavailable")
-    )
-    process = driver.get_process(stdin=subprocess.PIPE)
+def test_communicate_leaves_a_looked_up_process_stdin_open(driver: _Driver) -> None:
+    fetched = driver.get_process()
 
-    with pytest.raises(process.broken):
-        process.write(b"data")
-    process.close()
-    assert driver.server.data == b""
+    assert fetched.communicate() == ("", "")
+    assert driver.server.bodies == []
+
+    # Writing through the handle makes it the owner, so communicate closes.
+    fetched.write(b"later")
+    fetched.communicate()
+    assert driver.server.data == b"later"
+    assert driver.server.closed
+
+
+def test_a_looked_up_process_without_stdin_refuses_input(driver: _Driver) -> None:
+    driver.server.attached = False
+    fetched = driver.get_process()
+
+    for _ in range(2):
+        with pytest.raises(sandbox.SandboxStdinError, match="stdin=subprocess.PIPE"):
+            fetched.write(b"data")
+    with pytest.raises(sandbox.SandboxStdinError, match="stdin=subprocess.PIPE"):
+        driver.get_process().communicate("data")
+
+    # Nothing was attached, so there's nothing to close.
+    fetched.close()
+
+
+@pytest.mark.parametrize("stopped", ["reading", "exited"])
+def test_a_looked_up_process_that_stops_taking_input_breaks_the_pipe(
+    driver: _Driver, stopped: str
+) -> None:
+    fetched = driver.get_process()
+    fetched.write(b"a")
+    if stopped == "reading":
+        driver.server.reading = False
+    else:
+        driver.server.exited = True
+
+    with pytest.raises(fetched.broken):
+        fetched.write(b"b")
+    assert fetched.communicate(b"more") == ("a", "")
 
 
 def test_stdin_is_not_attached_unless_requested(driver: _Driver) -> None:

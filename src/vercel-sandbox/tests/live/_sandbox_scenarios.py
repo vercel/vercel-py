@@ -31,6 +31,7 @@ from vercel.sandbox import (
     SandboxPathNotFoundError,
     SandboxQueryByName,
     SandboxStatus,
+    SandboxStdinError,
     SandboxTerminalStateError,
     SnapshotSource,
     TagFilter,
@@ -197,6 +198,7 @@ class StdinObservation:
     digest_matches: bool
     communicated: str
     broken_after_exit: bool
+    refused_without_stdin: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -319,7 +321,7 @@ class _ScenarioDriver:
     ) -> Any:
         raise NotImplementedError
 
-    async def get_process(self, box: Any, process_id: str, *, stdin: int | None = None) -> Any:
+    async def get_process(self, box: Any, process_id: str) -> Any:
         raise NotImplementedError
 
     async def write_stdin(self, process: Any, data: bytes) -> None:
@@ -530,8 +532,8 @@ class AsyncDriver(_ScenarioDriver):
     ) -> Any:
         return await box.create_process(command, args, kill_after=kill_after, stdin=stdin)
 
-    async def get_process(self, box: Any, process_id: str, *, stdin: int | None = None) -> Any:
-        return await box.get_process(process_id, stdin=stdin)
+    async def get_process(self, box: Any, process_id: str) -> Any:
+        return await box.get_process(process_id)
 
     async def write_stdin(self, process: Any, data: bytes) -> None:
         await process.stdin.send(data)
@@ -778,8 +780,8 @@ class SyncDriver(_ScenarioDriver):
     ) -> Any:
         return box.create_process(command, args, kill_after=kill_after, stdin=stdin)
 
-    async def get_process(self, box: Any, process_id: str, *, stdin: int | None = None) -> Any:
-        return box.get_process(process_id, stdin=stdin)
+    async def get_process(self, box: Any, process_id: str) -> Any:
+        return box.get_process(process_id)
 
     async def write_stdin(self, process: Any, data: bytes) -> None:
         process.stdin.write(data)
@@ -1251,9 +1253,9 @@ async def process_stdin_flow(driver: _ScenarioDriver, name: str) -> StdinObserva
                 await driver.write_stdin(writer, (json.dumps(request) + "\n").encode())
                 response = json.loads(await driver.readline(server))
                 responses.append((response["id"], response["result"]["echo"] == params))
-                # Later requests go through a second handle that attaches to
-                # the running process and resumes after the first one's input.
-                writer = await driver.get_process(box, server.id, stdin=subprocess.PIPE)
+                # Later requests go through a looked-up handle, which resumes
+                # after the input the first handle wrote.
+                writer = await driver.get_process(box, server.id)
             await driver.close_stdin(writer)
             server_exit_code = await driver.wait(server)
 
@@ -1268,10 +1270,21 @@ async def process_stdin_flow(driver: _ScenarioDriver, name: str) -> StdinObserva
             await driver.wait(finished)
             broken_after_exit = await driver.write_after_exit_breaks(finished)
 
+            without_stdin = await driver.create_process(box, "sleep", ["60"])
+            fetched = await driver.get_process(box, without_stdin.id)
+            try:
+                await driver.write_stdin(fetched, b"lost\n")
+            except SandboxStdinError:
+                refused_without_stdin = True
+            else:
+                refused_without_stdin = False
+            await driver.terminate(without_stdin)
+
     return StdinObservation(
         responses=responses,
         server_exit_code=server_exit_code,
         digest_matches=digest.split()[0] == hashlib.sha256(data).hexdigest(),
         communicated=communicated.strip(),
         broken_after_exit=broken_after_exit,
+        refused_without_stdin=refused_without_stdin,
     )

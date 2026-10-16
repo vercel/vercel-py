@@ -9,7 +9,7 @@ duplicate input.
 import io
 import subprocess
 from contextlib import suppress
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, TypeAlias
 
 import anyio
 
@@ -32,6 +32,14 @@ _MAX_STALLED_TIMEOUTS = 2
 _MAX_RETRY_AFTER_SECONDS = 20.0
 
 ProcessInput = str | bytes | bytearray | memoryview
+
+StdinMode: TypeAlias = Literal["attached", "fetched"] | None
+"""How a process handle relates to its stdin.
+
+``"attached"`` means this SDK started the process with stdin attached.
+``"fetched"`` means the handle was looked up, so whether the process has stdin
+is unknown until the first request. ``None`` means the process has none.
+"""
 
 
 def _backoff(attempt: int) -> float:
@@ -69,6 +77,14 @@ def _coerce_input(input: ProcessInput) -> bytes:
     if isinstance(input, str):
         return input.encode("utf-8")
     return _coerce_bytes(input)
+
+
+def _is_stdin_unavailable(error: BaseException) -> bool:
+    return (
+        isinstance(error, SandboxApiError)
+        and error.status_code == 400
+        and error.code == "command_stdin_unavailable"
+    )
 
 
 def _is_input_not_accepted(error: BaseException) -> bool:
@@ -134,11 +150,18 @@ class StdinCore:
         session_id: str,
         process_id: str,
         lock: _PumpLock,
+        attached: bool = True,
     ) -> None:
         self._service = service
         self._session_id = session_id
         self._process_id = process_id
         self._lock = lock
+        # The service reports "never attached" and "stopped reading" the same
+        # way. That is only ambiguous until a request succeeds, and only for a
+        # handle that didn't start the process itself.
+        self.attached = attached
+        self._verified = attached
+        self.written = False
         # Confirmed bytes, or ``None`` until the service is asked. Asking also
         # reveals sandboxes that predate offsets, where resending is unsafe.
         self._offset: int | None = None
@@ -160,6 +183,7 @@ class StdinCore:
                 ) from self._failure
             if not data:
                 return
+            self.written = True
             await self._resolve_offset()
             await self._write_chunks(data)
         finally:
@@ -178,6 +202,11 @@ class StdinCore:
                 await self._request(offset=self._request_offset(), close=True)
             except _InputNotAccepted:
                 return
+            except SandboxStdinError as error:
+                # A looked-up process without stdin has nothing to close.
+                if _is_stdin_unavailable(error.cause):
+                    return
+                raise
             except _RequestFailed as failure:
                 if _is_input_not_accepted(failure.error):
                     return
@@ -188,10 +217,17 @@ class StdinCore:
             self._lock.release()
 
     async def communicate(self, data: bytes | None) -> None:
-        """Write ``data`` and close stdin, ignoring a process that stopped reading."""
+        """Write ``data`` and close stdin, ignoring a process that stopped reading.
+
+        A looked-up handle that was given no input and never written to leaves
+        stdin alone, so reading a running server's output doesn't end its
+        input.
+        """
         if data:
             with suppress(_InputNotAccepted):
                 await self.write(data)
+        elif not self.attached and not self.written:
+            return
         await self.close()
 
     async def _write_chunks(self, data: bytes) -> None:
@@ -231,12 +267,21 @@ class StdinCore:
         try:
             written = await self._request()
         except _RequestFailed as failure:
+            if not self._verified and _is_stdin_unavailable(failure.error):
+                # Unlike a process that stops reading, input sent here may be
+                # lost, so ``communicate`` doesn't ignore it.
+                raise SandboxStdinError(
+                    "Process stdin is unavailable: the process was not started with "
+                    "stdin=subprocess.PIPE, or it has stopped reading stdin",
+                    cause=failure.error,
+                ) from failure.error
             if _is_input_not_accepted(failure.error):
                 self._not_accepted = failure.error
                 raise _InputNotAccepted from failure.error
             raise SandboxStdinError(
                 "Failed to read process stdin state", cause=failure.error
             ) from failure.error
+        self._verified = True
         self._offsets_supported = written is not None
         self._offset = written or 0
 
@@ -364,7 +409,9 @@ class ProcessStdin(anyio.abc.ByteSendStream):
 
     ``send`` raises :class:`anyio.BrokenResourceError` once the process has
     exited or stopped reading stdin, and :class:`SandboxStdinError` if a
-    request fails. After a failure that may have delivered part of the data,
+    request fails. A looked-up process always has a writer; if the process
+    was started without stdin, the first ``send`` raises
+    :class:`SandboxStdinError`. After a failure that may have delivered part of the data,
     further sends raise :class:`anyio.BrokenResourceError`; the stream can
     still be closed.
     """
@@ -404,6 +451,8 @@ class SyncProcessStdin(io.RawIOBase):
 
     ``write`` raises :class:`BrokenPipeError` once the process has exited or
     stopped reading stdin, and :class:`SandboxStdinError` if a request fails.
+    A looked-up process always has a writer; if the process was started
+    without stdin, the first ``write`` raises :class:`SandboxStdinError`.
     After a failure that may have delivered part of the data, further writes
     raise :class:`BrokenPipeError`; the stream can still be closed.
 
@@ -449,7 +498,8 @@ class SyncProcessStdin(io.RawIOBase):
         except _StdinUnavailable as error:
             raise _broken_pipe(error) from error.__cause__
         finally:
-            super().close()
+            if self._core.closed:
+                super().close()
 
 
 def _broken_pipe(error: _StdinUnavailable) -> BrokenPipeError:
@@ -457,9 +507,9 @@ def _broken_pipe(error: _StdinUnavailable) -> BrokenPipeError:
 
 
 def _async_stdin(
-    service: "SandboxService", process: ProcessState, *, attached: bool
+    service: "SandboxService", process: ProcessState, mode: StdinMode
 ) -> ProcessStdin | None:
-    if not attached:
+    if mode is None:
         return None
     return ProcessStdin(
         StdinCore(
@@ -467,14 +517,15 @@ def _async_stdin(
             session_id=process.session_id,
             process_id=process.id,
             lock=_AsyncPumpLock(),
+            attached=mode == "attached",
         )
     )
 
 
 def _sync_stdin(
-    service: "SandboxService", process: ProcessState, *, attached: bool
+    service: "SandboxService", process: ProcessState, mode: StdinMode
 ) -> SyncProcessStdin | None:
-    if not attached:
+    if mode is None:
         return None
     return SyncProcessStdin(
         StdinCore(
@@ -482,5 +533,6 @@ def _sync_stdin(
             session_id=process.session_id,
             process_id=process.id,
             lock=_SyncPumpLock(),
+            attached=mode == "attached",
         )
     )
