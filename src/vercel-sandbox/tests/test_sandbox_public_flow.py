@@ -1,7 +1,7 @@
 import asyncio
 import gc
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from itertools import islice
@@ -13,6 +13,7 @@ import anyio
 import httpx as legacy_httpx
 import httpx2 as httpx
 import pytest
+from hypothesis import HealthCheck, given, settings, strategies as st
 from pydantic import BaseModel, ValidationError
 from sandbox_fixtures import sandbox_service_options as _session_options
 
@@ -825,16 +826,21 @@ async def test_network_policy_async_public_flow(mock_env_clear: None) -> None:
             },
         )
     )
+
+    def session_handler(request: httpx.Request) -> httpx.Response:
+        readback: dict[str, object] = (
+            {"mode": "deny-all"}
+            if json.loads(request.content) == {"mode": "deny-all"}
+            else _session_network_policy_response()
+        )
+        return httpx.Response(
+            200,
+            json={"session": _sandbox_response(session_network_policy=readback)["session"]},
+        )
+
     session_route = respx.post(
         "https://sandbox.test/v2/sandboxes/sessions/sbx_123/network-policy"
-    ).mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "session": _sandbox_response(session_network_policy={"mode": "deny-all"})["session"]
-            },
-        )
-    )
+    ).mock(side_effect=session_handler)
 
     async with session(service_options=_session_options()):
         handle = await sandbox.create_sandbox(
@@ -854,28 +860,34 @@ async def test_network_policy_async_public_flow(mock_env_clear: None) -> None:
         assert inspected.current_session is not None
         assert inspected.current_session.network_policy == _session_network_policy_readback()
         with pytest.raises(TypeError, match="must be a NetworkPolicy"):
-            await inspected.update_network_policy(inspected.network_policy)  # type: ignore[arg-type]
-        with pytest.raises(TypeError, match="must be a NetworkPolicy"):
-            await inspected.update_network_policy(
-                inspected.current_session.network_policy  # type: ignore[arg-type]
-            )
-        assert not session_route.called
-        with pytest.raises(TypeError, match="must be a NetworkPolicy"):
             await inspected.update(network_policy=inspected.network_policy)  # type: ignore[arg-type]
+        with pytest.raises(TypeError, match="must be a NetworkPolicy"):
+            await inspected.update(
+                network_policy=inspected.current_session.network_policy  # type: ignore[arg-type]
+            )
         assert not update_route.called
+        assert not session_route.called
 
-        authored = _authored_network_policy()
-        await handle.update(network_policy=authored)
+        attached = handle.current_session
+        assert await handle.update(network_policy=_authored_network_policy()) is handle
         assert handle.network_policy == inspected.network_policy
+        assert handle.current_session is attached
+        assert attached.network_policy == _session_network_policy_readback()
 
-        updated_session = await handle.update_network_policy(NetworkPolicy.deny_all())
-        assert updated_session.network_policy == NetworkPolicyReadback(mode="deny-all")
-        assert handle.current_session is updated_session
+        assert await handle.update(network_policy=NetworkPolicy.deny_all()) is handle
+        assert attached.network_policy == NetworkPolicyReadback(mode="deny-all")
+        assert handle.current_session is attached
 
     assert json.loads(create_route.calls.last.request.content)["networkPolicy"] == {
         "mode": "allow-all"
     }
-    sent = json.loads(update_route.calls.last.request.content)["networkPolicy"]
+    saved = [json.loads(call.request.content)["networkPolicy"] for call in update_route.calls]
+    live = [json.loads(call.request.content) for call in session_route.calls]
+    # The live request carries the authored policy, including secrets that
+    # the saved-configuration readback omits.
+    assert live == saved
+    sent, deny_all = saved
+    assert deny_all == {"mode": "deny-all"}
     match = {
         "path": {"startsWith": "/v1/"},
         "method": ["POST"],
@@ -908,7 +920,6 @@ async def test_network_policy_async_public_flow(mock_env_clear: None) -> None:
         },
         "subnets": {"allow": ["10.0.0.0/8"], "deny": ["10.1.0.0/16"]},
     }
-    assert json.loads(session_route.calls.last.request.content) == {"mode": "deny-all"}
     assert get_route.called
 
 
@@ -940,7 +951,7 @@ def test_network_policy_sync_readback_is_not_writable(mock_env_clear: None) -> N
         assert handle.current_session is not None
         assert handle.current_session.network_policy == _session_network_policy_readback()
         with pytest.raises(TypeError, match="must be a NetworkPolicy"):
-            handle.update_network_policy(handle.network_policy)  # type: ignore[arg-type]
+            handle.update(network_policy=handle.network_policy)  # type: ignore[arg-type]
 
     assert sandbox_sync.NetworkPolicy is NetworkPolicy
     assert sandbox_sync.NetworkPolicyReadback is NetworkPolicyReadback
@@ -1063,11 +1074,328 @@ async def test_network_policy_structural_validation(mock_env_clear: None) -> Non
             ),
         )
         with pytest.raises(TypeError, match="must be a NetworkPolicy"):
-            await handle.update_network_policy(readback)  # type: ignore[arg-type]
+            await handle.update(network_policy=readback)  # type: ignore[arg-type]
 
     assert malformed_route.called
     assert not create_route.called
     assert not update_route.called
+
+
+def _install_live_network_policy_routes(
+    failure: httpx.Response | Exception | None = None,
+) -> tuple[respx.Route, respx.Route, respx.Route]:
+    respx.get("https://sandbox.test/v2/sandboxes/preview", params={"resume": "false"}).mock(
+        return_value=httpx.Response(
+            200, json=_sandbox_response(session_network_policy={"mode": "allow-all"})
+        )
+    )
+    resume_route = respx.get(
+        "https://sandbox.test/v2/sandboxes/preview", params={"resume": "true"}
+    ).mock(return_value=httpx.Response(200, json=_sandbox_response(session_id="sbx_new")))
+    patch_route = respx.patch("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "sandbox": _sandbox_response(named_network_policy={"mode": "deny-all"})["sandbox"]
+            },
+        )
+    )
+    live_route = respx.post(
+        "https://sandbox.test/v2/sandboxes/sessions/sbx_123/network-policy"
+    ).mock(
+        side_effect=failure,
+        return_value=httpx.Response(
+            200,
+            json={
+                "session": _sandbox_response(session_network_policy={"mode": "deny-all"})["session"]
+            },
+        ),
+    )
+    return patch_route, live_route, resume_route
+
+
+def _api_failure(status_code: int, code: str | None) -> httpx.Response:
+    error = {"message": "live update failed", **({} if code is None else {"code": code})}
+    return httpx.Response(status_code, json={"error": error})
+
+
+# Mirrors the TypeScript SDK: any 410 and 422 ``sandbox_stopping`` are ignored
+# because the saved policy applies to the next session. A 410 is not specific
+# to a cleanly stopped session, so failed sessions are ignored too.
+_LIVE_NETWORK_POLICY_FAILURES = [
+    pytest.param(_api_failure(410, "sandbox_stopped"), None, id="410-stopped"),
+    pytest.param(_api_failure(410, None), None, id="410-without-code"),
+    pytest.param(_api_failure(422, "sandbox_stopping"), None, id="422-stopping"),
+    pytest.param(_api_failure(422, "sandbox_snapshotting"), SandboxApiError, id="422-snapshotting"),
+    pytest.param(_api_failure(409, "sandbox_stopped"), SandboxApiError, id="409-stopped"),
+    pytest.param(_api_failure(400, "invalid_network_policy"), SandboxApiError, id="400-invalid"),
+    pytest.param(_api_failure(403, "forbidden"), SandboxApiError, id="403-forbidden"),
+    pytest.param(httpx.ConnectError("unreachable"), httpx.ConnectError, id="transport"),
+]
+
+
+@respx.mock
+@pytest.mark.parametrize(("failure", "raised"), _LIVE_NETWORK_POLICY_FAILURES)
+async def test_async_update_saves_policy_when_live_update_fails(
+    mock_env_clear: None,
+    failure: httpx.Response | Exception,
+    raised: type[Exception] | None,
+) -> None:
+    patch_route, live_route, resume_route = _install_live_network_policy_routes(failure)
+
+    async with session(service_options=_session_options()):
+        handle = await sandbox.get_sandbox(name="preview")
+        if raised is None:
+            assert await handle.update(network_policy=NetworkPolicy.deny_all()) is handle
+        else:
+            with pytest.raises(raised):
+                await handle.update(network_policy=NetworkPolicy.deny_all())
+
+    assert patch_route.call_count == live_route.call_count == 1
+    assert not resume_route.called
+    assert handle.network_policy == NetworkPolicyReadback(mode="deny-all")
+    assert handle.current_session is not None
+    assert handle.current_session.network_policy == NetworkPolicyReadback(mode="allow-all")
+
+
+@respx.mock
+@pytest.mark.parametrize(("failure", "raised"), _LIVE_NETWORK_POLICY_FAILURES)
+def test_sync_update_saves_policy_when_live_update_fails(
+    mock_env_clear: None,
+    failure: httpx.Response | Exception,
+    raised: type[Exception] | None,
+) -> None:
+    patch_route, live_route, resume_route = _install_live_network_policy_routes(failure)
+
+    with session(service_options=_session_options()):
+        handle = sandbox_sync.get_sandbox(name="preview")
+        if raised is None:
+            assert handle.update(network_policy=NetworkPolicy.deny_all()) is handle
+        else:
+            with pytest.raises(raised):
+                handle.update(network_policy=NetworkPolicy.deny_all())
+
+    assert patch_route.call_count == live_route.call_count == 1
+    assert not resume_route.called
+    assert handle.network_policy == NetworkPolicyReadback(mode="deny-all")
+    assert handle.current_session is not None
+    assert handle.current_session.network_policy == NetworkPolicyReadback(mode="allow-all")
+
+
+_NO_LIVE_NETWORK_POLICY_UPDATES = [
+    pytest.param({"tags": {"team": "a"}}, "sbx_123", True, id="policy-omitted"),
+    pytest.param({"network_policy": NetworkPolicy.deny_all()}, "sbx_123", False, id="no-session"),
+    pytest.param(
+        {"network_policy": NetworkPolicy.deny_all()}, "sbx_other", True, id="session-replaced"
+    ),
+]
+
+
+def _install_no_live_network_policy_routes(
+    *, patched_session_id: str, attached: bool
+) -> tuple[respx.Route, respx.Route]:
+    lookup = _sandbox_response()
+    if not attached:
+        del lookup["session"]
+    respx.get("https://sandbox.test/v2/sandboxes/preview", params={"resume": "false"}).mock(
+        return_value=httpx.Response(200, json=lookup)
+    )
+    patch_route = respx.patch("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(
+            200, json={"sandbox": _sandbox_response(session_id=patched_session_id)["sandbox"]}
+        )
+    )
+    unexpected = respx.route(
+        url__regex=r"https://sandbox\.test/v2/sandboxes/(preview\?resume=true|sessions/.*)"
+    ).mock(return_value=httpx.Response(500))
+    return patch_route, unexpected
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("changes", "patched_session_id", "attached"), _NO_LIVE_NETWORK_POLICY_UPDATES
+)
+async def test_async_update_only_applies_policy_to_attached_session(
+    mock_env_clear: None,
+    changes: dict[str, Any],
+    patched_session_id: str,
+    attached: bool,
+) -> None:
+    patch_route, unexpected = _install_no_live_network_policy_routes(
+        patched_session_id=patched_session_id, attached=attached
+    )
+
+    async with session(service_options=_session_options()):
+        handle = await sandbox.get_sandbox(name="preview")
+        assert await handle.update(**changes) is handle
+
+    sent = json.loads(patch_route.calls.last.request.content)
+    assert ("networkPolicy" in sent) is ("network_policy" in changes)
+    assert not unexpected.called
+    assert handle.current_session_id == patched_session_id
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("changes", "patched_session_id", "attached"), _NO_LIVE_NETWORK_POLICY_UPDATES
+)
+def test_sync_update_only_applies_policy_to_attached_session(
+    mock_env_clear: None,
+    changes: dict[str, Any],
+    patched_session_id: str,
+    attached: bool,
+) -> None:
+    patch_route, unexpected = _install_no_live_network_policy_routes(
+        patched_session_id=patched_session_id, attached=attached
+    )
+
+    with session(service_options=_session_options()):
+        handle = sandbox_sync.get_sandbox(name="preview")
+        assert handle.update(**changes) is handle
+
+    sent = json.loads(patch_route.calls.last.request.content)
+    assert ("networkPolicy" in sent) is ("network_policy" in changes)
+    assert not unexpected.called
+    assert handle.current_session_id == patched_session_id
+
+
+def _install_superseded_live_network_policy_routes(
+    live_handler: Callable[[httpx.Request], Any],
+) -> None:
+    respx.get("https://sandbox.test/v2/sandboxes/preview", params={"resume": "false"}).mock(
+        return_value=httpx.Response(200, json=_sandbox_response(session_id="sbx_old"))
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/preview", params={"resume": "true"}).mock(
+        return_value=httpx.Response(200, json=_sandbox_response(session_id="sbx_new"))
+    )
+    respx.patch("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(
+            200, json={"sandbox": _sandbox_response(session_id="sbx_old")["sandbox"]}
+        )
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_old/network-policy").mock(
+        side_effect=live_handler
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_old/cmd").mock(
+        return_value=_api_failure(410, "sandbox_stopped")
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_new/cmd").mock(
+        return_value=httpx.Response(200, json={"commands": []})
+    )
+
+
+def _superseded_live_reply() -> httpx.Response:
+    session = _sandbox_response(session_id="sbx_old", session_network_policy={"mode": "deny-all"})
+    return httpx.Response(200, json={"session": session["session"]})
+
+
+@respx.mock
+async def test_async_update_live_reply_does_not_replace_recovered_session(
+    mock_env_clear: None,
+) -> None:
+    live_started = anyio.Event()
+    release_live = anyio.Event()
+
+    async def live_handler(_request: httpx.Request) -> httpx.Response:
+        live_started.set()
+        await release_live.wait()
+        return _superseded_live_reply()
+
+    _install_superseded_live_network_policy_routes(live_handler)
+
+    async with session(service_options=_session_options()):
+        handle = await sandbox.get_sandbox(name="preview")
+        old_session = handle.current_session
+        results: list[sandbox.Sandbox] = []
+
+        async def update() -> None:
+            results.append(await handle.update(network_policy=NetworkPolicy.deny_all()))
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(update)
+            await live_started.wait()
+            assert await handle.query_processes() == []
+            release_live.set()
+
+    assert results == [handle]
+    assert handle.current_session_id == "sbx_new"
+    assert handle.current_session is not None
+    assert handle.current_session is not old_session
+    assert handle.current_session.network_policy is None
+    assert old_session is not None
+    assert old_session.network_policy == NetworkPolicyReadback(mode="deny-all")
+
+
+@respx.mock
+def test_sync_update_live_reply_does_not_replace_recovered_session(
+    mock_env_clear: None,
+) -> None:
+    live_started = Event()
+    release_live = Event()
+
+    def live_handler(_request: httpx.Request) -> httpx.Response:
+        live_started.set()
+        assert release_live.wait(timeout=5)
+        return _superseded_live_reply()
+
+    _install_superseded_live_network_policy_routes(live_handler)
+
+    with session(service_options=_session_options()):
+        handle = sandbox_sync.get_sandbox(name="preview")
+        old_session = handle.current_session
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            update = executor.submit(handle.update, network_policy=NetworkPolicy.deny_all())
+            assert live_started.wait(timeout=5)
+            assert handle.query_processes() == []
+            release_live.set()
+            assert update.result(timeout=5) is handle
+
+    assert handle.current_session_id == "sbx_new"
+    assert handle.current_session is not None
+    assert handle.current_session is not old_session
+    assert handle.current_session.network_policy is None
+    assert old_session is not None
+    assert old_session.network_policy == NetworkPolicyReadback(mode="deny-all")
+
+
+_header_names = st.sampled_from(["Authorization", "X-Api-Key", "X-Trace"])
+_header_values = st.text(
+    alphabet=st.characters(min_codepoint=0x20, max_codepoint=0x7E), min_size=1, max_size=16
+)
+_authored_rules = st.lists(
+    st.builds(
+        lambda headers: NetworkPolicyRule(transform=[NetworkPolicyTransform(headers=headers)]),
+        st.dictionaries(_header_names, _header_values, min_size=1, max_size=2),
+    ),
+    max_size=2,
+)
+_authored_policies = st.one_of(
+    st.just(NetworkPolicy.allow_all()),
+    st.just(NetworkPolicy.deny_all()),
+    st.builds(
+        NetworkPolicy.custom,
+        allow=st.dictionaries(
+            st.sampled_from(["example.com", "*.example.com", "api.github.com"]),
+            _authored_rules,
+            max_size=3,
+        ),
+    ),
+)
+
+
+@given(policy=_authored_policies)
+@settings(deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
+def test_update_submits_identical_authored_policy_to_config_and_session(
+    mock_env_clear: None,
+    policy: NetworkPolicy,
+) -> None:
+    with respx.mock:
+        patch_route, live_route, _ = _install_live_network_policy_routes()
+        with session(service_options=_session_options()):
+            sandbox_sync.get_sandbox(name="preview").update(network_policy=policy)
+
+    saved = json.loads(patch_route.calls.last.request.content)["networkPolicy"]
+    assert json.loads(live_route.calls.last.request.content) == saved
 
 
 @respx.mock
@@ -2466,7 +2794,8 @@ async def _run_async_recoverable_operation(handle: sandbox.Sandbox, operation: s
     if operation == "extend_execution_time_limit":
         return await handle.extend_execution_time_limit(2)
     if operation == "update_network_policy":
-        return await handle.update_network_policy(NetworkPolicy.allow_all())
+        with pytest.warns(DeprecationWarning, match=r"update\(network_policy=\.\.\.\)"):
+            return await handle.update_network_policy(NetworkPolicy.allow_all())
     if operation == "snapshot":
         return await handle.snapshot()
     raise AssertionError(f"Unexpected operation: {operation}")
@@ -2480,7 +2809,8 @@ def _run_sync_recoverable_operation(handle: sandbox_sync.SyncSandbox, operation:
     if operation == "extend_execution_time_limit":
         return handle.extend_execution_time_limit(2)
     if operation == "update_network_policy":
-        return handle.update_network_policy(NetworkPolicy.allow_all())
+        with pytest.warns(DeprecationWarning, match=r"update\(network_policy=\.\.\.\)"):
+            return handle.update_network_policy(NetworkPolicy.allow_all())
     if operation == "snapshot":
         return handle.snapshot()
     raise AssertionError(f"Unexpected operation: {operation}")

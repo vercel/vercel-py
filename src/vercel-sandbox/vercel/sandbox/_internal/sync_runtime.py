@@ -91,6 +91,7 @@ from vercel.sandbox._internal.runtime_common import (
     SandboxHandleBase,
     SnapshotHandleBase,
     _coerce_remote_path,
+    _is_ignorable_live_network_policy_error,
     _normalize_tar_path,
     _ProcessHandleState,
     _SandboxFilesystemBatchBase,
@@ -1182,16 +1183,6 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         self._apply_payload(payload)
         return self
 
-    def update_network_policy(self, network_policy: NetworkPolicy) -> Self:
-        """Replace the session network policy."""
-        payload = iter_coroutine(
-            self._service.update_runtime_session_network_policy(
-                session_id=self.id, network_policy=network_policy
-            )
-        )
-        self._apply_payload(payload)
-        return self
-
     def snapshot(self, *, expiration: SnapshotExpirationInput = None) -> SyncSnapshot:
         """Create a filesystem snapshot from this session."""
         result = iter_coroutine(
@@ -1594,7 +1585,20 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         return self._apply_current_session_payload_if_current(payload, target_id)
 
     def update_network_policy(self, network_policy: NetworkPolicy) -> SyncSandboxRuntimeSession:
-        """Replace the current session's network policy."""
+        """Replace the current session's network policy.
+
+        .. deprecated::
+            Use ``update(network_policy=...)``, which saves the policy for
+            future sessions and applies it to the attached session. This
+            method only changes the current session, resuming the sandbox
+            if it is stopped.
+        """
+        warnings.warn(
+            "SyncSandbox.update_network_policy() is deprecated; use "
+            "SyncSandbox.update(network_policy=...) instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
         async def update(
             session_id: str,
@@ -1698,7 +1702,18 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         Only non-``None`` values are sent, except ``snapshot_retention`` where
         explicitly passing ``None`` removes the retention policy.
 
+        A ``network_policy`` is saved for future sessions and then submitted
+        to the attached session, if this handle has one. A stopped sandbox is
+        not resumed. Applying the policy to the running session is
+        best-effort: if that session has stopped (HTTP 410) or is stopping
+        (HTTP 422 ``sandbox_stopping``), the error is ignored and the saved
+        policy takes effect on the next session. HTTP 410 is also returned
+        for failed sessions. Any other failure, including a snapshotting
+        session, is raised after the saved configuration has changed.
+
         Args:
+            network_policy: Complete network policy replacement. Pass
+                ``NetworkPolicy.allow_all()`` to remove restrictions.
             mounts: Complete Drive mount replacement for the next session.
                 Pass ``None`` to leave mounts unchanged or ``{}`` to remove all
                 mounts.
@@ -1706,7 +1721,9 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
                 next resume.
 
         Returns:
-            This handle refreshed with the updated sandbox state.
+            This handle refreshed with the updated sandbox state. Returning
+            does not guarantee that any particular session received the
+            network policy.
         """
         payload = iter_coroutine(
             self._service.update_sandbox(
@@ -1729,7 +1746,28 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
             )
         )
         self._apply_payload(payload)
+        if network_policy is not None:
+            self._apply_live_network_policy(network_policy)
         return self
+
+    def _apply_live_network_policy(self, network_policy: NetworkPolicy) -> None:
+        """Submit an authored policy to the attached session, if any."""
+        with self._recovery_condition:
+            session = self.current_session
+        if session is None:
+            return
+        try:
+            payload = iter_coroutine(
+                self._service.update_runtime_session_network_policy(
+                    session_id=session.id, network_policy=network_policy
+                )
+            )
+        except SandboxApiError as error:
+            if _is_ignorable_live_network_policy_error(error):
+                return
+            raise
+        # The parent cache is refreshed only while this session is still current.
+        session._apply_payload_with_parent(payload)
 
 
 def _cleanup_managed_sandbox(handle: SyncSandbox, *, destroy: bool) -> None:

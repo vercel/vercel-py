@@ -164,6 +164,52 @@ with sandbox.fork_sandbox(source_sandbox="production-agent") as forked:
     result = forked.run_process("python", ["script.py"], capture_output=True)
 ```
 
+## Network policies
+
+A `NetworkPolicy` controls a sandbox's outbound network access. Pass one at
+creation, or replace it later with `update(network_policy=...)`:
+
+```python
+from vercel import sandbox
+from vercel.sandbox import NetworkPolicy, NetworkPolicyRule, NetworkPolicyTransform
+
+box = await sandbox.create_sandbox(network_policy=NetworkPolicy.deny_all())
+
+await box.update(
+    network_policy=NetworkPolicy.custom(
+        allow={
+            "api.github.com": [
+                NetworkPolicyRule(
+                    transform=[NetworkPolicyTransform(headers={"Authorization": "Bearer ..."})]
+                )
+            ],
+        }
+    )
+)
+```
+
+Each update is a complete replacement. Pass `NetworkPolicy.allow_all()` to
+remove restrictions; leaving `network_policy` unset keeps the current policy.
+
+`update(network_policy=...)` saves the policy for future sessions, then submits
+the same policy to the session attached to the handle. It does not resume a
+stopped sandbox. Applying the policy to the running session is best-effort: if
+that session has stopped (HTTP 410) or is stopping (HTTP 422
+`sandbox_stopping`), the error is ignored and the saved policy applies to the
+next session. Note that a failed session also reports HTTP 410, so it is
+skipped the same way. Any other failure, including a session that is
+snapshotting, raises `SandboxApiError` after the saved policy has changed. This
+matches the TypeScript SDK. Stronger guarantees, such as confirming that no
+session runs with the old policy, need support from the Sandbox API.
+
+`Sandbox.network_policy` and `SandboxRuntimeSession.network_policy` return a
+`NetworkPolicyReadback`: sanitized metadata that omits header values and other
+secrets. A readback cannot be submitted back as a policy.
+
+`Sandbox.update_network_policy()` is deprecated. It only changes the current
+session, resuming the sandbox first if needed, and does not save the policy for
+future sessions.
+
 ## Sandbox Drives
 
 Sandbox Drives are named persistent filesystems. A Drive belongs to one project
