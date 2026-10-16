@@ -1,4 +1,11 @@
-"""Shared live scenarios for the Sandbox public API."""
+"""Scenarios for the Sandbox public API, run live and against the fake API.
+
+Each scenario drives the public API through a driver, so one flow covers the
+async and sync surfaces, and returns an observation compared with
+`assert_*`. `tests/live` runs them against Vercel; `test_sandbox_scenarios`
+runs the same flows and expectations against `fake_sandbox`, which keeps the
+fake honest wherever a scenario covers it.
+"""
 
 import asyncio
 import hashlib
@@ -209,6 +216,10 @@ class NetworkPolicyObservation:
 
 
 class _ScenarioDriver:
+    def __init__(self, **session_kwargs: Any) -> None:
+        """Bind the driver's sessions to ``session_kwargs``; none means live."""
+        self._session_kwargs = session_kwargs
+
     @asynccontextmanager
     async def session(self) -> AsyncIterator[None]:
         raise NotImplementedError
@@ -354,7 +365,7 @@ class _ScenarioDriver:
 class AsyncDriver(_ScenarioDriver):
     @asynccontextmanager
     async def session(self) -> AsyncIterator[None]:
-        async with session():
+        async with session(**self._session_kwargs):
             yield
 
     @asynccontextmanager
@@ -575,7 +586,7 @@ class AsyncDriver(_ScenarioDriver):
 class SyncDriver(_ScenarioDriver):
     @asynccontextmanager
     async def session(self) -> AsyncIterator[None]:
-        with session():
+        with session(**self._session_kwargs):
             yield
 
     @asynccontextmanager
@@ -782,6 +793,73 @@ class SyncDriver(_ScenarioDriver):
 
     async def destroy(self, box: Any) -> None:
         box.destroy()
+
+
+def assert_workspace(result: WorkspaceObservation) -> None:
+    assert result == WorkspaceObservation(
+        stdout="stdout:scenario input\n",
+        stderr="stderr:scenario input\n",
+        output="SCENARIO INPUT\n",
+        exit_code=0,
+        context_cleaned_up=True,
+    )
+
+
+def assert_persistent(result: PersistentObservation) -> None:
+    assert result == PersistentObservation(
+        discovered=True,
+        tags_preserved=True,
+        routes_preserved=True,
+        project_id_preserved=True,
+        current_session_preserved=True,
+        routes_cleared=True,
+        snapshot_fetched=True,
+        snapshot_listed=True,
+        restored_content="restored state\n",
+        session_output="session follow-up\n",
+        session_exit_code=0,
+        session_cleaned_up=True,
+        resources_cleaned_up=True,
+    )
+
+
+def assert_process_filesystem(result: ProcessFilesystemObservation) -> None:
+    assert result.stdout == "stdout line\n"
+    assert result.stderr == "stderr line\n"
+    assert result.returncode == 3
+    assert result.terminated_returncode != 0
+    assert result.timed_out_returncode != 0
+    assert result.missing_executable_failed
+    assert result.text == "hello\n"
+    assert result.binary == b"\x00\xff"
+    assert result.missing_read_failed
+    assert result.invalid_write_failed
+
+
+def assert_streaming_transfer(result: StreamingTransferObservation) -> None:
+    assert result == StreamingTransferObservation(
+        digest_matches=True,
+        empty_matches=True,
+        explicit_mode="0o600",
+        missing_download_failed=True,
+    )
+
+
+def assert_network_policy(result: NetworkPolicyObservation) -> None:
+    assert result == NetworkPolicyObservation(
+        allow_all_created=True,
+        custom_returned=True,
+        header_names_redacted=True,
+        response_rule_summarized=True,
+        named_readback_is_partial=True,
+        deny_all_returned=True,
+        resources_cleaned_up=True,
+    )
+
+
+def assert_interactive(result: InteractiveObservation) -> None:
+    assert result.is_tty, result.command_output
+    assert result.exit_code == 3
 
 
 async def interactive_session_flow(driver: _ScenarioDriver, name: str) -> InteractiveObservation:

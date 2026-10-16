@@ -1,24 +1,20 @@
 """Live semantic parity scenarios for `vercel.sandbox`."""
 
 from datetime import timedelta
+from typing import cast
 from uuid import uuid4
 
 import anyio
 import pytest
-
-from vercel import sandbox
-from vercel.api import session
-from vercel.sandbox import SandboxTerminalStateError, sync as sandbox_sync
-
-from ._sandbox_scenarios import (
+from sandbox_scenarios import (
     AsyncDriver,
-    InteractiveObservation,
-    NetworkPolicyObservation,
-    PersistentObservation,
-    ProcessFilesystemObservation,
-    StreamingTransferObservation,
     SyncDriver,
-    WorkspaceObservation,
+    assert_interactive,
+    assert_network_policy,
+    assert_persistent,
+    assert_process_filesystem,
+    assert_streaming_transfer,
+    assert_workspace,
     interactive_session_flow,
     network_policy_flow,
     persistent_snapshot_flow,
@@ -27,6 +23,12 @@ from ._sandbox_scenarios import (
     streaming_transfer_flow,
     workspace_command_flow,
 )
+
+from vercel import sandbox
+from vercel.api import session
+from vercel.sandbox import SandboxTerminalStateError, sync as sandbox_sync
+from vercel.sandbox._internal.interactive_session import SyncInteractiveTransport
+
 from .conftest import requires_sandbox_credentials
 
 
@@ -40,64 +42,6 @@ def _exception_notes(error: BaseException) -> tuple[str, ...]:
     return tuple(getattr(error, "__notes__", ()))
 
 
-def _assert_workspace(result: WorkspaceObservation) -> None:
-    assert result == WorkspaceObservation(
-        stdout="stdout:scenario input\n",
-        stderr="stderr:scenario input\n",
-        output="SCENARIO INPUT\n",
-        exit_code=0,
-        context_cleaned_up=True,
-    )
-
-
-def _assert_persistent(result: PersistentObservation) -> None:
-    assert result == PersistentObservation(
-        discovered=True,
-        tags_preserved=True,
-        routes_preserved=True,
-        project_id_preserved=True,
-        current_session_preserved=True,
-        routes_cleared=True,
-        snapshot_fetched=True,
-        snapshot_listed=True,
-        restored_content="restored state\n",
-        session_output="session follow-up\n",
-        session_exit_code=0,
-        session_cleaned_up=True,
-        resources_cleaned_up=True,
-    )
-
-
-def _assert_process_filesystem(result: ProcessFilesystemObservation) -> None:
-    assert result.stdout == "stdout line\n"
-    assert result.stderr == "stderr line\n"
-    assert result.returncode == 3
-    assert result.terminated_returncode != 0
-    assert result.timed_out_returncode != 0
-    assert result.missing_executable_failed
-    assert result.text == "hello\n"
-    assert result.binary == b"\x00\xff"
-    assert result.missing_read_failed
-    assert result.invalid_write_failed
-
-
-def _assert_network_policy(result: NetworkPolicyObservation) -> None:
-    assert result == NetworkPolicyObservation(
-        allow_all_created=True,
-        custom_returned=True,
-        header_names_redacted=True,
-        response_rule_summarized=True,
-        named_readback_is_partial=True,
-        deny_all_returned=True,
-        resources_cleaned_up=True,
-    )
-
-
-def _assert_interactive(result: InteractiveObservation) -> None:
-    assert result.is_tty, result.command_output
-    assert result.exit_code == 3
-
-
 @requires_sandbox_credentials
 @pytest.mark.live
 @pytest.mark.asyncio
@@ -105,8 +49,8 @@ async def test_interactive_session_flow_has_sync_async_semantic_parity() -> None
     async_result = await interactive_session_flow(AsyncDriver(), _name("interactive", "async"))
     sync_result = await interactive_session_flow(SyncDriver(), _name("interactive", "sync"))
 
-    _assert_interactive(async_result)
-    _assert_interactive(sync_result)
+    assert_interactive(async_result)
+    assert_interactive(sync_result)
     assert async_result.is_tty == sync_result.is_tty
     assert async_result.exit_code == sync_result.exit_code
 
@@ -129,7 +73,8 @@ def test_sync_interactive_close_does_not_hang_on_a_saturated_websocket() -> None
         ) as box:
             scope = box.open_interactive("/bin/bash")
             pty = scope.__enter__()
-            websocket = pty._transport._session  # noqa: SLF001 - precondition only
+            transport = cast(SyncInteractiveTransport, pty._transport)  # noqa: SLF001
+            websocket = transport._session  # noqa: SLF001 - precondition only
             assert websocket is not None
             events = websocket._events  # noqa: SLF001
             # Many small frames that nobody reads.
@@ -153,8 +98,8 @@ async def test_workspace_command_flow_has_sync_async_semantic_parity() -> None:
     async_result = await workspace_command_flow(AsyncDriver(), _name("workspace", "async"))
     sync_result = await workspace_command_flow(SyncDriver(), _name("workspace", "sync"))
 
-    _assert_workspace(async_result)
-    _assert_workspace(sync_result)
+    assert_workspace(async_result)
+    assert_workspace(sync_result)
     assert async_result == sync_result
 
 
@@ -165,24 +110,18 @@ async def test_process_filesystem_flow_has_sync_async_semantic_parity() -> None:
     async_result = await process_filesystem_flow(AsyncDriver(), _name("process-fs", "async"))
     sync_result = await process_filesystem_flow(SyncDriver(), _name("process-fs", "sync"))
 
-    _assert_process_filesystem(async_result)
-    _assert_process_filesystem(sync_result)
+    assert_process_filesystem(async_result)
+    assert_process_filesystem(sync_result)
 
 
 @requires_sandbox_credentials
 @pytest.mark.live
 @pytest.mark.asyncio
 async def test_streaming_transfer_flow() -> None:
-    expected = StreamingTransferObservation(
-        digest_matches=True,
-        empty_matches=True,
-        explicit_mode="0o600",
-        missing_download_failed=True,
-    )
     async_result = await streaming_transfer_flow(AsyncDriver(), _name("transfer", "async"))
     sync_result = await streaming_transfer_flow(SyncDriver(), _name("transfer", "sync"))
-    assert async_result == expected
-    assert sync_result == expected
+    assert_streaming_transfer(async_result)
+    assert_streaming_transfer(sync_result)
 
 
 @requires_sandbox_credentials
@@ -192,8 +131,8 @@ async def test_network_policy_flow_has_sync_async_semantic_parity() -> None:
     async_result = await network_policy_flow(AsyncDriver(), _name("network-policy", "async"))
     sync_result = await network_policy_flow(SyncDriver(), _name("network-policy", "sync"))
 
-    _assert_network_policy(async_result)
-    _assert_network_policy(sync_result)
+    assert_network_policy(async_result)
+    assert_network_policy(sync_result)
     assert async_result == sync_result
 
 
@@ -204,8 +143,8 @@ async def test_persistent_snapshot_flow_has_sync_async_semantic_parity() -> None
     async_result = await persistent_snapshot_flow(AsyncDriver(), _name("persist", "async"))
     sync_result = await persistent_snapshot_flow(SyncDriver(), _name("persist", "sync"))
 
-    _assert_persistent(async_result)
-    _assert_persistent(sync_result)
+    assert_persistent(async_result)
+    assert_persistent(sync_result)
     assert async_result == sync_result
 
 

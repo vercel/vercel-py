@@ -1,93 +1,40 @@
+"""Running processes: handles, output routing, streams, and recovery."""
+
+import asyncio
 import io
 import json
 import signal
 import subprocess
 from collections.abc import AsyncIterator, Iterator
 from concurrent.futures import ThreadPoolExecutor
-from datetime import timedelta
-from threading import Condition, Event, Lock
+from threading import Condition, Event
+from typing import Any, NoReturn
 
 import anyio
 import httpx2 as httpx
 import pytest
-from sandbox_fixtures import sandbox_service_options
+from fake_sandbox import FakeSandboxApi, ProgramResult, RecordedRequest, wire
+from sandbox_modes import Mode
 
-import vendor.respx as respx
 from vercel import sandbox
-from vercel._internal.core.options import ServiceOptions
-from vercel.api import session
-from vercel.sandbox import sync as sandbox_sync
-from vercel.sandbox._internal.state import (
-    SandboxRuntimeSessionState,
-    SandboxState,
-)
+from vercel.sandbox import SandboxApiError, sync as sandbox_sync
 
 
-def _sandbox_response(*, session_id: str = "sbx_1") -> dict[str, object]:
-    return {
-        "sandbox": {"name": "preview", "currentSessionId": session_id, "status": "running"},
-        "session": {
-            "id": session_id,
-            "sourceSandboxName": "preview",
-            "projectId": "prj_1",
-            "status": "running",
-            "cwd": "/vercel/sandbox",
-        },
-    }
+def _resumes(request: RecordedRequest) -> bool:
+    return request.params.get("resume") == "true"
 
 
-def _process_response(
-    returncode: int | None = None,
-    *,
-    args: list[str] | None = None,
-    command_id: str = "cmd_1",
-    session_id: str = "sbx_1",
-) -> dict[str, object]:
-    return {
-        "command": {
-            "id": command_id,
-            "name": "python",
-            "args": args or [],
-            "cwd": "/vercel/sandbox",
-            "sessionId": session_id,
-            "exitCode": returncode,
-            "startedAt": 1,
-        }
-    }
+def _on(session_id: str) -> Any:
+    return lambda request: request.path_params.get("session_id") == session_id
 
 
-def _logs_response() -> httpx.Response:
-    records = [
-        {"stream": "stdout", "data": "out-1\nout-2"},
-        {"stream": "stderr", "data": "err\n"},
-    ]
-    return httpx.Response(200, text="".join(json.dumps(record) + "\n" for record in records))
-
-
-def _completed_response(
-    returncode: int = 0,
-    *,
-    args: list[str] | None = None,
-    session_id: str = "sbx_1",
-) -> httpx.Response:
-    records = [
-        _process_response(args=args, session_id=session_id),
-        {"stream": "stdout", "data": "out\n"},
-        {"stream": "stderr", "data": "err\n"},
-        _process_response(returncode, args=args, session_id=session_id),
-    ]
-    return httpx.Response(200, text="".join(json.dumps(record) + "\n" for record in records))
-
-
-def _interleaved_completed_response(returncode: int = 0) -> httpx.Response:
-    records = [
-        _process_response(),
-        {"stream": "stdout", "data": "out-1\n"},
-        {"stream": "stderr", "data": "err\n"},
-        {"stream": "stdout", "data": "out-2\n"},
-        _process_response(returncode),
-    ]
-    return httpx.Response(200, text="".join(json.dumps(record) + "\n" for record in records))
+def _seed_programs(fake_api: FakeSandboxApi) -> None:
+    fake_api.command("report", stdout="out\n", stderr="err\n")
+    fake_api.command("report fail", stdout="out\n", stderr="err\n", exit_code=9)
+    fake_api.command(
+        "interleave",
+        ProgramResult(output=[("stdout", "out-1\n"), ("stderr", "err\n"), ("stdout", "out-2\n")]),
+    )
 
 
 class _RecordingTextIO(io.StringIO):
@@ -116,50 +63,39 @@ class _FailingTextIO(io.StringIO):
         super().flush()
 
 
-class _TrackingAsyncStream(httpx.AsyncByteStream):
-    def __init__(self, content: bytes | list[bytes]) -> None:
-        self.chunks = content if isinstance(content, list) else [content]
+class _TrackingStream(httpx.AsyncByteStream, httpx.SyncByteStream):
+    """A response body that delivers fixed chunks and records being closed."""
+
+    def __init__(self, chunks: list[bytes]) -> None:
+        self.chunks = chunks
         self.closed = False
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
         for chunk in self.chunks:
             yield chunk
 
-    async def aclose(self) -> None:
-        self.closed = True
-
-
-class _TrackingSyncStream(httpx.SyncByteStream):
-    def __init__(self, content: bytes | list[bytes]) -> None:
-        self.chunks = content if isinstance(content, list) else [content]
-        self.closed = False
-
     def __iter__(self) -> Iterator[bytes]:
         yield from self.chunks
+
+    async def aclose(self) -> None:
+        self.closed = True
 
     def close(self) -> None:
         self.closed = True
 
 
-def _completed_body() -> bytes:
-    records = [
-        _process_response(),
-        {"stream": "stdout", "data": "out\n"},
-        _process_response(0),
-    ]
-    return "".join(json.dumps(record) + "\n" for record in records).encode()
-
-
-def _chunked_ndjson(*records: object) -> list[bytes]:
-    content = "\r\n\r\n".join(json.dumps(record, ensure_ascii=False) for record in records).encode()
-    return [content[offset : offset + 1] for offset in range(len(content))]
-
-
-def _session_options() -> list[ServiceOptions]:
-    return sandbox_service_options(
-        team_id="team_1",
-        project_id="prj_1",
+def _ndjson(*records: object, separator: str = "\n") -> bytes:
+    return (
+        separator.join(
+            record if isinstance(record, str) else json.dumps(record, ensure_ascii=False)
+            for record in records
+        ).encode()
+        + separator.encode()
     )
+
+
+def _command(exit_code: int | None = None, **fields: Any) -> wire.JSON:
+    return {"command": wire.command_payload(name="report", exit_code=exit_code, **fields)}
 
 
 def test_public_process_exports() -> None:
@@ -185,50 +121,30 @@ def test_public_process_exports() -> None:
         assert name in sandbox_sync.__all__
 
 
-@respx.mock
-async def test_async_process_readers_wait_and_signals(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
-        return_value=httpx.Response(200, json=_process_response())
-    )
-    get_process = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1").mock(
-        side_effect=[
-            httpx.Response(200, json=_process_response()),
-            httpx.Response(200, json=_process_response(7)),
-        ]
-    )
-    logs = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/logs").mock(
-        side_effect=lambda _request: _logs_response()
-    )
-    signals: list[int] = []
+# ---- process handles ------------------------------------------------------------
 
-    def signal_handler(request: httpx.Request) -> httpx.Response:
-        signals.append(json.loads(request.content)["signal"])
-        return httpx.Response(200, json=_process_response())
 
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/kill").mock(
-        side_effect=signal_handler
-    )
+async def test_process_handles_read_wait_and_signal(fake_api: FakeSandboxApi) -> None:
+    fake_api.command("serve", stdout="out-1\nout-2", stderr="err\n", exit_code=7, duration=10)
 
-    async with session(service_options=_session_options()):
+    async with fake_api.session():
         box = await sandbox.create_sandbox(name="preview")
-        process = await box.create_process("python")
-        assert process.name == "python"
-        assert process.args == []
+        process = await box.create_process("serve", ["--port", "3000"])
+        command = fake_api.current_session("preview").commands[process.id]
+        assert process.name == "serve"
+        assert process.args == ["--port", "3000"]
         assert process.cwd == "/vercel/sandbox"
         assert process.session_id == "sbx_1"
-        assert process.started_at == 1
+        assert process.started_at == command.started_at
         assert process.status is sandbox.ProcessStatus.RUNNING
         assert process.stdin is None
         assert process.returncode is None
-        assert process.stdout is not None
-        assert process.stderr is not None
+        assert await process.refresh() is process
+        assert process.status is sandbox.ProcessStatus.RUNNING
+        assert process.stdout is not None and process.stderr is not None
         assert await process.stdout.readline() == "out-1\n"
         assert await process.stdout.read() == "out-2"
         assert await process.stderr.read() == "err\n"
-        assert await process.refresh() is process
         assert await process.wait() == 7
         assert process.returncode == 7
         assert process.status is sandbox.ProcessStatus.EXITED
@@ -240,11 +156,11 @@ async def test_async_process_readers_wait_and_signals(mock_env_clear: None) -> N
         with pytest.raises(ValueError, match="Unknown signal"):
             await process.send_signal(32)
 
-    assert get_process.calls[0].request.url.params["wait"] == "false"
-    assert get_process.calls[1].request.url.params["wait"] == "true"
-    assert logs.call_count == 1
-    assert all(call.request.headers["connection"] == "close" for call in logs.calls)
-    assert signals == [
+    refresh, wait = fake_api.requests_to("commands.get")
+    assert (refresh.params["wait"], wait.params["wait"]) == ("false", "true")
+    (logs,) = fake_api.requests_to("commands.logs")
+    assert logs.headers["connection"] == "close"
+    assert [request.json()["signal"] for request in fake_api.requests_to("commands.kill")] == [
         sandbox.ProcessSignal.SIGTERM,
         sandbox.ProcessSignal.SIGKILL,
         sandbox.ProcessSignal.SIGINT,
@@ -253,116 +169,56 @@ async def test_async_process_readers_wait_and_signals(mock_env_clear: None) -> N
     ]
 
 
-@respx.mock
-def test_sync_process_readers_wait_and_signals(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
-        return_value=httpx.Response(200, json=_process_response())
-    )
-    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1").mock(
-        return_value=httpx.Response(200, json=_process_response(0))
-    )
-    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/logs").mock(
-        side_effect=lambda _request: _logs_response()
-    )
-    signals: list[int] = []
+async def test_a_signal_ends_a_running_process(mode: Mode, fake_api: FakeSandboxApi) -> None:
+    fake_api.command("serve", stdout="never printed", duration=60)
 
-    def signal_handler(request: httpx.Request) -> httpx.Response:
-        signals.append(json.loads(request.content)["signal"])
-        return httpx.Response(200, json=_process_response())
+    async with mode.session():
+        box = await mode(mode.sandbox.create_sandbox(name="preview"))
+        process = await mode(box.create_process("serve"))
+        await mode(process.terminate())
+        assert await mode(process.communicate()) == ("", "")
 
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/kill").mock(
-        side_effect=signal_handler
-    )
-
-    with session(service_options=_session_options()):
-        box = sandbox_sync.create_sandbox(name="preview")
-        process = box.create_process("python")
-        assert process.communicate() == ("out-1\nout-2", "err\n")
-        assert process.returncode == 0
-        process.terminate()
-        process.kill()
-
-    assert signals == [sandbox.ProcessSignal.SIGTERM, sandbox.ProcessSignal.SIGKILL]
+    assert process.returncode == 128 + signal.SIGTERM
 
 
-@respx.mock
-async def test_async_create_process_merges_stderr_into_stdout_reader(
-    mock_env_clear: None,
+@pytest.mark.parametrize(
+    ("stderr", "expected"),
+    [
+        (subprocess.STDOUT, ("out-1\nerr\nout-2\n", None)),
+        (subprocess.DEVNULL, ("out-1\nout-2\n", None)),
+    ],
+)
+async def test_stderr_can_be_merged_or_dropped(
+    mode: Mode, fake_api: FakeSandboxApi, stderr: int, expected: tuple[str, None]
 ) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
-        return_value=httpx.Response(200, json=_process_response())
-    )
-    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1").mock(
-        return_value=httpx.Response(200, json=_process_response(0))
-    )
-    logs = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/logs").mock(
-        side_effect=lambda _request: _logs_response()
-    )
+    _seed_programs(fake_api)
 
-    async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview")
-        process = await box.create_process("python", stderr=subprocess.STDOUT)
+    async with mode.session():
+        box = await mode(mode.sandbox.create_sandbox(name="preview"))
+        process = await mode(box.create_process("interleave", stderr=stderr))
         assert process.stderr is None
         assert process.stdout is not None
-        assert await process.communicate() == ("out-1\nout-2err\n", None)
+        assert await mode(process.communicate()) == expected
         assert process.returncode == 0
 
-    assert logs.call_count == 1
-
-
-@respx.mock
-async def test_async_create_process_devnull_drops_reader(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
-        return_value=httpx.Response(200, json=_process_response())
-    )
-    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1").mock(
-        return_value=httpx.Response(200, json=_process_response(0))
-    )
-    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/logs").mock(
-        side_effect=lambda _request: _logs_response()
-    )
-
-    async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview")
-        process = await box.create_process("python", stderr=subprocess.DEVNULL)
-        assert process.stderr is None
-        assert await process.communicate() == ("out-1\nout-2", None)
+    assert len(fake_api.requests_to("commands.logs")) == 1
 
 
 @pytest.mark.parametrize("stderr", [subprocess.DEVNULL, subprocess.STDOUT])
-@respx.mock
-async def test_async_create_process_with_no_readers_never_requests_logs(
-    mock_env_clear: None, stderr: int
+async def test_a_process_without_readers_never_requests_logs(
+    mode: Mode, fake_api: FakeSandboxApi, stderr: int
 ) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
-        return_value=httpx.Response(200, json=_process_response())
-    )
-    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1").mock(
-        return_value=httpx.Response(200, json=_process_response(0))
-    )
-    logs = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/logs")
+    _seed_programs(fake_api)
 
-    async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview")
-        process = await box.create_process("python", stdout=subprocess.DEVNULL, stderr=stderr)
+    async with mode.session():
+        box = await mode(mode.sandbox.create_sandbox(name="preview"))
+        process = await mode(box.create_process("report", stdout=subprocess.DEVNULL, stderr=stderr))
         assert process.stdout is None
         assert process.stderr is None
-        assert await process.communicate() == (None, None)
+        assert await mode(process.communicate()) == (None, None)
         assert process.returncode == 0
 
-    assert logs.call_count == 0
+    assert not fake_api.requests_to("commands.logs")
 
 
 @pytest.mark.parametrize(
@@ -377,410 +233,92 @@ async def test_async_create_process_with_no_readers_never_requests_logs(
         {"stderr": io.BytesIO()},
     ],
 )
-@respx.mock
-async def test_create_process_rejects_output_options_before_request(
-    mock_env_clear: None, kwargs: dict[str, object]
+async def test_create_process_rejects_output_options_before_any_request(
+    mode: Mode, fake_api: FakeSandboxApi, kwargs: dict[str, object]
 ) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    create = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd")
-
-    async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview")
+    async with mode.session():
+        box = await mode(mode.sandbox.create_sandbox(name="preview"))
         with pytest.raises((TypeError, ValueError)):
-            await box.create_process("python", **kwargs)  # type: ignore[arg-type]
+            await mode(box.create_process("report", **kwargs))
 
-    assert create.call_count == 0
-
-
-@respx.mock
-def test_sync_create_process_merges_stderr_into_stdout_reader(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
-        return_value=httpx.Response(200, json=_process_response())
-    )
-    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1").mock(
-        return_value=httpx.Response(200, json=_process_response(0))
-    )
-    logs = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/logs").mock(
-        side_effect=lambda _request: _logs_response()
-    )
-
-    with session(service_options=_session_options()):
-        box = sandbox_sync.create_sandbox(name="preview")
-        process = box.create_process("python", stderr=subprocess.STDOUT)
-        assert process.stderr is None
-        assert process.stdout is not None
-        assert process.communicate() == ("out-1\nout-2err\n", None)
-        assert process.returncode == 0
-
-    assert logs.call_count == 1
+    assert not fake_api.requests_to("commands.create")
 
 
-@pytest.mark.parametrize("stderr", [subprocess.DEVNULL, subprocess.STDOUT])
-@respx.mock
-def test_sync_create_process_with_no_readers_never_requests_logs(
-    mock_env_clear: None, stderr: int
-) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
-        return_value=httpx.Response(200, json=_process_response())
-    )
-    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1").mock(
-        return_value=httpx.Response(200, json=_process_response(0))
-    )
-    logs = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/logs")
-
-    with session(service_options=_session_options()):
-        box = sandbox_sync.create_sandbox(name="preview")
-        process = box.create_process("python", stdout=subprocess.DEVNULL, stderr=stderr)
-        assert process.stdout is None
-        assert process.stderr is None
-        assert process.communicate() == (None, None)
-        assert process.returncode == 0
-
-    assert logs.call_count == 0
-
-
-@respx.mock
-def test_sync_create_process_rejects_output_options_before_request(
-    mock_env_clear: None,
-) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    create = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd")
-
-    with session(service_options=_session_options()):
+def test_sync_stdout_cannot_be_merged_into_stderr(fake_api: FakeSandboxApi) -> None:
+    with fake_api.session(sync=True):
         box = sandbox_sync.create_sandbox(name="preview")
         with pytest.raises(ValueError, match="STDOUT is only supported for stderr"):
-            box.create_process("python", stdout=subprocess.STDOUT)
-
-    assert create.call_count == 0
+            box.create_process("report", stdout=subprocess.STDOUT)
 
 
-@respx.mock
-async def test_run_process_routes_output_checks_and_uses_one_request(
-    mock_env_clear: None, capsys: pytest.CaptureFixture[str]
+# ---- run_process ----------------------------------------------------------------
+
+
+async def test_run_process_routes_output_and_checks_in_one_request(
+    mode: Mode, fake_api: FakeSandboxApi, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    run = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
-        side_effect=[
-            _completed_response(args=["-c", "print('out')"]),
-            _completed_response(),
-            _interleaved_completed_response(),
-            _completed_response(9),
-            _completed_response(9),
-        ]
-    )
+    _seed_programs(fake_api)
 
-    async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview")
-        result = await box.run_process("python", ("-c", "print('out')"))
-        assert isinstance(result, sandbox.CompletedProcess)
-        assert result.args == ("python", "-c", "print('out')")
-        assert result.returncode == 0
-        assert result.stdout is None
-        assert result.stderr is None
+    async with mode.session():
+        box = await mode(mode.sandbox.create_sandbox(name="preview"))
+        inherited = await mode(box.run_process("report", ("--verbose",)))
+        assert isinstance(inherited, sandbox.CompletedProcess)
+        assert inherited.args == ("report", "--verbose")
+        assert inherited.returncode == 0
+        assert (inherited.stdout, inherited.stderr) == (None, None)
         assert capsys.readouterr() == ("out\n", "err\n")
 
-        captured = await box.run_process("python", capture_output=True)
-        assert captured.stdout == "out\n"
-        assert captured.stderr == "err\n"
+        captured = await mode(box.run_process("report", capture_output=True))
+        assert (captured.stdout, captured.stderr) == ("out\n", "err\n")
 
-        merged = await box.run_process("python", stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        assert merged.stdout == "out-1\nerr\nout-2\n"
-        assert merged.stderr is None
+        merged = await mode(
+            box.run_process("interleave", stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        )
+        assert (merged.stdout, merged.stderr) == ("out-1\nerr\nout-2\n", None)
 
         with pytest.raises(subprocess.CalledProcessError) as exc_info:
-            await box.run_process("python", check=True)
+            await mode(box.run_process("report", ["fail"], check=True))
         assert exc_info.value.returncode == 9
-        assert exc_info.value.stdout is None
-        assert exc_info.value.stderr is None
+        assert (exc_info.value.stdout, exc_info.value.stderr) == (None, None)
+        assert capsys.readouterr() == ("out\n", "err\n")
 
         with pytest.raises(subprocess.CalledProcessError) as captured_error:
-            await box.run_process("python", check=True, capture_output=True)
-        assert captured_error.value.stdout == "out\n"
-        assert captured_error.value.stderr == "err\n"
+            await mode(box.run_process("report", ["fail"], check=True, capture_output=True))
+        assert (captured_error.value.stdout, captured_error.value.stderr) == ("out\n", "err\n")
 
-    assert run.call_count == 5
-    assert all(call.request.url.params["wait"] == "true" for call in run.calls)
-    assert all(call.request.url.params["logs"] == "true" for call in run.calls)
+    runs = fake_api.requests_to("commands.create")
+    assert len(runs) == 5
+    assert all(request.json()["wait"] and request.json()["logs"] for request in runs)
+    assert not fake_api.requests_to("commands.logs")
+    assert not fake_api.requests_to("commands.get")
 
 
-@respx.mock
-async def test_async_run_process_explicit_and_discarded_destinations(
-    mock_env_clear: None, capsys: pytest.CaptureFixture[str]
+async def test_run_process_writes_to_explicit_or_discarded_destinations(
+    fake_api: FakeSandboxApi, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    run = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
-        side_effect=[
-            _interleaved_completed_response(),
-            _interleaved_completed_response(),
-            _interleaved_completed_response(),
-            _completed_response(),
-        ]
-    )
+    _seed_programs(fake_api)
     sink = _RecordingTextIO()
 
-    async with session(service_options=_session_options()):
+    async with fake_api.session():
         box = await sandbox.create_sandbox(name="preview")
-        result = await box.run_process("python", stdout=sink, stderr=subprocess.STDOUT)
-        assert result.stdout is None
-        assert result.stderr is None
+        result = await box.run_process("interleave", stdout=sink, stderr=subprocess.STDOUT)
+        assert (result.stdout, result.stderr) == (None, None)
         assert sink.getvalue() == "out-1\nerr\nout-2\n"
         assert sink.flush_count == 3
 
         discarded = await box.run_process(
-            "python", stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT
+            "interleave", stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT
         )
-        assert discarded.stdout is None
-        assert discarded.stderr is None
+        assert (discarded.stdout, discarded.stderr) == (None, None)
 
-        inherited = await box.run_process("python", stderr=subprocess.STDOUT)
-        assert inherited.stdout is None
-        assert inherited.stderr is None
+        inherited = await box.run_process("interleave", stderr=subprocess.STDOUT)
+        assert (inherited.stdout, inherited.stderr) == (None, None)
         assert capsys.readouterr() == ("out-1\nerr\nout-2\n", "")
 
         stdout_only = await box.run_process(
-            "python", stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+            "report", stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
         )
-        assert stdout_only.stdout == "out\n"
-        assert stdout_only.stderr is None
-
-    assert run.call_count == 4
-
-
-@respx.mock
-def test_sync_run_process_routes_and_captures(
-    mock_env_clear: None, capsys: pytest.CaptureFixture[str]
-) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    run = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
-        side_effect=[_completed_response(), _interleaved_completed_response()]
-    )
-
-    with session(service_options=_session_options()):
-        box = sandbox_sync.create_sandbox(name="preview")
-        inherited = box.run_process("python")
-        assert inherited.stdout is None
-        assert inherited.stderr is None
-        assert capsys.readouterr() == ("out\n", "err\n")
-
-        captured = box.run_process("python", stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        assert captured.stdout == "out-1\nerr\nout-2\n"
-        assert captured.stderr is None
-
-    assert run.call_count == 2
-
-
-@respx.mock
-async def test_async_run_process_reads_chunked_ndjson(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    stream = _TrackingAsyncStream(
-        _chunked_ndjson(
-            _process_response(),
-            {"stream": "stdout", "data": "café\n"},
-            {"stream": "stderr", "data": "雪\n"},
-            _process_response(0),
-        )
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
-        return_value=httpx.Response(200, stream=stream)
-    )
-
-    async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview")
-        result = await box.run_process("python", capture_output=True)
-
-    assert result.stdout == "café\n"
-    assert result.stderr == "雪\n"
-    assert stream.closed
-
-
-@respx.mock
-async def test_async_run_process_replays_pre_stream_stopped_session_error(
-    mock_env_clear: None,
-) -> None:
-    events: list[str] = []
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response(session_id="sbx_old"))
-    )
-
-    def old_command_handler(_request: httpx.Request) -> httpx.Response:
-        events.append("old-command")
-        return httpx.Response(
-            410,
-            json={"error": {"code": "sandbox_stopped", "message": "session is stopped"}},
-        )
-
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_old/cmd").mock(
-        side_effect=old_command_handler
-    )
-
-    def resume_handler(_request: httpx.Request) -> httpx.Response:
-        events.append("resume")
-        return httpx.Response(200, json=_sandbox_response(session_id="sbx_new"))
-
-    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(side_effect=resume_handler)
-
-    def replacement_command_handler(_request: httpx.Request) -> httpx.Response:
-        events.append("replacement-command")
-        return _completed_response(session_id="sbx_new")
-
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_new/cmd").mock(
-        side_effect=replacement_command_handler
-    )
-
-    async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview")
-        result = await box.run_process("python", capture_output=True)
-
-    assert result.session_id == "sbx_new"
-    assert result.stdout == "out\n"
-    assert events == ["old-command", "resume", "replacement-command"]
-
-
-@respx.mock
-def test_sync_run_process_replays_pre_stream_stopped_session_error(
-    mock_env_clear: None,
-) -> None:
-    events: list[str] = []
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response(session_id="sbx_old"))
-    )
-
-    def old_command_handler(_request: httpx.Request) -> httpx.Response:
-        events.append("old-command")
-        return httpx.Response(
-            410,
-            json={"error": {"code": "sandbox_stopped", "message": "session is stopped"}},
-        )
-
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_old/cmd").mock(
-        side_effect=old_command_handler
-    )
-
-    def resume_handler(_request: httpx.Request) -> httpx.Response:
-        events.append("resume")
-        return httpx.Response(200, json=_sandbox_response(session_id="sbx_new"))
-
-    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(side_effect=resume_handler)
-
-    def replacement_command_handler(_request: httpx.Request) -> httpx.Response:
-        events.append("replacement-command")
-        return _completed_response(session_id="sbx_new")
-
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_new/cmd").mock(
-        side_effect=replacement_command_handler
-    )
-
-    with session(service_options=_session_options()):
-        box = sandbox_sync.create_sandbox(name="preview")
-        result = box.run_process("python", capture_output=True)
-
-    assert result.session_id == "sbx_new"
-    assert result.stdout == "out\n"
-    assert events == ["old-command", "resume", "replacement-command"]
-
-
-@respx.mock
-def test_sync_run_process_reads_chunked_ndjson(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    stream = _TrackingSyncStream(
-        _chunked_ndjson(
-            _process_response(),
-            {"stream": "stdout", "data": "café\n"},
-            {"stream": "stderr", "data": "雪\n"},
-            _process_response(0),
-        )
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
-        return_value=httpx.Response(200, stream=stream)
-    )
-
-    with session(service_options=_session_options()):
-        box = sandbox_sync.create_sandbox(name="preview")
-        result = box.run_process("python", capture_output=True)
-
-    assert result.stdout == "café\n"
-    assert result.stderr == "雪\n"
-    assert stream.closed
-
-
-@respx.mock
-async def test_async_process_readers_read_chunked_ndjson(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
-        return_value=httpx.Response(200, json=_process_response())
-    )
-    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1").mock(
-        return_value=httpx.Response(200, json=_process_response(0))
-    )
-    stream = _TrackingAsyncStream(
-        _chunked_ndjson(
-            {"stream": "stdout", "data": "café\n"},
-            {"stream": "stderr", "data": "雪\n"},
-        )
-    )
-    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/logs").mock(
-        return_value=httpx.Response(200, stream=stream)
-    )
-
-    async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview")
-        process = await box.create_process("python")
-        output = await process.communicate()
-
-    assert output == ("café\n", "雪\n")
-    assert stream.closed
-
-
-@respx.mock
-def test_sync_process_readers_read_chunked_ndjson(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
-        return_value=httpx.Response(200, json=_process_response())
-    )
-    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1").mock(
-        return_value=httpx.Response(200, json=_process_response(0))
-    )
-    stream = _TrackingSyncStream(
-        _chunked_ndjson(
-            {"stream": "stdout", "data": "café\n"},
-            {"stream": "stderr", "data": "雪\n"},
-        )
-    )
-    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/logs").mock(
-        return_value=httpx.Response(200, stream=stream)
-    )
-
-    with session(service_options=_session_options()):
-        box = sandbox_sync.create_sandbox(name="preview")
-        process = box.create_process("python")
-        output = process.communicate()
-
-    assert output == ("café\n", "雪\n")
-    assert stream.closed
+        assert (stdout_only.stdout, stdout_only.stderr) == ("out\n", None)
 
 
 @pytest.mark.parametrize(
@@ -795,59 +333,89 @@ def test_sync_process_readers_read_chunked_ndjson(mock_env_clear: None) -> None:
         {"stderr": io.BytesIO()},
     ],
 )
-@respx.mock
-async def test_run_process_rejects_output_options_before_request(
-    mock_env_clear: None, kwargs: dict[str, object]
+async def test_run_process_rejects_output_options_before_any_request(
+    fake_api: FakeSandboxApi, kwargs: dict[str, object]
 ) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    run = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd")
-
-    async with session(service_options=_session_options()):
+    async with fake_api.session():
         box = await sandbox.create_sandbox(name="preview")
         with pytest.raises((TypeError, ValueError)):
-            await box.run_process("python", **kwargs)  # type: ignore[arg-type]
+            await box.run_process("report", **kwargs)  # type: ignore[arg-type]
 
-    assert run.call_count == 0
+    assert not fake_api.requests_to("commands.create")
 
 
-@respx.mock
-async def test_async_run_process_closes_response_when_sink_write_fails(
-    mock_env_clear: None,
+async def test_run_process_replays_on_a_replacement_when_the_session_stopped(
+    mode: Mode, fake_api: FakeSandboxApi
 ) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    stream = _TrackingAsyncStream(_completed_body())
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
-        return_value=httpx.Response(200, stream=stream)
-    )
+    _seed_programs(fake_api)
 
-    async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview")
-        with pytest.raises(OSError, match="sink write failed"):
-            await box.run_process("python", stdout=_FailingTextIO(fail_on="write"))
+    async with mode.session():
+        box = await mode(mode.sandbox.create_sandbox(name="preview", destroy=False))
+        fake_api.stop("preview")
+        result = await mode(box.run_process("report", capture_output=True))
 
+    assert result.session_id == "sbx_2"
+    assert result.stdout == "out\n"
+    assert [request.route for request in fake_api.requests[1:4]] == [
+        "commands.create",
+        "sandboxes.get",
+        "commands.create",
+    ]
+
+
+# ---- the wire: chunked, closed, and malformed streams -----------------------------
+
+
+async def test_run_process_reassembles_ndjson_split_across_chunks(
+    mode: Mode, fake_api: FakeSandboxApi
+) -> None:
+    body = _ndjson(
+        _command(),
+        wire.log_record("stdout", "café\n"),
+        wire.log_record("stderr", "雪\n"),
+        _command(0),
+        separator="\r\n\r\n",
+    )
+    stream = _TrackingStream([body[offset : offset + 1] for offset in range(len(body))])
+    fake_api.respond("commands.create", httpx.Response(200, stream=stream))
+
+    async with mode.session():
+        box = await mode(mode.sandbox.create_sandbox(name="preview"))
+        result = await mode(box.run_process("report", capture_output=True))
+
+    assert (result.stdout, result.stderr) == ("café\n", "雪\n")
     assert stream.closed
 
 
-@respx.mock
-def test_sync_run_process_closes_response_when_sink_flush_fails(
-    mock_env_clear: None,
+async def test_process_readers_reassemble_ndjson_split_across_chunks(
+    mode: Mode, fake_api: FakeSandboxApi
 ) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
+    body = _ndjson(
+        wire.log_record("stdout", "café\n"), wire.log_record("stderr", "雪\n"), separator="\r\n\r\n"
     )
-    stream = _TrackingSyncStream(_completed_body())
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
-        return_value=httpx.Response(200, stream=stream)
-    )
+    stream = _TrackingStream([body[offset : offset + 1] for offset in range(len(body))])
+    fake_api.respond("commands.logs", httpx.Response(200, stream=stream))
 
-    with session(service_options=_session_options()):
-        box = sandbox_sync.create_sandbox(name="preview")
-        with pytest.raises(OSError, match="sink flush failed"):
-            box.run_process("python", stdout=_FailingTextIO(fail_on="flush"))
+    async with mode.session():
+        box = await mode(mode.sandbox.create_sandbox(name="preview"))
+        process = await mode(box.create_process("true"))
+        output = await mode(process.communicate())
+
+    assert output == ("café\n", "雪\n")
+    assert stream.closed
+
+
+@pytest.mark.parametrize("fail_on", ["write", "flush"])
+async def test_run_process_closes_the_response_when_the_sink_fails(
+    mode: Mode, fake_api: FakeSandboxApi, fail_on: str
+) -> None:
+    stream = _TrackingStream([_ndjson(_command(), wire.log_record("stdout", "out\n"), _command(0))])
+    fake_api.respond("commands.create", httpx.Response(200, stream=stream))
+
+    async with mode.session():
+        box = await mode(mode.sandbox.create_sandbox(name="preview"))
+        with pytest.raises(OSError, match=f"sink {fail_on} failed"):
+            await mode(box.run_process("report", stdout=_FailingTextIO(fail_on=fail_on)))
 
     assert stream.closed
 
@@ -856,15 +424,15 @@ def test_sync_run_process_closes_response_when_sink_flush_fails(
     ("records", "error", "match"),
     [
         (["not-json"], sandbox.SandboxResponseError, "malformed NDJSON"),
-        ([_process_response()], sandbox.SandboxResponseError, "missing final"),
+        ([_command()], sandbox.SandboxResponseError, "missing final"),
         (
-            [_process_response(), _process_response(0, command_id="cmd_other")],
+            [_command(), _command(0, id="cmd_other")],
             sandbox.SandboxResponseError,
             "different final process identity",
         ),
         (
             [
-                _process_response(),
+                _command(),
                 {"stream": "error", "data": {"code": "failed", "message": "stream failed"}},
             ],
             sandbox.SandboxStreamError,
@@ -872,537 +440,298 @@ def test_sync_run_process_closes_response_when_sink_flush_fails(
         ),
     ],
 )
-@respx.mock
 async def test_run_process_rejects_invalid_streams(
-    mock_env_clear: None,
-    records: list[object],
-    error: type[Exception],
-    match: str,
+    fake_api: FakeSandboxApi, records: list[object], error: type[Exception], match: str
 ) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
-        return_value=httpx.Response(
-            200,
-            text="".join(
-                (record if isinstance(record, str) else json.dumps(record)) + "\n"
-                for record in records
-            ),
-        )
-    )
+    fake_api.respond("commands.create", httpx.Response(200, content=_ndjson(*records)))
 
-    async with session(service_options=_session_options()):
+    async with fake_api.session():
         box = await sandbox.create_sandbox(name="preview")
         with pytest.raises(error, match=match):
-            await box.run_process("python")
+            await box.run_process("report")
 
 
-@respx.mock
-async def test_async_run_process_does_not_replay_lifecycle_stream_errors(
-    mock_env_clear: None,
+async def test_run_process_does_not_replay_a_stream_that_failed_midway(
+    mode: Mode, fake_api: FakeSandboxApi
 ) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
-        return_value=httpx.Response(
-            200,
-            text="".join(
-                json.dumps(record) + "\n"
-                for record in (
-                    _process_response(),
-                    {
-                        "stream": "error",
-                        "data": {"code": "sandbox_stopped", "message": "stream stopped"},
-                    },
-                )
-            ),
-        )
-    )
-    resume_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
+    stream_error = {
+        "stream": "error",
+        "data": {"code": "sandbox_stopped", "message": "stream stopped"},
+    }
+    fake_api.respond(
+        "commands.create", httpx.Response(200, content=_ndjson(_command(), stream_error))
     )
 
-    async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview")
+    async with mode.session():
+        box = await mode(mode.sandbox.create_sandbox(name="preview"))
         with pytest.raises(sandbox.SandboxStreamError, match="stream stopped") as exc_info:
-            await box.run_process("python")
+            await mode(box.run_process("report"))
 
     assert exc_info.value.code == "sandbox_stopped"
-    assert not resume_route.called
+    assert not fake_api.requests_to("sandboxes.get")
 
 
-@respx.mock
-def test_sync_run_process_does_not_replay_lifecycle_stream_errors(
-    mock_env_clear: None,
-) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
-        return_value=httpx.Response(
-            200,
-            text="".join(
-                json.dumps(record) + "\n"
-                for record in (
-                    _process_response(),
-                    {
-                        "stream": "error",
-                        "data": {"code": "sandbox_stopped", "message": "stream stopped"},
-                    },
-                )
-            ),
-        )
-    )
-    resume_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-
-    with session(service_options=_session_options()):
-        box = sandbox_sync.create_sandbox(name="preview")
-        with pytest.raises(sandbox.SandboxStreamError, match="stream stopped") as exc_info:
-            box.run_process("python")
-
-    assert exc_info.value.code == "sandbox_stopped"
-    assert not resume_route.called
-
-
-def _stopped_error() -> sandbox.SandboxApiError:
-    data = {"error": {"code": "sandbox_stopped", "message": "session stopped"}}
-    return sandbox.SandboxApiError(httpx.Response(409), "session stopped", data=data)
-
-
-def _lifecycle_error(code: str) -> sandbox.SandboxApiError:
-    data = {"error": {"code": code, "message": "session unavailable"}}
-    return sandbox.SandboxApiError(httpx.Response(409), "session unavailable", data=data)
-
-
-class _AsyncCoordinatedRecoveryService:
-    def __init__(
-        self, *, resume_error: BaseException | None = None, error_code: str = "sandbox_stopped"
-    ) -> None:
-        self.error_code = error_code
-        self.allow_resume = anyio.Event()
-        self.resume_started = anyio.Event()
-        self.resume_finished = anyio.Event()
-        self.second_failure = anyio.Event()
-        self.operation_count = 0
-        self.resume_count = 0
-        self.resume_error = resume_error
-
-    async def query_processes(self, *, session_id: str) -> list[object]:
-        self.operation_count += 1
-        if session_id == "sbx_old":
-            if self.operation_count >= 2:
-                self.second_failure.set()
-            raise _lifecycle_error(self.error_code)
-        return []
-
-    async def get_runtime_session(self, *, session_id: str) -> SandboxRuntimeSessionState:
-        raise AssertionError("recovery must not poll the old session")
-
-    async def resume_sandbox(self, **_kwargs: object) -> SandboxState:
-        self.resume_count += 1
-        self.resume_started.set()
-        await self.allow_resume.wait()
-        if self.resume_error is not None:
-            raise self.resume_error
-        result = SandboxState(
-            name="preview",
-            current_session_id="sbx_new",
-            current_session=SandboxRuntimeSessionState(
-                id="sbx_new", status=sandbox.SandboxStatus.RUNNING
-            ),
-        )
-        self.resume_finished.set()
-        return result
-
-
-def _async_coordinated_box(
-    service: _AsyncCoordinatedRecoveryService,
-) -> sandbox.Sandbox:
-    return sandbox.Sandbox(
-        payload=SandboxState(
-            name="preview",
-            current_session_id="sbx_old",
-            current_session=SandboxRuntimeSessionState(
-                id="sbx_old", status=sandbox.SandboxStatus.STOPPED
-            ),
-        ),
-        service=service,  # type: ignore[arg-type]
-    )
+# ---- recovery coordination ----------------------------------------------------------
 
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
-@pytest.mark.parametrize(
-    "error_code", ["sandbox_stopped", "sandbox_stopping", "sandbox_snapshotting"]
-)
-async def test_async_recovery_shares_success(anyio_backend: str, error_code: str) -> None:
-    service = _AsyncCoordinatedRecoveryService(error_code=error_code)
-    box = _async_coordinated_box(service)
-    results: list[list[sandbox.Process]] = []
+@pytest.mark.parametrize("status", ["stopped", "stopping", "snapshotting"])
+async def test_concurrent_operations_share_one_recovery(
+    fake_api: FakeSandboxApi, anyio_backend: str, status: str
+) -> None:
+    fake_api.seed()
+    resume = fake_api.hold("sandboxes.get", when=_resumes)
+    results: list[object] = []
 
-    async def query() -> None:
-        results.append(await box.query_processes())
+    async with fake_api.session():
+        box = await sandbox.get_sandbox(name="preview")
+        fake_api.stop("preview", status=status)
 
-    async with anyio.create_task_group() as task_group:
-        task_group.start_soon(query)
-        await service.resume_started.wait()
-        task_group.start_soon(query)
-        await service.second_failure.wait()
-        service.allow_resume.set()
+        async def run() -> None:
+            results.append(await box.run_process("true"))
 
-    assert results == [[], []]
-    assert service.resume_count == 1
-    assert box.current_session_id == "sbx_new"
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(run)
+            await resume.wait_entered()
+            task_group.start_soon(run)
+            await fake_api.wait_for_requests("commands.create", 2, when=_on("sbx_1"))
+            await anyio.sleep(0.01)
+            resume.release()
+
+    assert len(results) == 2
+    assert len(fake_api.requests_to("sandboxes.get", when=_resumes)) == 1
+    assert len(fake_api.requests_to("commands.create", when=_on("sbx_2"))) == 2
+    assert box.current_session_id == "sbx_2"
 
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
-async def test_async_recovery_waiter_re_elects_after_owner_cancellation(
-    anyio_backend: str,
+async def test_a_waiter_takes_over_when_the_recovering_caller_is_cancelled(
+    fake_api: FakeSandboxApi, anyio_backend: str
 ) -> None:
-    service = _AsyncCoordinatedRecoveryService()
-    box = _async_coordinated_box(service)
-    owner_scope = anyio.CancelScope()
-    owner_done = anyio.Event()
-    waiter_result: list[sandbox.Process] | None = None
+    fake_api.seed()
+    resume = fake_api.hold("sandboxes.get", when=_resumes, times=1)
+    waiter_result: object = None
 
-    async def own_recovery() -> None:
-        with owner_scope:
+    async with fake_api.session():
+        box = await sandbox.get_sandbox(name="preview")
+        fake_api.stop("preview")
+        owner_scope = anyio.CancelScope()
+        owner_done = anyio.Event()
+
+        async def own_recovery() -> None:
+            with owner_scope:
+                try:
+                    await box.run_process("true")
+                finally:
+                    owner_done.set()
+
+        async def wait_for_recovery() -> None:
+            nonlocal waiter_result
+            waiter_result = await box.run_process("true")
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(own_recovery)
+            await resume.wait_entered()
+            task_group.start_soon(wait_for_recovery)
+            await fake_api.wait_for_requests("commands.create", 2, when=_on("sbx_1"))
+            await anyio.sleep(0.01)
+            owner_scope.cancel()
+            await owner_done.wait()
+        resume.release()
+
+    assert waiter_result is not None
+    assert len(fake_api.requests_to("sandboxes.get", when=_resumes)) == 2
+    assert box.current_session_id == "sbx_2"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
+async def test_a_recovery_is_abandoned_when_every_caller_is_cancelled(
+    fake_api: FakeSandboxApi, anyio_backend: str
+) -> None:
+    fake_api.seed()
+    resume = fake_api.hold("sandboxes.get", when=_resumes)
+
+    async with fake_api.session():
+        box = await sandbox.get_sandbox(name="preview")
+        fake_api.stop("preview")
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(box.run_process, "true")
+            await resume.wait_entered()
+            task_group.start_soon(box.run_process, "true")
+            await fake_api.wait_for_requests("commands.create", 2, when=_on("sbx_1"))
+            task_group.cancel_scope.cancel()
+        resume.release()
+        await anyio.sleep(0.01)
+
+    assert box.current_session_id == "sbx_1"
+    assert fake_api.sandbox("preview").current_session_id == "sbx_1"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
+async def test_a_failed_recovery_fails_every_caller_and_can_be_retried(
+    fake_api: FakeSandboxApi, anyio_backend: str
+) -> None:
+    fake_api.seed()
+    resume = fake_api.hold("sandboxes.get", when=_resumes, times=1)
+    fake_api.fail("sandboxes.get", status=500, code="internal_error", when=_resumes)
+    errors: list[BaseException] = []
+
+    async with fake_api.session():
+        box = await sandbox.get_sandbox(name="preview")
+        fake_api.stop("preview")
+
+        async def run() -> None:
             try:
-                await box.query_processes()
-            finally:
-                owner_done.set()
+                await box.run_process("true")
+            except SandboxApiError as error:
+                errors.append(error)
 
-    async def wait_for_recovery() -> None:
-        nonlocal waiter_result
-        waiter_result = await box.query_processes()
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(run)
+            await resume.wait_entered()
+            task_group.start_soon(run)
+            await fake_api.wait_for_requests("commands.create", 2, when=_on("sbx_1"))
+            await anyio.sleep(0.01)
+            resume.release()
 
-    async with anyio.create_task_group() as task_group:
-        task_group.start_soon(own_recovery)
-        await service.resume_started.wait()
-        task_group.start_soon(wait_for_recovery)
-        await service.second_failure.wait()
-        owner_scope.cancel()
-        await owner_done.wait()
-        service.allow_resume.set()
+        assert len(errors) == 2
+        assert errors[0] is errors[1]
+        assert len(fake_api.requests_to("sandboxes.get", when=_resumes)) == 1
+        await box.run_process("true")
 
-    assert waiter_result == []
-    assert service.resume_count == 2
-    assert box.current_session_id == "sbx_new"
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
-async def test_async_recovery_is_abandoned_when_all_callers_cancel(
-    anyio_backend: str,
-) -> None:
-    service = _AsyncCoordinatedRecoveryService()
-    box = _async_coordinated_box(service)
-
-    async with anyio.create_task_group() as task_group:
-        task_group.start_soon(box.query_processes)
-        await service.resume_started.wait()
-        task_group.start_soon(box.query_processes)
-        await service.second_failure.wait()
-        task_group.cancel_scope.cancel()
-
-    service.allow_resume.set()
-    await anyio.sleep(0)
-    assert not service.resume_finished.is_set()
-    assert service.resume_count == 1
-    assert box.current_session_id == "sbx_old"
+    assert len(fake_api.requests_to("sandboxes.get", when=_resumes)) == 2
+    assert box.current_session_id == "sbx_2"
 
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
-async def test_async_recovery_shares_failure_and_clears_slot_for_retry(
-    anyio_backend: str,
+async def test_a_late_failure_from_the_old_session_recovers_again(
+    fake_api: FakeSandboxApi, anyio_backend: str
 ) -> None:
-    resume_error = RuntimeError("resume failed")
-    service = _AsyncCoordinatedRecoveryService(resume_error=resume_error)
-    box = _async_coordinated_box(service)
-    results: list[BaseException] = []
+    fake_api.seed()
+    first = fake_api.hold("commands.create", when=_on("sbx_1"), times=1)
+    second = fake_api.hold("commands.create", when=_on("sbx_1"), times=1)
+    results: list[object] = []
 
-    async def query() -> None:
-        try:
-            await box.query_processes()
-        except BaseException as error:
-            results.append(error)
+    async with fake_api.session():
+        box = await sandbox.get_sandbox(name="preview")
+        fake_api.stop("preview")
 
-    async with anyio.create_task_group() as task_group:
-        task_group.start_soon(query)
-        await service.resume_started.wait()
-        task_group.start_soon(query)
-        await service.second_failure.wait()
-        service.allow_resume.set()
+        async def run() -> None:
+            results.append(await box.run_process("true"))
 
-    assert results == [resume_error, resume_error]
-    assert service.resume_count == 1
-    service.resume_error = None
-    assert await box.query_processes() == []
-    assert service.resume_count == 2
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(run)
+            task_group.start_soon(run)
+            await first.wait_entered()
+            await second.wait_entered()
+            first.release()
+            while not results:
+                await anyio.sleep(0.001)
+            second.release()
 
-
-class _DelayedLifecycleFailureService:
-    def __init__(self) -> None:
-        self.arrived = (anyio.Event(), anyio.Event())
-        self.release = (anyio.Event(), anyio.Event())
-        self.old_operation_count = 0
-        self.resume_count = 0
-
-    async def query_processes(self, *, session_id: str) -> list[object]:
-        if session_id != "sbx_old":
-            return []
-        index = self.old_operation_count
-        self.old_operation_count += 1
-        self.arrived[index].set()
-        await self.release[index].wait()
-        raise _stopped_error()
-
-    async def resume_sandbox(self, **_kwargs: object) -> SandboxState:
-        self.resume_count += 1
-        return SandboxState(
-            name="preview",
-            current_session_id="sbx_new",
-            current_session=SandboxRuntimeSessionState(
-                id="sbx_new", status=sandbox.SandboxStatus.RUNNING
-            ),
-        )
+    assert len(results) == 2
+    assert len(fake_api.requests_to("sandboxes.get", when=_resumes)) == 2
+    assert box.current_session_id == "sbx_2"
 
 
-@pytest.mark.anyio
-@pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
-async def test_delayed_async_lifecycle_failure_may_resume_again_after_slot_clears(
-    anyio_backend: str,
-) -> None:
-    service = _DelayedLifecycleFailureService()
-    box = sandbox.Sandbox(
-        payload=SandboxState(
-            name="preview",
-            current_session_id="sbx_old",
-            current_session=SandboxRuntimeSessionState(
-                id="sbx_old", status=sandbox.SandboxStatus.STOPPED
-            ),
-        ),
-        service=service,  # type: ignore[arg-type]
-    )
-
-    results: list[list[sandbox.Process]] = []
-
-    async def query() -> None:
-        results.append(await box.query_processes())
-
-    async with anyio.create_task_group() as task_group:
-        task_group.start_soon(query)
-        task_group.start_soon(query)
-        await service.arrived[0].wait()
-        await service.arrived[1].wait()
-        service.release[0].set()
-        while len(results) < 1:
-            await anyio.sleep(0)
-        service.release[1].set()
-
-    assert results == [[], []]
-    assert service.resume_count == 2
-    assert box.current_session_id == "sbx_new"
-
-
-class _SyncCoordinatedRecoveryService:
-    def __init__(
-        self,
-        *,
-        interrupt_first_resume: bool = False,
-        first_resume_error: Exception | None = None,
-        error_code: str = "sandbox_stopped",
-    ) -> None:
-        self.error_code = error_code
-        self.allow_resume = Event()
-        self.resume_returning = Event()
-        self.resume_started = Event()
-        self._lock = Lock()
-        self._interrupt_first_resume = interrupt_first_resume
-        self.first_resume_error = first_resume_error
-        self.resume_count = 0
-
-    async def query_processes(self, *, session_id: str) -> list[object]:
-        if session_id == "sbx_old":
-            raise _lifecycle_error(self.error_code)
-        return []
-
-    async def get_runtime_session(self, *, session_id: str) -> SandboxRuntimeSessionState:
-        raise AssertionError("recovery must not poll the old session")
-
-    async def resume_sandbox(self, **_kwargs: object) -> SandboxState:
-        with self._lock:
-            self.resume_count += 1
-            resume_count = self.resume_count
-        if resume_count == 1:
-            self.resume_started.set()
-            assert self.allow_resume.wait(timeout=5)
-            if self._interrupt_first_resume:
-                raise KeyboardInterrupt
-            if self.first_resume_error is not None:
-                raise self.first_resume_error
-        self.resume_returning.set()
-        return SandboxState(
-            name="preview",
-            current_session_id="sbx_new",
-            current_session=SandboxRuntimeSessionState(
-                id="sbx_new", status=sandbox.SandboxStatus.RUNNING
-            ),
-        )
-
-
-class _JoinObservingCondition(Condition):
-    """Recovery condition that reports when a caller waits on the shared resume.
-
-    The second caller's lifecycle failure is raised before it reaches the
-    shared resume, so only this wait shows it joined the in-flight attempt
-    rather than arriving after the attempt cleared.
-    """
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.joined = Event()
-
-    def wait(self, timeout: float | None = None) -> bool:
-        self.joined.set()
-        return super().wait(timeout)
-
-
-def _sync_coordinated_box(
-    service: _SyncCoordinatedRecoveryService,
-) -> sandbox_sync.SyncSandbox:
-    box = sandbox_sync.SyncSandbox(
-        payload=SandboxState(
-            name="preview",
-            current_session_id="sbx_old",
-            current_session=SandboxRuntimeSessionState(
-                id="sbx_old", status=sandbox.SandboxStatus.STOPPED
-            ),
-        ),
-        service=service,  # type: ignore[arg-type]
-    )
-    box._recovery_condition = _JoinObservingCondition()
-    return box
-
-
-def _wait_for_join(box: sandbox_sync.SyncSandbox) -> bool:
-    condition = box._recovery_condition
-    assert isinstance(condition, _JoinObservingCondition)
-    return condition.joined.wait(timeout=5)
-
-
-@pytest.mark.parametrize(
-    "error_code", ["sandbox_stopped", "sandbox_stopping", "sandbox_snapshotting"]
-)
+@pytest.mark.parametrize("status", ["stopped", "stopping", "snapshotting"])
 @pytest.mark.parametrize("interrupt_initiator", [False, True])
-def test_sync_recovery_shares_or_re_elects_after_initiator_interruption(
-    interrupt_initiator: bool,
-    error_code: str,
+def test_sync_recovery_is_shared_or_taken_over_after_an_interrupt(
+    fake_api: FakeSandboxApi, interrupt_initiator: bool, status: str
 ) -> None:
-    service = _SyncCoordinatedRecoveryService(
-        interrupt_first_resume=interrupt_initiator, error_code=error_code
-    )
-    box = _sync_coordinated_box(service)
+    fake_api.seed()
+    resume = fake_api.hold("sandboxes.get", when=_resumes, times=1)
+    if interrupt_initiator:
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        initiating = executor.submit(box.query_processes)
-        assert service.resume_started.wait(timeout=5)
-        waiting = executor.submit(box.query_processes)
-        assert _wait_for_join(box)
-        service.allow_resume.set()
-        if interrupt_initiator:
-            with pytest.raises(KeyboardInterrupt):
+        def interrupt(_request: RecordedRequest) -> NoReturn:
+            raise KeyboardInterrupt
+
+        fake_api.respond("sandboxes.get", interrupt, when=_resumes)
+    joined = Event()
+
+    class ObservedCondition(Condition):
+        def wait(self, timeout: float | None = None) -> bool:
+            joined.set()
+            return super().wait(timeout)
+
+    with fake_api.session(sync=True):
+        box = sandbox_sync.get_sandbox(name="preview")
+        box._recovery_condition = ObservedCondition()
+        fake_api.stop("preview", status=status)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            initiating = executor.submit(box.run_process, "true")
+            resume.wait_entered_sync()
+            waiting = executor.submit(box.run_process, "true")
+            assert joined.wait(timeout=5)
+            resume.release()
+            if interrupt_initiator:
+                with pytest.raises(KeyboardInterrupt):
+                    initiating.result(timeout=5)
+            else:
                 initiating.result(timeout=5)
-        else:
-            assert initiating.result(timeout=5) == []
-        assert waiting.result(timeout=5) == []
+            waiting.result(timeout=5)
 
-    assert service.resume_count == (2 if interrupt_initiator else 1)
-    assert box.current_session_id == "sbx_new"
-
-
-@pytest.mark.parametrize(
-    "error_code", ["sandbox_stopped", "sandbox_stopping", "sandbox_snapshotting"]
-)
-def test_sync_recovery_shares_failure_and_clears_slot_for_retry(error_code: str) -> None:
-    resume_error = RuntimeError("resume failed")
-    service = _SyncCoordinatedRecoveryService(
-        first_resume_error=resume_error, error_code=error_code
+    assert len(fake_api.requests_to("sandboxes.get", when=_resumes)) == (
+        2 if interrupt_initiator else 1
     )
-    box = _sync_coordinated_box(service)
-
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        initiating = executor.submit(box.query_processes)
-        assert service.resume_started.wait(timeout=5)
-        waiting = executor.submit(box.query_processes)
-        assert _wait_for_join(box)
-        service.allow_resume.set()
-        for participant in (initiating, waiting):
-            with pytest.raises(RuntimeError) as exc_info:
-                participant.result(timeout=5)
-            assert exc_info.value is resume_error
-
-    assert service.resume_count == 1
-    service.first_resume_error = None
-    assert box.query_processes() == []
-    assert service.resume_count == 2
+    assert box.current_session_id == "sbx_2"
 
 
-class _SyncSupersededMutationService:
-    def __init__(self) -> None:
-        self.allow_mutation = Event()
-        self.mutation_started = Event()
+def test_sync_failed_recovery_fails_every_caller_and_can_be_retried(
+    fake_api: FakeSandboxApi,
+) -> None:
+    fake_api.seed()
+    resume = fake_api.hold("sandboxes.get", when=_resumes, times=1)
+    fake_api.fail("sandboxes.get", status=500, code="internal_error", when=_resumes)
+    joined = Event()
 
-    async def extend_runtime_session_timeout(
-        self, *, session_id: str, duration: timedelta
-    ) -> SandboxRuntimeSessionState:
-        assert session_id == "sbx_old"
-        assert duration == timedelta(seconds=2)
-        self.mutation_started.set()
-        assert self.allow_mutation.wait(timeout=5)
-        return SandboxRuntimeSessionState(id="sbx_old", status=sandbox.SandboxStatus.RUNNING)
+    class ObservedCondition(Condition):
+        def wait(self, timeout: float | None = None) -> bool:
+            joined.set()
+            return super().wait(timeout)
 
-    async def query_processes(self, *, session_id: str) -> list[object]:
-        if session_id == "sbx_old":
-            raise _stopped_error()
-        assert session_id == "sbx_new"
-        return []
+    with fake_api.session(sync=True):
+        box = sandbox_sync.get_sandbox(name="preview")
+        box._recovery_condition = ObservedCondition()
+        fake_api.stop("preview")
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            participants = [executor.submit(box.run_process, "true")]
+            resume.wait_entered_sync()
+            participants.append(executor.submit(box.run_process, "true"))
+            assert joined.wait(timeout=5)
+            resume.release()
+            errors = [participant.exception(timeout=5) for participant in participants]
 
-    async def resume_sandbox(self, **_kwargs: object) -> SandboxState:
-        return SandboxState(
-            name="preview",
-            current_session_id="sbx_new",
-            current_session=SandboxRuntimeSessionState(
-                id="sbx_new", status=sandbox.SandboxStatus.RUNNING
-            ),
-        )
+        assert isinstance(errors[0], SandboxApiError)
+        assert errors[0] is errors[1]
+        box.run_process("true")
+
+    assert len(fake_api.requests_to("sandboxes.get", when=_resumes)) == 2
+    assert box.current_session_id == "sbx_2"
 
 
-def test_sync_mutation_reply_superseded_by_recovery_keeps_current_session() -> None:
-    service = _SyncSupersededMutationService()
-    box = sandbox_sync.SyncSandbox(
-        payload=SandboxState(
-            name="preview",
-            current_session_id="sbx_old",
-            current_session=SandboxRuntimeSessionState(
-                id="sbx_old", status=sandbox.SandboxStatus.RUNNING
-            ),
-        ),
-        service=service,  # type: ignore[arg-type]
-    )
+async def test_a_stale_reply_does_not_undo_a_recovery(mode: Mode, fake_api: FakeSandboxApi) -> None:
+    fake_api.seed()
+    extend = fake_api.hold("sessions.extend_timeout", after_response=True)
 
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        mutation = executor.submit(box.extend_execution_time_limit, 2)
-        assert service.mutation_started.wait(timeout=5)
-        assert box.query_processes() == []
-        service.allow_mutation.set()
-        result = mutation.result(timeout=5)
+    async with mode.session():
+        box = await mode(mode.sandbox.get_sandbox(name="preview"))
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            if mode.sync:
+                mutation: Any = executor.submit(box.extend_execution_time_limit, 2)
+                extend.wait_entered_sync()
+            else:
+                mutation = asyncio.create_task(box.extend_execution_time_limit(2))
+                await extend.wait_entered()
+            fake_api.stop("preview")
+            await mode(box.run_process("true"))
+            extend.release()
+            result = mutation.result(timeout=5) if mode.sync else await mutation
 
-    assert result.id == "sbx_new"
-    assert box.current_session_id == "sbx_new"
+    assert result.id == "sbx_2"
+    assert box.current_session_id == "sbx_2"

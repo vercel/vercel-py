@@ -4,10 +4,10 @@ import json
 import threading
 import time
 from collections import deque
-from collections.abc import AsyncIterator, Mapping, Sequence
-from contextlib import ExitStack, asynccontextmanager
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from contextlib import AbstractAsyncContextManager, ExitStack, asynccontextmanager
 from dataclasses import dataclass
-from typing import cast
+from typing import Protocol, cast
 
 import anyio
 import httpx2 as httpx
@@ -146,8 +146,14 @@ class AsyncInteractiveTransport:
     separately, so waiting for the process never competes for output.
     """
 
-    def __init__(self, state: InteractiveSessionState) -> None:
+    def __init__(
+        self,
+        state: InteractiveSessionState,
+        *,
+        sleep: Callable[[float], Awaitable[None]] = anyio.sleep,
+    ) -> None:
         self._state = state
+        self._sleep = sleep
         self._send, self._receive = anyio.create_memory_object_stream[Frame](_FRAME_BUFFER)
         self._scope = anyio.CancelScope()
         self._session: AsyncWebSocketSession | None = None
@@ -220,7 +226,7 @@ class AsyncInteractiveTransport:
             except httpx.HTTPError:
                 pass
             if attempt + 1 < _HEALTH_ATTEMPTS:
-                await anyio.sleep(_HEALTH_BACKOFF_SECONDS * (attempt + 1))
+                await self._sleep(_HEALTH_BACKOFF_SECONDS * (attempt + 1))
 
     async def send_bytes(self, data: bytes) -> None:
         session = self._require_session()
@@ -267,8 +273,10 @@ class AsyncInteractiveTransport:
 @asynccontextmanager
 async def open_async_transport(
     state: InteractiveSessionState,
+    *,
+    sleep: Callable[[float], Awaitable[None]] = anyio.sleep,
 ) -> AsyncIterator[AsyncInteractiveTransport]:
-    transport = AsyncInteractiveTransport(state)
+    transport = AsyncInteractiveTransport(state, sleep=sleep)
     try:
         async with anyio.create_task_group() as task_group:
             await task_group.start(transport.run)
@@ -298,8 +306,14 @@ class SyncInteractiveTransport:
     sequential code should read to the end of the stream before waiting.
     """
 
-    def __init__(self, state: InteractiveSessionState) -> None:
+    def __init__(
+        self,
+        state: InteractiveSessionState,
+        *,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
         self._state = state
+        self._sleep = sleep
         self._stack = ExitStack()
         self._session: WebSocketSession | None = None
         self._frames: deque[Frame] = deque()
@@ -347,7 +361,7 @@ class SyncInteractiveTransport:
             except httpx.HTTPError:
                 pass
             if attempt + 1 < _HEALTH_ATTEMPTS:
-                time.sleep(_HEALTH_BACKOFF_SECONDS * (attempt + 1))
+                self._sleep(_HEALTH_BACKOFF_SECONDS * (attempt + 1))
 
     async def send_bytes(self, data: bytes) -> None:
         session = self._require_session()
@@ -458,6 +472,74 @@ class SyncInteractiveTransport:
         if self._session is None:
             raise anyio.ClosedResourceError
         return self._session
+
+
+class AsyncInteractiveConnection(Protocol):
+    """The connection an async interactive session drives."""
+
+    @property
+    def failure(self) -> BaseException | None: ...
+
+    @property
+    def returncode(self) -> int | None: ...
+
+    async def send_bytes(self, data: bytes) -> None: ...
+
+    async def send_json(self, message: JSONObject) -> None: ...
+
+    async def receive(self) -> Frame: ...
+
+    async def wait(self) -> int | None: ...
+
+    async def close(self) -> None: ...
+
+
+class SyncInteractiveConnection(Protocol):
+    """The connection a sync interactive session drives.
+
+    Every method is async-shaped but must never suspend, so the sync runtime
+    can drive it with ``iter_coroutine``.
+    """
+
+    @property
+    def failure(self) -> BaseException | None: ...
+
+    @property
+    def returncode(self) -> int | None: ...
+
+    async def connect(self) -> None: ...
+
+    async def send_bytes(self, data: bytes) -> None: ...
+
+    async def send_json(self, message: JSONObject) -> None: ...
+
+    async def receive(self, timeout: float | None = None) -> Frame: ...
+
+    async def wait(self, timeout: float | None = None) -> int | None: ...
+
+    async def close(self) -> None: ...
+
+
+class InteractiveConnector(Protocol):
+    """Open the connection behind an interactive session."""
+
+    def open_async(
+        self, state: InteractiveSessionState
+    ) -> AbstractAsyncContextManager[AsyncInteractiveConnection]: ...
+
+    def open_sync(self, state: InteractiveSessionState) -> SyncInteractiveConnection: ...
+
+
+class WebSocketInteractiveConnector:
+    """Connect interactive sessions over the Sandbox WebSocket endpoint."""
+
+    def open_async(
+        self, state: InteractiveSessionState
+    ) -> AbstractAsyncContextManager[AsyncInteractiveConnection]:
+        return open_async_transport(state)
+
+    def open_sync(self, state: InteractiveSessionState) -> SyncInteractiveConnection:
+        return SyncInteractiveTransport(state)
 
 
 def _deadline(timeout: float | None) -> float | None:

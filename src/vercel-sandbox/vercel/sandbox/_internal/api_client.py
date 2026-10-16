@@ -972,11 +972,13 @@ class SandboxApiClient:
         credentials_factory: SandboxCredentialsFactory,
         transport: BaseTransport,
         file_transfer_timeout: timedelta,
+        user_agent: str,
     ) -> None:
         self._credentials_factory = credentials_factory
         self._base_url = base_url
         self._transport = transport
         self._file_transfer_timeout = file_transfer_timeout
+        self._user_agent = user_agent
 
     def _url(self, path: str) -> str:
         return self._base_url.rstrip("/") + "/" + path.lstrip("/")
@@ -1002,7 +1004,7 @@ class SandboxApiClient:
             ),
         )
         request_headers = {
-            "user-agent": _user_agent(),
+            "user-agent": self._user_agent,
             **dict(headers or {}),
         }
         response = await self._transport.send(
@@ -1043,7 +1045,7 @@ class SandboxApiClient:
             ),
         )
         request_headers = {
-            "user-agent": _user_agent(),
+            "user-agent": self._user_agent,
             **dict(headers or {}),
         }
         response = await self._transport.open_response_stream(
@@ -1933,7 +1935,7 @@ class SandboxApiClient:
             token=credentials.token,
             params=query,
             headers={
-                "user-agent": _user_agent(),
+                "user-agent": self._user_agent,
                 "x-cwd": "/",
                 "content-type": "application/gzip",
             },

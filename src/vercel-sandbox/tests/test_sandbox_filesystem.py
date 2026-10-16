@@ -1,18 +1,16 @@
-import io
-import json
-import tarfile
-from collections.abc import AsyncIterator, Iterator
+"""The sandbox filesystem: reads, writes, batches, streams, and recovery."""
+
+from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import PurePosixPath
-from typing import Any, cast
+from typing import Any
 
 import httpx2 as httpx
 import pytest
+from fake_sandbox import FakeSandboxApi, RecordedRequest
 from hypothesis import HealthCheck, given, settings, strategies as st
-from sandbox_fixtures import sandbox_service_options as _session_options
+from sandbox_modes import Mode
 
-import vendor.respx as respx
 from vercel import sandbox
-from vercel.api import session
 from vercel.sandbox import (
     DirectoryEntry,
     SandboxApiError,
@@ -23,652 +21,226 @@ from vercel.sandbox import (
     sync as sandbox_sync,
 )
 
-
-async def _read_as_chunks(source: bytes, chunk_size: int) -> AsyncIterator[bytes]:
-    offset = 0
-    while offset < len(source):
-        chunk = source[offset : offset + chunk_size]
-        yield chunk
-        offset += chunk_size
+_CWD = "/vercel/sandbox"
 
 
-class _SyncByteReader:
-    def __init__(self, data: bytes) -> None:
-        self._data = data
-        self._offset = 0
+def _resumes(request: RecordedRequest) -> bool:
+    return request.params.get("resume") == "true"
 
-    def read(self, n: int = -1) -> bytes:
-        if n < 0:
-            chunk = self._data[self._offset :]
-            self._offset = len(self._data)
+
+def _reads(path: str) -> Callable[[RecordedRequest], bool]:
+    return lambda request: (request.json() or {}).get("path") == path
+
+
+def _trail(fake_api: FakeSandboxApi) -> list[str]:
+    trail = []
+    for request in fake_api.requests:
+        if request.route == "sandboxes.get":
+            trail.append("resume" if _resumes(request) else "lookup")
         else:
-            chunk = self._data[self._offset : self._offset + n]
-            self._offset += len(chunk)
-        return chunk
+            trail.append(f"{request.route}@{request.path_params['session_id']}")
+    return trail
 
 
-class _SyncByteWriter:
-    def __init__(self) -> None:
-        self.written: list[bytes] = []
+class _TrackedStream(httpx.AsyncByteStream, httpx.SyncByteStream):
+    """A response body that delivers fixed chunks, may fail, and records closing."""
+
+    def __init__(self, chunks: list[bytes], *, failure: BaseException | None = None) -> None:
+        self._chunks = chunks
+        self._failure = failure
         self.closed = False
 
-    def write(self, data: bytes) -> None:
-        self.written.append(data)
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        for chunk in self._chunks:
+            yield chunk
+        if self._failure is not None:
+            raise self._failure
+
+    def __iter__(self) -> Iterator[bytes]:
+        yield from self._chunks
+        if self._failure is not None:
+            raise self._failure
+
+    async def aclose(self) -> None:
+        self.closed = True
 
     def close(self) -> None:
         self.closed = True
 
 
-def _sandbox_response(session_id: str = "sbx_1") -> dict[str, object]:
-    return {
-        "sandbox": {
-            "name": "preview",
-            "currentSessionId": session_id,
-            "status": "running",
-        },
-        "session": {
-            "id": session_id,
-            "sourceSandboxName": "preview",
-            "projectId": "prj_123",
-            "status": "running",
-            "cwd": "/vercel/sandbox",
-        },
-    }
+async def _batch_write(mode: Mode, box: Any) -> None:
+    async with mode.enter(box.fs.batch()) as batch:
+        batch.write_text("message.txt", "replacement")
 
 
-def _command_response(
-    command_id: str, session_id: str = "sbx_1", exit_code: int | None = None
-) -> dict[str, object]:
-    return {
-        "command": {
-            "id": command_id,
-            "name": "sh",
-            "args": [],
-            "cwd": "/vercel/sandbox",
-            "sessionId": session_id,
-            "exitCode": exit_code,
-            "startedAt": 1,
-        }
-    }
+_RECOVERABLE: dict[str, tuple[Callable[[Mode, Any], Any], str]] = {
+    "read_bytes": (lambda mode, box: mode(box.fs.read_bytes("message.txt")), "fs.read"),
+    "write_text": (
+        lambda mode, box: mode(box.fs.write_text("message.txt", "replacement")),
+        "fs.write",
+    ),
+    "batch": (_batch_write, "fs.write"),
+    "listdir": (lambda mode, box: mode(box.fs.listdir("directory")), "commands.create"),
+    "rename": (lambda mode, box: mode(box.fs.rename("before.txt", "after.txt")), "commands.create"),
+}
 
 
-def _logs_response(stdout: str = "", stderr: str = "") -> httpx.Response:
-    records = []
-    if stdout:
-        records.append({"stream": "stdout", "data": stdout})
-    if stderr:
-        records.append({"stream": "stderr", "data": stderr})
-    return httpx.Response(200, text="".join(json.dumps(item) + "\n" for item in records))
-
-
-def _tar_entries(content: bytes) -> dict[str, tuple[bytes, int]]:
-    with tarfile.open(fileobj=io.BytesIO(content), mode="r:gz") as archive:
-        entries: dict[str, tuple[bytes, int]] = {}
-        for member in archive.getmembers():
-            extracted = archive.extractfile(member)
-            assert extracted is not None
-            entries[member.name] = (extracted.read(), member.mode)
-    return entries
-
-
-_RECOVERABLE_FILESYSTEM_OPERATIONS = (
-    "read_bytes",
-    "write_text",
-    "batch",
-    "listdir",
-    "rename",
-)
-
-
-async def _run_async_filesystem_operation(handle: sandbox.Sandbox, operation: str) -> object:
-    if operation == "read_bytes":
-        return await handle.fs.read_bytes("message.txt")
-    if operation == "write_text":
-        await handle.fs.write_text("message.txt", "replacement")
-        return None
-    if operation == "batch":
-        async with handle.fs.batch() as batch:
-            batch.write_text("message.txt", "replacement")
-        return None
-    if operation == "listdir":
-        return await handle.fs.listdir("directory")
-    if operation == "rename":
-        await handle.fs.rename("before.txt", "after.txt")
-        return None
-    raise AssertionError(f"Unexpected filesystem operation: {operation}")
-
-
-def _run_sync_filesystem_operation(handle: sandbox_sync.SyncSandbox, operation: str) -> object:
-    if operation == "read_bytes":
-        return handle.fs.read_bytes("message.txt")
-    if operation == "write_text":
-        handle.fs.write_text("message.txt", "replacement")
-        return None
-    if operation == "batch":
-        with handle.fs.batch() as batch:
-            batch.write_text("message.txt", "replacement")
-        return None
-    if operation == "listdir":
-        return handle.fs.listdir("directory")
-    if operation == "rename":
-        handle.fs.rename("before.txt", "after.txt")
-        return None
-    raise AssertionError(f"Unexpected filesystem operation: {operation}")
-
-
-def _install_filesystem_recovery_routes(
-    operation: str,
-) -> tuple[list[str], Any, tuple[Any, Any]]:
-    events: list[str] = []
-
-    def sandbox_handler(request: httpx.Request) -> httpx.Response:
-        if request.url.params["resume"] == "false":
-            events.append("lookup")
-            return httpx.Response(200, json=_sandbox_response("sbx_old"))
-        events.append("resume")
-        return httpx.Response(200, json=_sandbox_response("sbx_new"))
-
-    resume_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
-        side_effect=sandbox_handler
-    )
-
-    def stopped_handler(_request: httpx.Request) -> httpx.Response:
-        events.append("old")
-        return httpx.Response(
-            409,
-            json={"error": {"code": "sandbox_stopped", "message": "session is stopped"}},
-        )
-
-    if operation == "read_bytes":
-        old_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_old/fs/read").mock(
-            side_effect=stopped_handler
-        )
-        replacement_route = respx.post(
-            "https://sandbox.test/v2/sandboxes/sessions/sbx_new/fs/read"
-        ).mock(return_value=httpx.Response(200, content=b"replacement"))
-    elif operation in {"write_text", "batch"}:
-        old_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_old/fs/write").mock(
-            side_effect=stopped_handler
-        )
-        replacement_route = respx.post(
-            "https://sandbox.test/v2/sandboxes/sessions/sbx_new/fs/write"
-        ).mock(return_value=httpx.Response(204))
-    else:
-        old_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_old/cmd").mock(
-            side_effect=stopped_handler
-        )
-        command_id = f"{operation}_new"
-        replacement_route = respx.post(
-            "https://sandbox.test/v2/sandboxes/sessions/sbx_new/cmd"
-        ).mock(return_value=httpx.Response(200, json=_command_response(command_id, "sbx_new")))
-        respx.get(f"https://sandbox.test/v2/sandboxes/sessions/sbx_new/cmd/{command_id}").mock(
-            return_value=httpx.Response(
-                200, json=_command_response(command_id, "sbx_new", exit_code=0)
-            )
-        )
-        respx.get(f"https://sandbox.test/v2/sandboxes/sessions/sbx_new/cmd/{command_id}/logs").mock(
-            return_value=_logs_response("listed\0file\0" if operation == "listdir" else "")
-        )
-
-    return events, resume_route, (old_route, replacement_route)
-
-
-@pytest.mark.parametrize("operation", _RECOVERABLE_FILESYSTEM_OPERATIONS)
-@respx.mock
-async def test_async_sandbox_filesystem_replays_recoverable_operations(
-    mock_env_clear: None, operation: str
+@pytest.mark.parametrize("operation", list(_RECOVERABLE))
+async def test_operations_on_a_stopped_session_replay_on_a_replacement(
+    mode: Mode, fake_api: FakeSandboxApi, operation: str
 ) -> None:
-    events, resume_route, (old_route, replacement_route) = _install_filesystem_recovery_routes(
-        operation
-    )
+    fake_api.seed(files={"message.txt": "original", "directory/listed": "", "before.txt": "moved"})
+    run, route = _RECOVERABLE[operation]
 
-    async with session(service_options=_session_options()):
-        box = await sandbox.get_sandbox(name="preview")
-        result = await _run_async_filesystem_operation(box, operation)
+    async with mode.session():
+        box = await mode(mode.sandbox.get_sandbox(name="preview"))
+        fake_api.stop("preview")
+        result = await run(mode, box)
 
-    assert box.current_session_id == "sbx_new"
-    assert old_route.call_count == 1
-    assert replacement_route.call_count == 1
-    assert resume_route.call_count == 2
-    assert events == ["lookup", "old", "resume"]
+    assert box.current_session_id == "sbx_2"
+    # Command-backed operations go on to wait for the command and read its logs.
+    assert _trail(fake_api)[:4] == ["lookup", f"{route}@sbx_1", "resume", f"{route}@sbx_2"]
+    files = fake_api.current_session("preview").fs
     if operation == "read_bytes":
-        assert result == b"replacement"
+        assert result == b"original"
     elif operation == "listdir":
         assert result == [DirectoryEntry(path="listed", kind="file")]
+    elif operation == "rename":
+        assert files.read(f"{_CWD}/after.txt") == b"moved"
     else:
-        assert result is None
+        assert files.read(f"{_CWD}/message.txt") == b"replacement"
 
 
-@pytest.mark.parametrize("operation", _RECOVERABLE_FILESYSTEM_OPERATIONS)
-@respx.mock
-def test_sync_sandbox_filesystem_replays_recoverable_operations(
-    mock_env_clear: None, operation: str
+async def test_a_lazy_reader_binds_the_session_it_finally_reads_from(
+    mode: Mode, fake_api: FakeSandboxApi
 ) -> None:
-    events, resume_route, (old_route, replacement_route) = _install_filesystem_recovery_routes(
-        operation
-    )
+    fake_api.seed(files={"message.txt": "persisted"})
 
-    with session(service_options=_session_options()):
-        box = sandbox_sync.get_sandbox(name="preview")
-        result = _run_sync_filesystem_operation(box, operation)
-
-    assert box.current_session_id == "sbx_new"
-    assert old_route.call_count == 1
-    assert replacement_route.call_count == 1
-    assert resume_route.call_count == 2
-    assert events == ["lookup", "old", "resume"]
-    if operation == "read_bytes":
-        assert result == b"replacement"
-    elif operation == "listdir":
-        assert result == [DirectoryEntry(path="listed", kind="file")]
-    else:
-        assert result is None
-
-
-@respx.mock
-async def test_async_lazy_reader_entry_recovers_and_binds_replacement_session(
-    mock_env_clear: None,
-) -> None:
-    events: list[str] = []
-
-    def sandbox_handler(request: httpx.Request) -> httpx.Response:
-        if request.url.params["resume"] == "false":
-            events.append("lookup")
-            return httpx.Response(200, json=_sandbox_response("sbx_stopped"))
-        events.append("resume")
-        return httpx.Response(200, json=_sandbox_response("sbx_replacement"))
-
-    sandbox_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
-        side_effect=sandbox_handler
-    )
-    old_read = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_stopped/fs/read").mock(
-        return_value=httpx.Response(
-            410,
-            json={"error": {"code": "sandbox_stopped", "message": "stopped"}},
-        )
-    )
-    replacement_read = respx.post(
-        "https://sandbox.test/v2/sandboxes/sessions/sbx_replacement/fs/read"
-    ).mock(return_value=httpx.Response(200, content=b"replacement"))
-
-    async with session(service_options=_session_options()):
-        box = await sandbox.get_sandbox(name="preview")
+    async with mode.session():
+        box = await mode(mode.sandbox.get_sandbox(name="preview"))
         reader = box.fs.open("message.txt", "rb")
-        assert sandbox_route.call_count == 1
-        assert not old_read.called
-        assert not replacement_read.called
+        assert fake_api.routes() == ["sandboxes.get"]
+        fake_api.stop("preview")
+        async with mode.enter(reader):
+            assert await mode(reader.read()) == b"persisted"
 
-        async with reader:
-            assert await reader.read() == b"replacement"
-
-    assert box.current_session_id == "sbx_replacement"
-    assert sandbox_route.call_count == 2
-    assert old_read.call_count == 1
-    assert replacement_read.call_count == 1
-    assert events == ["lookup", "resume"]
+    assert box.current_session_id == "sbx_2"
+    assert _trail(fake_api) == ["lookup", "fs.read@sbx_1", "resume", "fs.read@sbx_2"]
 
 
-@respx.mock
-def test_sync_lazy_reader_entry_recovers_and_binds_replacement_session(
-    mock_env_clear: None,
+async def test_an_open_reader_stays_on_its_session_while_others_recover(
+    mode: Mode, fake_api: FakeSandboxApi
 ) -> None:
-    events: list[str] = []
+    fake_api.seed(files={"recover.txt": "recovered"})
+    failure = RuntimeError("stream broke")
+    stream = _TrackedStream([b"first", b"-second"], failure=failure)
+    fake_api.respond("fs.read", httpx.Response(200, stream=stream), when=_reads("stream.txt"))
 
-    def sandbox_handler(request: httpx.Request) -> httpx.Response:
-        if request.url.params["resume"] == "false":
-            events.append("lookup")
-            return httpx.Response(200, json=_sandbox_response("sbx_stopped"))
-        events.append("resume")
-        return httpx.Response(200, json=_sandbox_response("sbx_replacement"))
-
-    sandbox_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
-        side_effect=sandbox_handler
-    )
-    old_read = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_stopped/fs/read").mock(
-        return_value=httpx.Response(
-            410,
-            json={"error": {"code": "sandbox_stopped", "message": "stopped"}},
-        )
-    )
-    replacement_read = respx.post(
-        "https://sandbox.test/v2/sandboxes/sessions/sbx_replacement/fs/read"
-    ).mock(return_value=httpx.Response(200, content=b"replacement"))
-
-    with session(service_options=_session_options()):
-        box = sandbox_sync.get_sandbox(name="preview")
-        reader = box.fs.open("message.txt", "rb")
-        assert sandbox_route.call_count == 1
-        assert not old_read.called
-        assert not replacement_read.called
-
-        with reader:
-            assert reader.read() == b"replacement"
-
-    assert box.current_session_id == "sbx_replacement"
-    assert sandbox_route.call_count == 2
-    assert old_read.call_count == 1
-    assert replacement_read.call_count == 1
-    assert events == ["lookup", "resume"]
-
-
-@respx.mock
-async def test_async_entered_reader_stays_pinned_after_other_filesystem_recovery(
-    mock_env_clear: None,
-) -> None:
-    events: list[str] = []
-
-    def sandbox_handler(request: httpx.Request) -> httpx.Response:
-        if request.url.params["resume"] == "false":
-            events.append("lookup")
-            return httpx.Response(200, json=_sandbox_response("sbx_old"))
-        events.append("sbx_replacement")
-        return httpx.Response(200, json=_sandbox_response("sbx_replacement"))
-
-    sandbox_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
-        side_effect=sandbox_handler
-    )
-    data = {"error": {"code": "sandbox_stopped", "message": "stream stopped"}}
-    failure = SandboxApiError(httpx.Response(409, json=data), "stream stopped", data=data)
-    stream = _TrackedAsyncStream([b"first", b"-second"], failure=failure)
-
-    def bound_read(request: httpx.Request) -> httpx.Response:
-        payload = json.loads(request.content)
-        if payload["path"] == "stream.txt":
-            return httpx.Response(200, stream=stream)
-        assert payload["path"] == "recover.txt"
-        return httpx.Response(
-            409,
-            json={"error": {"code": "sandbox_stopped", "message": "session is stopped"}},
-        )
-
-    bound_read_route = respx.post(
-        "https://sandbox.test/v2/sandboxes/sessions/sbx_old/fs/read"
-    ).mock(side_effect=bound_read)
-    replacement_read_route = respx.post(
-        "https://sandbox.test/v2/sandboxes/sessions/sbx_replacement/fs/read"
-    ).mock(return_value=httpx.Response(200, content=b"recovered"))
-
-    async with session(service_options=_session_options()):
-        box = await sandbox.get_sandbox(name="preview")
-        async with box.fs.open("stream.txt", "rb") as reader:
-            assert await reader.read(1) == b"f"
-            assert await box.fs.read_bytes("recover.txt") == b"recovered"
-            assert box.current_session_id == "sbx_replacement"
-            assert await reader.read(6) == b"irst-s"
-            with pytest.raises(SandboxApiError) as exc_info:
-                await reader.read()
+    async with mode.session():
+        box = await mode(mode.sandbox.get_sandbox(name="preview"))
+        async with mode.enter(box.fs.open("stream.txt", "rb")) as reader:
+            assert await mode(reader.read(1)) == b"f"
+            fake_api.stop("preview")
+            assert await mode(box.fs.read_bytes("recover.txt")) == b"recovered"
+            assert box.current_session_id == "sbx_2"
+            assert await mode(reader.read(6)) == b"irst-s"
+            with pytest.raises(RuntimeError) as exc_info:
+                await mode(reader.read())
 
     assert exc_info.value is failure
-    assert stream.aclose_called
-    assert sandbox_route.call_count == 2
-    assert bound_read_route.call_count == 2
-    assert replacement_read_route.call_count == 1
-    assert events == ["lookup", "sbx_replacement"]
+    assert stream.closed
+    assert _trail(fake_api) == [
+        "lookup",
+        "fs.read@sbx_1",
+        "fs.read@sbx_1",
+        "resume",
+        "fs.read@sbx_2",
+    ]
 
 
-@respx.mock
-def test_sync_entered_reader_stays_pinned_after_other_filesystem_recovery(
-    mock_env_clear: None,
+async def test_a_sized_writer_pins_its_session_and_does_not_recover(
+    mode: Mode, fake_api: FakeSandboxApi
 ) -> None:
-    events: list[str] = []
+    fake_api.seed()
 
-    def sandbox_handler(request: httpx.Request) -> httpx.Response:
-        if request.url.params["resume"] == "false":
-            events.append("lookup")
-            return httpx.Response(200, json=_sandbox_response("sbx_old"))
-        events.append("sbx_replacement")
-        return httpx.Response(200, json=_sandbox_response("sbx_replacement"))
-
-    sandbox_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
-        side_effect=sandbox_handler
-    )
-    data = {"error": {"code": "sandbox_stopped", "message": "stream stopped"}}
-    failure = SandboxApiError(httpx.Response(409, json=data), "stream stopped", data=data)
-    stream = _TrackedSyncStream([b"first", b"-second"], failure=failure)
-
-    def bound_read(request: httpx.Request) -> httpx.Response:
-        payload = json.loads(request.content)
-        if payload["path"] == "stream.txt":
-            return httpx.Response(200, stream=stream)
-        assert payload["path"] == "recover.txt"
-        return httpx.Response(
-            409,
-            json={"error": {"code": "sandbox_stopped", "message": "session is stopped"}},
-        )
-
-    bound_read_route = respx.post(
-        "https://sandbox.test/v2/sandboxes/sessions/sbx_old/fs/read"
-    ).mock(side_effect=bound_read)
-    replacement_read_route = respx.post(
-        "https://sandbox.test/v2/sandboxes/sessions/sbx_replacement/fs/read"
-    ).mock(return_value=httpx.Response(200, content=b"recovered"))
-
-    with session(service_options=_session_options()):
-        box = sandbox_sync.get_sandbox(name="preview")
-        with box.fs.open("stream.txt", "rb") as reader:
-            assert reader.read(1) == b"f"
-            assert box.fs.read_bytes("recover.txt") == b"recovered"
-            assert box.current_session_id == "sbx_replacement"
-            assert reader.read(6) == b"irst-s"
-            with pytest.raises(SandboxApiError) as exc_info:
-                reader.read()
-
-    assert exc_info.value is failure
-    assert stream.close_called
-    assert sandbox_route.call_count == 2
-    assert bound_read_route.call_count == 2
-    assert replacement_read_route.call_count == 1
-    assert events == ["lookup", "sbx_replacement"]
-
-
-@respx.mock
-async def test_async_active_writer_finish_lifecycle_failure_does_not_resume(
-    mock_env_clear: None,
-) -> None:
-    sandbox_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
-        side_effect=[
-            httpx.Response(200, json=_sandbox_response("sbx_old")),
-            httpx.Response(200, json=_sandbox_response("sbx_bound")),
-        ]
-    )
-    write_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_bound/fs/write").mock(
-        return_value=httpx.Response(
-            409,
-            json={"error": {"code": "sandbox_stopped", "message": "stream stopped"}},
-        )
-    )
-
-    async with session(service_options=_session_options()):
-        box = await sandbox.get_sandbox(name="preview")
+    async with mode.session():
+        box = await mode(mode.sandbox.get_sandbox(name="preview"))
         with pytest.raises(SandboxFilesystemWriteError) as exc_info:
-            async with box.fs.open("stream.txt", "wb", size=7) as writer:
-                await writer.write(b"partial")
+            async with mode.enter(box.fs.open("stream.txt", "wb", size=7)) as writer:
+                await mode(writer.write(b"partial"))
+                fake_api.stop("preview")
 
+    assert isinstance(exc_info.value.cause, SandboxApiError)
     assert exc_info.value.cause.code == "sandbox_stopped"
-    assert write_route.call_count == 1
-    assert sandbox_route.call_count == 2
+    assert _trail(fake_api) == ["lookup", "resume", "fs.write@sbx_1"]
 
 
-@respx.mock
-def test_sync_active_writer_finish_lifecycle_failure_does_not_resume(
-    mock_env_clear: None,
-) -> None:
-    sandbox_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
-        side_effect=[
-            httpx.Response(200, json=_sandbox_response("sbx_old")),
-            httpx.Response(200, json=_sandbox_response("sbx_bound")),
-        ]
-    )
-    write_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_bound/fs/write").mock(
-        return_value=httpx.Response(
-            409,
-            json={"error": {"code": "sandbox_stopped", "message": "stream stopped"}},
-        )
-    )
-
-    with session(service_options=_session_options()):
-        box = sandbox_sync.get_sandbox(name="preview")
-        with pytest.raises(SandboxFilesystemWriteError) as exc_info:
-            with box.fs.open("stream.txt", "wb", size=7) as writer:
-                writer.write(b"partial")
-
-    assert exc_info.value.cause.code == "sandbox_stopped"
-    assert write_route.call_count == 1
-    assert sandbox_route.call_count == 2
-
-
-@respx.mock
-@pytest.mark.parametrize("sync", [False, True])
 @pytest.mark.parametrize("error_code", ["sandbox_stopping", "sandbox_snapshotting"])
-async def test_stream_binding_retries_api_resume_before_pinning_session(
-    mock_env_clear: None,
-    sync: bool,
-    error_code: str,
+async def test_a_sized_writer_retries_a_resume_that_lands_mid_transition(
+    mode: Mode, fake_api: FakeSandboxApi, error_code: str
 ) -> None:
-    attempts = 0
+    fake_api.seed()
+    fake_api.fail("sandboxes.get", status=422, code=error_code, when=_resumes)
 
-    def sandbox_handler(request: httpx.Request) -> httpx.Response:
-        nonlocal attempts
-        if request.url.params["resume"] == "false":
-            return httpx.Response(200, json=_sandbox_response("sbx_old"))
-        attempts += 1
-        if attempts == 1:
-            return httpx.Response(
-                409,
-                json={"error": {"code": error_code, "message": "transitioning"}},
-            )
-        return httpx.Response(200, json=_sandbox_response("sbx_new"))
+    async with mode.session():
+        box = await mode(mode.sandbox.get_sandbox(name="preview"))
+        fake_api.stop("preview")
+        async with mode.enter(box.fs.open("stream.txt", "wb", size=4)) as writer:
+            await mode(writer.write(b"data"))
 
-    sandbox_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
-        side_effect=sandbox_handler
-    )
-    write_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_new/fs/write").mock(
-        return_value=httpx.Response(204)
-    )
-
-    if sync:
-        with session(service_options=_session_options(sync=True)):
-            sync_box = sandbox_sync.get_sandbox(name="preview")
-            with sync_box.fs.open("stream.txt", "wb", size=4) as sync_writer:
-                sync_writer.write(b"data")
-    else:
-        async with session(service_options=_session_options()):
-            async_box = await sandbox.get_sandbox(name="preview")
-            async with async_box.fs.open("stream.txt", "wb", size=4) as async_writer:
-                await async_writer.write(b"data")
-
-    assert sandbox_route.call_count == 3
-    assert write_route.call_count == 1
+    assert _trail(fake_api) == ["lookup", "resume", "resume", "fs.write@sbx_2"]
+    assert fake_api.current_session("preview").fs.read(f"{_CWD}/stream.txt") == b"data"
 
 
-@respx.mock
-@pytest.mark.parametrize("sync", [False, True])
-async def test_unsized_writer_recovers_at_publish(
-    mock_env_clear: None,
-    sync: bool,
+async def test_an_unsized_writer_spools_and_recovers_when_it_publishes(
+    mode: Mode, fake_api: FakeSandboxApi
 ) -> None:
-    sandbox_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
-        side_effect=[
-            httpx.Response(200, json=_sandbox_response("sbx_old")),
-            httpx.Response(200, json=_sandbox_response("sbx_new")),
-        ]
-    )
-    old_write = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_old/fs/write").mock(
-        return_value=httpx.Response(
-            410,
-            json={"error": {"code": "sandbox_stopped", "message": "stopped"}},
-        )
-    )
-    new_write = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_new/fs/write").mock(
-        return_value=httpx.Response(204)
-    )
+    fake_api.seed()
 
-    if sync:
-        with session(service_options=_session_options(sync=True)):
-            sync_box = sandbox_sync.get_sandbox(name="preview")
-            with sync_box.fs.open("replay.txt", "wb") as writer:
-                writer.write(b"replayable")
-    else:
-        async with session(service_options=_session_options()):
-            async_box = await sandbox.get_sandbox(name="preview")
-            async with async_box.fs.open("replay.txt", "wb") as writer:
-                await writer.write(b"replayable")
+    async with mode.session():
+        box = await mode(mode.sandbox.get_sandbox(name="preview"))
+        async with mode.enter(box.fs.open("replay.txt", "wb")) as writer:
+            await mode(writer.write(b"replay"))
+            await mode(writer.write(b"able"))
+            assert fake_api.routes() == ["sandboxes.get"]
+            fake_api.stop("preview")
 
-    assert sandbox_route.call_count == 2
-    assert old_write.call_count == 1
-    assert new_write.call_count == 1
-    assert (
-        _tar_entries(new_write.calls[0].request.content)["vercel/sandbox/replay.txt"][0]
-        == b"replayable"
-    )
+    assert _trail(fake_api) == ["lookup", "fs.write@sbx_1", "resume", "fs.write@sbx_2"]
+    assert fake_api.current_session("preview").fs.read(f"{_CWD}/replay.txt") == b"replayable"
 
 
-@respx.mock
-async def test_async_runtime_session_filesystem_and_lazy_handle_do_not_resume(
-    mock_env_clear: None,
+async def test_session_filesystems_stay_on_their_session(
+    mode: Mode, fake_api: FakeSandboxApi
 ) -> None:
-    sandbox_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
-        return_value=httpx.Response(200, json=_sandbox_response("sbx_stopped"))
-    )
-    read_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_stopped/fs/read").mock(
-        return_value=httpx.Response(
-            409,
-            json={"error": {"code": "sandbox_stopped", "message": "session is stopped"}},
-        )
-    )
+    fake_api.seed(files={"message.txt": "original"})
 
-    async with session(service_options=_session_options()):
-        box = await sandbox.get_sandbox(name="preview")
-        runtime_session = box.current_session
-        assert runtime_session is not None
-        lazy_reader = runtime_session.fs.open("message.txt", "rb")
-        assert sandbox_route.call_count == 1
-        assert read_route.call_count == 0
+    async with mode.session():
+        box = await mode(mode.sandbox.get_sandbox(name="preview"))
+        box_fs = box.fs
+        session_fs = box.current_session.fs
+        lazy_reader = session_fs.open("message.txt", "rb")
+        fake_api.stop("preview")
 
-        with pytest.raises(SandboxApiError, match="session is stopped"):
-            await runtime_session.fs.read_bytes("message.txt")
-        with pytest.raises(SandboxApiError, match="session is stopped"):
-            async with lazy_reader:
+        with pytest.raises(SandboxApiError, match="no longer available"):
+            await mode(session_fs.read_bytes("message.txt"))
+        with pytest.raises(SandboxApiError, match="no longer available"):
+            async with mode.enter(lazy_reader):
                 pass
+        assert not fake_api.requests_to("sandboxes.get", when=_resumes)
 
-    assert read_route.call_count == 2
-    assert sandbox_route.call_count == 1
+        await mode(box_fs.mkdir("current"))
+        async with mode.enter(box_fs.open("current.bin", "wb", size=7)) as writer:
+            await mode(writer.write(b"current"))
 
-
-@respx.mock
-def test_sync_runtime_session_filesystem_and_lazy_handle_do_not_resume(
-    mock_env_clear: None,
-) -> None:
-    sandbox_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
-        return_value=httpx.Response(200, json=_sandbox_response("sbx_stopped"))
-    )
-    read_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_stopped/fs/read").mock(
-        return_value=httpx.Response(
-            409,
-            json={"error": {"code": "sandbox_stopped", "message": "session is stopped"}},
-        )
-    )
-
-    with session(service_options=_session_options()):
-        box = sandbox_sync.get_sandbox(name="preview")
-        runtime_session = box.current_session
-        assert runtime_session is not None
-        lazy_reader = runtime_session.fs.open("message.txt", "rb")
-        assert sandbox_route.call_count == 1
-        assert read_route.call_count == 0
-
-        with pytest.raises(SandboxApiError, match="session is stopped"):
-            runtime_session.fs.read_bytes("message.txt")
-        with pytest.raises(SandboxApiError, match="session is stopped"):
-            with lazy_reader:
-                pass
-
-    assert read_route.call_count == 2
-    assert sandbox_route.call_count == 1
+    replacement = fake_api.current_session("preview")
+    assert replacement.id == "sbx_2"
+    assert replacement.fs.is_dir(f"{_CWD}/current")
+    assert replacement.fs.read(f"{_CWD}/current.bin") == b"current"
+    assert len(fake_api.requests_to("fs.read")) == 2
 
 
 @pytest.mark.parametrize(
-    ("mode", "options", "error_type"),
+    ("mode_", "options", "error_type"),
     [
         ("invalid", {}, ValueError),
         ("rb", {"encoding": "utf-8"}, ValueError),
@@ -680,121 +252,75 @@ def test_sync_runtime_session_filesystem_and_lazy_handle_do_not_resume(
         ("wb", {"permissions": True}, TypeError),
     ],
 )
-@respx.mock
-async def test_filesystem_open_rejects_invalid_options(
-    mock_env_clear: None,
-    mode: str,
-    options: dict[str, object],
-    error_type: type[Exception],
+async def test_open_rejects_invalid_options(
+    fake_api: FakeSandboxApi, mode_: str, options: dict[str, object], error_type: type[Exception]
 ) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-
-    async with session(service_options=_session_options()):
+    async with fake_api.session():
         box = await sandbox.create_sandbox(name="preview")
         with pytest.raises(error_type):
-            box.fs.open("data.bin", mode, **options)  # type: ignore[call-overload]
+            box.fs.open("data.bin", mode_, **options)  # type: ignore[call-overload]
 
 
-@respx.mock
-async def test_async_filesystem_native_operations_and_write_composition(
-    mock_env_clear: None,
+async def test_native_operations_write_bytes_text_and_modes(
+    mode: Mode, fake_api: FakeSandboxApi
 ) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    mkdir = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/mkdir").mock(
-        return_value=httpx.Response(204)
-    )
-    reads = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/read").mock(
-        side_effect=[httpx.Response(200, content=b"bytes"), httpx.Response(200, content=b"text")]
-    )
-    writes = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/write").mock(
-        return_value=httpx.Response(204)
-    )
-
-    async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview")
-        assert isinstance(box.fs, sandbox.SandboxFilesystem)
-        assert box.current_session is not None
-        assert isinstance(box.current_session.fs, sandbox.SandboxFilesystem)
+    async with mode.session():
+        box = await mode(mode.sandbox.create_sandbox(name="preview"))
+        filesystem_type = (
+            sandbox_sync.SyncSandboxFilesystem if mode.sync else sandbox.SandboxFilesystem
+        )
+        assert isinstance(box.fs, filesystem_type)
+        assert isinstance(box.current_session.fs, filesystem_type)
         for method in ("mkdir", "read_file", "read_text", "write_files"):
             assert not hasattr(box, method)
             assert not hasattr(box.current_session, method)
 
-        await box.fs.mkdir(PurePosixPath("parent"), recursive=False)
-        assert await box.fs.read_bytes(PurePosixPath("data.bin")) == b"bytes"
-        assert await box.fs.read_text("message.txt") == "text"
-        await box.fs.write_bytes("data.bin", b"\x00\x01", mode=0o600)
-        await box.fs.write_text("message.txt", "hello", mode=0o640)
-        await box.fs.write_text(
-            PurePosixPath("file.txt"), "relative", cwd=PurePosixPath("workspace")
+        await mode(box.fs.mkdir(PurePosixPath("parent"), recursive=False))
+        await mode(box.fs.write_bytes("data.bin", b"\x00\x01", mode=0o600))
+        await mode(box.fs.write_text("message.txt", "hello", mode=0o640))
+        await mode(
+            box.fs.write_text(PurePosixPath("file.txt"), "relative", cwd=PurePosixPath("workspace"))
         )
+        assert await mode(box.fs.read_bytes(PurePosixPath("data.bin"))) == b"\x00\x01"
+        assert await mode(box.fs.read_text("message.txt")) == "hello"
+        assert await mode(box.fs.exists("workspace/file.txt"))
 
-    assert json.loads(mkdir.calls[0].request.content) == {
-        "path": "parent",
-        "recursive": False,
-    }
-    assert reads.call_count == 2
-    assert writes.call_count == 3
-    assert _tar_entries(writes.calls[0].request.content) == {
-        "vercel/sandbox/data.bin": (b"\x00\x01", 0o600)
-    }
-    assert _tar_entries(writes.calls[1].request.content) == {
-        "vercel/sandbox/message.txt": (b"hello", 0o640)
-    }
-    assert _tar_entries(writes.calls[2].request.content) == {
-        "vercel/sandbox/workspace/file.txt": (b"relative", 0o644)
-    }
+    files = fake_api.current_session("preview").fs
+    assert files.is_dir(f"{_CWD}/parent")
+    assert (files.read(f"{_CWD}/data.bin"), files.mode(f"{_CWD}/data.bin")) == (b"\x00\x01", 0o600)
+    assert (files.read(f"{_CWD}/message.txt"), files.mode(f"{_CWD}/message.txt")) == (
+        b"hello",
+        0o640,
+    )
+    path = f"{_CWD}/workspace/file.txt"
+    assert (files.read(path), files.mode(path)) == (b"relative", 0o644)
+    assert fake_api.requests_to("fs.mkdir")[0].json() == {"path": "parent", "recursive": False}
+    assert len(fake_api.requests_to("fs.write")) == 3
 
 
-@respx.mock
-async def test_async_unknown_size_writer_publishes_temporary_spool(
-    mock_env_clear: None,
+async def test_an_unsized_writer_uploads_once_at_close(
+    mode: Mode, fake_api: FakeSandboxApi
 ) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    write = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/write").mock(
-        return_value=httpx.Response(204)
-    )
+    async with mode.session():
+        box = await mode(mode.sandbox.create_sandbox(name="preview"))
+        async with mode.enter(box.fs.open("spooled.bin", "wb")) as writer:
+            await mode(writer.write(b"spooled"))
+            await mode(writer.write(b" data"))
+            assert not fake_api.requests_to("fs.write")
 
-    async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview")
-        async with box.fs.open("spooled.bin", "wb") as writer:
-            await writer.write(b"spooled")
-            await writer.write(b" data")
-            assert write.call_count == 0
-
-    assert _tar_entries(write.calls[0].request.content) == {
-        "vercel/sandbox/spooled.bin": (b"spooled data", 0o644)
-    }
+    assert len(fake_api.requests_to("fs.write")) == 1
+    assert fake_api.current_session("preview").fs.read(f"{_CWD}/spooled.bin") == b"spooled data"
 
 
 @pytest.mark.parametrize("content", [b"", b"abc"])
-@respx.mock
-async def test_async_binary_writer_rejects_incomplete_declared_size(
-    mock_env_clear: None, content: bytes
+async def test_a_sized_writer_rejects_short_content(
+    mode: Mode, fake_api: FakeSandboxApi, content: bytes
 ) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/write").mock(
-        return_value=httpx.Response(204)
-    )
-
-    async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview")
+    async with mode.session():
+        box = await mode(mode.sandbox.create_sandbox(name="preview"))
         with pytest.raises(SandboxUploadSizeMismatchError) as exc_info:
-            async with box.fs.open("data.bin", "wb", size=4) as writer:
-                await writer.write(content)
+            async with mode.enter(box.fs.open("data.bin", "wb", size=4)) as writer:
+                await mode(writer.write(content))
 
     error = exc_info.value
     assert (error.path, error.declared, error.consumed, error.early_end) == (
@@ -803,21 +329,14 @@ async def test_async_binary_writer_rejects_incomplete_declared_size(
         len(content),
         True,
     )
+    assert not fake_api.current_session("preview").fs.exists(f"{_CWD}/data.bin")
 
 
-@respx.mock
-async def test_filesystem_write_wraps_api_error(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/write").mock(
-        return_value=httpx.Response(
-            413, json={"error": {"code": "too_large", "message": "too large"}}
-        )
-    )
+async def test_write_failures_name_every_path_in_the_request(fake_api: FakeSandboxApi) -> None:
+    fake_api.seed(files={"workspace/b.bin/inner": "a directory is in the way"})
 
-    async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview")
+    async with fake_api.session():
+        box = await sandbox.get_sandbox(name="preview")
         with pytest.raises(SandboxFilesystemWriteError) as exc_info:
             async with box.fs.batch(cwd=PurePosixPath("workspace")) as batch:
                 batch.write_text(PurePosixPath("a.txt"), "a")
@@ -825,510 +344,157 @@ async def test_filesystem_write_wraps_api_error(mock_env_clear: None) -> None:
 
     error = exc_info.value
     assert error.paths == ("a.txt", "b.bin")
-    assert error.cwd == "/vercel/sandbox/workspace"
-    assert error.cause.code == "too_large"
+    assert error.cwd == f"{_CWD}/workspace"
+    assert isinstance(error.cause, SandboxApiError)
+    assert error.cause.code == "write_file_failed"
 
 
-@respx.mock
-async def test_filesystem_target_binding_tracks_sandbox_but_not_runtime_session(
-    mock_env_clear: None,
+async def test_batches_upload_once_and_skip_empty_or_aborted_batches(
+    mode: Mode, fake_api: FakeSandboxApi
 ) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response("sbx_1"))
-    )
-    respx.patch("https://sandbox.test/v2/sandboxes/preview").mock(
-        return_value=httpx.Response(200, json=_sandbox_response("sbx_2"))
-    )
-    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
-        return_value=httpx.Response(200, json=_sandbox_response("sbx_2"))
-    )
-    first = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/mkdir").mock(
-        return_value=httpx.Response(204)
-    )
-    second = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_2/fs/mkdir").mock(
-        return_value=httpx.Response(204)
-    )
-    first_write = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/write").mock(
-        return_value=httpx.Response(204)
-    )
-    second_write = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_2/fs/write").mock(
-        return_value=httpx.Response(204)
-    )
-    first_read = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/read").mock(
-        return_value=httpx.Response(200, content=b"original")
-    )
-    second_read = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_2/fs/read").mock(
-        return_value=httpx.Response(200, content=b"current")
-    )
-
-    async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview")
-        retained_box_fs = box.fs
-        assert box.current_session is not None
-        retained_session_fs = box.current_session.fs
-        await box.update(current_snapshot_id="snap_1")
-        await retained_box_fs.mkdir("current")
-        await retained_session_fs.mkdir("original")
-        async with retained_box_fs.open("current.bin", "wb", size=7) as current_writer:
-            await current_writer.write(b"current")
-        async with retained_session_fs.open("original.bin", "wb", size=8) as original_writer:
-            await original_writer.write(b"original")
-        async with retained_box_fs.open("current.bin", "rb") as current_reader:
-            assert await current_reader.read() == b"current"
-        async with retained_session_fs.open("original.bin", "rb") as original_reader:
-            assert await original_reader.read() == b"original"
-
-    assert second.call_count == 1
-    assert first.call_count == 1
-    assert second_write.call_count == 1
-    assert first_write.call_count == 1
-    assert second_read.call_count == 1
-    assert first_read.call_count == 1
-
-
-@respx.mock
-async def test_async_filesystem_batch_stages_one_request_and_skips_aborted_or_empty_batches(
-    mock_env_clear: None,
-) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    writes = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/write").mock(
-        return_value=httpx.Response(204)
-    )
-
-    async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview")
+    async with mode.session():
+        box = await mode(mode.sandbox.create_sandbox(name="preview"))
         staged = box.fs.batch(cwd="workspace")
         with pytest.raises(RuntimeError):
             staged.write_text("outside.txt", "no")
-        async with staged as batch:
+        async with mode.enter(staged) as batch:
             batch.write_text("message.txt", "cafe", encoding="ascii", mode=0o640)
             batch.write_bytes("data.bin", b"\x00", mode=0o600)
         with pytest.raises(RuntimeError):
             staged.write_bytes("after.bin", b"no")
         with pytest.raises(RuntimeError):
-            async with staged:
+            async with mode.enter(staged):
                 pass
 
-        async with box.fs.batch():
+        async with mode.enter(box.fs.batch()):
             pass
         with pytest.raises(ValueError):
-            async with box.fs.batch() as batch:
+            async with mode.enter(box.fs.batch()) as batch:
                 batch.write_text("ignored.txt", "ignored")
                 raise ValueError("abort")
 
-    assert writes.call_count == 1
-    assert _tar_entries(writes.calls[0].request.content) == {
-        "vercel/sandbox/workspace/data.bin": (b"\x00", 0o600),
-        "vercel/sandbox/workspace/message.txt": (b"cafe", 0o640),
-    }
+    assert len(fake_api.requests_to("fs.write")) == 1
+    files = fake_api.current_session("preview").fs
+    assert files.read(f"{_CWD}/workspace/message.txt") == b"cafe"
+    assert files.mode(f"{_CWD}/workspace/message.txt") == 0o640
+    assert files.mode(f"{_CWD}/workspace/data.bin") == 0o600
+    assert not files.exists(f"{_CWD}/ignored.txt")
 
 
-@respx.mock
-async def test_command_backed_filesystem_operations_parse_output_and_pass_paths_as_args(
-    mock_env_clear: None,
+async def test_command_backed_operations_pass_paths_as_arguments(
+    mode: Mode, fake_api: FakeSandboxApi
 ) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
+    unsafe = "-a; printf injected"
+    fake_api.seed(
+        files={unsafe: "unsafe", "directory/z name": "", "directory/.dot\nname/inner": ""}
     )
-    requested: list[dict[str, object]] = []
-    command_ids = iter(["exists", "is_file", "listdir", "remove", "rename"])
 
-    def start(request: httpx.Request) -> httpx.Response:
-        payload = json.loads(request.content)
-        assert isinstance(payload, dict)
-        requested.append(payload)
-        return httpx.Response(200, json=_command_response(next(command_ids)))
-
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(side_effect=start)
-    exit_codes = {"exists": 0, "is_file": 1, "listdir": 0, "remove": 0, "rename": 0}
-    output = {"listdir": "z name\0file\0.dot\nname\0directory\0"}
-    for command_id, exit_code in exit_codes.items():
-        respx.get(f"https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/{command_id}").mock(
-            return_value=httpx.Response(
-                200, json=_command_response(command_id, exit_code=exit_code)
-            )
-        )
-        respx.get(f"https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/{command_id}/logs").mock(
-            return_value=_logs_response(output.get(command_id, ""))
-        )
-
-    unsafe_path = "-a; printf injected"
-    async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview")
-        assert await box.fs.exists(unsafe_path)
-        assert not await box.fs.is_file("missing")
-        assert await box.fs.listdir("directory") == [
+    async with mode.session():
+        box = await mode(mode.sandbox.get_sandbox(name="preview"))
+        assert await mode(box.fs.exists(unsafe))
+        assert not await mode(box.fs.is_file("missing"))
+        assert await mode(box.fs.listdir("directory")) == [
             DirectoryEntry(path=".dot\nname", kind="directory"),
             DirectoryEntry(path="z name", kind="file"),
         ]
-        await box.fs.remove(unsafe_path, recursive=True, missing_ok=True)
-        await box.fs.rename(unsafe_path, "destination")
+        await mode(box.fs.rename(unsafe, "destination"))
+        await mode(box.fs.remove(unsafe, recursive=True, missing_ok=True))
 
-    request_args = [cast(list[str], item["args"]) for item in requested]
-    scripts = [args[1] for args in request_args]
-    assert all(unsafe_path not in script for script in scripts)
-    assert request_args[0][3:] == [unsafe_path, "-e"]
-    assert request_args[3][3:] == [unsafe_path, "true", "true"]
-    assert request_args[4][3:] == [unsafe_path, "destination"]
+    files = fake_api.current_session("preview").fs
+    assert files.read(f"{_CWD}/destination") == b"unsafe"
+    assert not files.exists(f"{_CWD}/{unsafe}")
+    exists, _is_file, _listdir, rename, remove = (
+        request.json()["args"] for request in fake_api.requests_to("commands.create")
+    )
+    assert all(unsafe not in args[1] for args in (exists, rename, remove))
+    assert exists[3:] == [unsafe, "-e"]
+    assert rename[3:] == [unsafe, "destination"]
+    assert remove[3:] == [unsafe, "true", "true"]
 
 
-@respx.mock
-async def test_filesystem_failures_use_filesystem_error_contract(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    read = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/read")
-    read.mock(
-        side_effect=[
-            httpx.Response(404, json={"error": {"code": "not_found", "message": "missing"}}),
-            httpx.Response(404, json={"error": {"code": "unknown", "message": "missing"}}),
-        ]
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
-        return_value=httpx.Response(200, json=_command_response("listdir"))
-    )
-    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/listdir").mock(
-        return_value=httpx.Response(200, json=_command_response("listdir", exit_code=2))
-    )
-    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/listdir/logs").mock(
-        return_value=_logs_response("partial", "cannot list")
+async def test_filesystem_failures_follow_the_error_contract(
+    mode: Mode, fake_api: FakeSandboxApi
+) -> None:
+    fake_api.seed()
+    fake_api.respond(
+        "fs.read",
+        httpx.Response(404, json={"error": {"code": "unknown", "message": "missing"}}),
+        when=_reads("unclassified"),
     )
 
-    async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview")
+    async with mode.session():
+        box = await mode(mode.sandbox.get_sandbox(name="preview"))
         with pytest.raises(SandboxPathNotFoundError) as missing:
-            await box.fs.read_bytes("missing")
-        assert missing.value.path == "missing"
+            await mode(box.fs.read_bytes(PurePosixPath("missing.txt")))
+        assert missing.value.path == "missing.txt"
+        assert missing.value.operation == "read_bytes"
         assert missing.value.cause.code == "not_found"
 
-        with pytest.raises(SandboxApiError):
-            await box.fs.read_bytes("unclassified")
+        with pytest.raises(SandboxApiError) as unclassified:
+            await mode(box.fs.read_bytes("unclassified"))
+        assert not isinstance(unclassified.value, SandboxPathNotFoundError)
 
         with pytest.raises(SandboxFilesystemCommandError) as failed:
-            await box.fs.listdir("directory")
-        assert failed.value.operation == "listdir"
-        assert failed.value.paths == ("directory",)
-        assert failed.value.exit_code == 2
-        assert failed.value.stdout == "partial"
-        assert failed.value.stderr == "cannot list"
+            await mode(box.fs.rename("absent", "destination"))
+        assert failed.value.operation == "rename"
+        assert failed.value.paths == ("absent", "destination")
+        assert failed.value.exit_code == 1
+        assert failed.value.stderr == "mv: cannot stat 'absent': No such file or directory\n"
 
 
-@respx.mock
-def test_sync_filesystem_capability_uses_sync_boundary(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
-        return_value=httpx.Response(200, json=_command_response("exists"))
-    )
-    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/exists").mock(
-        return_value=httpx.Response(200, json=_command_response("exists", exit_code=0))
-    )
-    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/exists/logs").mock(
-        return_value=_logs_response()
-    )
-
-    with session(service_options=_session_options()):
-        box = sandbox_sync.create_sandbox(name="preview")
-        assert isinstance(box.fs, sandbox_sync.SyncSandboxFilesystem)
-        assert box.current_session is not None
-        assert isinstance(box.current_session.fs, sandbox_sync.SyncSandboxFilesystem)
-        assert box.fs.exists("present")
-        for method in ("mkdir", "read_file", "read_text", "write_files"):
-            assert not hasattr(box, method)
-            assert not hasattr(box.current_session, method)
+# ---- the wire: streamed reads -------------------------------------------------------
 
 
-@respx.mock
-def test_sync_unknown_size_writer_publishes_temporary_spool(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    write = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/write").mock(
-        return_value=httpx.Response(204)
-    )
-
-    with session(service_options=_session_options()):
-        box = sandbox_sync.create_sandbox(name="preview")
-        with box.fs.open("spooled.bin", "wb") as writer:
-            writer.write(b"spooled")
-            writer.write(b" data")
-            assert write.call_count == 0
-
-    assert _tar_entries(write.calls[0].request.content) == {
-        "vercel/sandbox/spooled.bin": (b"spooled data", 0o644)
-    }
-
-
-@pytest.mark.parametrize("content", [b"", b"abc"])
-@respx.mock
-def test_sync_binary_writer_rejects_incomplete_declared_size(
-    mock_env_clear: None, content: bytes
-) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/write").mock(
-        return_value=httpx.Response(204)
-    )
-
-    with session(service_options=_session_options()):
-        box = sandbox_sync.create_sandbox(name="preview")
-        with pytest.raises(SandboxUploadSizeMismatchError) as exc_info:
-            with box.fs.open("data.bin", "wb", size=4) as writer:
-                writer.write(content)
-
-    error = exc_info.value
-    assert (error.path, error.declared, error.consumed, error.early_end) == (
-        "data.bin",
-        4,
-        len(content),
-        True,
-    )
-
-
-@respx.mock
-def test_sync_filesystem_batch_stages_one_request(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    writes = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/write").mock(
-        return_value=httpx.Response(204)
-    )
-
-    with session(service_options=_session_options()):
-        box = sandbox_sync.create_sandbox(name="preview")
-        staged = box.fs.batch(cwd="/tmp")
-        with staged as batch:
-            batch.write_text("message.txt", "hello")
-            batch.write_bytes("data.bin", b"\x01", mode=0o600)
-        with pytest.raises(RuntimeError):
-            with staged:
-                pass
-
-    assert writes.call_count == 1
-    assert _tar_entries(writes.calls[0].request.content) == {
-        "tmp/data.bin": (b"\x01", 0o600),
-        "tmp/message.txt": (b"hello", 0o644),
-    }
-
-
-class _TrackedAsyncStream(httpx.AsyncByteStream):
-    def __init__(self, chunks: list[bytes], *, failure: BaseException | None = None) -> None:
-        self._chunks = chunks
-        self._failure = failure
-        self.aclose_called = False
-
-    async def __aiter__(self) -> "AsyncIterator[bytes]":
-        for chunk in self._chunks:
-            yield chunk
-        if self._failure is not None:
-            raise self._failure
-
-    async def aclose(self) -> None:
-        self.aclose_called = True
-
-
-class _TrackedSyncStream(httpx.SyncByteStream):
-    def __init__(self, chunks: list[bytes], *, failure: BaseException | None = None) -> None:
-        self._chunks = chunks
-        self._failure = failure
-        self.close_called = False
-
-    def __iter__(self) -> Iterator[bytes]:
-        yield from self._chunks
-        if self._failure is not None:
-            raise self._failure
-
-    def close(self) -> None:
-        self.close_called = True
-
-
-@given(
-    prefix=st.text(
-        alphabet=st.characters(min_codepoint=0, max_codepoint=0xD7FF, exclude_characters="\r\n")
-    ),
-    suffix=st.text(
-        alphabet=st.characters(min_codepoint=0, max_codepoint=0xD7FF, exclude_characters="\r\n")
-    ),
-    chunk_size=st.integers(min_value=1, max_value=8),
+@pytest.mark.parametrize(
+    "chunks", [[b"abc", b"", b"def"], [b"abcdef"], []], ids=["chunked", "whole", "empty"]
 )
-@settings(deadline=1000, suppress_health_check=[HealthCheck.function_scoped_fixture])
-async def test_text_reader_preserves_crlf_split_across_chunks(
-    mock_env_clear: None,
-    prefix: str,
-    suffix: str,
-    chunk_size: int,
+async def test_read_bytes_joins_the_stream_and_closes_it(
+    mode: Mode, fake_api: FakeSandboxApi, chunks: list[bytes]
 ) -> None:
-    prefix_bytes = prefix.encode()
-    suffix_bytes = suffix.encode()
-    chunks = [
-        *(
-            prefix_bytes[offset : offset + chunk_size]
-            for offset in range(0, len(prefix_bytes), chunk_size)
-        ),
-        b"\r",
-        b"\n",
-        *(
-            suffix_bytes[offset : offset + chunk_size]
-            for offset in range(0, len(suffix_bytes), chunk_size)
-        ),
-    ]
+    stream = _TrackedStream(chunks)
+    fake_api.respond("fs.read", httpx.Response(200, stream=stream))
 
-    with respx.mock:
-        respx.post("https://sandbox.test/v3/sandboxes").mock(
-            return_value=httpx.Response(200, json=_sandbox_response())
-        )
-        respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
-            return_value=httpx.Response(200, json=_sandbox_response())
-        )
-        respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/read").mock(
-            return_value=httpx.Response(200, stream=_TrackedAsyncStream(chunks))
-        )
+    async with mode.session():
+        box = await mode(mode.sandbox.create_sandbox(name="preview"))
+        assert await mode(box.fs.read_bytes("data.bin")) == b"".join(chunks)
 
-        async with session(service_options=_session_options()):
-            box = await sandbox.create_sandbox(name="preview")
-            async with box.fs.open("data.txt", "r", newline="") as reader:
-                assert await reader.readline() == f"{prefix}\r\n"
-                assert await reader.read() == suffix
+    assert stream.closed
 
 
-@respx.mock
-async def test_read_bytes_response_closed_after_streaming_read(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    stream = _TrackedAsyncStream([b"bytes"])
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/read").mock(
-        return_value=httpx.Response(200, stream=stream)
-    )
-
-    async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview")
-        result = await box.fs.read_bytes(PurePosixPath("data.bin"))
-        assert result == b"bytes"
-
-    assert stream.aclose_called
-
-
-@respx.mock
-def test_sync_read_bytes_uses_and_closes_unread_stream(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    stream = _TrackedSyncStream([b"abc", b"", b"def"])
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/read").mock(
-        return_value=httpx.Response(200, stream=stream)
-    )
-
-    with session(service_options=_session_options()):
-        box = sandbox_sync.create_sandbox(name="preview")
-        assert box.fs.read_bytes("data.bin") == b"abcdef"
-
-    assert stream.close_called
-
-
-@respx.mock
-def test_sync_read_bytes_closes_response_after_stream_failure(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
+async def test_read_bytes_closes_a_stream_that_fails(mode: Mode, fake_api: FakeSandboxApi) -> None:
     failure = RuntimeError("stream failed")
-    stream = _TrackedSyncStream([b"partial"], failure=failure)
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/read").mock(
-        return_value=httpx.Response(200, stream=stream)
-    )
+    stream = _TrackedStream([b"partial"], failure=failure)
+    fake_api.respond("fs.read", httpx.Response(200, stream=stream))
 
-    with session(service_options=_session_options()):
-        box = sandbox_sync.create_sandbox(name="preview")
+    async with mode.session():
+        box = await mode(mode.sandbox.create_sandbox(name="preview"))
         with pytest.raises(RuntimeError) as exc_info:
-            box.fs.read_bytes("data.bin")
-        assert exc_info.value is failure
+            await mode(box.fs.read_bytes("data.bin"))
 
-    assert stream.close_called
-
-
-@respx.mock
-async def test_read_bytes_multiple_chunks(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/read").mock(
-        return_value=httpx.Response(200, stream=_TrackedAsyncStream([b"abc", b"def", b"ghi"]))
-    )
-
-    async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview")
-        result = await box.fs.read_bytes(PurePosixPath("data.bin"))
-        assert result == b"abcdefghi"
+    assert exc_info.value is failure
+    assert stream.closed
 
 
-@respx.mock
-async def test_read_bytes_empty_file(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/read").mock(
-        return_value=httpx.Response(200, stream=_TrackedAsyncStream([]))
-    )
-
-    async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview")
-        result = await box.fs.read_bytes(PurePosixPath("empty.txt"))
-        assert result == b""
+_LINE_TEXT = st.text(
+    alphabet=st.characters(min_codepoint=0, max_codepoint=0xD7FF, exclude_characters="\r\n")
+)
 
 
-@respx.mock
-async def test_read_bytes_missing_path(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/read").mock(
-        return_value=httpx.Response(
-            404, json={"error": {"code": "not_found", "message": "missing"}}
-        )
-    )
+@given(prefix=_LINE_TEXT, suffix=_LINE_TEXT, chunk_size=st.integers(min_value=1, max_value=8))
+@settings(deadline=1000, suppress_health_check=[HealthCheck.function_scoped_fixture])
+async def test_text_reads_keep_a_crlf_split_across_chunks(
+    mock_env_clear: None, prefix: str, suffix: str, chunk_size: int
+) -> None:
+    def chunked(data: bytes) -> list[bytes]:
+        return [data[offset : offset + chunk_size] for offset in range(0, len(data), chunk_size)]
 
-    async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview")
-        with pytest.raises(SandboxPathNotFoundError) as exc_info:
-            await box.fs.read_bytes(PurePosixPath("missing.txt"))
-        assert exc_info.value.path == "missing.txt"
-        assert exc_info.value.operation == "read_bytes"
-        assert exc_info.value.cause.code == "not_found"
+    fake_api = FakeSandboxApi()
+    fake_api.seed()
+    stream = _TrackedStream([*chunked(prefix.encode()), b"\r", b"\n", *chunked(suffix.encode())])
+    fake_api.respond("fs.read", httpx.Response(200, stream=stream))
 
-
-@respx.mock
-async def test_read_bytes_and_read_text_still_work(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    response_count = 0
-
-    def stream_response(request: httpx.Request) -> httpx.Response:
-        nonlocal response_count
-        response_count += 1
-        return httpx.Response(200, stream=_TrackedAsyncStream([b"content"]))
-
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/read").mock(
-        side_effect=stream_response
-    )
-
-    async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview")
-
-        raw = await box.fs.read_bytes(PurePosixPath("data.bin"))
-        assert raw == b"content"
-
-        text = await box.fs.read_text("message.txt")
-        assert text == "content"
-
-    assert response_count == 2
+    async with fake_api.session():
+        box = await sandbox.get_sandbox(name="preview")
+        async with box.fs.open("data.txt", "r", newline="") as reader:
+            assert await reader.readline() == f"{prefix}\r\n"
+            assert await reader.read() == suffix

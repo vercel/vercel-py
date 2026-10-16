@@ -1,47 +1,15 @@
 import inspect
-from typing import Any, cast
+from typing import cast
 
 import httpx2 as httpx
 import pytest
-from sandbox_fixtures import sandbox_service_options
+from fake_sandbox import FakeSandboxApi
 
-import vendor.respx as respx
 from vercel import sandbox
 from vercel._internal.core.session import get_active_session, get_active_sync_session
 from vercel.errors import VercelSessionClosedError
 from vercel.sandbox import SandboxClient, SandboxServiceOptions, sync as sandbox_sync
 from vercel.sandbox.sync import SyncSandboxClient
-
-
-def _sandbox_response(*, name: str) -> dict[str, Any]:
-    return {
-        "sandbox": {
-            "name": name,
-            "currentSessionId": "sbx_123",
-            "image": "vercel/sandbox/universal:latest",
-            "status": "running",
-            "persistent": True,
-            "region": "iad1",
-            "failoverRegions": [],
-            "timeout": 300000,
-            "snapshotExpiration": 0,
-            "createdAt": 1,
-            "updatedAt": 2,
-        },
-        "session": {
-            "id": "sbx_123",
-            "sourceSandboxName": name,
-            "projectId": "prj_123",
-            "status": "running",
-            "cwd": "/vercel/sandbox",
-            "region": "iad1",
-            "memory": 2048,
-            "vcpus": 1,
-            "timeout": 300000,
-            "requestedAt": 1,
-        },
-        "routes": [],
-    }
 
 
 async def test_clients_mirror_module_operation_signatures() -> None:
@@ -65,33 +33,26 @@ async def test_clients_mirror_module_operation_signatures() -> None:
         sync_client.close()
 
 
-@respx.mock
 async def test_async_client_is_standalone_and_owns_its_transport(
-    mock_env_clear: None,
+    fake_api: FakeSandboxApi,
 ) -> None:
+    fake_api.seed("async-client")
     active = get_active_session()
-    options = cast(SandboxServiceOptions, sandbox_service_options(sync=False)[0])
+    options = cast(SandboxServiceOptions, fake_api.service_options(sync=False)[0])
     clients: list[httpx.AsyncClient] = []
 
     def httpx_client_factory() -> httpx.AsyncClient:
-        client = httpx.AsyncClient()
+        client = fake_api.httpx_client_factory(sync=False)()
         clients.append(client)
         return client
 
-    route = respx.get("https://sandbox.test/v2/sandboxes/async-client").mock(
-        return_value=httpx.Response(200, json=_sandbox_response(name="async-client"))
-    )
-
-    client = SandboxClient.create(
-        options=options,
-        httpx_client_factory=httpx_client_factory,
-    )
+    client = SandboxClient.create(options=options, httpx_client_factory=httpx_client_factory)
     assert get_active_session() is active
     assert clients == []
 
     instance = await client.get_sandbox(name="async-client")
     assert instance.name == "async-client"
-    assert route.calls.last.request.url.params["teamId"] == "team_123"
+    assert fake_api.requests[-1].params["teamId"] == "team_123"
     assert len(clients) == 1
 
     await client.aclose()
@@ -102,36 +63,24 @@ async def test_async_client_is_standalone_and_owns_its_transport(
         await client.get_sandbox(name="closed")
 
 
-@respx.mock
-def test_sync_client_is_standalone_and_owns_its_transport(
-    mock_env_clear: None,
-) -> None:
+def test_sync_client_is_standalone_and_owns_its_transport(fake_api: FakeSandboxApi) -> None:
+    fake_api.seed("sync-client")
     active = get_active_sync_session()
-    options = cast(
-        sandbox_sync.SandboxServiceOptions,
-        sandbox_service_options(sync=True)[0],
-    )
+    options = cast(sandbox_sync.SandboxServiceOptions, fake_api.service_options(sync=True)[0])
     clients: list[httpx.Client] = []
 
     def httpx_client_factory() -> httpx.Client:
-        client = httpx.Client()
+        client = fake_api.httpx_client_factory(sync=True)()
         clients.append(client)
         return client
 
-    route = respx.get("https://sandbox.test/v2/sandboxes/sync-client").mock(
-        return_value=httpx.Response(200, json=_sandbox_response(name="sync-client"))
-    )
-
-    client = SyncSandboxClient.create(
-        options=options,
-        httpx_client_factory=httpx_client_factory,
-    )
+    client = SyncSandboxClient.create(options=options, httpx_client_factory=httpx_client_factory)
     assert get_active_sync_session() is active
     assert clients == []
 
     instance = client.get_sandbox(name="sync-client")
     assert instance.name == "sync-client"
-    assert route.calls.last.request.url.params["teamId"] == "team_123"
+    assert fake_api.requests[-1].params["teamId"] == "team_123"
     assert len(clients) == 1
 
     client.close()

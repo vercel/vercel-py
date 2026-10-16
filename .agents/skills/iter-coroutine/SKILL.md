@@ -56,7 +56,7 @@ httpx.Client or httpx.AsyncClient
 ## How `iter_coroutine` works
 
 ```python
-# src/vercel/_internal/iter_coroutine.py
+# src/vercel-internal-core/vercel/_internal/core/iter_coroutine.py
 def iter_coroutine(coro: Coroutine[None, None, _T]) -> _T:
     """Execute a non-suspending coroutine synchronously."""
     try:
@@ -295,13 +295,18 @@ async def _emit_progress(
 
 ## Testing expectations
 
-- Prefer integration-style tests with `respx` that verify real request flow and
-  sync/async parity.
+- Prefer integration-style tests that drive the public API against a fake of
+  the service at the HTTP boundary (plugged in through the session's
+  `httpx_client_factory`) and verify real request flow and sync/async parity.
+  `vercel-sandbox`'s `tests/fake_sandbox` is the reference; see the Testing
+  section of `AGENTS.md`.
 - Do not rely only on monkeypatch tests that assert internal call shape.
-- Test both sync and async paths for every operation.
+- Test both sync and async paths for every operation; a fixture that runs one
+  test body through both surfaces keeps them from drifting.
 - Validate before commit:
-  - `./scripts/lint.sh`
-  - `./scripts/test.sh` (targeted or full)
+  - `uv run poe lint`
+  - `uv run poe typecheck`
+  - `uv run poe test` (targeted or full)
 
 ## Reference implementation
 
