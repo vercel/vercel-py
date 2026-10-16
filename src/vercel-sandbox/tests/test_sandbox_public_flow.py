@@ -3018,6 +3018,12 @@ async def test_session_cleanup_suppresses_already_stopped(
     assert stop_route.call_count == 1
 
 
+def _cleanup_warning_source(record: pytest.WarningsRecorder) -> object:
+    # pytest.warns records every warning raised inside its block, including
+    # ResourceWarnings from unrelated objects garbage-collected meanwhile.
+    return next(each.source for each in record if issubclass(each.category, RuntimeWarning))
+
+
 @respx.mock
 async def test_async_session_cleanup_preserves_block_error_and_warns(
     mock_env_clear: None,
@@ -3041,7 +3047,7 @@ async def test_async_session_cleanup_preserves_block_error_and_warns(
                     raise original
 
     assert exc_info.value is original
-    cleanup_error = warnings_info[0].source
+    cleanup_error = _cleanup_warning_source(warnings_info)
     assert isinstance(cleanup_error, SandboxCleanupError)
     assert cleanup_error.resource_type == "sandbox_runtime_session"
     assert cleanup_error.resource_id == "sbx_123"
@@ -3433,7 +3439,7 @@ async def test_async_cleanup_wraps_stop_result_application_failure(
                     async with box.session():
                         raise original
             assert exc_info.value is original
-            cleanup_error = warnings_info[0].source
+            cleanup_error = _cleanup_warning_source(warnings_info)
         else:
             with pytest.raises(SandboxCleanupError) as cleanup_info:
                 async with box.session():
@@ -3507,7 +3513,7 @@ async def test_async_cancellation_with_cleanup_failure_warns_structured_error(
                 await entered.wait()
                 cancel_scope.cancel()
 
-    cleanup_error = warnings_info[0].source
+    cleanup_error = _cleanup_warning_source(warnings_info)
     assert isinstance(cleanup_error, SandboxCleanupError)
     assert cleanup_error.resource_id == "sbx_123"
     assert isinstance(cleanup_error.cause, SandboxApiError)
