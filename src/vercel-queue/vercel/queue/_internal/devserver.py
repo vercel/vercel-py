@@ -45,7 +45,7 @@ def embedded_queue_dev_server(
         timeout_graceful_shutdown=_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS,
     )
     server = _cancellable_server(uvicorn, config)
-    thread = threading.Thread(target=_profiled_server_run(server, profile), daemon=True)
+    thread = _ServerThread(target=_profiled_server_run(server, profile), daemon=True)
     thread.start()
     _wait_for_server(server)
     base_url = f"http://{host}:{_server_port(server)}"
@@ -55,6 +55,7 @@ def embedded_queue_dev_server(
             base_url=base_url,
             app=app,
             _thread=thread,
+            _is_serving=lambda: _is_serving(server),
         )
     finally:
         try:
@@ -100,6 +101,25 @@ def main(argv: list[str] | None = None) -> int:
                 raise RuntimeError("embedded queue server stopped unexpectedly")
 
     return 0
+
+
+class _ServerThread(threading.Thread):
+    """Server thread that remembers what ended it."""
+
+    error: BaseException | None = None
+
+    def run(self) -> None:
+        try:
+            super().run()
+        except BaseException as exc:
+            self.error = exc
+            raise
+
+
+def _is_serving(server: Any) -> bool:
+    return not server.should_exit and all(
+        asyncio_server.is_serving() for asyncio_server in server.servers
+    )
 
 
 def _uvicorn() -> Any:

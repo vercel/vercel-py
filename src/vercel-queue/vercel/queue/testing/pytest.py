@@ -21,6 +21,7 @@ def embedded_queue_server(
     _embedded_queue_server_session: EmbeddedQueueDevServer,
 ) -> Iterator[EmbeddedQueueDevServer]:
     """Return an isolated embedded queue server state for a test."""
+    _embedded_queue_server_session.ensure_running()
     _embedded_queue_server_session.reset()
     try:
         yield _embedded_queue_server_session

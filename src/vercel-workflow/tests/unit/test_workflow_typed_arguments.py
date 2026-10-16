@@ -488,7 +488,11 @@ def test_a_mismatched_value_goes_out_unchanged_and_unremarked(recwarn) -> None: 
     async def fulfil(order: Order) -> None: ...
 
     assert fulfil.codec.dump("order", "not an order") == "not an order"
-    assert [str(each.message) for each in recwarn.list] == []
+    # Unrelated objects garbage-collected meanwhile can still report
+    # ResourceWarnings; only the codec's own warnings matter here.
+    assert [
+        str(each.message) for each in recwarn.list if not issubclass(each.category, ResourceWarning)
+    ] == []
 
 
 def test_a_dump_failure_propagates(monkeypatch) -> None:  # type: ignore[no-untyped-def]
