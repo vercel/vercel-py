@@ -191,6 +191,12 @@ def payloads(messages: list[Message[T]]) -> list[T]:
     return [message.payload for message in messages]
 
 
+# How long to wait for something that should happen promptly. Waits return as
+# soon as their condition holds, so this only bounds how long a broken test
+# takes to fail; loaded CI runners need far more slack than a second.
+WAIT_SECONDS = 10.0
+
+
 async def advance_async_time(clock: Any, seconds: float) -> None:
     await anyio.lowlevel.checkpoint()
     clock.shift(seconds + 0.001)
@@ -218,7 +224,7 @@ def _wait_until_sync(
 async def wait_until(
     condition: Callable[[], bool],
     *,
-    max_wait_seconds: float = 1,
+    max_wait_seconds: float = WAIT_SECONDS,
     delay_seconds: float = 0.001,
 ) -> None:
     await to_thread.run_sync(
@@ -232,7 +238,7 @@ async def wait_until(
 
 
 def wait_for_call_count_sync(route: Any, count: int) -> None:
-    deadline = time.monotonic() + 1
+    deadline = time.monotonic() + WAIT_SECONDS
     while route.call_count < count:
         if time.monotonic() >= deadline:
             raise AssertionError(f"expected {count} calls, saw {route.call_count}")

@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 import dramatiq
 import dramatiq.broker as dramatiq_broker
 import pytest
-from dramatiq.broker import MessageProxy, Middleware
+from dramatiq.broker import Consumer, MessageProxy, Middleware
 from dramatiq.errors import QueueNotFound
 from dramatiq.message import Message as DramatiqMessage
 from dramatiq.results import Results
@@ -232,6 +232,19 @@ def fake_vqs_message(
 
 def queue_client() -> FakeSyncQueueClient:
     return FakeSyncQueueClient.instances[0]
+
+
+# Bounds cross-thread handoffs in tests. Loaded CI runners can starve a thread
+# for well over a second, so only a hung test should ever reach this.
+_WAIT_SECONDS = 10.0
+
+
+def next_message(consumer: Consumer) -> MessageProxy:
+    """Wait for a delivery the way a Dramatiq worker does: poll until one arrives."""
+    deadline = time.monotonic() + _WAIT_SECONDS
+    while (message := consumer.__next__()) is None:
+        assert time.monotonic() < deadline, "no message was delivered"
+    return message
 
 
 def topic_name(topic: object) -> str:
@@ -500,8 +513,7 @@ def test_registered_callback_hands_push_to_consumer_and_waits_for_ack(
     monkeypatch.setattr(vqs_dramatiq.vcache, "prime_runtime_cache", prime_runtime_cache)
 
     def worker() -> None:
-        message = consumer.__next__()
-        assert message is not None
+        message = next_message(consumer)
         received.append(message)
         consumer.ack(message)
 
@@ -513,7 +525,7 @@ def test_registered_callback_hands_push_to_consumer_and_waits_for_ack(
                 fake_vqs_message(dramatiq_message("emails").encode(), topic="emails")
             )
     finally:
-        thread.join(timeout=1)
+        thread.join(timeout=_WAIT_SECONDS)
 
     assert received
     assert received[0].queue_name == "emails"
@@ -532,21 +544,20 @@ def test_push_callback_waits_for_settlement_before_handoff(
 
     def worker() -> None:
         ready.set()
-        message = consumer.__next__()
-        assert message is not None
+        message = next_message(consumer)
         received.append(message)
         consumer.ack(message)
 
     thread = threading.Thread(target=worker)
     thread.start()
-    assert ready.wait(timeout=1)
+    assert ready.wait(timeout=_WAIT_SECONDS)
     try:
         with pytest.raises(Handoff):
             fake_queue_subscribe[0].callback(
                 fake_vqs_message(dramatiq_message("emails").encode(), topic="emails")
             )
     finally:
-        thread.join(timeout=1)
+        thread.join(timeout=_WAIT_SECONDS)
 
     assert received
     assert len(queue_client().acknowledged) == 1
@@ -559,23 +570,22 @@ def test_push_settlement_wait_is_not_handoff_deadline_bounded(
     subject.declare_queue("emails")
     consumer = subject.consume("emails", prefetch=1, timeout=1000)
     release = threading.Event()
+    handed_off = threading.Event()
     received: list[MessageProxy] = []
 
     def worker() -> None:
-        message = consumer.__next__()
-        assert message is not None
+        message = next_message(consumer)
         received.append(message)
-        assert release.wait(timeout=1)
+        handed_off.set()
+        assert release.wait(timeout=_WAIT_SECONDS)
         consumer.ack(message)
 
     thread = threading.Thread(target=worker)
     thread.start()
     try:
-        started = threading.Event()
         result: list[type[BaseException]] = []
 
         def callback() -> None:
-            started.set()
             try:
                 fake_queue_subscribe[0].callback(
                     fake_vqs_message(dramatiq_message("emails").encode(), topic="emails")
@@ -585,14 +595,15 @@ def test_push_settlement_wait_is_not_handoff_deadline_bounded(
 
         callback_thread = threading.Thread(target=callback)
         callback_thread.start()
-        assert started.wait(timeout=1)
+        assert handed_off.wait(timeout=_WAIT_SECONDS)
+        # Outlast the handoff deadline; the callback must still be waiting.
         time.sleep(0.05)
         assert result == []
         release.set()
-        callback_thread.join(timeout=1)
+        callback_thread.join(timeout=_WAIT_SECONDS)
     finally:
         release.set()
-        thread.join(timeout=1)
+        thread.join(timeout=_WAIT_SECONDS)
 
     assert received
     assert result == [Handoff]

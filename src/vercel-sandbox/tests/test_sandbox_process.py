@@ -5,7 +5,7 @@ import subprocess
 from collections.abc import AsyncIterator, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
-from threading import Event, Lock
+from threading import Condition, Event, Lock
 
 import anyio
 import httpx2 as httpx
@@ -1223,20 +1223,13 @@ class _SyncCoordinatedRecoveryService:
         self.allow_resume = Event()
         self.resume_returning = Event()
         self.resume_started = Event()
-        self.second_failure = Event()
         self._lock = Lock()
         self._interrupt_first_resume = interrupt_first_resume
         self.first_resume_error = first_resume_error
-        self.operation_count = 0
         self.resume_count = 0
 
     async def query_processes(self, *, session_id: str) -> list[object]:
-        with self._lock:
-            self.operation_count += 1
-            operation_count = self.operation_count
         if session_id == "sbx_old":
-            if operation_count >= 2:
-                self.second_failure.set()
             raise _lifecycle_error(self.error_code)
         return []
 
@@ -1264,10 +1257,27 @@ class _SyncCoordinatedRecoveryService:
         )
 
 
+class _JoinObservingCondition(Condition):
+    """Recovery condition that reports when a caller waits on the shared resume.
+
+    The second caller's lifecycle failure is raised before it reaches the
+    shared resume, so only this wait shows it joined the in-flight attempt
+    rather than arriving after the attempt cleared.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.joined = Event()
+
+    def wait(self, timeout: float | None = None) -> bool:
+        self.joined.set()
+        return super().wait(timeout)
+
+
 def _sync_coordinated_box(
     service: _SyncCoordinatedRecoveryService,
 ) -> sandbox_sync.SyncSandbox:
-    return sandbox_sync.SyncSandbox(
+    box = sandbox_sync.SyncSandbox(
         payload=SandboxState(
             name="preview",
             current_session_id="sbx_old",
@@ -1277,6 +1287,14 @@ def _sync_coordinated_box(
         ),
         service=service,  # type: ignore[arg-type]
     )
+    box._recovery_condition = _JoinObservingCondition()
+    return box
+
+
+def _wait_for_join(box: sandbox_sync.SyncSandbox) -> bool:
+    condition = box._recovery_condition
+    assert isinstance(condition, _JoinObservingCondition)
+    return condition.joined.wait(timeout=5)
 
 
 @pytest.mark.parametrize(
@@ -1296,7 +1314,7 @@ def test_sync_recovery_shares_or_re_elects_after_initiator_interruption(
         initiating = executor.submit(box.query_processes)
         assert service.resume_started.wait(timeout=5)
         waiting = executor.submit(box.query_processes)
-        assert service.second_failure.wait(timeout=5)
+        assert _wait_for_join(box)
         service.allow_resume.set()
         if interrupt_initiator:
             with pytest.raises(KeyboardInterrupt):
@@ -1323,7 +1341,7 @@ def test_sync_recovery_shares_failure_and_clears_slot_for_retry(error_code: str)
         initiating = executor.submit(box.query_processes)
         assert service.resume_started.wait(timeout=5)
         waiting = executor.submit(box.query_processes)
-        assert service.second_failure.wait(timeout=5)
+        assert _wait_for_join(box)
         service.allow_resume.set()
         for participant in (initiating, waiting):
             with pytest.raises(RuntimeError) as exc_info:

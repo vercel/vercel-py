@@ -2,12 +2,31 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import nullcontext
+from typing import TYPE_CHECKING, Any
 
+import anyio
 import pytest
 from rich.text import Text
 from textual.widgets import Label
 
 from scripts import clogedit, release
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from textual.pilot import Pilot
+
+
+async def _wait_for(pilot: Pilot[Any], condition: Callable[[], bool]) -> None:
+    """Let the app process messages until ``condition`` holds.
+
+    ``pilot.press`` only waits for messages already queued when it returns, so
+    a widget message that bubbles up to the app, or a timer, can still be
+    pending afterwards.
+    """
+    with anyio.fail_after(10):
+        while not condition():
+            await pilot.pause(0.01)
 
 
 def test_clogedit_updates_selection_state() -> None:
@@ -298,7 +317,7 @@ async def test_clogedit_kind_marker_follows_highlight() -> None:
         # stale [*] marker: the kind tracks the highlight, which is what
         # enter saves.
         await pilot.press("space", "down")
-        assert selection.packages["pkg"].kind == "docs"
+        await _wait_for(pilot, lambda: selection.packages["pkg"].kind == "docs")
         assert app.type_list is not None
         marked = app.type_list.get_option("docs").prompt
         assert isinstance(marked, Text)
@@ -447,8 +466,7 @@ async def test_clogedit_escape_exit_timeout_resets(monkeypatch: pytest.MonkeyPat
 
     async with app.run_test() as pilot:
         await pilot.press("escape")
-        await pilot.pause(0.03)
-        assert app.escape_exit_timer is None
+        await _wait_for(pilot, lambda: app.escape_exit_timer is None)
         assert app.status == clogedit.PACKAGE_STATUS
         monkeypatch.setattr(clogedit, "ESC_EXIT_SECONDS", 30)
         await pilot.press("escape")

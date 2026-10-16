@@ -15,11 +15,11 @@ from vercel.queue import Message, QueueClient, SubscriptionError, poll_and_handl
 from vercel.queue.devserver import EmbeddedQueueDevServer
 from vercel.queue.sync import QueueClient as SyncQueueClient
 
-from .helpers import wait_until
+from .helpers import WAIT_SECONDS, wait_until
 
 
 def _wait_until_sync(predicate: Callable[[], bool]) -> None:
-    deadline = time.monotonic() + 2
+    deadline = time.monotonic() + WAIT_SECONDS
     while not predicate():
         if time.monotonic() >= deadline:
             raise AssertionError("condition was not met")
@@ -68,7 +68,7 @@ async def test_async_poll_and_handle_exact_topic_acknowledges(
 
     client = eqs.get_async_client(base_url=eqs.base_url)
     await client.send("emails", {"ok": True})
-    with anyio.move_on_after(2):
+    with anyio.move_on_after(WAIT_SECONDS):
         async with anyio.create_task_group() as task_group:
             task_group.start_soon(partial(client.poll_and_handle, handle, interval=0.01))
             await wait_until(lambda: eqs.state.by_id["msg_1"].acknowledged)
@@ -95,7 +95,7 @@ async def test_async_poll_and_handle_handler_error_logs_and_continues(
     client = eqs.get_async_client(base_url=eqs.base_url)
     await client.send("jobs", {"n": 1})
     await client.send("jobs", {"n": 2})
-    with anyio.move_on_after(2):
+    with anyio.move_on_after(WAIT_SECONDS):
         async with anyio.create_task_group() as task_group:
             task_group.start_soon(partial(client.poll_and_handle, handle, interval=0.01))
             await wait_until(lambda: eqs.state.by_id["msg_2"].acknowledged)
@@ -126,7 +126,7 @@ async def test_async_poll_and_handle_wildcard_requires_topics(
         await client.poll_and_handle(handle, interval=0)
 
     await client.send("events-one", {"ok": "yes"})
-    with anyio.move_on_after(2):
+    with anyio.move_on_after(WAIT_SECONDS):
         async with anyio.create_task_group() as task_group:
             task_group.start_soon(
                 partial(
@@ -158,7 +158,7 @@ def test_sync_poll_and_handle_returns_cancellable_future(
     _wait_until_sync(lambda: calls == [{"ok": True}])
     assert future.cancel()
     with pytest.raises(concurrent.futures.CancelledError):
-        future.result(timeout=2)
+        future.result(timeout=WAIT_SECONDS)
 
     assert future.done()
     assert future.cancelled()
@@ -180,7 +180,7 @@ def test_sync_poll_and_handle_rejects_string_topics(
         interval=0.01,
     )
     with pytest.raises(TypeError, match="not a string"):
-        future.result(timeout=2)
+        future.result(timeout=WAIT_SECONDS)
 
 
 def test_sync_poll_and_handle_rejects_async_subscriber(
@@ -216,7 +216,7 @@ def test_sync_poll_and_handle_handler_error_logs_and_continues(
     _wait_until_sync(lambda: calls == [1, 2])
     future.cancel()
     with pytest.raises(concurrent.futures.CancelledError):
-        future.result(timeout=2)
+        future.result(timeout=WAIT_SECONDS)
 
     assert calls == [1, 2]
     assert "queue subscriber failed while polling" in caplog.text
@@ -241,7 +241,7 @@ def test_sync_poll_and_handle_future_surfaces_poll_errors(
     client = BrokenClient(token="token")
     future = client.poll_and_handle(handle, interval=0.01)
     with pytest.raises(RuntimeError, match="poll failed"):
-        future.result(timeout=2)
+        future.result(timeout=WAIT_SECONDS)
 
 
 def test_sync_poll_and_handle_thread_exits_on_cancel(
@@ -255,7 +255,7 @@ def test_sync_poll_and_handle_thread_exits_on_cancel(
     client = eqs.get_sync_client()
     future = client.poll_and_handle(handle, interval=0.01)
     future.cancel()
-    deadline = time.monotonic() + 2
+    deadline = time.monotonic() + WAIT_SECONDS
     while not future.done() and time.monotonic() < deadline:
         time.sleep(0.01)
     assert future.done()

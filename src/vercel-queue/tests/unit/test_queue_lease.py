@@ -69,6 +69,11 @@ from .helpers import (
     queue_lease_anyio_module,
 )
 
+# Upper bound for events that should happen promptly. It only bounds how long a
+# broken test hangs; loaded CI runners can stall far longer than any value
+# that would also tell "prompt" from "blocked".
+_GUARD_SECONDS = 10.0
+
 
 def _queue_debug_events(caplog: pytest.LogCaptureFixture) -> list[dict[str, object]]:
     return [
@@ -855,7 +860,7 @@ async def test_lease_worker_stop_after_start_timeout_cancels_renewal() -> None:
         )
         await started.wait()
         await command_send.send(_LeaseExtensionStop(token=request.token))
-        with anyio.fail_after(0.5):
+        with anyio.fail_after(_GUARD_SECONDS):
             await cancelled.wait()
         await anyio.sleep(0.01)
         await command_send.aclose()
@@ -870,11 +875,12 @@ async def test_lease_renewal_start_async_does_not_block_caller_loop(
 ) -> None:
     release = threading.Event()
     started = threading.Event()
+    released: list[bool] = []
 
     async def start(request: _LeaseExtensionRequest) -> None:
         del request
         started.set()
-        await to_thread.run_sync(release.wait, 1)
+        released.append(await to_thread.run_sync(release.wait, _GUARD_SECONDS))
 
     monkeypatch.setattr("vercel.queue._internal.lease._ensure_lease_renewal_thread", lambda: None)
     monkeypatch.setattr("vercel.queue._internal.lease._send_lease_extension_start_async", start)
@@ -884,11 +890,13 @@ async def test_lease_renewal_start_async_does_not_block_caller_loop(
 
     async with anyio.create_task_group() as task_group:
         task_group.start_soon(renewal.start_async)
-        await to_thread.run_sync(started.wait, 1)
-        with anyio.fail_after(0.1):
-            await anyio.sleep(0.001)
+        assert await to_thread.run_sync(started.wait, _GUARD_SECONDS)
+        # Only a caller loop that keeps running while the start is pending
+        # can release it before the wait gives up.
+        await anyio.sleep(0.001)
         release.set()
 
+    assert released == [True]
     assert renewal._entered
 
 
@@ -921,7 +929,7 @@ async def test_send_lease_extension_start_async_waits_for_real_worker_schedule()
         lease_seconds=30,
     )
 
-    with anyio.fail_after(0.5):
+    with anyio.fail_after(_GUARD_SECONDS):
         await _send_lease_extension_start_async(request)
 
 
@@ -1609,7 +1617,7 @@ async def test_send_lease_extension_stop_async_waits_for_real_worker_signal() ->
     _ensure_lease_renewal_thread()
     token = _LeaseRenewalToken(object())
 
-    with anyio.fail_after(0.5):
+    with anyio.fail_after(_GUARD_SECONDS):
         stopped = await _send_lease_extension_stop_async(token)
 
     assert stopped is True
@@ -1633,29 +1641,33 @@ async def test_send_lease_extension_stop_async_does_not_wait_in_worker_thread(
 
     def blocking_worker_probe() -> None:
         anyio.from_thread.run_sync(waiter_started.set, token=event_loop_token)
-        release_waiter.wait(timeout=1)
+        release_waiter.wait(timeout=_GUARD_SECONDS)
 
     async def stop() -> None:
         assert await _send_lease_extension_stop_async(_LeaseRenewalToken(object()))
         stop_done.set()
 
     monkeypatch.setattr("vercel.queue._internal.lease._send_lease_command", send)
-    monkeypatch.setattr("vercel.queue._internal.lease._LEASE_STOP_WAIT_TIMEOUT_SECONDS", 1.0)
+    # A stop that held the only worker thread while waiting would keep the
+    # probe below from starting until this timeout, outlasting its guard.
+    monkeypatch.setattr(
+        "vercel.queue._internal.lease._LEASE_STOP_WAIT_TIMEOUT_SECONDS", 2 * _GUARD_SECONDS
+    )
     monkeypatch.setattr(to_thread.current_default_thread_limiter(), "total_tokens", 1)
 
     async with anyio.create_task_group() as task_group:
         task_group.start_soon(stop)
-        with anyio.fail_after(0.5):
+        with anyio.fail_after(_GUARD_SECONDS):
             await command_sent.wait()
 
         task_group.start_soon(to_thread.run_sync, blocking_worker_probe)
-        with anyio.fail_after(0.5):
+        with anyio.fail_after(_GUARD_SECONDS):
             await waiter_started.wait()
 
         assert commands[0].done_event is not None
         commands[0].done_event.set()
         release_waiter.set()
-        with anyio.fail_after(0.5):
+        with anyio.fail_after(_GUARD_SECONDS):
             await stop_done.wait()
         task_group.cancel_scope.cancel()
 
@@ -1681,7 +1693,7 @@ async def test_lease_worker_ignores_registration_after_stop() -> None:
     async with anyio.create_task_group() as task_group:
         task_group.start_soon(_lease_worker_async, command_receive)
         await command_send.send(_LeaseExtensionStop(token=request.token, done_send=done_send))
-        with anyio.fail_after(0.5):
+        with anyio.fail_after(_GUARD_SECONDS):
             await done_receive.receive()
         await command_send.send(
             _LeaseExtensionStart(request=request, scheduled_event=threading.Event())
@@ -1782,7 +1794,7 @@ async def test_lease_worker_one_renewal_in_flight_does_not_block_another_token()
             _LeaseExtensionStart(request=second, scheduled_event=threading.Event())
         )
 
-        with anyio.fail_after(0.5):
+        with anyio.fail_after(_GUARD_SECONDS):
             await second_started.wait()
 
         release_first.set()
