@@ -179,8 +179,11 @@ async def test_async_text_reader_breaks_peer_after_transport_failure(
 @pytest.mark.anyio
 @pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
 async def test_async_text_reader_breaks_peer_after_cancellation(anyio_backend: str) -> None:
+    reading = anyio.Event()
+
     class PendingStream(httpx.AsyncByteStream):
         async def __aiter__(self) -> AsyncIterator[bytes]:
+            reading.set()
             await anyio.sleep_forever()
             yield b""  # pragma: no cover
 
@@ -189,11 +192,38 @@ async def test_async_text_reader_breaks_peer_after_cancellation(anyio_backend: s
 
     reader, peer = _text_readers(open_response)
     assert reader is not None and peer is not None
-    with anyio.move_on_after(0.01) as scope:
-        await reader.read()
+
+    async def cancel_once_reading(scope: anyio.CancelScope) -> None:
+        await reading.wait()
+        scope.cancel()
+
+    # Cancel only once the read is blocked on the stream. A short deadline
+    # instead can expire before the read reaches the transport, which leaves
+    # the peer usable and its read waiting on this stream forever.
+    with anyio.CancelScope() as scope:
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(cancel_once_reading, scope)
+            await reader.read()
     assert scope.cancel_called
-    with pytest.raises(anyio.BrokenResourceError):
+    with anyio.fail_after(10), pytest.raises(anyio.BrokenResourceError):
         await peer.read()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
+async def test_async_text_reader_cancelled_before_reading_leaves_peer_usable(
+    anyio_backend: str,
+) -> None:
+    async def open_response() -> StreamingResponse:
+        return _logs_response({"stream": "stderr", "data": "still here\n"})
+
+    reader, peer = _text_readers(open_response)
+    assert reader is not None and peer is not None
+    with anyio.CancelScope() as scope:
+        scope.cancel()
+        await reader.read()
+
+    assert await peer.read() == "still here\n"
 
 
 def test_sync_text_reader_lines_shared_cursor_eof_and_close() -> None:
