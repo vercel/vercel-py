@@ -1457,10 +1457,24 @@ class EmbeddedQueueDevServer:
     base_url: str
     app: EmbeddedQueueAsgiApp
     _thread: threading.Thread | None = field(default=None, repr=False, compare=False)
+    _is_serving: Callable[[], bool] | None = field(default=None, repr=False, compare=False)
 
     def is_running(self) -> bool:
-        """Return whether the embedded HTTP server thread is still running."""
-        return self._thread is None or self._thread.is_alive()
+        """Return whether the embedded HTTP server is still accepting connections."""
+        if self._thread is not None and not self._thread.is_alive():
+            return False
+        return self._is_serving is None or self._is_serving()
+
+    def ensure_running(self) -> None:
+        """Raise if the embedded HTTP server has stopped, chaining why it stopped.
+
+        A server that dies mid-session otherwise surfaces only as connection
+        errors in whichever tests run next, with the cause long gone.
+        """
+        if self.is_running():
+            return
+        error = getattr(self._thread, "error", None)
+        raise RuntimeError("embedded queue dev server stopped unexpectedly") from error
 
     def reset(self) -> None:
         """Reset server state and cached clients between tests."""
