@@ -39,8 +39,8 @@ from vercel.sandbox._internal.filesystem_handle_core import (
 from vercel.sandbox._internal.interactive_session import (
     DEFAULT_COLS,
     DEFAULT_ROWS,
-    AsyncInteractiveTransport,
-    open_async_transport,
+    AsyncInteractiveConnection,
+    InteractiveConnector,
     resize_message,
     start_message,
 )
@@ -281,7 +281,7 @@ class InteractiveSession:
     stream: InteractiveStream
     """Raw terminal output and input."""
 
-    def __init__(self, *, transport: AsyncInteractiveTransport) -> None:
+    def __init__(self, *, transport: AsyncInteractiveConnection) -> None:
         self._transport = transport
         self.stream = InteractiveStream(self)
 
@@ -361,6 +361,7 @@ class InteractiveSessionOperation:
 async def _open_interactive_session(
     open_state: Callable[[], Awaitable[InteractiveSessionState]],
     *,
+    connector: InteractiveConnector,
     command: str,
     args: Sequence[str] | None,
     cwd: str | None,
@@ -370,7 +371,7 @@ async def _open_interactive_session(
     rows: int,
 ) -> AsyncIterator[InteractiveSession]:
     state = await open_state()
-    async with open_async_transport(state) as transport:
+    async with connector.open_async(state) as transport:
         await transport.send_json(
             start_message(
                 command=command,
@@ -1069,6 +1070,7 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         return InteractiveSessionOperation(
             _open_interactive_session(
                 lambda: self._service.open_interactive(session_id=self.id),
+                connector=self._service.interactive,
                 command=command,
                 args=args,
                 cwd=cwd if cwd is not None else self.cwd,
@@ -1381,6 +1383,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
                     lambda session_id: self._service.open_interactive(session_id=session_id),
                     coordinator=self,
                 ),
+                connector=self._service.interactive,
                 command=command,
                 args=args,
                 cwd=cwd if cwd is not None else self.cwd,

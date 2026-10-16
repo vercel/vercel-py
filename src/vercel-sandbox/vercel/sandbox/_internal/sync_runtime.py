@@ -34,7 +34,8 @@ from vercel.sandbox._internal.filesystem_handle_core import (
 from vercel.sandbox._internal.interactive_session import (
     DEFAULT_COLS,
     DEFAULT_ROWS,
-    SyncInteractiveTransport,
+    InteractiveConnector,
+    SyncInteractiveConnection,
     resize_message,
     start_message,
 )
@@ -292,7 +293,7 @@ class SyncInteractiveSession:
     stream: SyncInteractiveStream
     """Raw terminal output and input."""
 
-    def __init__(self, *, transport: SyncInteractiveTransport) -> None:
+    def __init__(self, *, transport: SyncInteractiveConnection) -> None:
         self._transport = transport
         self.stream = SyncInteractiveStream(self)
 
@@ -377,6 +378,7 @@ class SyncInteractiveSessionOperation:
 def _open_interactive_session(
     open_state: Callable[[], InteractiveSessionState],
     *,
+    connector: InteractiveConnector,
     command: str,
     args: Sequence[str] | None,
     cwd: str | None,
@@ -385,7 +387,7 @@ def _open_interactive_session(
     cols: int,
     rows: int,
 ) -> Iterator[SyncInteractiveSession]:
-    transport = SyncInteractiveTransport(open_state())
+    transport = connector.open_sync(open_state())
     iter_coroutine(transport.connect())
     try:
         iter_coroutine(
@@ -1137,6 +1139,7 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         return SyncInteractiveSessionOperation(
             _open_interactive_session(
                 lambda: iter_coroutine(self._service.open_interactive(session_id=self.id)),
+                connector=self._service.interactive,
                 command=command,
                 args=args,
                 cwd=cwd if cwd is not None else self.cwd,
@@ -1506,6 +1509,7 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
                         coordinator=self,
                     )
                 ),
+                connector=self._service.interactive,
                 command=command,
                 args=args,
                 cwd=cwd if cwd is not None else self.cwd,

@@ -57,6 +57,25 @@ include = "../../scripts/poe/poe.toml"
 verbosity = -1
 ```
 
+# Testing
+
+- Test behaviour through the public API, against a fake of the service at the
+  HTTP boundary, rather than asserting internal call shapes. The fake plugs in
+  through the session's `httpx_client_factory`, so every layer above HTTP is
+  real.
+- `vercel-sandbox` has a stateful fake Sandbox API in
+  `src/vercel-sandbox/tests/fake_sandbox`, modelled on the API service. Use its
+  state, `command()` handlers, and `respond`/`fail`/`hold` for faults and
+  races. Use the `mode` fixture to run one test through the async and sync
+  APIs. Hand-written responses are for wire-contract cases (chunked or
+  malformed streams) and go through `respond`.
+- The scenarios in `tests/sandbox_scenarios.py` run offline against the fake
+  and live against the real API (`tests/live`); keep both passing when either
+  changes.
+- Runtime dependencies that tests need to control (sleep, the interactive
+  connection) are composed into the service by `get_sandbox_service`; inject
+  them through session options, not monkeypatching.
+
 # News Fragments
 
 - Before opening a pull request or handing work back to the user, run

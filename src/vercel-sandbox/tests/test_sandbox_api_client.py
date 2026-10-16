@@ -1,14 +1,13 @@
 import json
 import sys
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from datetime import timedelta
-from types import SimpleNamespace
 
 import httpx2 as httpx
 import pytest
+from fake_sandbox import FakeSandboxApi
 from httpx2._types import HeaderTypes, QueryParamTypes
 
+from vercel import sandbox
 from vercel._internal.core.http import (
     NO_TIMEOUT,
     BaseTransport,
@@ -25,6 +24,7 @@ from vercel.sandbox._internal.api_client import (
     PLATFORM,
     VERSION,
     SandboxApiClient,
+    _SandboxUserAgent,
     _WriteFilesUpload,
 )
 from vercel.sandbox._internal.errors import SandboxApiError, SandboxResponseError
@@ -175,30 +175,6 @@ class RecordingStreamTransport(JsonTransport):
         return _CompletedResponse(response, lines=self.lines)
 
 
-class RecordingUploadTransport(JsonTransport):
-    def __init__(self) -> None:
-        super().__init__({})
-        self.headers: httpx.Headers | None = None
-
-    @asynccontextmanager
-    async def request_stream(
-        self,
-        method: str,
-        path: str,
-        *,
-        token: str | None = None,
-        params: QueryParamTypes | None = None,
-        headers: HeaderTypes | None = None,
-        timeout: RequestTimeout = None,
-        follow_redirects: bool | None = None,
-        read_response: ReadResponsePolicy = ReadResponsePolicy.NON_SUCCESS_ONLY,
-        response_chunk_size: int | None = None,
-    ) -> AsyncIterator[StreamingRequest]:
-        self.headers = httpx.Headers(headers)
-        response = httpx.Response(200, request=httpx.Request(method, path))
-        yield _CompletedRequest(_CompletedResponse(response))
-
-
 def _sandbox_client(transport: BaseTransport) -> SandboxApiClient:
     async def credentials_factory() -> SandboxCredentials:
         return SandboxCredentials(
@@ -212,6 +188,7 @@ def _sandbox_client(transport: BaseTransport) -> SandboxApiClient:
         credentials_factory=credentials_factory,
         transport=transport,
         file_transfer_timeout=timedelta(minutes=5),
+        user_agent="vercel-sandbox/test",
     )
 
 
@@ -234,102 +211,55 @@ def _base_user_agent() -> str:
 
 
 @pytest.mark.parametrize(
-    ("python_version", "platform_system", "platform_machine", "agent_name", "expected"),
+    ("agent_name", "expected"),
     [
-        ("3.12.0", "Linux", "x86_64", None, "vercel-sandbox/3.4.0 (Python/3.12.0; Linux/x86_64)"),
+        (None, "vercel-sandbox/3.4.0 (Python/3.12.0; Linux/x86_64)"),
         (
-            "3.13.2",
-            "Darwin",
-            "arm64",
             "claude-code_2-1-247_agent",
-            "vercel-sandbox/3.4.0 agent/claude-code_2-1-247_agent (Python/3.13.2; Darwin/arm64)",
+            "vercel-sandbox/3.4.0 agent/claude-code_2-1-247_agent (Python/3.12.0; Linux/x86_64)",
         ),
     ],
 )
-async def test_request_user_agent_serializes_fields(
-    monkeypatch: pytest.MonkeyPatch,
-    python_version: str,
-    platform_system: str,
-    platform_machine: str,
-    agent_name: str | None,
-    expected: str,
-) -> None:
-    from vercel.sandbox._internal import api_client
-
-    monkeypatch.setattr(api_client, "VERSION", "3.4.0")
-    monkeypatch.setattr(api_client, "sys", SimpleNamespace(version=python_version))
-    monkeypatch.setattr(
-        api_client,
-        "PLATFORM",
-        SimpleNamespace(system=platform_system, machine=platform_machine),
+def test_user_agent_serializes_its_fields(agent_name: str | None, expected: str) -> None:
+    user_agent = _SandboxUserAgent(
+        client_version="3.4.0",
+        python_version="3.12.0",
+        platform_system="Linux",
+        platform_machine="x86_64",
+        agent_name=agent_name,
     )
-    monkeypatch.setattr(api_client, "detect_agent_name", lambda: agent_name)
-    monkeypatch.delenv("VERCEL_TELEMETRY_DISABLED", raising=False)
-    monkeypatch.delenv("VERCEL_SANDBOX_TELEMETRY_DISABLED", raising=False)
-
-    transport = RecordingJsonTransport(_command_response(exit_code=0))
-    await _sandbox_client(transport).get_command(session_id="sbx_1", command_id="cmd_1")
-
-    assert transport.headers is not None
-    assert transport.headers["user-agent"] == expected
+    assert str(user_agent) == expected
 
 
 @pytest.mark.parametrize(
-    "disabled_variable",
-    ["VERCEL_TELEMETRY_DISABLED", "VERCEL_SANDBOX_TELEMETRY_DISABLED"],
+    ("environment", "agent"),
+    [
+        ({"AI_AGENT": "claude-code_2-1-247_agent"}, "claude-code_2-1-247_agent"),
+        ({"AI_AGENT": "codex", "VERCEL_TELEMETRY_DISABLED": "1"}, None),
+        ({"AI_AGENT": "codex", "VERCEL_SANDBOX_TELEMETRY_DISABLED": "1"}, None),
+    ],
 )
-async def test_request_user_agent_honors_opt_out(
-    monkeypatch: pytest.MonkeyPatch, disabled_variable: str
+async def test_every_request_identifies_the_sdk_and_agent(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_api: FakeSandboxApi,
+    environment: dict[str, str],
+    agent: str | None,
 ) -> None:
-    monkeypatch.setenv("AI_AGENT", "codex")
-    monkeypatch.delenv("VERCEL_TELEMETRY_DISABLED", raising=False)
-    monkeypatch.delenv("VERCEL_SANDBOX_TELEMETRY_DISABLED", raising=False)
-    monkeypatch.setenv(disabled_variable, "1")
+    for name in ("VERCEL_TELEMETRY_DISABLED", "VERCEL_SANDBOX_TELEMETRY_DISABLED"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
 
-    transport = RecordingJsonTransport(_command_response(exit_code=0))
-    await _sandbox_client(transport).get_command(session_id="sbx_1", command_id="cmd_1")
+    async with fake_api.session():
+        box = await sandbox.create_sandbox(name="preview")
+        await box.fs.write_text("message.txt", "hello")
+        assert await box.fs.read_text("message.txt") == "hello"
 
-    assert transport.headers is not None
-    assert transport.headers["user-agent"] == _base_user_agent()
-
-
-async def test_request_uses_agent_from_process_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AI_AGENT", "claude-code_2-1-247_agent")
-    monkeypatch.delenv("VERCEL_TELEMETRY_DISABLED", raising=False)
-    monkeypatch.delenv("VERCEL_SANDBOX_TELEMETRY_DISABLED", raising=False)
-
-    transport = RecordingJsonTransport(_command_response(exit_code=0))
-    await _sandbox_client(transport).get_command(session_id="sbx_1", command_id="cmd_1")
-
-    assert transport.headers is not None
-    expected = _base_user_agent().replace(
-        " (Python/", " agent/claude-code_2-1-247_agent (Python/", 1
-    )
-    assert transport.headers["user-agent"] == expected
-
-
-async def test_stream_and_upload_user_agents(monkeypatch: pytest.MonkeyPatch) -> None:
-    from vercel.sandbox._internal import api_client
-
-    monkeypatch.setattr(api_client, "detect_agent_name", lambda: "codex")
-    monkeypatch.delenv("VERCEL_TELEMETRY_DISABLED", raising=False)
-    monkeypatch.delenv("VERCEL_SANDBOX_TELEMETRY_DISABLED", raising=False)
-
-    stream_transport = RecordingStreamTransport()
-    response = await _sandbox_client(stream_transport).open_read_response(
-        session_id="sbx_1", path="file.txt"
-    )
-    await response.aclose()
-
-    upload_transport = RecordingUploadTransport()
-    async with _sandbox_client(upload_transport).write_files_request(session_id="sbx_1"):
-        pass
-
-    expected = _base_user_agent().replace(" (Python/", " agent/codex (Python/", 1)
-    assert stream_transport.headers is not None
-    assert upload_transport.headers is not None
-    assert stream_transport.headers["user-agent"] == expected
-    assert upload_transport.headers["user-agent"] == expected
+    expected = _base_user_agent()
+    if agent is not None:
+        expected = expected.replace(" (Python/", f" agent/{agent} (Python/", 1)
+    assert {"sandboxes.create", "fs.write", "fs.read"} <= set(fake_api.routes())
+    assert {request.headers["user-agent"] for request in fake_api.requests} == {expected}
 
 
 async def test_waiting_for_command_disables_client_timeout() -> None:

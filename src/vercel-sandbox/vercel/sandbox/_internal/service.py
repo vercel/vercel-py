@@ -10,7 +10,7 @@ from vercel._internal.core.byte_stream import (
     StagingFileRuntime,
 )
 from vercel._internal.core.http import StreamingResponse
-from vercel.sandbox._internal.api_client import SandboxApiClient
+from vercel.sandbox._internal.api_client import SandboxApiClient, _user_agent
 from vercel.sandbox._internal.errors import (
     SandboxApiError,
     SandboxFilesystemCommandError,
@@ -18,6 +18,10 @@ from vercel.sandbox._internal.errors import (
     SandboxPathNotFoundError,
     SandboxResponseError,
     SandboxUploadSizeMismatchError,
+)
+from vercel.sandbox._internal.interactive_session import (
+    InteractiveConnector,
+    WebSocketInteractiveConnector,
 )
 from vercel.sandbox._internal.log_stream import _parse_command_log_record
 from vercel.sandbox._internal.models import (
@@ -58,6 +62,7 @@ from vercel.sandbox._internal.process_output import ProcessOutputRouter
 from vercel.sandbox._internal.runtime_common import (
     _StreamUploadFileEntry,
 )
+from vercel.sandbox._internal.runtime_options import AsyncSleep, SandboxRuntimeOptions
 from vercel.sandbox._internal.state import (
     CompletedProcessState,
     DrivesPageState,
@@ -86,7 +91,6 @@ _TRANSITIONAL_SANDBOX_STATUSES = frozenset(
     {SandboxStatus.PENDING, SandboxStatus.STOPPING, SandboxStatus.SNAPSHOTTING}
 )
 _READY_POLL_INTERVAL_SECONDS = 0.5
-AsyncSleep = Callable[[float], Awaitable[None]]
 ProcessOutputCollector = Callable[[ProcessState], Awaitable[tuple[str, str]]]
 _MISSING_PATH_ERROR_CODES = frozenset({"not_found", "path_not_found", "file_not_found", "ENOENT"})
 _PREDICATE_SCRIPT = """\
@@ -242,12 +246,14 @@ class SandboxService:
         ensure_open: Callable[[], None],
         sleep: AsyncSleep,
         staging_file_runtime: StagingFileRuntime,
+        interactive: InteractiveConnector,
     ) -> None:
         self._api_client = api_client
         self._options = options
         self._ensure_open = ensure_open
         self._sleep = sleep
         self._staging_file_runtime = staging_file_runtime
+        self._interactive = interactive
 
     @property
     def api_client(self) -> SandboxApiClient:
@@ -260,6 +266,10 @@ class SandboxService:
     @property
     def staging_file_runtime(self) -> StagingFileRuntime:
         return self._staging_file_runtime
+
+    @property
+    def interactive(self) -> InteractiveConnector:
+        return self._interactive
 
     async def _wait_for_ready_sandbox(
         self, sandbox: SandboxState, *, project_id: str | None = None
@@ -1223,21 +1233,30 @@ def _adapt_sync_credentials_factory(
     return credentials_factory
 
 
+def _build_sandbox_service(
+    session: "SdkSession | SyncSdkSession", options: SandboxServiceOptions
+) -> SandboxService:
+    runtime = session.get_service_option(SandboxRuntimeOptions) or SandboxRuntimeOptions()
+    return SandboxService(
+        api_client=SandboxApiClient(
+            base_url=options.base_url,
+            credentials_factory=options.credentials_factory,
+            transport=session.get_transport(),
+            file_transfer_timeout=options.file_transfer_timeout,
+            user_agent=_user_agent(),
+        ),
+        options=options,
+        ensure_open=session.check_open,
+        sleep=runtime.sleep or session.sleep,
+        staging_file_runtime=session.get_staging_file_runtime(),
+        interactive=runtime.interactive or WebSocketInteractiveConnector(),
+    )
+
+
 def get_sandbox_service(session: "SdkSession") -> SandboxService:
     def factory() -> SandboxService:
         options = session.get_service_option(SandboxServiceOptions) or SandboxServiceOptions()
-        return SandboxService(
-            api_client=SandboxApiClient(
-                base_url=options.base_url,
-                credentials_factory=options.credentials_factory,
-                transport=session.get_transport(),
-                file_transfer_timeout=options.file_transfer_timeout,
-            ),
-            options=options,
-            ensure_open=session.check_open,
-            sleep=session.sleep,
-            staging_file_runtime=session.get_staging_file_runtime(),
-        )
+        return _build_sandbox_service(session, options)
 
     return session.get_or_create_service(SandboxService, factory)
 
@@ -1253,17 +1272,6 @@ def get_sync_sandbox_service(session: "SyncSdkSession") -> SandboxService:
             file_transfer_timeout=sync_options.file_transfer_timeout,
             region=sync_options.region,
         )
-        return SandboxService(
-            api_client=SandboxApiClient(
-                base_url=options.base_url,
-                credentials_factory=options.credentials_factory,
-                transport=session.get_transport(),
-                file_transfer_timeout=options.file_transfer_timeout,
-            ),
-            options=options,
-            ensure_open=session.check_open,
-            sleep=session.sleep,
-            staging_file_runtime=session.get_staging_file_runtime(),
-        )
+        return _build_sandbox_service(session, options)
 
     return session.get_or_create_service(SandboxService, factory)

@@ -1,3 +1,11 @@
+"""Interactive sessions: the PTY protocol, its transports, and the public API.
+
+Protocol and transport tests drive the runtime with `_ScriptedConnection`, a
+connection that replays scripted frames. Tests of the public API run against
+the fake Sandbox API, whose connector opens a fake terminal with a line
+shell; `_ScriptedConnector` replaces it where a test needs exact frames.
+"""
+
 import io
 import json
 import queue
@@ -5,24 +13,22 @@ import threading
 import time
 from collections import deque
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import Any, cast
 
 import anyio
-import httpx2 as httpx
 import pytest
-from sandbox_fixtures import sandbox_service_options
+from fake_sandbox import FakeSandboxApi
+from sandbox_modes import Mode
 
-import vendor.respx as respx
 from vercel import sandbox
 from vercel._internal.core.iter_coroutine import iter_coroutine
-from vercel._internal.core.options import ServiceOptions
-from vercel.api import session
 from vercel.sandbox import sync as sandbox_sync
 from vercel.sandbox._internal import async_runtime, sync_runtime
 from vercel.sandbox._internal.interactive_session import (
-    AsyncInteractiveTransport,
+    AsyncInteractiveConnection,
     Frame,
+    SyncInteractiveConnection,
     SyncInteractiveTransport,
     decode_frame,
     health_url,
@@ -30,28 +36,8 @@ from vercel.sandbox._internal.interactive_session import (
     resize_message,
     start_message,
 )
+from vercel.sandbox._internal.models import JSONObject
 from vercel.sandbox._internal.state import InteractiveSessionState
-
-
-def _session_options() -> list[ServiceOptions]:
-    return sandbox_service_options()
-
-
-def _sandbox_response(*, session_id: str = "sbx_1", status: str = "running") -> dict[str, object]:
-    return {
-        "sandbox": {"name": "preview", "currentSessionId": session_id, "status": status},
-        "session": {
-            "id": session_id,
-            "sourceSandboxName": "preview",
-            "projectId": "prj_1",
-            "status": status,
-            "cwd": "/vercel/sandbox",
-        },
-    }
-
-
-def _interactive_response() -> dict[str, object]:
-    return {"url": "wss://controller.test/ws", "token": "tok_1"}
 
 
 class _TextEvent:
@@ -64,15 +50,13 @@ class _BytesEvent:
         self.data = data
 
 
-class _FakeTransport:
-    """Stand-in for the WebSocket transport, scripted with received frames."""
-
-    instances: list["_FakeTransport"] = []
+class _ScriptedConnection:
+    """An interactive connection that replays scripted frames."""
 
     def __init__(self, state: InteractiveSessionState) -> None:
         self.state = state
         self.sent_bytes: list[bytes] = []
-        self.sent_json: list[dict[str, object]] = []
+        self.sent_json: list[JSONObject] = []
         self.closed = False
         self.receive_timeouts: list[float | None] = []
         self.running = False
@@ -80,7 +64,6 @@ class _FakeTransport:
         self.frames: list[Frame] = [Frame(data=b"hello"), Frame(returncode=0, end=True)]
         self._returncode: int | None = None
         self._finished = False
-        _FakeTransport.instances.append(self)
 
     @property
     def returncode(self) -> int | None:
@@ -96,7 +79,7 @@ class _FakeTransport:
     async def send_bytes(self, data: bytes) -> None:
         self.sent_bytes.append(data)
 
-    async def send_json(self, message: dict[str, object]) -> None:
+    async def send_json(self, message: JSONObject) -> None:
         self.sent_json.append(message)
 
     async def receive(self, timeout: float | None = None) -> Frame:
@@ -138,22 +121,52 @@ class _FakeTransport:
         self._finished = True
 
 
-@asynccontextmanager
-async def _fake_open_async_transport(
-    state: InteractiveSessionState,
-) -> AsyncIterator[_FakeTransport]:
-    transport = _FakeTransport(state)
-    try:
-        yield transport
-    finally:
-        await transport.close()
+class _ScriptedConnector:
+    """Open scripted connections, keeping each for the test to script."""
+
+    def __init__(self) -> None:
+        self.connections: list[_ScriptedConnection] = []
+
+    def _open(self, state: InteractiveSessionState) -> _ScriptedConnection:
+        connection = _ScriptedConnection(state)
+        self.connections.append(connection)
+        return connection
+
+    def open_async(
+        self, state: InteractiveSessionState
+    ) -> AbstractAsyncContextManager[AsyncInteractiveConnection]:
+        @asynccontextmanager
+        async def connection() -> AsyncIterator[AsyncInteractiveConnection]:
+            opened = self._open(state)
+            try:
+                yield opened
+            finally:
+                await opened.close()
+
+        return connection()
+
+    def open_sync(self, state: InteractiveSessionState) -> SyncInteractiveConnection:
+        return self._open(state)
+
+    @property
+    def last(self) -> _ScriptedConnection:
+        return self.connections[-1]
 
 
-@pytest.fixture(autouse=True)
-def fake_transport(monkeypatch: pytest.MonkeyPatch) -> None:
-    _FakeTransport.instances.clear()
-    monkeypatch.setattr(async_runtime, "open_async_transport", _fake_open_async_transport)
-    monkeypatch.setattr(sync_runtime, "SyncInteractiveTransport", _FakeTransport)
+@pytest.fixture
+def scripted(fake_api: FakeSandboxApi) -> _ScriptedConnector:
+    """Serve interactive sessions from scripted connections."""
+    connector = _ScriptedConnector()
+    fake_api.interactive = connector
+    return connector
+
+
+def _state() -> InteractiveSessionState:
+    return InteractiveSessionState(url="wss://h.test/ws", token="t")
+
+
+async def _no_sleep(_seconds: float) -> None:
+    return None
 
 
 def test_public_interactive_exports() -> None:
@@ -219,9 +232,9 @@ def test_exit_code_is_only_trusted_when_it_is_an_integer() -> None:
 async def test_waiting_does_not_consume_terminal_output() -> None:
     # Waiting is lifecycle, not I/O: it must not take frames from a reader or
     # block one that is already running.
-    transport = _FakeTransport(InteractiveSessionState(url="wss://h.test/ws", token="t"))
+    transport = _ScriptedConnection(_state())
     transport.frames = [Frame(data=b"one"), Frame(data=b"two"), Frame(returncode=5, end=True)]
-    pty = async_runtime.InteractiveSession(transport=cast(AsyncInteractiveTransport, transport))
+    pty = async_runtime.InteractiveSession(transport=transport)
 
     seen: list[bytes] = []
     codes: list[int | None] = []
@@ -243,10 +256,10 @@ async def test_waiting_does_not_consume_terminal_output() -> None:
 
 async def test_reader_reports_a_broken_connection_instead_of_a_clean_end() -> None:
     # A dropped connection must not look like the process exiting normally.
-    transport = _FakeTransport(InteractiveSessionState(url="wss://h.test/ws", token="t"))
+    transport = _ScriptedConnection(_state())
     transport.frames = [Frame(data=b"partial")]
     transport.failure = OSError("connection reset")
-    pty = async_runtime.InteractiveSession(transport=cast(AsyncInteractiveTransport, transport))
+    pty = async_runtime.InteractiveSession(transport=transport)
 
     assert await pty.stream.receive() == b"partial"
     with pytest.raises(anyio.BrokenResourceError):
@@ -256,30 +269,30 @@ async def test_reader_reports_a_broken_connection_instead_of_a_clean_end() -> No
 async def test_waiting_reports_a_broken_connection() -> None:
     # A failure has to reach the wait as well as the reader, or a caller that
     # only waits sees a clean exit that never happened.
-    transport = _FakeTransport(InteractiveSessionState(url="wss://h.test/ws", token="t"))
+    transport = _ScriptedConnection(_state())
     transport.frames = []
     transport.failure = OSError("connection reset")
-    pty = async_runtime.InteractiveSession(transport=cast(AsyncInteractiveTransport, transport))
+    pty = async_runtime.InteractiveSession(transport=transport)
 
     with pytest.raises((anyio.BrokenResourceError, ConnectionError)):
         await pty.wait()
 
 
 def test_sync_waiting_reports_a_broken_connection() -> None:
-    transport = _FakeTransport(InteractiveSessionState(url="wss://h.test/ws", token="t"))
+    transport = _ScriptedConnection(_state())
     transport.frames = []
     transport.failure = OSError("connection reset")
-    pty = sync_runtime.SyncInteractiveSession(transport=cast(SyncInteractiveTransport, transport))
+    pty = sync_runtime.SyncInteractiveSession(transport=transport)
 
     with pytest.raises(ConnectionError):
         pty.wait()
 
 
 def test_sync_reader_reports_a_broken_connection() -> None:
-    transport = _FakeTransport(InteractiveSessionState(url="wss://h.test/ws", token="t"))
+    transport = _ScriptedConnection(_state())
     transport.frames = [Frame(data=b"partial")]
     transport.failure = OSError("connection reset")
-    pty = sync_runtime.SyncInteractiveSession(transport=cast(SyncInteractiveTransport, transport))
+    pty = sync_runtime.SyncInteractiveSession(transport=transport)
 
     assert pty.stream.read(7) == b"partial"
     with pytest.raises(ConnectionError):
@@ -461,20 +474,8 @@ async def test_connect_failure_is_catchable_by_type() -> None:
     # ExceptionGroup, making the public error type impossible to catch.
     state = InteractiveSessionState(url="wss://127.0.0.1:1/ws", token="t")
     with pytest.raises(sandbox.SandboxInteractiveError):
-        async with open_async_transport(state):
+        async with open_async_transport(state, sleep=_no_sleep):
             pass
-
-
-async def test_caller_errors_are_not_wrapped_by_the_connection() -> None:
-    class Boom(Exception):
-        pass
-
-    async with session(service_options=_session_options()):
-        with pytest.raises(Boom):
-            async with _fake_open_async_transport(
-                InteractiveSessionState(url="wss://h.test/ws", token="t")
-            ):
-                raise Boom
 
 
 def test_resize_message_and_health_url() -> None:
@@ -498,20 +499,125 @@ def test_decode_frame_maps_events() -> None:
     assert decode_frame(object()) == Frame(end=True)
 
 
-@respx.mock
-async def test_async_stream_follows_the_bytestream_contract(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/interactive").mock(
-        return_value=httpx.Response(200, json=_interactive_response())
-    )
+# ---- the public API -----------------------------------------------------------------
 
-    async with session(service_options=_session_options()):
+
+async def test_a_shell_session_echoes_runs_resizes_and_exits(
+    mode: Mode, fake_api: FakeSandboxApi
+) -> None:
+    async with mode.session():
+        box = await mode(mode.sandbox.create_sandbox(name="preview"))
+        async with mode.enter(box.open_interactive(cols=100, rows=30)) as pty:
+            received = b""
+            if mode.sync:
+                pty.stream.write(b"echo hi\n")
+                while len(received) < 12:
+                    received += pty.stream.read(12)
+            else:
+                await pty.stream.send(b"echo hi\n")
+                while len(received) < 12:
+                    received += await pty.stream.receive()
+            # The PTY echoes the input line, then the program prints.
+            assert received == b"echo hi\r\nhi\r\n"
+            await mode(pty.resize(120, 40))
+            if mode.sync:
+                pty.stream.write(b"exit 3\n")
+            else:
+                await pty.stream.send(b"exit 3\n")
+            assert await mode(pty.wait()) == 3
+            assert pty.returncode == 3
+
+    (terminal,) = fake_api.terminals
+    assert terminal.started == start_message(
+        command="/bin/bash",
+        args=None,
+        cwd="/vercel/sandbox",
+        env=None,
+        sudo=False,
+        cols=100,
+        rows=30,
+    )
+    assert terminal.sizes == [(100, 30), (120, 40)]
+    assert terminal.closed
+    assert fake_api.requests_to("sessions.interactive")[0].path_params["session_id"] == "sbx_1"
+
+
+async def test_a_command_session_reports_its_output_and_exit(
+    mode: Mode, fake_api: FakeSandboxApi
+) -> None:
+    fake_api.command("report", stdout="line one\nline two\n", exit_code=4)
+
+    async with mode.session():
+        box = await mode(mode.sandbox.create_sandbox(name="preview"))
+        async with mode.enter(box.open_interactive("report", ["--all"])) as pty:
+            chunks = await mode.collect(pty.stream)
+            assert await mode(pty.wait()) == 4
+
+    assert b"".join(chunks) == b"line one\r\nline two\r\n"
+    assert fake_api.terminals[0].started["args"] == ["--all"]
+
+
+async def test_open_interactive_resumes_a_stopped_sandbox(
+    mode: Mode, fake_api: FakeSandboxApi
+) -> None:
+    fake_api.seed()
+
+    async with mode.session():
+        box = await mode(mode.sandbox.get_sandbox(name="preview"))
+        fake_api.stop("preview")
+        async with mode.enter(box.open_interactive()):
+            pass
+
+    sessions = [
+        request.path_params["session_id"]
+        for request in fake_api.requests_to("sessions.interactive")
+    ]
+    assert sessions == ["sbx_1", "sbx_2"]
+    assert box.current_session_id == "sbx_2"
+    assert [terminal.session_id for terminal in fake_api.terminals] == ["sbx_2"]
+
+
+async def test_errors_raised_in_the_block_are_not_wrapped(
+    mode: Mode, fake_api: FakeSandboxApi
+) -> None:
+    class Boom(Exception):
+        pass
+
+    async with mode.session():
+        box = await mode(mode.sandbox.create_sandbox(name="preview"))
+        with pytest.raises(Boom):
+            async with mode.enter(box.open_interactive()):
+                raise Boom
+
+
+async def test_interactive_operations_are_single_use(mode: Mode, fake_api: FakeSandboxApi) -> None:
+    async with mode.session():
+        box = await mode(mode.sandbox.create_sandbox(name="preview"))
+        operation = box.open_interactive()
+        async with mode.enter(operation):
+            pass
+        with pytest.raises(RuntimeError, match="can only be used once"):
+            async with mode.enter(operation):
+                pass
+
+
+async def test_controls_after_close_report_closed(mode: Mode, fake_api: FakeSandboxApi) -> None:
+    async with mode.session():
+        box = await mode(mode.sandbox.create_sandbox(name="preview"))
+        async with mode.enter(box.open_interactive()) as pty:
+            await mode(pty.close() if mode.sync else pty.aclose())
+            with pytest.raises(ValueError if mode.sync else anyio.ClosedResourceError):
+                await mode(pty.resize(80, 24))
+
+
+async def test_async_stream_follows_the_bytestream_contract(
+    fake_api: FakeSandboxApi, scripted: _ScriptedConnector
+) -> None:
+    async with fake_api.session():
         box = await sandbox.create_sandbox(name="preview")
         async with box.open_interactive() as pty:
             assert isinstance(pty.stream, anyio.abc.ByteStream)
-            _FakeTransport.instances[-1].frames = [Frame(data=b"abcdef")]
+            scripted.last.frames = [Frame(data=b"abcdef")]
             # receive() must respect max_bytes and keep the remainder.
             assert await pty.stream.receive(2) == b"ab"
             assert await pty.stream.receive(10) == b"cdef"
@@ -527,26 +633,20 @@ async def test_async_stream_follows_the_bytestream_contract(mock_env_clear: None
                 await pty.stream.send(b"x")
 
 
-@respx.mock
-def test_sync_stream_follows_the_rawio_contract(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/interactive").mock(
-        return_value=httpx.Response(200, json=_interactive_response())
-    )
-
-    with session(service_options=_session_options()):
+def test_sync_stream_follows_the_rawio_contract(
+    fake_api: FakeSandboxApi, scripted: _ScriptedConnector
+) -> None:
+    with fake_api.session(sync=True):
         box = sandbox_sync.create_sandbox(name="preview")
         with box.open_interactive() as pty:
-            transport = _FakeTransport.instances[-1]
+            connection = scripted.last
             assert isinstance(pty.stream, io.RawIOBase)
             assert pty.stream.readable() and pty.stream.writable()
 
-            transport.frames = [Frame(data=b"abcdef")]
+            connection.frames = [Frame(data=b"abcdef")]
             # A zero-length read must not consume input or block.
             assert pty.stream.readinto(bytearray(0)) == 0
-            assert not transport.receive_timeouts
+            assert not connection.receive_timeouts
 
             target = bytearray(2)
             assert pty.stream.readinto(target) == 2
@@ -560,280 +660,68 @@ def test_sync_stream_follows_the_rawio_contract(mock_env_clear: None) -> None:
             pty.stream.readinto(bytearray(4))
 
 
-@respx.mock
-async def test_async_controls_after_close_report_closed(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/interactive").mock(
-        return_value=httpx.Response(200, json=_interactive_response())
-    )
-
-    async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview")
-        async with box.open_interactive() as pty:
-            await pty.aclose()
-            with pytest.raises(anyio.ClosedResourceError):
-                await pty.resize(80, 24)
-
-
-@respx.mock
-def test_sync_controls_after_close_report_closed(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/interactive").mock(
-        return_value=httpx.Response(200, json=_interactive_response())
-    )
-
-    with session(service_options=_session_options()):
-        box = sandbox_sync.create_sandbox(name="preview")
-        with box.open_interactive() as pty:
-            pty.close()
-            with pytest.raises(ValueError):
-                pty.resize(80, 24)
-
-
-@respx.mock
-async def test_interactive_operations_are_single_use(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/interactive").mock(
-        return_value=httpx.Response(200, json=_interactive_response())
-    )
-
-    async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview")
-        operation = box.open_interactive()
-        async with operation:
-            pass
-        with pytest.raises(RuntimeError, match="can only be used once"):
-            async with operation:
-                pass
-
-
-@respx.mock
-def test_sync_interactive_operations_are_single_use(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/interactive").mock(
-        return_value=httpx.Response(200, json=_interactive_response())
-    )
-
-    with session(service_options=_session_options()):
-        box = sandbox_sync.create_sandbox(name="preview")
-        operation = box.open_interactive()
-        with operation:
-            pass
-        with pytest.raises(RuntimeError, match="can only be used once"):
-            with operation:
-                pass
-
-
-@respx.mock
-async def test_async_control_frames_never_reach_the_terminal(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/interactive").mock(
-        return_value=httpx.Response(200, json=_interactive_response())
-    )
-
-    async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview")
-        async with box.open_interactive() as pty:
-            _FakeTransport.instances[-1].frames = [
-                Frame(data=b"real output"),
-                Frame(returncode=0, end=True),
-            ]
-            assert [chunk async for chunk in pty.stream] == [b"real output"]
-
-
-@respx.mock
-async def test_async_open_interactive_streams_and_waits(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/interactive").mock(
-        return_value=httpx.Response(200, json=_interactive_response())
-    )
-
-    async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview")
-        async with box.open_interactive("bash", ["-l"], cols=100, rows=30) as pty:
-            transport = _FakeTransport.instances[-1]
-            assert transport.state.url == "wss://controller.test/ws"
-            assert transport.state.token == "tok_1"
-            assert transport.sent_json[0] == start_message(
-                command="bash",
-                args=["-l"],
-                cwd="/vercel/sandbox",
-                env=None,
-                sudo=False,
-                cols=100,
-                rows=30,
-            )
-            await pty.stream.send(b"echo hi\n")
-            assert transport.sent_bytes == [b"echo hi\n"]
-            await pty.resize(120, 40)
-            assert transport.sent_json[-1] == resize_message(120, 40)
-            assert await pty.stream.receive() == b"hello"
-            assert await pty.wait() == 0
-            assert pty.returncode == 0
-
-    assert route.called
-    assert _FakeTransport.instances[-1].closed
-
-
-@respx.mock
-async def test_async_interactive_iteration_stops_at_exit(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/interactive").mock(
-        return_value=httpx.Response(200, json=_interactive_response())
-    )
-
-    async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview")
-        async with box.open_interactive() as pty:
-            _FakeTransport.instances[-1].frames = [
-                Frame(data=b"a"),
-                Frame(data=b"b"),
-                Frame(returncode=2, end=True),
-            ]
-            chunks = [chunk async for chunk in pty.stream]
-            assert chunks == [b"a", b"b"]
-            assert pty.returncode == 2
-            with pytest.raises(anyio.EndOfStream):
-                await pty.stream.receive()
-
-
-@respx.mock
-async def test_async_interactive_exit_without_code_reports_success(
-    mock_env_clear: None,
+@pytest.mark.parametrize(
+    ("frames", "chunks", "returncode"),
+    [
+        ([Frame(data=b"real output"), Frame(returncode=0, end=True)], [b"real output"], 0),
+        ([Frame(data=b"a"), Frame(data=b"b"), Frame(returncode=2, end=True)], [b"a", b"b"], 2),
+        (
+            [Frame(data=b"bye"), decode_frame(_TextEvent(json.dumps({"type": "exit"})))],
+            [b"bye"],
+            0,
+        ),
+    ],
+    ids=["control-frames", "exit-code", "exit-without-code"],
+)
+async def test_iteration_stops_at_the_exit_frame(
+    mode: Mode,
+    fake_api: FakeSandboxApi,
+    scripted: _ScriptedConnector,
+    frames: list[Frame],
+    chunks: list[bytes],
+    returncode: int,
 ) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/interactive").mock(
-        return_value=httpx.Response(200, json=_interactive_response())
-    )
-
-    async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview")
-        async with box.open_interactive() as pty:
-            exit_frame = decode_frame(_TextEvent(json.dumps({"type": "exit"})))
-            assert exit_frame is not None
-            _FakeTransport.instances[-1].frames = [Frame(data=b"bye"), exit_frame]
-            assert [chunk async for chunk in pty.stream] == [b"bye"]
-            assert await pty.wait() == 0
+    async with mode.session():
+        box = await mode(mode.sandbox.create_sandbox(name="preview"))
+        async with mode.enter(box.open_interactive()) as pty:
+            scripted.last.frames = list(frames)
+            if mode.sync:
+                assert pty.stream.read() == b"".join(chunks)
+            else:
+                assert [chunk async for chunk in pty.stream] == chunks
+                with pytest.raises(anyio.EndOfStream):
+                    await pty.stream.receive()
+            assert pty.returncode == returncode
+            assert await mode(pty.wait()) == returncode
 
 
-@respx.mock
-async def test_async_interactive_reads_after_stream_end_do_not_block(
-    mock_env_clear: None,
+async def test_async_reads_after_the_end_do_not_block(
+    fake_api: FakeSandboxApi, scripted: _ScriptedConnector
 ) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/interactive").mock(
-        return_value=httpx.Response(200, json=_interactive_response())
-    )
-
-    async with session(service_options=_session_options()):
+    async with fake_api.session():
         box = await sandbox.create_sandbox(name="preview")
         async with box.open_interactive() as pty:
-            _FakeTransport.instances[-1].frames = [Frame(returncode=4, end=True)]
+            scripted.last.frames = [Frame(returncode=4, end=True)]
             assert await pty.wait() == 4
             for _ in range(3):
                 with pytest.raises(anyio.EndOfStream):
                     await pty.stream.receive()
             assert await pty.wait() == 4
 
-
-@respx.mock
-async def test_async_interactive_wait_without_exit_frame(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/interactive").mock(
-        return_value=httpx.Response(200, json=_interactive_response())
-    )
-
-    async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview")
         async with box.open_interactive() as pty:
-            _FakeTransport.instances[-1].frames = [Frame(data=b"a")]
+            scripted.last.frames = [Frame(data=b"a")]
             assert await pty.wait() is None
 
 
-@respx.mock
-async def test_async_open_interactive_resumes_stopped_sandbox(mock_env_clear: None) -> None:
-    respx.get("https://sandbox.test/v2/sandboxes/preview", params={"resume": "false"}).mock(
-        return_value=httpx.Response(200, json=_sandbox_response(status="stopped"))
-    )
-    resume = respx.get("https://sandbox.test/v2/sandboxes/preview", params={"resume": "true"}).mock(
-        return_value=httpx.Response(200, json=_sandbox_response(session_id="sbx_2"))
-    )
-    stopped = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/interactive").mock(
-        return_value=httpx.Response(410, json={"error": {"code": "session_stopped"}})
-    )
-    resumed = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_2/interactive").mock(
-        return_value=httpx.Response(200, json=_interactive_response())
-    )
-
-    async with session(service_options=_session_options()):
-        box = await sandbox.get_sandbox(name="preview")
-        async with box.open_interactive():
-            pass
-
-    assert stopped.called
-    assert resume.called
-    assert resumed.called
-
-
-@respx.mock
-def test_sync_open_interactive_streams_and_waits(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/interactive").mock(
-        return_value=httpx.Response(200, json=_interactive_response())
-    )
-
-    with session(service_options=_session_options()):
-        box = sandbox_sync.create_sandbox(name="preview")
-        with box.open_interactive("bash") as pty:
-            transport = _FakeTransport.instances[-1]
-            assert transport.sent_json[0]["command"] == "bash"
-            pty.stream.write(b"echo hi\n")
-            assert transport.sent_bytes == [b"echo hi\n"]
-            pty.resize(120, 40)
-            assert transport.sent_json[-1] == resize_message(120, 40)
-            assert pty.stream.read(5) == b"hello"
-            assert pty.wait() == 0
-
-    assert _FakeTransport.instances[-1].closed
-
-
-@respx.mock
-def test_sync_interactive_wait_honours_timeout(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/interactive").mock(
-        return_value=httpx.Response(200, json=_interactive_response())
-    )
-
-    with session(service_options=_session_options()):
+def test_sync_wait_honours_its_timeout_and_keeps_output(
+    fake_api: FakeSandboxApi, scripted: _ScriptedConnector
+) -> None:
+    with fake_api.session(sync=True):
         box = sandbox_sync.create_sandbox(name="preview")
         with box.open_interactive() as pty:
-            transport = _FakeTransport.instances[-1]
-            transport.frames = [Frame(data=b"still running")]
-            transport.running = True
+            connection = scripted.last
+            connection.frames = [Frame(data=b"still running")]
+            connection.running = True
 
             with pytest.raises(TimeoutError):
                 pty.wait(timeout=5)
@@ -842,19 +730,4 @@ def test_sync_interactive_wait_honours_timeout(mock_env_clear: None) -> None:
             # still be there for the reader.
             assert pty.stream.read(13) == b"still running"
 
-
-@respx.mock
-def test_sync_interactive_iteration_stops_at_exit(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/interactive").mock(
-        return_value=httpx.Response(200, json=_interactive_response())
-    )
-
-    with session(service_options=_session_options()):
-        box = sandbox_sync.create_sandbox(name="preview")
-        with box.open_interactive() as pty:
-            _FakeTransport.instances[-1].frames = [Frame(data=b"a"), Frame(returncode=5, end=True)]
-            assert pty.stream.read() == b"a"
-            assert pty.returncode == 5
+    assert scripted.last.closed
