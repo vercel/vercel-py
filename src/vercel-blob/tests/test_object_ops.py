@@ -1705,6 +1705,66 @@ async def test_download_size_reports_decoded_length_or_none(
     assert result.metadata.headers["content-length"] == str(len(wire))
 
 
+class _BodyFails(httpx.SyncByteStream, httpx.AsyncByteStream):
+    """Deliver one chunk after successful headers, then fail mid-body."""
+
+    def __init__(self, failure: type[httpx.HTTPError]) -> None:
+        self.failure = failure
+
+    def __iter__(self) -> Iterator[bytes]:
+        yield b"first"
+        raise self.failure("body failed")
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        yield b"first"
+        raise self.failure("body failed")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("sync", [False, True], ids=["async", "sync"])
+@pytest.mark.parametrize("buffered", [False, True], ids=["stream", "get"])
+@pytest.mark.parametrize(
+    "failure,expected",
+    [
+        (httpx.ReadTimeout, BlobTimeoutError),
+        (httpx.RemoteProtocolError, BlobUnknownError),
+        (httpx.DecodingError, BlobStreamError),
+        (None, BlobStreamError),
+    ],
+    ids=["timeout", "protocol", "decoding", "corrupt-gzip"],
+)
+async def test_download_body_failures_map_to_blob_errors(
+    sync: bool,
+    buffered: bool,
+    failure: type[httpx.HTTPError] | None,
+    expected: type[BlobError],
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if failure is None:
+            return httpx.Response(
+                200, headers={"content-encoding": "gzip"}, content=b"not gzip at all"
+            )
+        return httpx.Response(200, stream=_BodyFails(failure))
+
+    with pytest.raises(BlobError) as raised:
+        if sync:
+            with _sync_session(handler):
+                if buffered:
+                    blob.sync.get_blob(_URL, access="public")
+                else:
+                    with blob.sync.stream_blob(_URL, access="public") as sync_download:
+                        b"".join(sync_download)
+        else:
+            async with _async_session(handler):
+                if buffered:
+                    await blob.get_blob(_URL, access="public")
+                else:
+                    async with blob.stream_blob(_URL, access="public") as async_download:
+                        [chunk async for chunk in async_download]
+    assert type(raised.value) is expected
+    assert isinstance(raised.value.__cause__, failure or httpx.DecodingError)
+
+
 @pytest.mark.anyio
 async def test_async_stream_lifecycle() -> None:
     stream = _TrackingAsyncStream([b"chunk-1-", b"chunk-2-", b"chunk-3"])

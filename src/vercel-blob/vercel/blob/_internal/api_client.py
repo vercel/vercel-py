@@ -59,7 +59,8 @@ from vercel.blob.models import (
 )
 
 from .pagination import QueryPage
-from .upload import _CHUNK_SIZE, _ChunkSource, send_streaming_upload, transport_failure
+from .transport_errors import body_read_failure, transport_failure
+from .upload import _CHUNK_SIZE, _ChunkSource, send_streaming_upload
 from .validation import (
     validate_access,
     validate_bool_flag,
@@ -667,7 +668,8 @@ class BlobApiClient:
                 chunk_size=_CHUNK_SIZE,
             )
         except http_errors() as exc:
-            raise transport_failure(exc) from exc
+            # Opening the stream can read and decode the first body chunk.
+            raise body_read_failure(exc) from exc
         try:
             metadata = _validate_and_parse_download_response(url, stream.response)
         except BaseException:

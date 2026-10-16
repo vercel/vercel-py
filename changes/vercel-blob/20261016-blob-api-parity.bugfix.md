@@ -8,6 +8,9 @@ Match the Blob service more closely:
 - Pathnames and delivery URLs containing C1 control characters are rejected
   by every operation, like other control characters. The CDN cannot serve
   such objects.
+- Network failures while reading a download's body raise `BlobUnknownError`
+  or `BlobTimeoutError` instead of raw HTTPX exceptions, and a body that cannot
+  be decoded raises `BlobStreamError`.
 - `DownloadMetadata.size` is `None` for compressed responses, whose
   `content-length` counts the encoded bytes, and `get_blob` reports the length
   of the body it returns.

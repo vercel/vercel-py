@@ -378,8 +378,10 @@ available. Common subclasses include `BlobAccessError`, `BlobStoreNotFoundError`
 `BlobPreconditionFailedError`, and `BlobServiceRateLimited`. Malformed responses
 raise `BlobStreamError`; missing or invalid credentials raise `BlobCredentialsError`.
 Network failures raise `BlobUnknownError`, and its subclass `BlobTimeoutError` when an
-HTTP timeout expires. A timed-out upload or copy may still have completed on the
-service, so check before retrying with `allow_overwrite=False`.
+HTTP timeout expires, including while a download's body is being read. A download
+body that cannot be decoded raises `BlobStreamError`. A timed-out upload or copy may
+still have completed on the service, so check before retrying with
+`allow_overwrite=False`.
 Invalid arguments fail before credential factories or HTTP requests run.
 
 ## Session configuration

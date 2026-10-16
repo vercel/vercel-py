@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import inspect
-import sys
 from collections.abc import AsyncIterable, AsyncIterator, Callable, Iterable, Iterator
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
@@ -25,8 +24,10 @@ from vercel.blob._internal.validation import (
     validate_content_length,
     validate_optional_content_length,
 )
-from vercel.blob.errors import BlobContentLengthError, BlobTimeoutError, BlobUnknownError
+from vercel.blob.errors import BlobContentLengthError
 from vercel.blob.models import PutBody, SyncPutBody
+
+from .transport_errors import transport_failure
 
 # Every body accepted by the sync or async public ``put_blob``. Each runtime rejects
 # the half of this union that belongs to the other surface.
@@ -48,18 +49,6 @@ _STREAMING_TRANSPORT_ERRORS: tuple[type[Exception], ...] = (
     anyio.BrokenResourceError,
     anyio.ClosedResourceError,
 )
-
-
-def transport_failure(exc: BaseException) -> BlobUnknownError:
-    """Map a failed HTTP exchange to the Blob error raised in its place."""
-    timeout_types: list[type[BaseException]] = [httpx.TimeoutException]
-    # Sessions may use a legacy HTTPX client, which raises its own exception family.
-    legacy = getattr(sys.modules.get("httpx"), "TimeoutException", None)
-    if isinstance(legacy, type) and issubclass(legacy, BaseException):
-        timeout_types.append(legacy)
-    if isinstance(exc, tuple(timeout_types)):
-        return BlobTimeoutError()
-    return BlobUnknownError()
 
 
 def _normalize_chunk(chunk: object) -> bytes:
