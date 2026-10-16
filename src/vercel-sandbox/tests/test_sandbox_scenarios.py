@@ -5,6 +5,8 @@ async and sync surfaces, so they check the SDK end to end on every run and
 keep the fake aligned with the API wherever a scenario reaches.
 """
 
+import sys
+
 import pytest
 from fake_sandbox import FakeSandboxApi
 from sandbox_scenarios import (
@@ -25,16 +27,26 @@ from sandbox_scenarios import (
 
 pytestmark = pytest.mark.asyncio
 
+# These scenarios run their scripts on the host interpreter under the fake, and
+# the SDK's text writes use the host's line endings, so on Windows the newlines
+# and file permissions they observe are not the ones a Linux sandbox reports.
+_posix_host = pytest.mark.skipif(
+    sys.platform == "win32", reason="scripts run on the host, not a Linux sandbox"
+)
 
+
+@_posix_host
 async def test_workspace_command_flow(driver: _ScenarioDriver, fake_api: FakeSandboxApi) -> None:
     assert_workspace(await workspace_command_flow(driver, "workspace"))
     assert not fake_api.sandboxes
 
 
+@_posix_host
 async def test_process_filesystem_flow(driver: _ScenarioDriver) -> None:
     assert_process_filesystem(await process_filesystem_flow(driver, "process-fs"))
 
 
+@_posix_host
 async def test_streaming_transfer_flow(driver: _ScenarioDriver) -> None:
     assert_streaming_transfer(await streaming_transfer_flow(driver, "transfer"))
 

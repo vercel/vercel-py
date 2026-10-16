@@ -312,7 +312,9 @@ def _host_python(context: ProgramContext) -> ProgramResult:
             [sys.executable, *context.args],
             cwd=cwd,
             env=environment,
-            stdin=subprocess.DEVNULL,
+            # An empty pipe rather than DEVNULL: Windows reports NUL as a
+            # console, so a bare `python` would start an interactive REPL.
+            input=b"",
             capture_output=True,
             timeout=60,
         )
