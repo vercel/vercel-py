@@ -14,6 +14,7 @@ from typing import Any, Generic, Literal, TypeAlias, TypeVar
 from vercel._internal.core.byte_stream import ReadableByteStream
 from vercel.sandbox._internal.errors import SandboxResponseError
 from vercel.sandbox._internal.models import (
+    CompletedProcess,
     JSONObject,
     NetworkPolicyReadback,
     ProcessSignal,
@@ -24,6 +25,7 @@ from vercel.sandbox._internal.models import (
     _WriteFile,
 )
 from vercel.sandbox._internal.state import (
+    CompletedProcessState,
     DriveState,
     ProcessState,
     RuntimeSessionStopState,
@@ -190,6 +192,22 @@ def _signal_number(value: int | str | signal_module.Signals | ProcessSignal | No
         return int(ProcessSignal(value))
     except (TypeError, ValueError) as exc:
         raise ValueError(f"Unknown signal: {value!r}") from exc
+
+
+def _completed_process(state: CompletedProcessState) -> CompletedProcess:
+    process = state.process
+    assert process.returncode is not None
+    return CompletedProcess(
+        id=process.id,
+        name=process.name,
+        args=(process.name, *process.args),
+        cwd=process.cwd,
+        session_id=process.session_id,
+        started_at=process.started_at,
+        returncode=process.returncode,
+        stdout=state.stdout,
+        stderr=state.stderr,
+    )
 
 
 class _ProcessHandleState:
