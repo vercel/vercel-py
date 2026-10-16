@@ -213,7 +213,11 @@ def get_blob_service(session: SdkSession) -> BlobService:
     def factory() -> BlobService:
         options = session.get_service_option(BlobServiceOptions) or BlobServiceOptions()
         return BlobService(
-            api_client=BlobApiClient(base_url=options.base_url, transport=session.get_transport()),
+            api_client=BlobApiClient(
+                base_url=options.base_url,
+                transport=session.get_transport(),
+                transfer_timeout=options.transfer_timeout,
+            ),
             credentials_factory=options.credentials_factory,
             check_open=session.check_open,
             upload_runtime=AsyncUploadRuntime(session.get_staging_file_runtime()),
@@ -226,7 +230,11 @@ def get_sync_blob_service(session: SyncSdkSession) -> BlobService:
     def factory() -> BlobService:
         options = session.get_service_option(SyncBlobServiceOptions) or SyncBlobServiceOptions()
         return BlobService(
-            api_client=BlobApiClient(base_url=options.base_url, transport=session.get_transport()),
+            api_client=BlobApiClient(
+                base_url=options.base_url,
+                transport=session.get_transport(),
+                transfer_timeout=options.transfer_timeout,
+            ),
             credentials_factory=adapt_sync_credentials_factory(options.credentials_factory),
             check_open=session.check_open,
             upload_runtime=SyncUploadRuntime(session.get_staging_file_runtime()),
