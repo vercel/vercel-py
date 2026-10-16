@@ -24,6 +24,7 @@ import asyncio
 import multiprocessing
 import os
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -33,7 +34,15 @@ import pytest
 
 from tests.payloads import PLAIN_ENCODER
 from tests.workflow_context import bind_context
-from vercel.workflow import HookConflictError, Run, WorkflowRunFailedError, sleep
+from vercel._internal.core.polyfills import UTC
+from vercel.workflow import (
+    HookConflictError,
+    Run,
+    WorkflowRunFailedError,
+    get_hook_by_token,
+    sleep,
+    start,
+)
 from vercel.workflow._internal import core, runtime, serialization as ser, world as w
 from vercel.workflow._internal.worlds import local as local_mod
 
@@ -44,6 +53,7 @@ RUN_ID = "wrun_test"
 VERCEL_RUN_ID = "wrun_loser"
 OWNER_RUN_ID = "wrun_owner"
 TOKEN = "shared-token"
+RETENTION_NOW = datetime(2026, 9, 22, tzinfo=UTC)
 
 registry = core.Workflows(as_vercel_job=False)
 
@@ -53,8 +63,10 @@ class Claim(core.BaseHook, pydantic.BaseModel):
 
 
 @registry.workflow
-async def wait_for_claim() -> str:
-    await Claim.wait(token=TOKEN)
+async def wait_for_claim(retention: Any = None, fail: bool = False) -> str:
+    await Claim.wait(token=TOKEN, experimental_min_retention=retention)
+    if fail:
+        raise RuntimeError("failed with retained hook")
     return "received"
 
 
@@ -815,3 +827,187 @@ async def test_vercel_successful_lazy_hook_result_stays_opaque() -> None:
         )
 
         assert result.event == event
+
+
+@pytest.fixture
+def retained_world(tmp_path, monkeypatch):
+    monkeypatch.setattr(local_mod, "js_now", lambda: RETENTION_NOW)
+    world = _world(tmp_path, monkeypatch)
+    w.set_world(world)
+    return world
+
+
+async def _create_retained_claim(
+    world: local_mod.LocalWorld, deadline: datetime = RETENTION_NOW + timedelta(days=1)
+) -> w.Hook:
+    run_id = await _create_run(world)
+    await world.events_create(
+        run_id,
+        w.HookCreatedEventData(token=TOKEN, token_retention_until=deadline).into_event(
+            f"hook_{run_id}"
+        ),
+    )
+    return await world.hooks_get_by_token(TOKEN)
+
+
+async def _assert_retained_token_conflicts(world: local_mod.LocalWorld, owner_id: str) -> None:
+    duplicate = await _create_run(world, register_claim.workflow_id)
+    await _invoke(duplicate, register_claim.workflow_id)
+    assert await Run(duplicate).return_value() == {"conflicting_run_id": owner_id}
+
+
+@pytest.mark.parametrize("mode", ["plain", "failure", "cancelled"])
+async def test_terminal_run_keeps_token_but_cannot_be_resumed(retained_world, mode) -> None:
+    run = await start(wait_for_claim, "1d", fail=mode == "failure")
+    await _invoke(run.run_id)
+    hook = await get_hook_by_token(TOKEN)
+    if mode == "cancelled":
+        await run.terminate()
+    else:
+        await Claim().resume(TOKEN)
+        await _invoke(run.run_id)
+    assert (await get_hook_by_token(TOKEN)).hook_id == hook.hook_id
+
+    before = len((await retained_world.events_list(hook.run_id)).data)
+    queued = len(retained_world.queued)
+    for target in (TOKEN, hook):
+        with pytest.raises(w.EntityConflictError, match="terminal state"):
+            await Claim().resume(target)
+    assert len((await retained_world.events_list(hook.run_id)).data) == before
+    assert len(retained_world.queued) == queued
+    await _assert_retained_token_conflicts(retained_world, hook.run_id)
+
+
+@pytest.mark.parametrize("lookup_before_reclaim", [False, True])
+async def test_expired_token_can_be_reclaimed(
+    retained_world, monkeypatch, lookup_before_reclaim
+) -> None:
+    old_hook = await _create_retained_claim(retained_world)
+    await retained_world.events_create(
+        old_hook.run_id, w.RunCompletedEventData(output=PLAIN_ENCODER.encode("done")).into_event()
+    )
+    monkeypatch.setattr(local_mod, "js_now", lambda: RETENTION_NOW + timedelta(days=1))
+    if lookup_before_reclaim:
+        with pytest.raises(w.HookNotFoundError):
+            await get_hook_by_token(TOKEN)
+    replacement = await _create_retained_claim(retained_world, RETENTION_NOW + timedelta(days=2))
+    assert (await get_hook_by_token(TOKEN)).run_id == replacement.run_id
+    assert not (retained_world.data_dir / "hooks" / f"{old_hook.hook_id}.json").exists()
+    # Delayed cleanup from the old owner must not release the new claim.
+    await retained_world.delete_all_hooks_for_run(old_hook.run_id)
+    await _assert_retained_token_conflicts(retained_world, replacement.run_id)
+
+
+@pytest.mark.parametrize("param", [0, RETENTION_NOW - timedelta(days=1), "1d"])
+async def test_active_run_keeps_token_after_deadline(retained_world, monkeypatch, param) -> None:
+    run = await start(wait_for_claim, param)
+    await _invoke(run.run_id)
+    monkeypatch.setattr(local_mod, "js_now", lambda: RETENTION_NOW + timedelta(days=2))
+    assert (await get_hook_by_token(TOKEN)).run_id == run.run_id
+    await _assert_retained_token_conflicts(retained_world, run.run_id)
+    await Claim().resume(TOKEN)
+    await _invoke(run.run_id)
+    with pytest.raises(w.HookNotFoundError):
+        await get_hook_by_token(TOKEN)
+
+
+async def test_local_retention_limit_is_enforced_before_claim(retained_world) -> None:
+    run_id = await _create_run(retained_world)
+    with pytest.raises(w.WorkflowWorldError, match="cannot exceed 30 days"):
+        await retained_world.events_create(
+            run_id,
+            w.HookCreatedEventData(
+                token=TOKEN, token_retention_until=RETENTION_NOW + timedelta(days=31)
+            ).into_event("hook_too_long"),
+        )
+    with pytest.raises(w.HookNotFoundError):
+        await get_hook_by_token(TOKEN)
+    assert not retained_world._hook_token_path(TOKEN).exists()
+
+
+async def test_local_retention_limit_is_configurable(retained_world, monkeypatch) -> None:
+    monkeypatch.setenv("WORKFLOW_LOCAL_HOOK_RETENTION_LIMIT_DAYS", "60")
+    configured = local_mod.LocalWorld()
+    run_id = await _create_run(configured)
+    deadline = RETENTION_NOW + timedelta(days=31)
+    await configured.events_create(
+        run_id,
+        w.HookCreatedEventData(token=TOKEN, token_retention_until=deadline).into_event("hook_long"),
+    )
+    assert (await configured.hooks_get_by_token(TOKEN)).token_retention_until == deadline
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf"])
+def test_invalid_local_retention_limit(monkeypatch, value) -> None:
+    monkeypatch.setenv("WORKFLOW_LOCAL_HOOK_RETENTION_LIMIT_DAYS", value)
+    with pytest.raises(w.WorkflowWorldError, match="positive number"):
+        local_mod.LocalWorld()
+
+
+def _claim_in_process(data_dir: str, run_id: str, hook_id: str) -> str:
+    os.environ["WORKFLOW_LOCAL_DATA_DIR"] = data_dir
+
+    async def claim() -> str:
+        world = local_mod.LocalWorld()
+        await world.events_create(
+            run_id,
+            w.RunCreatedEventData(
+                deployment_id="", workflow_name="claim", input=PLAIN_ENCODER.encode([])
+            ).into_event(),
+        )
+        ready = world.data_dir / "racers"
+        (ready / hook_id).touch()
+        while len(list(ready.iterdir())) < 4:
+            await asyncio.sleep(0.01)
+        result = await world.events_create(
+            run_id, w.HookCreatedEventData(token=TOKEN).into_event(hook_id)
+        )
+        assert result.event is not None
+        return result.event.event_type
+
+    return asyncio.run(claim())
+
+
+async def test_expired_token_has_only_one_winner_across_processes(
+    retained_world, monkeypatch
+) -> None:
+    import subprocess
+
+    # Use a deadline in the past relative to the workers' real clocks.
+    hook = await _create_retained_claim(retained_world, RETENTION_NOW - timedelta(days=365))
+
+    async def skip_cleanup(run_id: str) -> None:
+        pass
+
+    # Leave the expired entity and claim as a process interrupted during
+    # terminal cleanup would. New claimants must serialize their handoff.
+    with monkeypatch.context() as patch:
+        patch.setattr(retained_world, "delete_all_hooks_for_run", skip_cleanup)
+        await retained_world.events_create(
+            hook.run_id, w.RunCompletedEventData(output=PLAIN_ENCODER.encode("done")).into_event()
+        )
+    (retained_world.data_dir / "racers").mkdir()
+
+    async def race(i: int) -> str:
+        result = await asyncio.to_thread(
+            subprocess.run,
+            [
+                sys.executable,
+                "-c",
+                "import sys; from tests.unit.test_workflow_hook_conflict "
+                "import _claim_in_process; print(_claim_in_process(*sys.argv[1:]))",
+                str(retained_world.data_dir),
+                f"wrun_racer_{i}",
+                f"hook_racer_{i}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+        return result.stdout.strip()
+
+    results = await asyncio.gather(*(race(i) for i in range(4)))
+    assert results.count("hook_created") == 1
+    assert results.count("hook_conflict") == 3
+    assert (await retained_world.hooks_get_by_token(TOKEN)).hook_id != hook.hook_id
