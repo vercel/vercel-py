@@ -84,6 +84,18 @@ CI supplies `BLOB_READ_WRITE_TOKEN`, `VERCEL_TOKEN`, `VERCEL_PROJECT_ID`, and
 `VERCEL_TEAM_ID`; package-owned checks skip live examples safely when those
 secrets are unavailable.
 
+Pull requests run a reduced CI matrix. Add the `full-matrix` label to run
+every OS and Python combination plus the Dependency Bounds workflow, which
+tests the packages against the lowest and latest versions their published
+ranges allow. To reproduce a bounds failure locally:
+
+```sh
+uv sync --all-packages --locked
+uv run python scripts/dependency_bounds.py lowest > bounds.txt
+uv pip install -r bounds.txt
+UV_NO_SYNC=1 uv run poe test vercel-queue
+```
+
 Auto-fix formatting and simple lint issues with:
 
 ```sh

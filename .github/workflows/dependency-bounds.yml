@@ -1,0 +1,114 @@
+name: Dependency Bounds
+
+# Tests the packages against the lowest and latest versions their published
+# dependency ranges allow. Runs on pushes to main, weekly so upstream releases
+# that break the ranges surface even when main is quiet, on demand, and on pull
+# requests labelled `release` or `full-matrix`. Every pull request event still
+# reaches "Dependency bounds overall", which passes when the bounds are skipped,
+# so the summary can be a required check.
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+  schedule:
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  dependency-bounds:
+    name: Dependency bounds (${{ matrix.bound }}, py${{ matrix.python-version }})
+    if: >-
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'release') ||
+      contains(github.event.pull_request.labels.*.name, 'full-matrix')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        bound: [lowest, latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    services:
+      redis:
+        image: redis:7-alpine # zizmor: ignore[unpinned-images]
+        ports:
+          - 6379:6379
+    env:
+      # Keep nested task runners from restoring the locked versions over the
+      # installed bounds.
+      UV_NO_SYNC: "1"
+      BOUND: ${{ matrix.bound }}
+      APSCHEDULER_TEST_REDIS_URL: redis://localhost:6379/9
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: false
+
+      - name: Install JavaScript interop tools
+        id: js
+        uses: ./.github/actions/js-interop
+
+      - name: Sync dependencies
+        run: uv sync --all-packages --locked --python ${{ matrix.python-version }}
+
+      # Replaces the locked third-party packages with the lowest or latest
+      # versions the published dependency ranges allow, leaving the test
+      # tooling at its locked versions.
+      - name: Install dependency bounds
+        run: |
+          uv run --no-sync python scripts/dependency_bounds.py "$BOUND" > "$RUNNER_TEMP/bounds.txt"
+          cat "$RUNNER_TEMP/bounds.txt"
+          uv pip install -r "$RUNNER_TEMP/bounds.txt"
+
+      # Root tooling tests do not use the bounded dependencies.
+      - name: Test
+        run: |
+          # shellcheck disable=SC2046
+          uv run poe test $(uv workspace list)
+        env:
+          VERCEL_DEVALUE_JS: ${{ steps.js.outputs.devalue }}
+          VERCEL_WORKFLOW_CLI: ${{ steps.js.outputs.workflow-cli }}
+          # Dump a hanging test's stacks on Python 3.10, as ci.yml's test job does.
+          PYTEST_ADDOPTS: -o faulthandler_timeout=120
+
+      # The bundles vendor everything but AnyIO, which they share with the
+      # application, so their wheels are tested against its bound too.
+      - name: Build packages
+        if: matrix.python-version == '3.12'
+        run: uv run poe dist
+
+      - name: Test bundled packages with shared AnyIO
+        if: matrix.python-version == '3.12'
+        run: |
+          VERCEL_TEST_ANYIO=$(grep -i '^anyio==' "$RUNNER_TEMP/bounds.txt")
+          export VERCEL_TEST_ANYIO
+          for package in vercel-internal-core vercel-queue vercel-sandbox; do
+            uv run python scripts/bundle_release.py test-wheel --package "$package" --dist-dir dist
+          done
+
+  overall:
+    name: Dependency bounds overall
+    if: always()
+    needs:
+      - dependency-bounds
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Check dependency bounds results
+        if: >-
+          needs.dependency-bounds.result != 'success' &&
+          needs.dependency-bounds.result != 'skipped'
+        run: exit 1

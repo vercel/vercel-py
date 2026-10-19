@@ -48,6 +48,14 @@ Merged release PRs are published by GitHub Actions through PyPI trusted publishi
 
 Most packages also publish a `-bundle` variant with their third-party dependencies vendored, assembled by [[scripts/bundle_release.py#build_bundle_package]]. The common HTTP stack is vendored once into a shared `vercel-internal-shared-vendored-deps` distribution so bundles do not each carry a copy. AnyIO and the integrated frameworks stay ordinary peer dependencies because they share state with application code.
 
+## Continuous integration
+
+Pull requests run a reduced test matrix against locked dependencies; merges to main and release PRs add every combination and the declared dependency bounds.
+
+[[.github/workflows/ci.yml]] tests every Python version on Linux but only the oldest and newest on macOS and Windows for pull requests, since version-specific code is exercised on Linux. Pushes to main and PRs labelled `release` or `full-matrix` test every OS and Python combination. Root tooling tests run in one cell per OS, and live API tests and examples run in a single Linux cell because they touch real Vercel resources.
+
+[[.github/workflows/dependency-bounds.yml]] runs on pushes to main, weekly, on demand, and on `release` or `full-matrix` PRs. It replaces the locked third-party packages with the lowest or latest versions that every package's published ranges allow, resolved by [[scripts/dependency_bounds.py#declared_requirements]] and [[scripts/dependency_bounds.py#resolve]], and runs the package tests against them while the test tooling stays locked. Every published requirement must declare a lower bound so the lowest resolution stays meaningful. All packages share one environment, so a package whose floor sits below a sibling's is tested at the sibling's floor. Its own summary job, rather than **CI Overall**, reports the result, so an upstream release that breaks the latest leg does not turn unrelated CI red.
+
 ## Knowledge graph checks
 
 This `lat.md/` graph is validated in CI so links into source code and between sections cannot silently rot.

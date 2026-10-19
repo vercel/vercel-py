@@ -1,5 +1,9 @@
 name: CI
 
+# Pull requests run a reduced test matrix against the locked dependencies.
+# Pushes to main and pull requests labelled `release` or `full-matrix` run
+# every OS and Python combination. The declared dependency ranges are tested
+# by dependency-bounds.yml.
 on:
   push:
     branches:
@@ -57,8 +61,8 @@ jobs:
           version: '0.1.1'
 
   test:
-    name: Test (${{ matrix.os.name }}, py${{ matrix.python-version }}, anyio ${{ matrix.anyio }})
-    runs-on: ${{ matrix.os.runner }}
+    name: Test (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.runner }}
     # A healthy run finishes in under 7 minutes on every OS. Without a cap, a
     # single hung test holds its matrix slot until GitHub's 6-hour default.
     timeout-minutes: 20
@@ -73,37 +77,61 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - name: Linux
+        os: [Linux, macOS, Windows]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        # Version-specific code is exercised on Linux, so a reduced run only
+        # tests macOS and Windows at the ends of the supported Python range.
+        # Pushes to main and `release` or `full-matrix` PRs test them all.
+        exclude: >-
+          ${{ fromJSON(
+            (github.event_name != 'pull_request'
+              || contains(github.event.pull_request.labels.*.name, 'release')
+              || contains(github.event.pull_request.labels.*.name, 'full-matrix'))
+            && '[]'
+            || '[
+              {"os": "macOS", "python-version": "3.11"},
+              {"os": "macOS", "python-version": "3.12"},
+              {"os": "macOS", "python-version": "3.13"},
+              {"os": "Windows", "python-version": "3.11"},
+              {"os": "Windows", "python-version": "3.12"},
+              {"os": "Windows", "python-version": "3.13"}
+            ]'
+          ) }}
+        include:
+          - os: Linux
             runner: ubuntu-latest
             redis-image: redis:7-alpine
             redis-url: redis://localhost:6379/9
-          - name: macOS
+          - os: macOS
             runner: macos-latest
             redis-image: ""
             redis-url: ""
-          - name: Windows
+          - os: Windows
             runner: windows-latest
             redis-image: ""
             redis-url: ""
-        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
-        anyio: [lowest, latest]
+          # Repository tooling tests do not depend on the Python version, so
+          # they run in one cell per OS. Live API tests and examples hit real
+          # Vercel resources, so they run in a single cell.
+          - os: Linux
+            python-version: "3.12"
+            root-tests: true
+            live: true
+          - os: macOS
+            python-version: "3.14"
+            root-tests: true
+          - os: Windows
+            python-version: "3.14"
+            root-tests: true
     services:
       # The vercel-apscheduler driver tests exercise their Lua scripts against
       # a real Redis on Linux; without this service they skip silently.
       redis:
-        image: ${{ matrix.os.redis-image }} # zizmor: ignore[unpinned-images]
+        image: ${{ matrix.redis-image }} # zizmor: ignore[unpinned-images]
         ports:
           - 6379:6379
     env:
-      # Keep nested task runners from restoring the locked AnyIO version.
-      UV_NO_SYNC: "1"
-      ANYIO_VERSION: ${{ matrix.anyio }}
-      APSCHEDULER_TEST_REDIS_URL: ${{ matrix.os.redis-url }}
-      BLOB_READ_WRITE_TOKEN: ${{ secrets.BLOB_READ_WRITE_TOKEN }}
-      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
-      VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
-      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      APSCHEDULER_TEST_REDIS_URL: ${{ matrix.redis-url }}
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -115,73 +143,51 @@ jobs:
         with:
           enable-cache: false
 
-      # The devalue interop tests run the real JS package against the Python
-      # port. They skip when node is absent locally, but are mandatory here.
-      - name: Install Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: '22'
-
-      # The interop tests fall back to `npm install devalue` when pointed at
-      # nothing, but here we use a pinned checkout: it also carries the test
-      # fixtures the tarball omits, and it keeps npm out of CI. `index.js` and
-      # `src/` are byte-identical to the published package, so this ref is what
-      # the port is actually verified against.
-      #
-      # Cloned outside the workspace deliberately. `actions/checkout` can only
-      # write inside it, and a copy there puts devalue's own workflows under
-      # our linters, where zizmor reports findings against them.
-      - name: Checkout devalue
-        run: >-
-          git clone --depth 1 --branch v5.9.0
-          https://github.com/sveltejs/devalue.git "$RUNNER_TEMP/devalue"
-
-      # The local-world interop test runs the real `workflow` CLI against the
-      # `.workflow-data` files the Python local world writes. Installed here
-      # rather than left to the test's own npm fallback, so npm runs once per
-      # job in a visible step instead of inside five test processes.
-      #
-      # A git checkout (as for devalue above) is not an option: the CLI is
-      # TypeScript and needs a pnpm workspace install plus a tsc build, so the
-      # published tarball is the practical artifact. `--ignore-scripts` skips
-      # the native postinstalls of @swc/core, esbuild and cbor-extract, which
-      # the read-only `inspect` path does not use.
-      - name: Install the workflow CLI
-        run: >-
-          npm install workflow@5.0.0-beta.38 --no-save --no-audit --no-fund
-          --ignore-scripts --prefix "$RUNNER_TEMP/workflow-cli"
+      - name: Install JavaScript interop tools
+        id: js
+        uses: ./.github/actions/js-interop
 
       - name: Sync dependencies
         run: uv sync --all-packages --locked --python ${{ matrix.python-version }}
 
-      - name: Select AnyIO boundary
-        run: |
-          requirement=$(uv run --no-sync python scripts/anyio_version.py "$ANYIO_VERSION")
-          uv pip install "$requirement"
-
       - name: Test
-        run: uv run poe test
+        run: |
+          if [ "$ROOT_TESTS" = true ]; then
+            uv run poe test
+          else
+            # Every workspace package, leaving out the root tooling tests.
+            # shellcheck disable=SC2046
+            uv run poe test $(uv workspace list)
+          fi
         env:
-          VERCEL_DEVALUE_JS: ${{ runner.temp }}/devalue
-          VERCEL_WORKFLOW_CLI: ${{ runner.temp }}/workflow-cli/node_modules/workflow
+          ROOT_TESTS: ${{ matrix.root-tests }}
+          VERCEL_DEVALUE_JS: ${{ steps.js.outputs.devalue }}
+          VERCEL_WORKFLOW_CLI: ${{ steps.js.outputs.workflow-cli }}
           # Where tests run under pytest (Python 3.10, which ggt does not
           # support), dump every thread's stack once a test runs this long, so
           # a hang shows where it is stuck instead of idling silently until
           # the job timeout. ggt does not read this variable.
           PYTEST_ADDOPTS: -o faulthandler_timeout=120
 
+      - name: Live tests
+        if: matrix.live
+        run: uv run poe test vercel -- -m live
+        env:
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+
       - name: Test examples
-        if: matrix.python-version == '3.12'
+        if: matrix.live
         run: uv run poe test-examples
+        env:
+          BLOB_READ_WRITE_TOKEN: ${{ secrets.BLOB_READ_WRITE_TOKEN }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
 
   build:
-    name: Build packages (anyio ${{ matrix.anyio }})
-    strategy:
-      fail-fast: false
-      matrix:
-        anyio: [lowest, latest]
-    env:
-      ANYIO_VERSION: ${{ matrix.anyio }}
+    name: Build packages
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -205,8 +211,6 @@ jobs:
 
       - name: Test bundled packages with shared AnyIO
         run: |
-          VERCEL_TEST_ANYIO=$(uv run --no-sync python scripts/anyio_version.py "$ANYIO_VERSION")
-          export VERCEL_TEST_ANYIO
           for package in vercel-internal-core vercel-queue vercel-sandbox; do
             uv run python scripts/bundle_release.py test-wheel --package "$package" --dist-dir dist
           done

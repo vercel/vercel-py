@@ -16,6 +16,7 @@ from vercel.projects import create_project, delete_project, get_projects, update
 from vercel.projects.projects import create_project_async, delete_project_async, get_projects_async
 
 
+@pytest.mark.live
 @pytest.mark.skipif(
     not os.getenv("VERCEL_TOKEN") or not os.getenv("VERCEL_TEAM_ID"),
     reason="Requires VERCEL_TOKEN and VERCEL_TEAM_ID environment variables",
