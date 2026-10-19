@@ -59,6 +59,13 @@ class RunStreams(w.BaseModel):
     streams: list[str]
 
 
+class HookTokenClaim(w.BaseModel):
+    token: str
+    hook_id: str = pydantic.Field(alias="hookId")
+    run_id: str = pydantic.Field(alias="runId")
+    event_id: str | None = pydantic.Field(default=None, alias="eventId")
+
+
 class HookResumeClaim(w.BaseModel):
     run_id: str = pydantic.Field(alias="runId")
     resume_id: str = pydantic.Field(alias="resumeId")
@@ -506,6 +513,14 @@ class LocalWorld(w.World):
                 return None
         return converge(claim)
 
+    def _hook_token_path(self, token: str) -> pathlib.Path:
+        hashed_token = hashlib.sha256(token.encode()).hexdigest()
+        return self.data_dir / "hooks" / "tokens" / f"{hashed_token}.json"
+
+    def _delete_hook(self, hook: w.Hook) -> None:
+        self._hook_token_path(hook.token).unlink(missing_ok=True)
+        (self.data_dir / "hooks" / f"{hook.hook_id}.json").unlink(missing_ok=True)
+
     def delete_all_hooks_for_run(self, run_id: str) -> None:
         hooks_dir = self.data_dir / "hooks"
         if not hooks_dir.exists():
@@ -515,10 +530,7 @@ class LocalWorld(w.World):
                 continue
             hook = read_json(hook_path, w.Hook)
             if hook is not None and hook.run_id == run_id:
-                hashed_token = hashlib.sha256(hook.token.encode()).hexdigest()
-                constraint_path = hooks_dir / "tokens" / f"{hashed_token}.json"
-                constraint_path.unlink(missing_ok=True)
-                hook_path.unlink(missing_ok=True)
+                self._delete_hook(hook)
 
     async def get_deployment_id(self) -> str:
         return ""
@@ -683,9 +695,14 @@ class LocalWorld(w.World):
         # existing run/step, so serialize those per run. The body is synchronous,
         # so holding a threading.Lock across it is safe and brief.
         if run_id is None:
-            return self._events_create_impl(run_id, data)
-        with self._run_lock(run_id):
-            return self._events_create_impl(run_id, data)
+            result = self._events_create_impl(run_id, data)
+        else:
+            with self._run_lock(run_id):
+                result = self._events_create_impl(run_id, data)
+
+        if result.run is not None and is_run_terminal(result.run.status):
+            self.delete_all_hooks_for_run(result.run.run_id)
+        return result
 
     def _resilient_create_run(
         self, run_id: str, data: w.Event, now: datetime
@@ -946,7 +963,6 @@ class LocalWorld(w.World):
                 )
                 run_path = self.data_dir / "runs" / f"{effective_run_id}.json"
                 write_json(run_path, run, overwrite=True)
-                self.delete_all_hooks_for_run(effective_run_id)
 
         elif data.event_type == "run_failed":
             failed_data = data.event_data
@@ -971,7 +987,6 @@ class LocalWorld(w.World):
                 )
                 run_path = self.data_dir / "runs" / f"{effective_run_id}.json"
                 write_json(run_path, run, overwrite=True)
-                self.delete_all_hooks_for_run(effective_run_id)
 
         elif data.event_type == "run_cancelled":
             if current_run:
@@ -993,7 +1008,6 @@ class LocalWorld(w.World):
                 )
                 run_path = self.data_dir / "runs" / f"{effective_run_id}.json"
                 write_json(run_path, run, overwrite=True)
-                self.delete_all_hooks_for_run(effective_run_id)
 
         elif data.event_type == "attr_set":
             attr_data = data.event_data
@@ -1122,28 +1136,27 @@ class LocalWorld(w.World):
             if dispose_lock.exists():
                 raise w.EntityConflictError(f'Hook "{data.correlation_id}" already disposed')
             hook_data = data.event_data
-            hashed_token = hashlib.sha256(hook_data.token.encode()).hexdigest()
-            constraint_path = self.data_dir / "hooks" / "tokens" / f"{hashed_token}.json"
+            constraint_path = self._hook_token_path(hook_data.token)
             token_claimed = write_exclusive(
                 constraint_path,
                 # Compact, key-for-key what TS writes here — including the
                 # `eventId` its cross-process claim recovery reads back.
                 json.dumps(
-                    {
-                        "token": hook_data.token,
-                        "hookId": data.correlation_id,
-                        "runId": effective_run_id,
-                        "eventId": event_id,
-                    },
+                    HookTokenClaim(
+                        token=hook_data.token,
+                        hook_id=data.correlation_id,
+                        run_id=effective_run_id,
+                        event_id=event_id,
+                    ).model_dump(exclude_none=True),
                     separators=(",", ":"),
                     ensure_ascii=False,
                 ),
             )
             if not token_claimed:
-                existing_claim = json.loads(constraint_path.read_text())
+                existing_claim = HookTokenClaim.from_wire(json.loads(constraint_path.read_text()))
                 if (
-                    existing_claim["runId"] == effective_run_id
-                    and existing_claim["hookId"] == data.correlation_id
+                    existing_claim.run_id == effective_run_id
+                    and existing_claim.hook_id == data.correlation_id
                 ):
                     # Same hook re-claiming its own token (replay re-issue or
                     # crash recovery). Idempotent, not a cross-workflow conflict.
@@ -1154,7 +1167,7 @@ class LocalWorld(w.World):
                     correlation_id=data.correlation_id,
                     event_data=w.HookConflictEventData(
                         token=hook_data.token,
-                        conflicting_run_id=existing_claim["runId"],
+                        conflicting_run_id=existing_claim.run_id,
                     ),
                     server_props=w.ServerProps(
                         run_id=effective_run_id,
@@ -1211,12 +1224,7 @@ class LocalWorld(w.World):
             hook_path = self.data_dir / "hooks" / f"{data.correlation_id}.json"
             existing_hook = read_json(hook_path, w.Hook)
             if existing_hook is not None:
-                hashed_token = hashlib.sha256(existing_hook.token.encode()).hexdigest()
-                disposed_constraint_path = (
-                    self.data_dir / "hooks" / "tokens" / f"{hashed_token}.json"
-                )
-                disposed_constraint_path.unlink(missing_ok=True)
-            hook_path.unlink(missing_ok=True)
+                self._delete_hook(existing_hook)
 
         composite_key = f"{effective_run_id}-{event_id}"
         event_path = self.data_dir / "events" / f"{composite_key}.json"
