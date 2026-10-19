@@ -16,6 +16,7 @@ from vercel.sandbox._internal.errors import (
     SandboxFilesystemCommandError,
     SandboxFilesystemWriteError,
     SandboxPathNotFoundError,
+    SandboxUserAlreadyExistsError,
 )
 from vercel.sandbox._internal.filesystem_handle_core import FilesystemOperationBinding
 from vercel.sandbox._internal.models import (
@@ -165,13 +166,32 @@ fi
 exit "$status"
 """
 )
+_USER_ALREADY_EXISTS = "vercel-sandbox:user-already-exists"
 _CREATE_USER = """
 set -eu
+if getent passwd "$1" >/dev/null; then
+    printf '%s\\n' "$3"
+    exit 9
+fi
 if [ -e "/home/$1" ] || [ -L "/home/$1" ]; then
+    if getent passwd "$1" >/dev/null; then
+        printf '%s\\n' "$3"
+        exit 9
+    fi
     printf 'Home path already exists: /home/%s\n' "$1" >&2
     exit 1
 fi
-useradd --create-home --home-dir "/home/$1" --user-group --shell /bin/bash -- "$1"
+if useradd --create-home --home-dir "/home/$1" --user-group --shell /bin/bash -- "$1"; then
+    :
+else
+    status=$?
+    # useradd also uses 9 for a conflicting group. Confirm the account exists,
+    # including when another creator won the race after our initial lookup.
+    if [ "$status" -eq 9 ] && getent passwd "$1" >/dev/null; then
+        printf '%s\\n' "$3"
+    fi
+    exit "$status"
+fi
 chown -- "$1:$2" "/home/$1"
 chmod 770 -- "/home/$1"
 """
@@ -236,11 +256,20 @@ class UserContext:
             result = await self.service._parent.run_process(
                 session_id=session_id,
                 command="/bin/bash",
-                args=["-c", _CREATE_USER, "create-user", self.username, default_gid],
+                args=[
+                    "-c",
+                    _CREATE_USER,
+                    "create-user",
+                    self.username,
+                    default_gid,
+                    _USER_ALREADY_EXISTS,
+                ],
                 cwd="/",
                 sudo=True,
                 output_router=ProcessOutputRouter(stdout=None, stderr=None, capture_output=True),
             )
+            if result.process.returncode == 9 and result.stdout == _USER_ALREADY_EXISTS + "\n":
+                raise SandboxUserAlreadyExistsError(self.username)
             if result.process.returncode != 0:
                 raise SandboxError(
                     f"Failed to create Linux user {self.username!r}: {result.stderr or ''}"

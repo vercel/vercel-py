@@ -21,12 +21,15 @@ from vercel import sandbox
 from vercel._internal.core.session import get_active_sync_session
 from vercel.api import session
 from vercel.sandbox import (
+    SandboxError,
     SandboxExecution,
     SandboxFilesystemOperations,
     SandboxFilesystemWriteError,
+    SandboxUserAlreadyExistsError,
 )
 from vercel.sandbox._internal.service import get_sync_sandbox_service
 from vercel.sandbox._internal.state import ProcessState, SandboxRuntimeSessionState, SandboxState
+from vercel.sandbox._internal.user_core import _USER_ALREADY_EXISTS
 from vercel.sandbox.sync import SyncSandboxExecution, SyncSandboxFilesystemOperations
 
 
@@ -55,6 +58,74 @@ def test_public_imports_in_fresh_interpreter() -> None:
         timeout=10,
     )
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("sync", [False, True], ids=["async", "sync"])
+@pytest.mark.parametrize(
+    ("status", "stdout", "stderr", "duplicate"),
+    [
+        (9, _USER_ALREADY_EXISTS + "\n", "", True),
+        (1, "", "Home path already exists: /home/alice", False),
+        (9, "", "useradd: group alice already exists", False),
+        (9, "", "chmod: permission denied", False),
+    ],
+    ids=["duplicate", "occupied-home", "conflicting-group", "setup-exit-nine"],
+)
+@respx.mock
+async def test_create_user_distinguishes_existing_accounts_from_provisioning_errors(
+    mock_env_clear: None, sync: bool, status: int, stdout: str, stderr: str, duplicate: bool
+) -> None:
+    assert sandbox.sync.SandboxUserAlreadyExistsError is SandboxUserAlreadyExistsError
+
+    def command(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        is_lookup = body["command"] == "id"
+        state = {
+            "id": "cmd_test",
+            "name": body["command"],
+            "args": body.get("args", []),
+            "sessionId": "sbx_test",
+            "cwd": "/",
+            "startedAt": 1,
+        }
+        records = [
+            {"command": state},
+            {"stream": "stdout", "data": "1000\n" if is_lookup else stdout},
+            {"stream": "stderr", "data": "" if is_lookup else stderr},
+            {"command": {**state, "exitCode": 0 if is_lookup else status}},
+        ]
+        return httpx.Response(200, text="\n".join(json.dumps(record) for record in records))
+
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_test/cmd").mock(side_effect=command)
+
+    async def exercise() -> None:
+        if sync:
+            handle = _handles()[3]
+        else:
+            from vercel._internal.core.session import get_active_session
+            from vercel.sandbox._internal.service import get_sandbox_service
+
+            handle = sandbox.SandboxRuntimeSession(
+                payload=SandboxRuntimeSessionState(id="sbx_test"),
+                service=get_sandbox_service(get_active_session()),
+            )
+        with pytest.raises(SandboxError) as raised:
+            result = handle.create_user("alice")
+            if isawaitable(result):
+                await result
+        if duplicate:
+            assert isinstance(raised.value, SandboxUserAlreadyExistsError)
+            assert raised.value.username == "alice"
+        else:
+            assert type(raised.value) is SandboxError
+            assert stderr in str(raised.value)
+
+    if sync:
+        with session(service_options=sandbox_service_options(sync=True)):
+            await exercise()
+    else:
+        async with session(service_options=sandbox_service_options(sync=False)):
+            await exercise()
 
 
 @pytest.mark.parametrize("sync", [False, True], ids=["async", "sync"])

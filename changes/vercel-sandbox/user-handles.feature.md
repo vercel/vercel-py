@@ -1,1 +1,1 @@
-Add immutable Linux user handles with permission-enforced commands and reads, HTTP file uploads with user ownership, account provisioning and selection, and shared synchronous and asynchronous execution and filesystem Protocols.
+Add immutable Linux user handles with permission-enforced commands and reads, HTTP file uploads with user ownership, account provisioning and selection with recoverable duplicate-account errors, and shared synchronous and asynchronous execution and filesystem Protocols.

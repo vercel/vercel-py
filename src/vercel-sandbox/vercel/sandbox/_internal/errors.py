@@ -10,6 +10,14 @@ class SandboxError(VercelError):
     """Base error for Sandbox operations."""
 
 
+class SandboxUserAlreadyExistsError(SandboxError):
+    """Raised when create_user() is called for an existing Linux username."""
+
+    def __init__(self, username: str) -> None:
+        super().__init__(f"Failed to create Linux user {username!r}: user already exists")
+        self.username = username
+
+
 class SandboxInvalidHandleError(SandboxError):
     """Raised when a Sandbox handle is unattached or mode-invalid."""
 

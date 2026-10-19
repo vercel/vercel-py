@@ -341,7 +341,10 @@ assert alice.home_dir == "/home/alice"
 `home_dir`, `run_process()`, `create_process()`, and `.fs`. Their command and
 filesystem options match the session APIs. Usernames must match
 `[a-z_][a-z0-9_-]*` and contain at most 32 characters; invalid names fail
-immediately. `create_user()` fails if the account already exists, provisions
+immediately. `create_user()` raises `SandboxUserAlreadyExistsError` if the account
+already exists. Catch it and pass its `username` to `as_user()` to select that
+account. Other provisioning failures, including occupied home paths, raise
+`SandboxError`. Successful creation provisions
 `/bin/bash` and `/home/<username>` owned by the user and the sandbox default
 group with mode `0770`, and returns a handle.
 It rejects existing home paths, including symlinks, before creating an account.

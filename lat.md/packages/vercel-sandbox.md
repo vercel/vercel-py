@@ -43,7 +43,7 @@ Process output is routed by [[src/vercel-sandbox/vercel/sandbox/_internal/proces
 
 User handles enforce Linux permissions for commands and reads while treating SDK uploads and directory creation as trusted orchestration.
 
-[[src/vercel-sandbox/vercel/sandbox/_internal/user_core.py#UserContext#provision|Account provisioning]] creates a Bash account with a home owned by that account and the sandbox default group, with group access for HTTP uploads. Existing homes and symlinks are rejected before account creation. Selecting an existing account resolves its actual home and primary group without changing its home permissions.
+[[src/vercel-sandbox/vercel/sandbox/_internal/user_core.py#UserContext#provision|Account provisioning]] creates a Bash account with a home owned by that account and the sandbox default group, with group access for HTTP uploads. Existing usernames raise [[src/vercel-sandbox/vercel/sandbox/_internal/errors.py#SandboxUserAlreadyExistsError]] with the username for recovery through account selection. Occupied homes, conflicting groups without accounts, and other provisioning failures remain generic Sandbox errors. Existing homes and symlinks are rejected before account creation. Selecting an existing account resolves its actual home and primary group without changing its home permissions.
 
 [[src/vercel-sandbox/vercel/sandbox/_internal/user_core.py#UserService#open_archive_upload|Uploads]] stream through the parent HTTP archive endpoint; file contents never enter command arguments. After success, privileged metadata commands assign files to the selected account and its primary group. Ancestors below that account's home are assigned to the account and sandbox default group with group write and traversal access. [[src/vercel-sandbox/vercel/sandbox/_internal/user_core.py#UserService#mkdir|Directory creation]] uses the same HTTP account and directory metadata policy, including the requested directory itself.
 
@@ -55,7 +55,7 @@ These SDK writes can reach paths that the selected account cannot access through
 
 Public API regressions verify native HTTP payload transport, ownership, binary reads, and the distinction between trusted SDK writes and account permissions.
 
-[[src/vercel-sandbox/tests/test_sandbox_users.py#test_user_upload_keeps_payload_out_of_commands|Wire tests]] cover both APIs, ensure the payload appears in the archive rather than command arguments, and propagate HTTP or metadata failures. [[src/vercel-sandbox/tests/live/test_sandbox_users_live.py#test_user_identity_and_permission_enforcement|Live tests]] cover binary eager, batched, and streamed writes; explicit close; file and directory ownership; private reads and command denial; and existing accounts with different homes and groups.
+[[src/vercel-sandbox/tests/test_sandbox_users.py#test_create_user_distinguishes_existing_accounts_from_provisioning_errors|Provisioning error tests]] verify both public APIs expose a recoverable existing-username error while preserving other failures. [[src/vercel-sandbox/tests/test_sandbox_users.py#test_user_upload_keeps_payload_out_of_commands|Wire tests]] cover both APIs, ensure the payload appears in the archive rather than command arguments, and propagate HTTP or metadata failures. [[src/vercel-sandbox/tests/live/test_sandbox_users_live.py#test_user_identity_and_permission_enforcement|Live tests]] cover binary eager, batched, and streamed writes; explicit close; file and directory ownership; private reads and command denial; and existing accounts with different homes and groups.
 
 ## Drives
 

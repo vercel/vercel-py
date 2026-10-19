@@ -11,7 +11,12 @@ from uuid import uuid4
 import anyio
 import pytest
 
-from vercel.sandbox import SandboxError, SandboxFilesystemError, SandboxPathNotFoundError
+from vercel.sandbox import (
+    SandboxError,
+    SandboxFilesystemError,
+    SandboxPathNotFoundError,
+    SandboxUserAlreadyExistsError,
+)
 
 from ._sandbox_scenarios import AsyncDriver, SyncDriver
 from .conftest import requires_sandbox_credentials
@@ -52,6 +57,14 @@ async def test_user_upload_provisioning_and_process_regressions(driver: Any) -> 
             async with _scope(alice.fs.open("-", "rb")) as source:
                 assert await _call(source.read) == b"literal dash\0\xff"
 
+            # A same-named group without an account is a provisioning failure,
+            # even though useradd uses exit status 9 for both conflicts.
+            await _run(box, "groupadd", ["group_only"], sudo=True, check=True)
+            with pytest.raises(SandboxError) as group_conflict:
+                await _call(box.create_user, "group_only")
+            assert not isinstance(group_conflict.value, SandboxUserAlreadyExistsError)
+            assert (await _run(box, "getent", ["passwd", "group_only"])).returncode != 0
+
             # Rejected homes must retain ownership, permissions, and contents;
             # neither regular homes nor dangling symlinks may create accounts.
             await _run(box, "/bin/mkdir", ["/home/occupied"], sudo=True, check=True)
@@ -63,8 +76,9 @@ async def test_user_upload_provisioning_and_process_regressions(driver: Any) -> 
                 box, "ln", ["-s", "/tmp/absent-home", "/home/dangling"], sudo=True, check=True
             )
             for name in ("occupied", "linked", "dangling"):
-                with pytest.raises(SandboxError, match="Home path already exists"):
+                with pytest.raises(SandboxError, match="Home path already exists") as raised:
                     await _call(box.create_user, name)
+                assert not isinstance(raised.value, SandboxUserAlreadyExistsError)
                 assert (await _run(box, "getent", ["passwd", name])).returncode != 0
                 assert (await _run(box, "getent", ["group", name])).returncode != 0
             assert (await _run(box, "stat", ["-c", "%u:%g:%a", "/home/occupied"])).stdout == before
@@ -232,8 +246,11 @@ async def test_user_identity_and_permission_enforcement(driver: Any) -> None:
             default_gid = (await _run(box, "id", ["-g"], check=True)).stdout.strip()
             homes = await _run(box, "stat", ["-c", "%U:%g:%a", alice.home_dir, bob.home_dir])
             assert homes.stdout == f"alice:{default_gid}:770\nbob:{default_gid}:770\n"
-            with pytest.raises(SandboxError):
+            with pytest.raises(SandboxUserAlreadyExistsError) as duplicate:
                 await _call(runtime.create_user, "alice")
+            assert duplicate.value.username == "alice"
+            recovered = runtime.as_user(duplicate.value.username)
+            assert (await _run(recovered, "whoami", check=True)).stdout == "alice\n"
 
             # Safe argv includes empty strings, quotes, newlines, and shell syntax.
             argv = [

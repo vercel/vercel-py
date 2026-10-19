@@ -55,6 +55,7 @@ from vercel.sandbox._internal.errors import (
     SandboxTerminalStateError,
     SandboxTimeoutError as SandboxTimeoutError,
     SandboxUploadSizeMismatchError,
+    SandboxUserAlreadyExistsError,
 )
 from vercel.sandbox._internal.models import (
     CompletedProcess,
@@ -648,6 +649,7 @@ __all__ = [
     "SandboxInvalidHandleError",
     "SandboxPathNotFoundError",
     "SandboxUploadSizeMismatchError",
+    "SandboxUserAlreadyExistsError",
     "NetworkPolicy",
     "NetworkPolicyForwardRuleSummary",
     "NetworkPolicyInjectionRuleSummary",
