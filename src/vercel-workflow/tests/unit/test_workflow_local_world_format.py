@@ -136,6 +136,23 @@ def test_binary_payloads_round_trip_through_the_uint8array_wrapper() -> None:
     assert local_mod._decode_js(json.loads(encoded)) == {"blob": blob}
 
 
+def test_read_json_handles_file_removed_before_read(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "hook.json"
+    local_mod.write_json(path, w.HookCreatedEventData(token="tok-abc"))
+    read_text = type(path).read_text
+
+    def remove_then_read(target, *args, **kwargs):
+        if target == path:
+            # Model another process deleting the file after an existence check
+            # but before the actual read, without relying on thread timing.
+            target.unlink()
+        return read_text(target, *args, **kwargs)
+
+    monkeypatch.setattr(type(path), "read_text", remove_then_read)
+
+    assert local_mod.read_json(path, w.HookCreatedEventData) is None
+
+
 async def test_written_files_are_json_stringify_output(tmp_path, monkeypatch) -> None:
     world = _world(tmp_path, monkeypatch)
     await _populate(world)

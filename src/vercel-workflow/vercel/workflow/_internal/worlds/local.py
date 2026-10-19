@@ -227,9 +227,11 @@ def dumps_js(data: Any) -> bytes:
 
 
 def read_json(path: pathlib.Path, schema: type[T] | w.WireAdaptor[T]) -> T | None:
-    if not path.exists():
+    try:
+        content = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
         return None
-    return schema.from_wire(_decode_js(json.loads(path.read_text(encoding="utf-8"))))
+    return schema.from_wire(_decode_js(json.loads(content)))
 
 
 def atomic_write(path: str | os.PathLike[str], data: bytes, *, overwrite: bool = True) -> None:
