@@ -913,10 +913,15 @@ def clear_pydantic_generics_cache(context: SandboxCleanupContext) -> None:
     ``Alias = Gen[Param]``), the key → class → ``__globals__`` → value
     path keeps the value alive through the cache itself, so entries
     never self-evict — unbounded growth per run.
+
+    pydantic 2.12 holds the cache in a ``ContextVar`` that is unset until
+    the first parametrization in the current context.
     """
     generics = _real_sys_modules.get("pydantic._internal._generics")
     if generics is not None:
         cache = getattr(generics, "_GENERIC_TYPES_CACHE", None)
+        if isinstance(cache, contextvars.ContextVar):
+            cache = cache.get(None)
         if cache is not None:
             cache.clear()
 
