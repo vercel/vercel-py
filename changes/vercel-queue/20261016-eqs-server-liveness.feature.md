@@ -1,1 +1,1 @@
-The `eqs` pytest fixture now fails with the reason the embedded queue server stopped, instead of leaving later tests to fail on connection errors.
+Add `ensure_running()` to the embedded dev server, allowing callers to check that the server is running and get the underlying error if it stopped unexpectedly.
