@@ -46,41 +46,6 @@ async def test_user_upload_provisioning_and_process_regressions(driver: Any) -> 
             f"vercel-py-user-regressions-{uuid4().hex[:10]}"
         ) as box:
             alice = await _call(box.create_user, "alice")
-            bob = await _call(box.create_user, "bob")
-            await _run(box, "/bin/mkdir", ["/tmp/shared"], sudo=True, check=True)
-            await _run(box, "/bin/chmod", ["777", "/tmp/shared"], sudo=True, check=True)
-
-            # Accessible parents cannot hide overly broad permissions on a
-            # partially uploaded file. Check new and preexisting public files.
-            for existing in (False, True):
-                path = f"/tmp/shared/partial-{existing}"
-                if existing:
-                    await _call(alice.fs.write_text, path, "old contents", mode=0o644)
-                with pytest.raises(RuntimeError, match="abort upload"):
-                    async with _scope(
-                        alice.fs.open(path, "wb", size=20, permissions=0o600)
-                    ) as target:
-                        await _call(target.write, b"secret")
-                        assert await _call(alice.fs.read_bytes, path) == b"secret"
-                        assert (await _run(alice, "stat", ["-c", "%a", path])).stdout == "600\n"
-                        with pytest.raises(SandboxFilesystemError):
-                            await _call(bob.fs.read_bytes, path)
-                        raise RuntimeError("abort upload")
-                assert await _call(alice.fs.read_bytes, path) == b"secret"
-                assert (await _run(alice, "stat", ["-c", "%a", path])).stdout == "600\n"
-                with pytest.raises(SandboxFilesystemError):
-                    await _call(bob.fs.read_bytes, path)
-
-            readonly = "/tmp/shared/readonly"
-            await _call(alice.fs.write_text, readonly, "keep", mode=0o400)
-            with pytest.raises(SandboxFilesystemError):
-                async with _scope(
-                    alice.fs.open(readonly, "wb", size=4, permissions=0o600)
-                ) as target:
-                    await _call(target.write, b"lost")
-            assert await _call(alice.fs.read_text, readonly) == "keep"
-            assert (await _run(alice, "stat", ["-c", "%a", readonly])).stdout == "400\n"
-
             # Read '-' as a filename through both eager and streaming reads.
             await _call(alice.fs.write_bytes, "-", b"literal dash\0\xff", mode=0o600)
             assert await _call(alice.fs.read_bytes, "-") == b"literal dash\0\xff"
@@ -264,6 +229,9 @@ async def test_user_identity_and_permission_enforcement(driver: Any) -> None:
             bob = await _call(runtime.create_user, "bob")
             assert alice.home_dir == "/home/alice"
             assert bob.home_dir == "/home/bob"
+            default_gid = (await _run(box, "id", ["-g"], check=True)).stdout.strip()
+            homes = await _run(box, "stat", ["-c", "%U:%g:%a", alice.home_dir, bob.home_dir])
+            assert homes.stdout == f"alice:{default_gid}:770\nbob:{default_gid}:770\n"
             with pytest.raises(SandboxError):
                 await _call(runtime.create_user, "alice")
 
@@ -323,7 +291,7 @@ async def test_user_identity_and_permission_enforcement(driver: Any) -> None:
             with pytest.raises(subprocess.CalledProcessError):
                 await _run(alice, "false", check=True)
 
-            data = bytes(range(256)) * 320  # Binary transfer spans multiple command chunks.
+            data = bytes(range(256)) * 320  # Exercise binary archive and command-output boundaries.
             await _call(alice.fs.mkdir, "workspace")
             await _call(alice.fs.write_bytes, "secret.bin", data, cwd="workspace", mode=0o600)
             assert await _call(alice.fs.read_bytes, "secret.bin", cwd="workspace") == data
@@ -343,18 +311,30 @@ async def test_user_identity_and_permission_enforcement(driver: Any) -> None:
                 batch.write_text("batch/note.txt", "batch contents", mode=0o600)
             assert await _call(alice.fs.read_text, "batch/note.txt") == "batch contents"
             for size in (None, len(data)):
+                path = f"stream-{size}.bin"
                 async with _scope(
-                    alice.fs.open("stream.bin", "wb", size=size, permissions=0o600)
+                    alice.fs.open(path, "wb", size=size, permissions=0o600)
                 ) as target:
-                    await _call(target.write, data)
-                async with _scope(alice.fs.open("stream.bin", "rb")) as source:
+                    await _call(target.write, data[:19])
+                    await _call(target.write, data[19:])
+                    # Explicit close publishes ownership before context exit.
+                    await _call(getattr(target, "aclose", None) or target.close)
+                    assert await _call(alice.fs.read_bytes, path) == data
+                async with _scope(alice.fs.open(path, "rb")) as source:
                     assert await _call(source.read, 19) == data[:19]
                     assert await _call(source.read) == data[19:]
+            for directory in ("workspace", "batch"):
+                assert (
+                    await _run(alice, "stat", ["-c", "%U:%g:%a", directory], check=True)
+                ).stdout == f"alice:{default_gid}:770\n"
+            await _call(alice.fs.mkdir, "created/nested")
+            for directory in ("created", "created/nested"):
+                assert (
+                    await _run(alice, "stat", ["-c", "%U:%g:%a", directory], check=True)
+                ).stdout == f"alice:{default_gid}:770\n"
             private = "/home/alice/workspace/secret.bin"
             operations: list[tuple[Callable[..., Any], tuple[str, ...], dict[str, Any]]] = [
                 (bob.fs.read_bytes, (private,), {}),
-                (bob.fs.write_text, (private, "overwrite"), {}),
-                (bob.fs.mkdir, ("/home/alice/new-dir",), {}),
                 (bob.fs.listdir, ("/home/alice",), {}),
                 (bob.fs.remove, (private,), {}),
                 (bob.fs.rename, (private, "/tmp/stolen"), {}),
@@ -362,28 +342,41 @@ async def test_user_identity_and_permission_enforcement(driver: Any) -> None:
             for method, args, kwargs in operations:
                 with pytest.raises(SandboxFilesystemError):
                     await _call(method, *args, **kwargs)
-            for mode in ("r", "w", "rb", "wb"):
+            for mode in ("r", "rb"):
                 with pytest.raises(SandboxFilesystemError):
-                    async with _scope(bob.fs.open(private, mode)) as stream:
-                        if mode.startswith("w"):
-                            await _call(stream.write, b"denied" if "b" in mode else "denied")
+                    async with _scope(bob.fs.open(private, mode)):
+                        pass
+            assert (await _run(bob, "cat", [private])).returncode != 0
+            denied = await _run(bob, "bash", ["-c", 'printf denied > "$1"', "write", private])
+            assert denied.returncode != 0
+
+            # SDK uploads are trusted orchestration, independent of the selected
+            # account's command permissions. The HTTP account can traverse Alice's
+            # home, then the SDK assigns the uploaded file to Bob.
+            delivery = "/home/alice/delivery.txt"
+            await _call(bob.fs.write_text, delivery, "delivered by orchestration", mode=0o600)
+            assert (
+                await _run(box, "stat", ["-c", "%U:%G:%a", delivery], sudo=True, check=True)
+            ).stdout == "bob:bob:600\n"
             with pytest.raises(SandboxFilesystemError):
-                async with _scope(bob.fs.batch()) as batch:
-                    batch.write_text(private, "denied")
+                await _call(bob.fs.read_text, delivery)
             assert not await _call(bob.fs.exists, private)
             assert not await _call(bob.fs.is_file, private)
             assert not await _call(bob.fs.is_dir, "/home/alice/workspace")
             assert await _call(alice.fs.read_bytes, "workspace/secret.bin") == data
 
-            # An absolute path and a symlink must not bypass the account's permissions.
+            # Reads and commands still follow permissions through symlinks.
             await _run(bob, "ln", ["-s", private, "/home/bob/link"], check=True)
             for path in ("/etc/shadow", "link"):
                 with pytest.raises(SandboxFilesystemError):
-                    await _call(bob.fs.write_text, path, "denied")
+                    await _call(bob.fs.read_text, path)
+                assert (await _run(bob, "cat", [path])).returncode != 0
             await _call(alice.fs.write_text, "readonly.txt", "keep", mode=0o400)
-            with pytest.raises(SandboxFilesystemError):
-                await _call(alice.fs.write_text, "readonly.txt", "overwrite")
-            assert await _call(alice.fs.read_text, "readonly.txt") == "keep"
+            assert (
+                await _run(alice, "bash", ["-c", "printf denied > readonly.txt"])
+            ).returncode != 0
+            await _call(alice.fs.write_text, "readonly.txt", "trusted replacement", mode=0o400)
+            assert await _call(alice.fs.read_text, "readonly.txt") == "trusted replacement"
             await _call(alice.fs.rename, "workspace/secret.bin", "workspace/moved.bin")
             await _call(alice.fs.remove, "workspace/moved.bin")
             assert not await _call(alice.fs.exists, "workspace/moved.bin")
@@ -401,6 +394,17 @@ async def test_user_identity_and_permission_enforcement(driver: Any) -> None:
             assert (await _run(custom, "pwd", check=True)).stdout == "/srv/custom-home\n"
             assert custom.home_dir == "/srv/custom-home"
             assert (await _run(custom, "id", ["-gn"], check=True)).stdout == "users\n"
+            before = (await _run(box, "stat", ["-c", "%u:%g:%a", "/srv/custom-home"])).stdout
+            # Existing homes retain their permissions; uploaded files use the
+            # resolved primary group rather than assuming username == group.
+            await _call(custom.fs.write_text, "nested/custom.txt", "custom home", mode=0o600)
+            assert await _call(custom.fs.read_text, "nested/custom.txt") == "custom home"
+            assert (
+                await _run(box, "stat", ["-c", "%u:%g:%a", "/srv/custom-home"])
+            ).stdout == before
+            assert (
+                await _run(custom, "stat", ["-c", "%U:%G:%a", "nested/custom.txt"])
+            ).stdout == "custom:users:600\n"
             root = box.as_user("root")
             assert root.home_dir == "/root"
             assert (await _run(root, "pwd", check=True)).stdout == "/root\n"

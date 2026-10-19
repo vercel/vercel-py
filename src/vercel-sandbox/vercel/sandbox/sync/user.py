@@ -19,11 +19,13 @@ from vercel.sandbox._internal.user_core import UserContext
 
 @dataclass(frozen=True, slots=True)
 class SyncSandboxUser:
-    """Execute commands and file operations with a selected Linux account.
+    """Execute commands and read files as a selected Linux account.
 
     Obtain handles through ``create_user()`` or ``as_user()``. Existing account
     homes are resolved on the first operation; ``home_dir`` is None until then
-    (root starts with /root). Handles expose no sandbox lifecycle methods.
+    (root starts with /root). Uploads and mkdir use trusted HTTP orchestration,
+    then assign ownership to this account; they do not enforce its write
+    permissions. Handles expose no sandbox lifecycle methods.
     """
 
     _context: UserContext = field(repr=False)

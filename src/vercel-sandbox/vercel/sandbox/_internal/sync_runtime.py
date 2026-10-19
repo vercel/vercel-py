@@ -1011,9 +1011,10 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         return SyncSandboxUser(context, filesystem)
 
     def create_user(self, username: str) -> "SyncSandboxUser":
-        """Create a Linux account with /bin/bash and a private (0700) home.
+        """Create a Linux account with /bin/bash and a group-accessible (0770) home.
 
-        Existing accounts cause an error; use ``as_user()`` to reuse one.
+        The home belongs to the account and the sandbox default group for HTTP
+        uploads. Existing accounts cause an error; use ``as_user()`` to reuse one.
         """
         user = self.as_user(username)
         iter_coroutine(user._context.provision())
@@ -1443,9 +1444,10 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         return SyncSandboxUser(context, filesystem)
 
     def create_user(self, username: str) -> "SyncSandboxUser":
-        """Create a Linux account with /bin/bash and a private (0700) home.
+        """Create a Linux account with /bin/bash and a group-accessible (0770) home.
 
-        Existing accounts cause an error; use ``as_user()`` to reuse one.
+        The home belongs to the account and the sandbox default group for HTTP
+        uploads. Existing accounts cause an error; use ``as_user()`` to reuse one.
         """
         user = self.as_user(username)
         iter_coroutine(user._context.provision())

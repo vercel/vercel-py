@@ -39,6 +39,24 @@ Processes and file transfers stream with bounded memory in both I/O modes.
 
 Process output is routed by [[src/vercel-sandbox/vercel/sandbox/_internal/process_output.py#ProcessOutputRouter]] and read through [[src/vercel-sandbox/vercel/sandbox/_internal/text_reader.py]]. File reads and writes share state machines in [[src/vercel-sandbox/vercel/sandbox/_internal/filesystem_handle_core.py]], with sync and async facades on top. Bulk transfers are encoded as tar+gzip on the fly by [[src/vercel-sandbox/vercel/sandbox/_internal/streaming_archive.py#ArchiveRequestWriter]] rather than being built in memory.
 
+## Linux user contexts
+
+User handles enforce Linux permissions for commands and reads while treating SDK uploads and directory creation as trusted orchestration.
+
+[[src/vercel-sandbox/vercel/sandbox/_internal/user_core.py#UserContext#provision|Account provisioning]] creates a Bash account with a home owned by that account and the sandbox default group, with group access for HTTP uploads. Existing homes and symlinks are rejected before account creation. Selecting an existing account resolves its actual home and primary group without changing its home permissions.
+
+[[src/vercel-sandbox/vercel/sandbox/_internal/user_core.py#UserService#open_archive_upload|Uploads]] stream through the parent HTTP archive endpoint; file contents never enter command arguments. After success, privileged metadata commands assign files to the selected account and its primary group. Ancestors below that account's home are assigned to the account and sandbox default group with group write and traversal access. [[src/vercel-sandbox/vercel/sandbox/_internal/user_core.py#UserService#mkdir|Directory creation]] uses the same HTTP account and directory metadata policy, including the requested directory itself.
+
+These SDK writes can reach paths that the selected account cannot access through commands. They are not a permission boundary for untrusted callers, and still depend on the HTTP account's filesystem access. An existing account's home may need explicit preparation. Failed transfers or metadata commands can leave files; ownership is applied only after a successful HTTP upload.
+
+[[src/vercel-sandbox/vercel/sandbox/_internal/user_core.py#UserService#open_read_response|File reads]] execute as the selected account and decode base64 command output to preserve binary bytes. Other filesystem commands also retain the account's permissions. User handles created from sandboxes follow lazy resume; session handles remain pinned.
+
+### User filesystem tests
+
+Public API regressions verify native HTTP payload transport, ownership, binary reads, and the distinction between trusted SDK writes and account permissions.
+
+[[src/vercel-sandbox/tests/test_sandbox_users.py#test_user_upload_keeps_payload_out_of_commands|Wire tests]] cover both APIs, ensure the payload appears in the archive rather than command arguments, and propagate HTTP or metadata failures. [[src/vercel-sandbox/tests/live/test_sandbox_users_live.py#test_user_identity_and_permission_enforcement|Live tests]] cover binary eager, batched, and streamed writes; explicit close; file and directory ownership; private reads and command denial; and existing accounts with different homes and groups.
+
 ## Drives
 
 Drives are named persistent filesystems scoped to one project and region and mounted into sandboxes at creation.

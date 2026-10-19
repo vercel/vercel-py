@@ -1,6 +1,7 @@
 """Shared account provisioning and permission-preserving user execution."""
 
 import base64
+import posixpath
 import re
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
@@ -10,6 +11,7 @@ from typing import Literal, TypeVar
 
 from vercel._internal.core.http import StreamingResponse
 from vercel.sandbox._internal.errors import (
+    SandboxApiError,
     SandboxError,
     SandboxFilesystemCommandError,
     SandboxFilesystemWriteError,
@@ -170,7 +172,8 @@ if [ -e "/home/$1" ] || [ -L "/home/$1" ]; then
     exit 1
 fi
 useradd --create-home --home-dir "/home/$1" --user-group --shell /bin/bash -- "$1"
-chmod 700 -- "/home/$1"
+chown -- "$1:$2" "/home/$1"
+chmod 770 -- "/home/$1"
 """
 
 
@@ -229,10 +232,11 @@ class UserContext:
 
     async def provision(self) -> None:
         async def create(session_id: str) -> None:
+            default_gid = await self.service.default_gid(session_id)
             result = await self.service._parent.run_process(
                 session_id=session_id,
                 command="/bin/bash",
-                args=["-c", _CREATE_USER, "create-user", self.username],
+                args=["-c", _CREATE_USER, "create-user", self.username, default_gid],
                 cwd="/",
                 sudo=True,
                 output_router=ProcessOutputRouter(stdout=None, stderr=None, capture_output=True),
@@ -287,7 +291,7 @@ class UserContext:
 
 
 class UserService(SandboxService):
-    """Reuse filesystem orchestration, replacing every privileged I/O endpoint."""
+    """Run commands and reads as the account; upload through the trusted HTTP API."""
 
     def __init__(self, parent: SandboxService, context: UserContext) -> None:
         super().__init__(
@@ -300,6 +304,66 @@ class UserService(SandboxService):
         self._parent = parent
         self._context = context
         self._process_metadata: dict[tuple[str, str], ProcessState] = {}
+        self._default_gid: tuple[str, str] | None = None
+
+    async def default_gid(self, session_id: str) -> str:
+        if self._default_gid is None or self._default_gid[0] != session_id:
+            result = await self._parent.run_process(
+                session_id=session_id,
+                command="id",
+                args=["-g"],
+                output_router=ProcessOutputRouter(stdout=None, stderr=None, capture_output=True),
+            )
+            gid = (result.stdout or "").strip()
+            if result.process.returncode != 0 or not re.fullmatch(r"[0-9]+", gid):
+                raise SandboxError(f"Cannot resolve sandbox default group: {result.stderr or ''}")
+            self._default_gid = (session_id, gid)
+        return self._default_gid[1]
+
+    def _ancestor_dirs_under_home(self, paths: Sequence[str]) -> list[str]:
+        home = self._context.home_dir
+        assert home is not None
+        prefix = home.rstrip("/") + "/"
+        dirs: dict[str, None] = {}
+        for path in paths:
+            directory = posixpath.dirname(path)
+            while directory != home and directory.startswith(prefix):
+                dirs[directory] = None
+                parent = posixpath.dirname(directory)
+                if parent == directory:
+                    break
+                directory = parent
+        return list(dirs)
+
+    async def _set_metadata(
+        self,
+        session_id: str,
+        operation: str,
+        paths: Sequence[str],
+        ownership: str,
+        mode: str | None = None,
+    ) -> None:
+        if not paths:
+            return
+        for command, value in (("chown", ownership), ("chmod", mode)):
+            if value is None:
+                continue
+            result = await self._parent.run_process(
+                session_id=session_id,
+                command=command,
+                args=["--", value, *paths],
+                cwd="/",
+                sudo=True,
+                output_router=ProcessOutputRouter(stdout=None, stderr=None, capture_output=True),
+            )
+            if result.process.returncode != 0:
+                raise SandboxFilesystemCommandError(
+                    operation,
+                    paths=tuple(paths),
+                    exit_code=result.process.returncode,
+                    stdout=result.stdout or "",
+                    stderr=result.stderr or "",
+                )
 
     async def _wrap(
         self,
@@ -466,37 +530,6 @@ class UserService(SandboxService):
         )
         return self._project_process(state)
 
-    async def _checked(
-        self,
-        session_id: str,
-        operation: str,
-        command: str,
-        args: list[str],
-        cwd: str | None,
-        paths: tuple[str, ...],
-    ) -> None:
-        result = await self.run_process(
-            session_id=session_id,
-            command=command,
-            args=args,
-            cwd=cwd,
-            env={"LC_ALL": "C"},
-            output_router=ProcessOutputRouter(stdout=None, stderr=None, capture_output=True),
-        )
-        if result.process.returncode != 0:
-            error = SandboxFilesystemCommandError(
-                operation,
-                paths=paths,
-                exit_code=result.process.returncode,
-                stdout=result.stdout or "",
-                stderr=result.stderr or "",
-            )
-            if operation == "mkdir" and "No such file or directory" in error.stderr:
-                raise SandboxPathNotFoundError(
-                    paths[0], operation=operation, cwd=cwd, cause=error
-                ) from error
-            raise error
-
     async def mkdir(
         self,
         *,
@@ -505,8 +538,21 @@ class UserService(SandboxService):
         cwd: str | None = None,
         recursive: bool = True,
     ) -> None:
-        await self._checked(
-            session_id, "mkdir", "mkdir", [*(["-p"] if recursive else []), "--", path], cwd, (path,)
+        absolute_path = posixpath.normpath(posixpath.join(self._context.write_files_cwd(cwd), path))
+        try:
+            await self._parent.mkdir(session_id=session_id, path=absolute_path, recursive=recursive)
+        except SandboxApiError as error:
+            if error.code == "file_error" and "No such file or directory" in str(error):
+                raise SandboxPathNotFoundError(
+                    path, operation="mkdir", cwd=cwd, cause=error
+                ) from error
+            raise
+        await self._set_metadata(
+            session_id,
+            "mkdir",
+            [absolute_path, *self._ancestor_dirs_under_home([absolute_path])],
+            f"{self._context.username}:{await self.default_gid(session_id)}",
+            "770",
         )
 
     async def listdir(
@@ -593,15 +639,29 @@ class UserService(SandboxService):
         paths: tuple[str, ...],
         cwd: str,
     ) -> AsyncGenerator[SandboxArchiveUpload, None]:
-        upload = _UserUpload(self, session_id, cwd)
-        try:
+        async with self._parent.open_archive_upload(
+            session_id=session_id, paths=paths, cwd=cwd
+        ) as upload:
             yield upload
-        except BaseException:
-            await upload.abort()
-            raise
-        else:
-            if not upload.finished:
-                await upload.finish()
+        absolute_paths = [posixpath.normpath(posixpath.join(cwd, path)) for path in paths]
+        try:
+            await self._set_metadata(
+                session_id,
+                "write",
+                absolute_paths,
+                f"{self._context.username}:{self._context.primary_gid}",
+            )
+            dirs = self._ancestor_dirs_under_home(absolute_paths)
+            if dirs:
+                await self._set_metadata(
+                    session_id,
+                    "write",
+                    dirs,
+                    f"{self._context.username}:{await self.default_gid(session_id)}",
+                    "770",
+                )
+        except SandboxFilesystemCommandError as error:
+            raise SandboxFilesystemWriteError(paths=paths, cwd=cwd, cause=error) from error
 
 
 class _UserReadResponse(StreamingResponse):
@@ -634,67 +694,3 @@ class _UserReadResponse(StreamingResponse):
                 yield line.decode()
         if pending:
             yield pending.decode()
-
-
-class _UserUpload(SandboxArchiveUpload):
-    """Chunked writes made exclusively as the account, including parent creation."""
-
-    def __init__(self, service: UserService, session_id: str, cwd: str) -> None:
-        self._service = service
-        self._session_id = session_id
-        self._cwd = cwd
-        self._finished = False
-        self._path: str | None = None
-        self._mode: int | None = None
-
-    async def _command(self, script: str, *args: str) -> None:
-        assert self._path is not None
-        try:
-            await self._service._checked(
-                self._session_id,
-                "write",
-                "/bin/bash",
-                ["-c", script, "user-write", self._path, *args],
-                self._cwd,
-                (self._path,),
-            )
-        except SandboxFilesystemCommandError as error:
-            raise SandboxFilesystemWriteError(
-                paths=(self._path,), cwd=self._cwd, cause=error
-            ) from error
-
-    async def start_entry(self, archive_path: str, size: int, mode: int | None) -> None:
-        if self._path is not None:
-            await self.finish_entry()
-        self._path = "/" + archive_path
-        self._mode = mode
-        # Open as the account before chmod: an existing read-only file must fail
-        # without changing its permissions. Create privately and restrict access
-        # before writing any payload, including when the upload is aborted.
-        mask = "077" if mode is not None else "022"
-        script = f'mkdir -p -- "$(dirname -- "$1")" && (umask {mask}; : > "$1")'
-        if mode is not None:
-            script += ' && chmod -- "$2" "$1"'
-            await self._command(script, f"{mode | 0o200:o}")
-        else:
-            await self._command(script)
-
-    async def write(self, data: bytes) -> None:
-        for offset in range(0, len(data), 32 * 1024):
-            encoded = base64.b64encode(data[offset : offset + 32 * 1024]).decode("ascii")
-            await self._command('printf %s "$2" | base64 -d >> "$1"', encoded)
-
-    async def finish_entry(self) -> None:
-        if self._path is not None and self._mode is not None:
-            await self._command('chmod -- "$2" "$1"', f"{self._mode:o}")
-        self._path = None
-
-    async def flush(self) -> None:
-        pass
-
-    async def finish(self) -> None:
-        await self.finish_entry()
-        self._finished = True
-
-    async def abort(self) -> None:
-        self._finished = True

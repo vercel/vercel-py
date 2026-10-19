@@ -1,12 +1,17 @@
 """Public selection, immutability, and structural capability contracts."""
 
+import base64
+import io
+import json
 import re
 import subprocess
 import sys
+import tarfile
 from dataclasses import FrozenInstanceError
 from inspect import isawaitable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+import httpx2 as httpx
 import pytest
 from hypothesis import given, strategies as st
 from sandbox_fixtures import sandbox_service_options
@@ -15,7 +20,11 @@ import vendor.respx as respx
 from vercel import sandbox
 from vercel._internal.core.session import get_active_sync_session
 from vercel.api import session
-from vercel.sandbox import SandboxExecution, SandboxFilesystemOperations
+from vercel.sandbox import (
+    SandboxExecution,
+    SandboxFilesystemOperations,
+    SandboxFilesystemWriteError,
+)
 from vercel.sandbox._internal.service import get_sync_sandbox_service
 from vercel.sandbox._internal.state import ProcessState, SandboxRuntimeSessionState, SandboxState
 from vercel.sandbox.sync import SyncSandboxExecution, SyncSandboxFilesystemOperations
@@ -46,6 +55,99 @@ def test_public_imports_in_fresh_interpreter() -> None:
         timeout=10,
     )
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("sync", [False, True], ids=["async", "sync"])
+@pytest.mark.parametrize("failure", [None, "upload", "chown", "chmod"])
+@respx.mock
+async def test_user_upload_keeps_payload_out_of_commands(
+    mock_env_clear: None, sync: bool, failure: str | None
+) -> None:
+    commands: list[dict[str, Any]] = []
+    events: list[str] = []
+    data = b"private payload\x00\xff" * 4096
+
+    def command(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        commands.append(body)
+        name = body["command"]
+        events.append(name)
+        output = {
+            "getent": "alice:x:1001:1002::/home/alice:/bin/bash\n",
+            "id": "1000\n",
+        }.get(name, "")
+        state = {
+            "id": f"cmd_{len(commands)}",
+            "name": name,
+            "sessionId": "sbx_test",
+            "args": body.get("args", []),
+            "cwd": "/",
+            "startedAt": 1,
+        }
+        records = [
+            {"command": state},
+            {"stream": "stdout", "data": output},
+            {"stream": "stderr", "data": "metadata failed" if name == failure else ""},
+            {"command": {**state, "exitCode": 1 if name == failure else 0}},
+        ]
+        return httpx.Response(200, text="\n".join(json.dumps(record) for record in records))
+
+    def upload(request: httpx.Request) -> httpx.Response:
+        events.append("upload")
+        with tarfile.open(fileobj=io.BytesIO(request.content), mode="r:gz") as archive:
+            member = archive.getmember("home/alice/nested/secret.bin")
+            source = archive.extractfile(member)
+            assert source is not None and source.read() == data
+            assert member.mode == 0o600
+        if failure == "upload":
+            return httpx.Response(
+                403, json={"error": {"code": "file_error", "message": "upload failed"}}
+            )
+        return httpx.Response(204)
+
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_test/cmd").mock(side_effect=command)
+    route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_test/fs/write").mock(
+        side_effect=upload
+    )
+
+    async def write() -> None:
+        if sync:
+            handle = _handles()[3]
+        else:
+            from vercel._internal.core.session import get_active_session
+            from vercel.sandbox._internal.service import get_sandbox_service
+
+            handle = sandbox.SandboxRuntimeSession(
+                payload=SandboxRuntimeSessionState(id="sbx_test"),
+                service=get_sandbox_service(get_active_session()),
+            )
+        result = handle.as_user("alice").fs.write_bytes("nested/secret.bin", data, mode=0o600)
+        if isawaitable(result):
+            await result
+
+    async def exercise() -> None:
+        if failure:
+            with pytest.raises(SandboxFilesystemWriteError) as raised:
+                await write()
+            assert raised.value.paths == ("nested/secret.bin",)
+            assert raised.value.cwd == "/home/alice"
+        else:
+            await write()
+
+    if sync:
+        with session(service_options=sandbox_service_options(sync=True)):
+            await exercise()
+    else:
+        async with session(service_options=sandbox_service_options(sync=False)):
+            await exercise()
+
+    assert route.call_count == 1
+    assert all(body["command"] in {"getent", "id", "chown", "chmod"} for body in commands)
+    assert base64.b64encode(data).decode() not in json.dumps(commands)
+    if failure == "upload":
+        assert events == ["getent", "upload"]
+    else:
+        assert events.index("upload") < events.index("chown")
 
 
 @respx.mock

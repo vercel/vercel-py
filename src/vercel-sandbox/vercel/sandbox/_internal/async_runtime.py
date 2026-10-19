@@ -948,9 +948,10 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         return SandboxUser(context, filesystem)
 
     async def create_user(self, username: str) -> "SandboxUser":
-        """Create a Linux account with /bin/bash and a private (0700) home.
+        """Create a Linux account with /bin/bash and a group-accessible (0770) home.
 
-        Existing accounts cause an error; use ``as_user()`` to reuse one.
+        The home belongs to the account and the sandbox default group for HTTP
+        uploads. Existing accounts cause an error; use ``as_user()`` to reuse one.
         """
         user = self.as_user(username)
         await user._context.provision()
@@ -1326,9 +1327,10 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         return SandboxUser(context, filesystem)
 
     async def create_user(self, username: str) -> "SandboxUser":
-        """Create a Linux account with /bin/bash and a private (0700) home.
+        """Create a Linux account with /bin/bash and a group-accessible (0770) home.
 
-        Existing accounts cause an error; use ``as_user()`` to reuse one.
+        The home belongs to the account and the sandbox default group for HTTP
+        uploads. Existing accounts cause an error; use ``as_user()`` to reuse one.
         """
         user = self.as_user(username)
         await user._context.provision()

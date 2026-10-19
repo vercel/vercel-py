@@ -342,7 +342,8 @@ assert alice.home_dir == "/home/alice"
 filesystem options match the session APIs. Usernames must match
 `[a-z_][a-z0-9_-]*` and contain at most 32 characters; invalid names fail
 immediately. `create_user()` fails if the account already exists, provisions
-`/bin/bash` and `/home/<username>` with mode `0700`, and returns a handle.
+`/bin/bash` and `/home/<username>` owned by the user and the sandbox default
+group with mode `0770`, and returns a handle.
 It rejects existing home paths, including symlinks, before creating an account.
 `as_user()` performs no I/O. It resolves the actual existing account's home
 on first use, so `home_dir` is initially `None`, except for `root` (`/root`).
@@ -356,20 +357,33 @@ home; explicit relative `cwd` values also resolve against that home. Caller
 with root's environment defaults, while retaining the handle's default cwd.
 Use `as_user("root")` for a persistent root identity.
 
-Every file operation, including writes, parent directory creation, batches,
-and `fs.open()`, runs as the selected account and honors Linux permissions.
-Another user cannot access a private home. User handles obtained from a
-sandbox follow its lazy resume; handles obtained from a runtime session stay
-pinned to that session. No lifecycle, configuration, or process lookup/listing
-methods are exposed by user handles. Group management is not included.
-Custom images need Bash with coprocess support, getent, useradd, setpriv with
-`--pdeathsig` support (util-linux), GNU find, and coreutils (including env's
-`--default-signal`),
-with setpriv, env, and sleep available
-under `/usr/bin`. User file
-transfers use base64 command output and chunked command writes rather than the
-native file endpoint; writes can leave partial files on failure, protected by
-the requested access permissions throughout the transfer. Command time limits
+Commands, reads, listing, renaming, and removal run as the selected account
+and honor Linux permissions. Another user cannot read a private home.
+Uploads (`write_bytes`, `write_text`, batches, and writable `fs.open` handles)
+and `mkdir` are trusted SDK orchestration: they use the native HTTP filesystem
+API as the sandbox default account, then run privileged ownership commands.
+Upload contents never appear in command arguments. Successful uploads belong
+to the selected user and its actual primary group. Directories created by
+`mkdir`, and ancestors below the selected user's home, belong to that user
+and the sandbox default group with mode `0770` so later HTTP uploads can reach
+them. File access modes come from the upload request.
+
+These SDK write operations can access paths that the selected user's commands
+cannot, including another user's home when the HTTP account has access. Do not
+expose them as a filesystem permission boundary to untrusted callers. The HTTP
+account still needs access to the destination; existing accounts selected with
+`as_user()` retain their home ownership and permissions, so uploads may require
+explicit preparation. Failed uploads or ownership changes can leave partial
+files, and ownership is assigned only after the HTTP upload succeeds.
+
+User handles obtained from a sandbox follow its lazy resume; handles obtained
+from a runtime session stay pinned to that session. No lifecycle, configuration,
+or process lookup/listing methods are exposed by user handles. Group management
+is not included. Custom images need Bash with coprocess support, getent,
+useradd, setpriv with `--pdeathsig` support (util-linux), GNU find, and coreutils
+(including env's `--default-signal`), with setpriv, env, and sleep available
+under `/usr/bin`. User file reads use base64 command output to preserve binary
+contents; uploads stream through the native file endpoint. Command time limits
 and `KILL` clean up the command's process group inside the selected account so
 child processes release their output streams promptly. Catchable signals such
 as `INT`, `TERM`, and `USR1` allow command handlers to finish and report their
