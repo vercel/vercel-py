@@ -2729,7 +2729,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "celery", specifier = ">=5.3,<6" },
+    { name = "celery", specifier = ">=5.3.1,<6" },
     { name = "httpx2", specifier = ">=2" },
     { name = "vercel-cache", editable = "src/vercel-cache" },
     { name = "vercel-queue", editable = "src/vercel-queue" },
@@ -2884,9 +2884,9 @@ requires-dist = [
     { name = "anyio", extras = ["trio"], marker = "extra == 'trio'", specifier = ">=4.11.0,<5" },
     { name = "httpx2", extras = ["http2"], specifier = ">=2" },
     { name = "pydantic", marker = "extra == 'typed'", specifier = ">=2.7.0" },
-    { name = "python-multipart", specifier = ">=0.0.20" },
+    { name = "python-multipart", specifier = ">=0.0.27" },
     { name = "typing-extensions", specifier = ">=4.0.0" },
-    { name = "uvicorn", marker = "extra == 'devserver'" },
+    { name = "uvicorn", marker = "extra == 'devserver'", specifier = ">=0.30.0" },
     { name = "vercel-headers", editable = "src/vercel-headers" },
     { name = "vercel-internal-core", editable = "src/vercel-internal-core" },
     { name = "vercel-oidc", editable = "src/vercel-oidc" },
@@ -2907,7 +2907,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "anyio", specifier = ">=4.11.0,<5" },
-    { name = "httpx2", extras = ["ws"], specifier = ">=2" },
+    { name = "httpx2", extras = ["ws"], specifier = ">=2.6.0" },
     { name = "pydantic", specifier = ">=2.7.0,<3" },
     { name = "vercel-internal-core", editable = "src/vercel-internal-core" },
     { name = "vercel-oidc", editable = "src/vercel-oidc" },
