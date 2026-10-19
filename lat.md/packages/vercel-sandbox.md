@@ -45,6 +45,10 @@ Drives are named persistent filesystems scoped to one project and region and mou
 
 A mount is read-write by default, or a point-in-time read-only snapshot. Mount paths are canonicalized and validated in [[src/vercel-sandbox/vercel/sandbox/_internal/models.py]]: absolute, non-overlapping, no `..`, never `/`. Each drive must be in the sandbox's region, and mounted sandboxes cannot use failover regions. A read-write drive attached to another running sandbox is rejected by the API, and a drive must be unmounted before it can be deleted.
 
+[[src/vercel-sandbox/vercel/sandbox/_internal/async_runtime.py#Drive#fork|Drive.fork]] and [[src/vercel-sandbox/vercel/sandbox/_internal/sync_runtime.py#SyncDrive#fork|SyncDrive.fork]] copy committed data into an independent Drive with a new name, inheriting the source's region and maximum size. The top-level [[src/vercel-sandbox/vercel/sandbox/__init__.py#fork_drive|fork_drive]] and its [[src/vercel-sandbox/vercel/sandbox/sync/__init__.py#fork_drive|sync counterpart]] accept a source name directly, avoiding a lookup. Standalone clients expose the same operation. Handles expose optional immediate-parent and root Drive IDs for lineage; API errors preserve missing-source, name-conflict, and uninitialized-source failures.
+
+[[src/vercel-sandbox/tests/live/test_sandbox_live.py#test_drive_fork_and_fork_by_name_copy_committed_data_independently|The live fork test]] verifies both APIs against committed data, inherited metadata, lineage, and independent writes, and cleans up all allocated resources.
+
 ## Interactive PTY sessions
 
 PTY sessions run over a WebSocket and expose terminal I/O as the native byte stream of each mode.
