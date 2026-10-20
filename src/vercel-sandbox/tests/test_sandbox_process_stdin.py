@@ -57,8 +57,7 @@ Fault = Callable[["_StdinServer", httpx.Request, dict[str, Any]], httpx.Response
 class _StdinServer:
     """Stands in for the stdin endpoint of one running ``cat`` process."""
 
-    def __init__(self, *, legacy: bool = False) -> None:
-        self.legacy = legacy
+    def __init__(self) -> None:
         self.data = bytearray()
         self.closed = False
         self.exited = False
@@ -75,7 +74,7 @@ class _StdinServer:
         if not self.attached or ((self.closed or not self.reading) and (chunk or close)):
             return _failure(400, "command_stdin_unavailable")
         offset = body.get("offset")
-        if self.legacy or offset is None:
+        if offset is None:
             self.data += chunk
         elif offset > len(self.data):
             return _failure(409, "command_stdin_offset_mismatch")
@@ -83,10 +82,7 @@ class _StdinServer:
             self.data += chunk[len(self.data) - offset :]
         if close:
             self.closed = True
-        response: dict[str, object] = {"command": _COMMAND}
-        if not self.legacy:
-            response["bytesWritten"] = len(self.data)
-        return _json(response)
+        return _json({"command": _COMMAND, "bytesWritten": len(self.data)})
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
@@ -288,15 +284,6 @@ def driver(
     request: pytest.FixtureRequest, mock_env_clear: None, sleeps: list[float]
 ) -> Iterator[_Driver]:
     with _open_driver(request.param, _StdinServer()) as opened:
-        yield opened
-
-
-@pytest.fixture(params=_MODES)
-def legacy_driver(
-    request: pytest.FixtureRequest, mock_env_clear: None, sleeps: list[float]
-) -> Iterator[_Driver]:
-    """A sandbox that predates stdin offsets and never reports ``bytesWritten``."""
-    with _open_driver(request.param, _StdinServer(legacy=True)) as opened:
         yield opened
 
 
@@ -518,11 +505,19 @@ def test_timeouts_are_resent_while_the_process_keeps_reading(driver: _Driver) ->
     ) -> httpx.Response:
         return _failure(504, "command_stdin_timeout", bytesWritten=len(server.data))
 
-    driver.server.faults.extend([stalled, stalled])
-    with pytest.raises(sandbox.SandboxStdinError) as failure:
+    # A timeout that reports no progress, or no bytes written at all, is
+    # stalled, and the request is given up after a second one.
+    for fault in (stalled, _rejected(504)):
+        process = driver.create_process(stdin=subprocess.PIPE)
         process.write(b"g")
-    assert isinstance(failure.value.cause, SandboxApiError)
-    assert failure.value.cause.status_code == 504
+        sent, offset = len(driver.server.bodies), len(driver.server.data)
+        driver.server.faults.extend([fault, fault])
+        with pytest.raises(sandbox.SandboxStdinError) as failure:
+            process.write(b"h")
+        assert isinstance(failure.value.cause, SandboxApiError)
+        assert failure.value.cause.status_code == 504
+        resent = driver.server.bodies[sent:]
+        assert resent == [{"data": base64.b64encode(b"h").decode(), "offset": offset}] * 2
 
 
 def test_a_resent_close_that_finds_the_process_gone_succeeds(driver: _Driver) -> None:
@@ -542,20 +537,18 @@ def test_a_resent_close_that_finds_the_process_gone_succeeds(driver: _Driver) ->
     assert driver.server.closed
 
 
-def test_sandboxes_without_offsets_are_never_resent(legacy_driver: _Driver) -> None:
-    driver = legacy_driver
+def test_writes_fail_before_writing_when_the_offset_is_unknown(driver: _Driver) -> None:
     process = driver.create_process(stdin=subprocess.PIPE)
-    process.write(b"a")
-    driver.server.faults.append(_applied_then_disconnect)
+    driver.server.faults.append(lambda server, request, body: _json({"command": _COMMAND}))
 
-    with pytest.raises(sandbox.SandboxStdinError):
-        process.write(b"b")
+    with pytest.raises(sandbox.SandboxStdinError) as failure:
+        process.write(b"a")
 
-    assert driver.server.writes() == [
-        {"data": base64.b64encode(b"a").decode()},
-        {"data": base64.b64encode(b"b").decode()},
-    ]
-    assert driver.server.data == b"ab"
+    assert isinstance(failure.value.cause, sandbox.SandboxResponseError)
+    assert driver.server.writes() == []
+    # Nothing was written, so a later write asks again and succeeds.
+    process.write(b"b")
+    assert driver.server.data == b"b"
 
 
 def test_run_process_feeds_input_while_streaming_output(driver: _Driver) -> None:

@@ -16,7 +16,11 @@ import anyio
 from vercel._internal.core.http._compat import transport_errors
 from vercel._internal.core.iter_coroutine import iter_coroutine
 from vercel._internal.core.polyfills import Buffer
-from vercel.sandbox._internal.errors import SandboxApiError, SandboxStdinError
+from vercel.sandbox._internal.errors import (
+    SandboxApiError,
+    SandboxResponseError,
+    SandboxStdinError,
+)
 from vercel.sandbox._internal.models import ProcessSignal
 from vercel.sandbox._internal.state import ProcessState
 from vercel.sandbox._internal.text_reader import _AsyncPumpLock, _PumpLock, _SyncPumpLock
@@ -162,10 +166,8 @@ class StdinCore:
         self.attached = attached
         self._verified = attached
         self.written = False
-        # Confirmed bytes, or ``None`` until the service is asked. Asking also
-        # reveals sandboxes that predate offsets, where resending is unsafe.
+        # Confirmed bytes, or ``None`` until the service is asked.
         self._offset: int | None = None
-        self._offsets_supported = True
         self._failure: BaseException | None = None
         self._not_accepted: BaseException | None = None
         self.closed = False
@@ -199,7 +201,7 @@ class StdinCore:
                 return
             try:
                 await self._resolve_offset()
-                await self._request(offset=self._request_offset(), close=True)
+                await self._request(offset=self._confirmed(), close=True)
             except _InputNotAccepted:
                 return
             except SandboxStdinError as error:
@@ -236,8 +238,9 @@ class StdinCore:
         try:
             for start in range(0, len(view), STDIN_CHUNK_SIZE):
                 chunk = bytes(view[start : start + STDIN_CHUNK_SIZE])
-                written = await self._request(data=chunk, offset=self._request_offset())
-                self._confirm(written, len(chunk))
+                offset = self._confirmed()
+                written = await self._request(data=chunk, offset=offset)
+                self._offset = offset + len(chunk) if written is None else written
                 sent += 1
         except _RequestFailed as failure:
             error = failure.error
@@ -282,18 +285,19 @@ class StdinCore:
                 "Failed to read process stdin state", cause=failure.error
             ) from failure.error
         self._verified = True
-        self._offsets_supported = written is not None
-        self._offset = written or 0
-
-    def _request_offset(self) -> int | None:
-        return self._offset if self._offsets_supported else None
-
-    def _confirm(self, written: int | None, length: int) -> None:
         if written is None:
-            self._offsets_supported = False
-            self._offset = (self._offset or 0) + length
-        else:
-            self._offset = written
+            # Without the current offset a write could duplicate or skip input.
+            raise SandboxStdinError(
+                "Failed to read process stdin state",
+                cause=SandboxResponseError(
+                    "Sandbox stdin response did not report the bytes written"
+                ),
+            )
+        self._offset = written
+
+    def _confirmed(self) -> int:
+        assert self._offset is not None
+        return self._offset
 
     async def _send(
         self, *, data: bytes = b"", offset: int | None = None, close: bool = False
@@ -306,23 +310,16 @@ class StdinCore:
             close=close,
         )
 
-    async def _probe(self) -> int | None:
-        try:
-            return await self._send()
-        except Exception:
-            return None
-
     async def _request(
         self, *, data: bytes = b"", offset: int | None = None, close: bool = False
     ) -> int | None:
         """Send one logical request, resending it while that is safe.
 
-        With an offset the service skips bytes it already has, so the request
-        is resent across connection failures, 502, 503, and timeouts that
-        still make progress. Without one, only rate-limited requests are
-        resent, since any other failure may have written the bytes already.
+        Every write carries an offset, and the service skips bytes it already
+        has, so a request is resent across connection failures, 429, 502, 503,
+        and timeouts that report progress. Requests without data only read the
+        offset, so they are always safe to resend.
         """
-        resendable = offset is not None or (not data and not close)
         maybe_applied = False
         stalled_timeouts = 0
         last_written = offset or 0
@@ -333,7 +330,7 @@ class StdinCore:
             try:
                 return await self._send(data=data, offset=offset, close=close)
             except transport_errors() as error:
-                if not resendable or not can_retry:
+                if not can_retry:
                     raise _RequestFailed(error, maybe_applied=True) from error
                 maybe_applied = True
                 await self._service.sleep(_backoff(attempt - 1))
@@ -351,17 +348,16 @@ class StdinCore:
                             else _backoff(attempt - 1)
                         )
                         continue
-                elif resendable and can_retry and status in (502, 503):
+                elif can_retry and status in (502, 503):
                     maybe_applied = True
                     await self._service.sleep(_backoff(attempt - 1))
                     continue
-                elif resendable and can_retry and status == 504:
+                elif can_retry and status == 504:
                     # The process isn't reading fast enough. Keep resending
-                    # while it makes progress.
+                    # while it makes progress; a timeout that doesn't report
+                    # the bytes written counts as stalled.
                     maybe_applied = True
                     written = _timeout_bytes_written(error)
-                    if written is None:
-                        written = await self._probe()
                     if written is not None and written > last_written:
                         last_written = written
                         stalled_timeouts = 0

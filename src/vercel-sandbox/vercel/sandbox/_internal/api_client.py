@@ -2043,7 +2043,7 @@ class SandboxApiClient:
         """Send one stdin request and return the service's ``bytesWritten``.
 
         An empty request writes nothing and reports the bytes written so far.
-        Sandboxes that predate stdin offsets omit ``bytesWritten``.
+        Returns ``None`` if the response omits ``bytesWritten``.
         """
         credentials = await self._credentials_factory()
         body: JSONObject = {}
