@@ -1229,12 +1229,28 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
             )
         )
 
-    def get_process(self, process_id: str, *, wait: bool = False) -> SyncProcess:
-        """Get a process in this session."""
+    def get_process(
+        self, process_id: str, *, wait: bool = False, stdin: int | None = None
+    ) -> SyncProcess:
+        """Get a process in this session.
+
+        Args:
+            process_id: Process identifier.
+            wait: Whether the API call should wait for process completion.
+            stdin: ``subprocess.PIPE`` for a writer at ``stdin``, for a
+                process started with ``stdin=subprocess.PIPE`` elsewhere.
+                Writes resume after whatever was already written, so only
+                one handle should write at a time. If the process has no
+                stdin attached, writing raises ``BrokenPipeError``.
+
+        Returns:
+            A process handle populated with the latest state.
+        """
+        attach_stdin = _validate_stdin(stdin)
         state = iter_coroutine(
             self._service.get_process(session_id=self.id, process_id=process_id, wait=wait)
         )
-        return SyncProcess(payload=state, service=self._service)
+        return SyncProcess(payload=state, service=self._service, stdin=attach_stdin)
 
     def query_processes(self) -> list[SyncProcess]:
         """Return handles for the processes in this session."""
@@ -1643,8 +1659,14 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
             )
         )
 
-    def get_process(self, process_id: str, *, wait: bool = False) -> SyncProcess:
-        """Get a process from the current session."""
+    def get_process(
+        self, process_id: str, *, wait: bool = False, stdin: int | None = None
+    ) -> SyncProcess:
+        """Get a process from the current session.
+
+        See ``SyncSandboxRuntimeSession.get_process`` for argument behavior.
+        """
+        attach_stdin = _validate_stdin(stdin)
         state = iter_coroutine(
             execute_with_sandbox_recovery(
                 lambda session_id: self._service.get_process(
@@ -1655,7 +1677,7 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
                 coordinator=self,
             )
         )
-        return SyncProcess(payload=state, service=self._service)
+        return SyncProcess(payload=state, service=self._service, stdin=attach_stdin)
 
     def query_processes(self) -> list[SyncProcess]:
         """Return handles for processes in the current session."""

@@ -233,6 +233,9 @@ class _Driver:
     def create_process(self, **kwargs: Any) -> _Handle:
         return _Handle(self._call(self.box.create_process, "cat", **kwargs), self.portal)
 
+    def get_process(self, **kwargs: Any) -> _Handle:
+        return _Handle(self._call(self.box.get_process, "cmd_1", **kwargs), self.portal)
+
     def run_process(self, **kwargs: Any) -> sandbox.CompletedProcess:
         return self._call(self.box.run_process, "cat", **kwargs)  # type: ignore[no-any-return]
 
@@ -308,6 +311,32 @@ def test_writes_reach_the_process_in_order_and_close_sends_eof(driver: _Driver) 
     assert driver.server.bodies[0] == {}
     assert [body.get("offset") for body in driver.server.writes()] == [0, 6, 9, 12]
     assert process.communicate() == ("hello world\n", "")
+
+
+def test_a_fetched_process_can_attach_and_resume_its_stdin(driver: _Driver) -> None:
+    started = driver.create_process(stdin=subprocess.PIPE)
+    started.write(b"first ")
+    assert driver.get_process().process.stdin is None
+
+    attached = driver.get_process(stdin=subprocess.PIPE)
+    attached.write(b"second\n")
+    attached.close()
+
+    assert driver.server.data == b"first second\n"
+    assert driver.server.closed
+    assert [body.get("offset") for body in driver.server.writes()] == [0, 6, 13]
+
+
+def test_attaching_to_a_process_without_stdin_breaks_the_pipe(driver: _Driver) -> None:
+    driver.server.faults.append(
+        lambda server, request, body: _failure(400, "command_stdin_unavailable")
+    )
+    process = driver.get_process(stdin=subprocess.PIPE)
+
+    with pytest.raises(process.broken):
+        process.write(b"data")
+    process.close()
+    assert driver.server.data == b""
 
 
 def test_stdin_is_not_attached_unless_requested(driver: _Driver) -> None:
