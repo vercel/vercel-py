@@ -3,6 +3,8 @@
 Create and manage Vercel Sandboxes with synchronous and asynchronous APIs.
 
 ```python
+import subprocess
+
 from vercel import sandbox
 from vercel.api import session
 
@@ -10,6 +12,13 @@ async with session():
     async with sandbox.create_sandbox() as instance:
         process = await instance.run_process("echo", ["hello"], capture_output=True)
         print(process.stdout)
+
+        # Pass input to run_process, or keep stdin open with stdin=subprocess.PIPE.
+        result = await instance.run_process("sort", input="b\na\n", capture_output=True)
+        server = await instance.create_process("cat", stdin=subprocess.PIPE)
+        await server.stdin.send(b"ping\n")
+        print(await server.stdout.readline())
+        print(await server.communicate())  # Close stdin, read the rest, and wait.
 ```
 
 The package can be installed independently with `pip install vercel-sandbox`.
@@ -40,6 +49,12 @@ with session():
         process = instance.run_process("echo", ["hello"], capture_output=True)
         print(process.stdout)
 ```
+
+Process APIs follow `subprocess`. Asynchronously, `process.stdin` is an
+`anyio.abc.ByteSendStream`, so it works with `TextSendStream` under asyncio or
+Trio. Synchronously it is a writable `io.RawIOBase`; wrap it in
+`io.TextIOWrapper` for text. For a long-running stdio server, see
+[`examples/sandbox_10_mcp_everything.py`](examples/sandbox_10_mcp_everything.py).
 
 ## Standalone clients
 
@@ -263,81 +278,6 @@ characters, target `/`, or exceed 256 characters after canonicalization. Each
 Drive name may appear only once. Mounted sandboxes cannot use failover regions,
 and each Drive must use the sandbox region. Drives default to `iad1` when
 `region` is omitted.
-
-## Process input
-
-Processes read an empty stdin unless asked otherwise. As with `subprocess`,
-`run_process(..., input=...)` writes data and closes stdin, and
-`create_process(..., stdin=subprocess.PIPE)` attaches a writer on
-`process.stdin` for a long-running conversation, such as a stdio MCP server:
-
-```python
-import json
-import subprocess
-
-from vercel import sandbox
-
-
-async def main() -> None:
-    async with sandbox.create_sandbox() as box:
-        result = await box.run_process("wc", ["-c"], input="hello\n", capture_output=True)
-        print(result.stdout)
-
-        server = await box.create_process("python", ["-u", "server.py"], stdin=subprocess.PIPE)
-        request = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
-        await server.stdin.send((json.dumps(request) + "\n").encode())
-        print(json.loads(await server.stdout.readline()))
-        await server.stdin.aclose()
-        print(await server.wait())
-```
-
-The asynchronous `stdin` is an `anyio.abc.ByteSendStream`, so it can be wrapped
-in `anyio.streams.text.TextSendStream` or handed to anything that sends to an
-AnyIO stream, under asyncio or Trio. The synchronous one is a writable
-`io.RawIOBase`; wrap it in `io.TextIOWrapper` to write text:
-
-```python
-import io
-import subprocess
-
-from vercel.sandbox import sync as sandbox
-
-with sandbox.create_sandbox() as box:
-    process = box.create_process("sort", stdin=subprocess.PIPE)
-    with io.TextIOWrapper(process.stdin, encoding="utf-8", write_through=True) as stdin:
-        stdin.write("banana\napple\n")
-    print(process.communicate())
-```
-
-`communicate(input)` writes the input, closes stdin, and then reads the
-output. Each write returns once the process has accepted the bytes, and
-concurrent writes reach the process in the order they were made. Large writes
-are split into several requests, and requests that fail in transit are resent
-without duplicating input. Writing after the process exits or stops reading
-raises `anyio.BrokenResourceError` (`BrokenPipeError` synchronously), which
-`communicate` and `run_process` ignore the way a shell ignores a closed pipe.
-Other failures raise `SandboxStdinError`; if part of the data may have been
-delivered, later writes raise the broken-pipe error, though stdin can still be
-closed. Unlike a local pipe, the synchronous stream is not closed by garbage
-collection, so close it explicitly.
-
-Processes looked up with `get_process` or `query_processes` always have a
-`stdin` writer, so a process started elsewhere, such as by another program,
-can be written to later. Its writes continue after whatever was already
-written. Because the service can't say up front whether a process has stdin,
-the first write to a process started without it raises `SandboxStdinError`.
-`communicate()` on a looked-up process closes stdin only if it is given input
-or the handle has been written to, so reading a running server's output
-doesn't end its input:
-
-```python
-server = await box.get_process(server_id)
-await server.stdin.send(b'{"jsonrpc": "2.0", "id": 2, "method": "ping"}\n')
-```
-
-Write through one handle at a time: each handle tracks how much the process
-has received, and the service drops bytes it believes it already has, so
-overlapping writers lose input.
 
 ## Interactive PTY sessions
 
