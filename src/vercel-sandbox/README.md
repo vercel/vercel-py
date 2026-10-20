@@ -310,12 +310,7 @@ with sandbox.create_sandbox() as box:
 ```
 
 `communicate(input)` writes the input, closes stdin, and then reads the
-output. `get_process(process_id, stdin=subprocess.PIPE)` attaches a writer to
-a process that was started with stdin elsewhere, such as by another program;
-its writes continue after whatever was already written. Write through one
-handle at a time: each handle tracks how much the process has received, and
-the service drops bytes it believes it already has, so overlapping writers
-lose input. Each write returns once the process has accepted the bytes, and
+output. Each write returns once the process has accepted the bytes, and
 concurrent writes reach the process in the order they were made. Large writes
 are split into several requests, and requests that fail in transit are resent
 without duplicating input. Writing after the process exits or stops reading
@@ -325,6 +320,24 @@ Other failures raise `SandboxStdinError`; if part of the data may have been
 delivered, later writes raise the broken-pipe error, though stdin can still be
 closed. Unlike a local pipe, the synchronous stream is not closed by garbage
 collection, so close it explicitly.
+
+Processes looked up with `get_process` or `query_processes` always have a
+`stdin` writer, so a process started elsewhere, such as by another program,
+can be written to later. Its writes continue after whatever was already
+written. Because the service can't say up front whether a process has stdin,
+the first write to a process started without it raises `SandboxStdinError`.
+`communicate()` on a looked-up process closes stdin only if it is given input
+or the handle has been written to, so reading a running server's output
+doesn't end its input:
+
+```python
+server = await box.get_process(server_id)
+await server.stdin.send(b'{"jsonrpc": "2.0", "id": 2, "method": "ping"}\n')
+```
+
+Write through one handle at a time: each handle tracks how much the process
+has received, and the service drops bytes it believes it already has, so
+overlapping writers lose input.
 
 ## Interactive PTY sessions
 

@@ -595,6 +595,7 @@ async def test_process_stdin_flow_has_sync_async_semantic_parity() -> None:
         digest_matches=True,
         communicated="8",
         broken_after_exit=True,
+        refused_without_stdin=True,
     )
     async_result = await process_stdin_flow(AsyncDriver(), _name("stdin", "async"))
     sync_result = await process_stdin_flow(SyncDriver(), _name("stdin", "sync"))

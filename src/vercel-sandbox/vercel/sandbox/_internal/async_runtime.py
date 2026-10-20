@@ -91,6 +91,7 @@ from vercel.sandbox._internal.process_output import (
 from vercel.sandbox._internal.process_stdin import (
     ProcessInput,
     ProcessStdin,
+    StdinMode,
     _async_stdin,
     _coerce_input,
     _validate_stdin,
@@ -143,8 +144,10 @@ class Process(_ProcessHandleState):
     The ``stdout`` and ``stderr`` readers each consume their process log
     stream once; reads make forward progress through the stream and cannot
     rewind. A reader is ``None`` when its stream was dropped with
-    ``subprocess.DEVNULL`` or merged with ``subprocess.STDOUT``. ``stdin`` is a
-    writer only for a process created with ``stdin=subprocess.PIPE``.
+    ``subprocess.DEVNULL`` or merged with ``subprocess.STDOUT``. ``stdin`` is
+    ``None`` for a process created without ``stdin=subprocess.PIPE``; a
+    looked-up process always has a writer, which fails on first use if the
+    process has no stdin.
     """
 
     __slots__ = ("_service", "stderr", "stdin", "stdout")
@@ -158,13 +161,13 @@ class Process(_ProcessHandleState):
         *,
         payload: ProcessState,
         service: SandboxService,
-        stdin: bool = False,
+        stdin: StdinMode = "fetched",
         stdout: int = subprocess.PIPE,
         stderr: int = subprocess.PIPE,
     ) -> None:
         super().__init__(payload)
         self._service = service
-        self.stdin = _async_stdin(service, payload, attached=stdin)
+        self.stdin = _async_stdin(service, payload, stdin)
         self.stdout, self.stderr = _text_readers(
             lambda: service.process_logs_response(session_id=self._session_id, process_id=self.id),
             stdout=stdout,
@@ -197,10 +200,11 @@ class Process(_ProcessHandleState):
 
         Args:
             input: Data written to stdin before it is closed; text is
-                encoded as UTF-8. Requires ``stdin=subprocess.PIPE``. When
-                stdin is attached it is closed even without input. A process
-                that exits or stops reading before taking all of it is not an
-                error.
+                encoded as UTF-8. Requires ``stdin=subprocess.PIPE``. A
+                process created with stdin has it closed even without input,
+                while a looked-up process only has it closed when given input
+                or written to through this handle. A process that exits or
+                stops reading before taking all of it is not an error.
 
         Returns:
             A ``(stdout, stderr)`` tuple. A stream without a reader is
@@ -208,8 +212,10 @@ class Process(_ProcessHandleState):
             ``(merged, None)``.
 
         Raises:
-            ValueError: If ``input`` is given but stdin is not attached.
-            SandboxStdinError: If writing or closing stdin fails.
+            ValueError: If ``input`` is given to a process created without
+                stdin.
+            SandboxStdinError: If writing or closing stdin fails, including
+                when a looked-up process has no stdin.
         """
         data = None if input is None else _coerce_input(input)
         if self.stdin is not None:
@@ -1112,7 +1118,7 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         return Process(
             payload=state,
             service=self._service,
-            stdin=attach_stdin,
+            stdin="attached" if attach_stdin else None,
             stdout=stdout,
             stderr=stderr,
         )
@@ -1162,28 +1168,23 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
             )
         )
 
-    async def get_process(
-        self, process_id: str, *, wait: bool = False, stdin: int | None = None
-    ) -> Process:
+    async def get_process(self, process_id: str, *, wait: bool = False) -> Process:
         """Get a process in this session.
 
         Args:
             process_id: Process identifier.
             wait: Whether the API call should wait for process completion.
-            stdin: ``subprocess.PIPE`` for a writer at ``stdin``, for a
-                process started with ``stdin=subprocess.PIPE`` elsewhere.
-                Writes resume after whatever was already written, so only
-                one handle should write at a time. If the process has no
-                stdin attached, writing raises ``anyio.BrokenResourceError``.
 
         Returns:
-            A process handle populated with the latest state.
+            A process handle populated with the latest state. Its ``stdin``
+            writer continues after any input already written, so it can take
+            over from the handle that started the process; only one handle
+            should write at a time.
         """
-        attach_stdin = _validate_stdin(stdin)
         state = await self._service.get_process(
             session_id=self.id, process_id=process_id, wait=wait
         )
-        return Process(payload=state, service=self._service, stdin=attach_stdin)
+        return Process(payload=state, service=self._service)
 
     async def query_processes(self) -> list[Process]:
         """Return handles for the processes in this session."""
@@ -1488,7 +1489,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         return Process(
             payload=state,
             service=self._service,
-            stdin=attach_stdin,
+            stdin="attached" if attach_stdin else None,
             stdout=stdout,
             stderr=stderr,
         )
@@ -1527,14 +1528,8 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
             )
         )
 
-    async def get_process(
-        self, process_id: str, *, wait: bool = False, stdin: int | None = None
-    ) -> Process:
-        """Get a process from the current session.
-
-        See ``SandboxRuntimeSession.get_process`` for argument behavior.
-        """
-        attach_stdin = _validate_stdin(stdin)
+    async def get_process(self, process_id: str, *, wait: bool = False) -> Process:
+        """Get a process from the current session."""
         state = await execute_with_sandbox_recovery(
             lambda session_id: self._service.get_process(
                 session_id=session_id,
@@ -1543,7 +1538,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
             ),
             coordinator=self,
         )
-        return Process(payload=state, service=self._service, stdin=attach_stdin)
+        return Process(payload=state, service=self._service)
 
     async def query_processes(self) -> list[Process]:
         """Return handles for processes in the current session."""
