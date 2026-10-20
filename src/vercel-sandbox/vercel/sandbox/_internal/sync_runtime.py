@@ -162,7 +162,7 @@ class SyncProcess(_ProcessHandleState):
         *,
         payload: ProcessState,
         service: SandboxService,
-        stdin: StdinMode = "fetched",
+        stdin: StdinMode = None,
         stdout: int = subprocess.PIPE,
         stderr: int = subprocess.PIPE,
     ) -> None:
@@ -1251,12 +1251,14 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         state = iter_coroutine(
             self._service.get_process(session_id=self.id, process_id=process_id, wait=wait)
         )
-        return SyncProcess(payload=state, service=self._service)
+        return SyncProcess(payload=state, service=self._service, stdin="fetched")
 
     def query_processes(self) -> list[SyncProcess]:
         """Return handles for the processes in this session."""
         states = iter_coroutine(self._service.query_processes(session_id=self.id))
-        return [SyncProcess(payload=state, service=self._service) for state in states]
+        return [
+            SyncProcess(payload=state, service=self._service, stdin="fetched") for state in states
+        ]
 
     def refresh(self, *, include_system_routes: bool | None = None) -> Self:
         """Refresh this session's state and return the same handle."""
@@ -1672,7 +1674,7 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
                 coordinator=self,
             )
         )
-        return SyncProcess(payload=state, service=self._service)
+        return SyncProcess(payload=state, service=self._service, stdin="fetched")
 
     def query_processes(self) -> list[SyncProcess]:
         """Return handles for processes in the current session."""
@@ -1682,7 +1684,9 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
                 coordinator=self,
             )
         )
-        return [SyncProcess(payload=state, service=self._service) for state in states]
+        return [
+            SyncProcess(payload=state, service=self._service, stdin="fetched") for state in states
+        ]
 
     def list_sessions(
         self,

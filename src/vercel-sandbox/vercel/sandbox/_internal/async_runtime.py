@@ -161,7 +161,7 @@ class Process(_ProcessHandleState):
         *,
         payload: ProcessState,
         service: SandboxService,
-        stdin: StdinMode = "fetched",
+        stdin: StdinMode = None,
         stdout: int = subprocess.PIPE,
         stderr: int = subprocess.PIPE,
     ) -> None:
@@ -1184,12 +1184,12 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         state = await self._service.get_process(
             session_id=self.id, process_id=process_id, wait=wait
         )
-        return Process(payload=state, service=self._service)
+        return Process(payload=state, service=self._service, stdin="fetched")
 
     async def query_processes(self) -> list[Process]:
         """Return handles for the processes in this session."""
         states = await self._service.query_processes(session_id=self.id)
-        return [Process(payload=state, service=self._service) for state in states]
+        return [Process(payload=state, service=self._service, stdin="fetched") for state in states]
 
     async def refresh(self, *, include_system_routes: bool | None = None) -> Self:
         """Refresh this session's state and return the same handle."""
@@ -1538,7 +1538,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
             ),
             coordinator=self,
         )
-        return Process(payload=state, service=self._service)
+        return Process(payload=state, service=self._service, stdin="fetched")
 
     async def query_processes(self) -> list[Process]:
         """Return handles for processes in the current session."""
@@ -1546,7 +1546,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
             lambda session_id: self._service.query_processes(session_id=session_id),
             coordinator=self,
         )
-        return [Process(payload=state, service=self._service) for state in states]
+        return [Process(payload=state, service=self._service, stdin="fetched") for state in states]
 
     async def list_sessions(
         self,

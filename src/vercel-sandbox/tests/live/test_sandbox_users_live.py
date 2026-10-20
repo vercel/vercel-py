@@ -449,3 +449,35 @@ async def test_sandbox_users_resume_and_session_users_remain_pinned(driver: Any)
             assert resumed.stdout == "alice\n" and resumed.session_id != runtime.id
             with pytest.raises(SandboxError):
                 await _run(pinned, "true")
+
+
+@requires_sandbox_credentials
+@pytest.mark.live
+@pytest.mark.asyncio
+@pytest.mark.parametrize("driver", [AsyncDriver(), SyncDriver()], ids=["async", "sync"])
+async def test_user_processes_read_stdin_through_the_launcher(driver: Any) -> None:
+    async with driver.session():
+        async with driver.ephemeral_sandbox(f"vercel-py-user-stdin-{uuid4().hex[:10]}") as box:
+            alice = await _call(box.create_user, "alice")
+            script = 'read -r line; printf "%s:%s\\n" "$(whoami)" "$line"; cat'
+
+            result = await _run(alice, "/bin/bash", ["-c", script], input="hi\nrest\n")
+            assert result.stdout == "alice:hi\nrest\n"
+
+            process = await _call(
+                alice.create_process, "/bin/bash", ["-c", script], stdin=subprocess.PIPE
+            )
+            await driver.write_stdin(process, b"first\n")
+            assert await driver.readline(process) == "alice:first\n"
+            fetched = await _call(box.get_process, process.id)
+            await driver.write_stdin(fetched, b"second\n")
+            assert await driver.readline(process) == "second\n"
+            await driver.close_stdin(fetched)
+            with anyio.fail_after(30):
+                assert await _call(process.wait) == 0
+
+            # Without stdin=PIPE the command still reads an empty stdin.
+            empty = await _call(alice.create_process, "/bin/cat")
+            assert empty.stdin is None
+            with anyio.fail_after(30):
+                assert await _call(empty.communicate) == ("", "")
