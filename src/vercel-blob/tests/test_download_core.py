@@ -21,7 +21,11 @@ _CLOSE_ERROR_XFAIL = pytest.mark.xfail(
     strict=True,
     reason="Core streaming-response adapters suppress explicit close errors",
 )
+# httpx2 2.12.0 started closing responses automatically; earlier releases
+# within the supported range leave cleanup to the adapter and pass.
+_HTTPX2_AUTO_CLEANUP = tuple(int(part) for part in httpx.__version__.split(".")[:2]) >= (2, 12)
 _CANCEL_CLEANUP_XFAIL = pytest.mark.xfail(
+    _HTTPX2_AUTO_CLEANUP,
     strict=True,
     raises=AssertionError,
     reason="httpx2 automatic response cleanup is interrupted by cancellation",
@@ -34,6 +38,7 @@ _SCENARIOS = (
     pytest.param(
         "read",
         marks=pytest.mark.xfail(
+            _HTTPX2_AUTO_CLEANUP,
             strict=True,
             raises=RuntimeError,
             reason="httpx2 automatic response cleanup replaces the original read error",

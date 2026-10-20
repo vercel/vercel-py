@@ -53,7 +53,7 @@ from vercel.workflow._internal.worlds import local as local_mod
 # The version fetched from npm when VERCEL_WORKFLOW_CLI is not set. Keep this in
 # step with the `@workflow/world-local` release the on-disk format is written
 # against -- an older CLI predates fields the format now carries -- and with the
-# pin in the "Install the workflow CLI" step of .github/workflows/ci.yml.
+# pin in the "Install the workflow CLI" step of .github/actions/js-interop/action.yml.
 WORKFLOW_CLI_VERSION = "5.0.0-beta.38"
 
 _IS_CI = bool(os.getenv("CI"))

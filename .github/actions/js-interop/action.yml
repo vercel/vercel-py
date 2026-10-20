@@ -1,0 +1,57 @@
+name: JavaScript interop tools
+description: >-
+  Install Node, the pinned devalue checkout, and the pinned workflow CLI that
+  the vercel-workflow interop tests run against.
+
+outputs:
+  devalue:
+    description: Path to the devalue checkout, for VERCEL_DEVALUE_JS.
+    value: ${{ steps.devalue.outputs.path }}
+  workflow-cli:
+    description: Path to the installed workflow CLI, for VERCEL_WORKFLOW_CLI.
+    value: ${{ steps.workflow-cli.outputs.path }}
+
+runs:
+  using: composite
+  steps:
+    # The devalue interop tests run the real JS package against the Python
+    # port. They skip when node is absent locally, but are mandatory on CI.
+    - name: Install Node
+      uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      with:
+        node-version: '22'
+
+    # The interop tests fall back to `npm install devalue` when pointed at
+    # nothing, but here we use a pinned checkout: it also carries the test
+    # fixtures the tarball omits, and it keeps npm out of CI. `index.js` and
+    # `src/` are byte-identical to the published package, so this ref is what
+    # the port is actually verified against.
+    #
+    # Cloned outside the workspace deliberately. `actions/checkout` can only
+    # write inside it, and a copy there puts devalue's own workflows under
+    # our linters, where zizmor reports findings against them.
+    - name: Checkout devalue
+      id: devalue
+      shell: bash
+      run: |
+        git clone --depth 1 --branch v5.9.0 \
+          https://github.com/sveltejs/devalue.git "$RUNNER_TEMP/devalue"
+        echo "path=$RUNNER_TEMP/devalue" >> "$GITHUB_OUTPUT"
+
+    # The local-world interop test runs the real `workflow` CLI against the
+    # `.workflow-data` files the Python local world writes. Installed here
+    # rather than left to the test's own npm fallback, so npm runs once per
+    # job in a visible step instead of inside five test processes.
+    #
+    # A git checkout (as for devalue above) is not an option: the CLI is
+    # TypeScript and needs a pnpm workspace install plus a tsc build, so the
+    # published tarball is the practical artifact. `--ignore-scripts` skips
+    # the native postinstalls of @swc/core, esbuild and cbor-extract, which
+    # the read-only `inspect` path does not use.
+    - name: Install the workflow CLI
+      id: workflow-cli
+      shell: bash
+      run: |
+        npm install workflow@5.0.0-beta.38 --no-save --no-audit --no-fund \
+          --ignore-scripts --prefix "$RUNNER_TEMP/workflow-cli"
+        echo "path=$RUNNER_TEMP/workflow-cli/node_modules/workflow" >> "$GITHUB_OUTPUT"
