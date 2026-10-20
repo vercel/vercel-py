@@ -63,6 +63,7 @@ from vercel.sandbox._internal.options import (
     SyncSandboxServiceOptions,
 )
 from vercel.sandbox._internal.process_output import ProcessOutputRouter
+from vercel.sandbox._internal.recovery import _lifecycle_stream_error
 from vercel.sandbox._internal.runtime_common import (
     _StreamUploadFileEntry,
 )
@@ -772,16 +773,23 @@ class SandboxService:
 
         # The process is already running, so follow the rest of its output
         # from the logs endpoint and its exit through the wait endpoint.
-        async with aclosing(
-            _iter_command_logs(
-                lambda: self.process_logs_response(session_id=session_id, process_id=started.id),
-                sleep=self._sleep,
-                delivered=delivered,
-            )
-        ) as logs:
-            async for event in logs:
-                output_router.route(event)
-        final = await self.get_process(session_id=session_id, process_id=started.id, wait=True)
+        try:
+            async with aclosing(
+                _iter_command_logs(
+                    lambda: self.process_logs_response(
+                        session_id=session_id, process_id=started.id
+                    ),
+                    sleep=self._sleep,
+                    delivered=delivered,
+                )
+            ) as logs:
+                async for event in logs:
+                    output_router.route(event)
+            final = await self.get_process(session_id=session_id, process_id=started.id, wait=True)
+        except Exception as error:
+            if (stream_error := _lifecycle_stream_error(error)) is not None:
+                raise stream_error from error
+            raise
         return _completed_process_state(started, final, output_router)
 
     async def create_process(

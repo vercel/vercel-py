@@ -48,6 +48,7 @@ def _malformed_write_error(cause: object = _MISSING_CAUSE) -> SandboxFilesystemW
         (_malformed_write_error(), None),
         (_malformed_write_error(RuntimeError("non-api cause")), None),
         (_api_error(code="other"), None),
+        (_api_error(status_code=410, code="sandbox_stream_closed"), None),
         (SandboxStreamError("stopped", code="sandbox_stopped"), None),
     ],
 )

@@ -2,7 +2,7 @@ import io
 import json
 import signal
 import subprocess
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from threading import Condition, Event, Lock
@@ -1407,10 +1407,20 @@ def test_sync_mutation_reply_superseded_by_recovery_keeps_current_session() -> N
     assert box.current_session_id == "sbx_new"
 
 
+_STREAM_CLOSED = {"code": "sandbox_stream_closed", "message": "Sandbox stream was closed"}
+
+
+def _stream_closed_response() -> httpx.Response:
+    # How the API reports losing its sandbox connection before the first record.
+    return httpx.Response(410, json={"error": _STREAM_CLOSED})
+
+
 class _InterruptedStream(httpx.SyncByteStream, httpx.AsyncByteStream):
     """Send NDJSON records one byte at a time, then optionally lose the connection."""
 
     def __init__(self, *records: object, interruption: str | None = None) -> None:
+        if interruption == "stream-closed":
+            records = (*records, {"stream": "error", "data": _STREAM_CLOSED})
         body = "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records)
         if interruption == "truncated":
             body += '{"stream": "stdout", "data": "unfini'
@@ -1470,7 +1480,8 @@ def _mock_interrupted_run(interruption: str) -> tuple[respx.Route, respx.Route, 
     return run, logs, wait
 
 
-_RUN_INTERRUPTIONS = ["reset", "peer-closed", "truncated", "closed"]
+_RUN_INTERRUPTIONS = ["reset", "peer-closed", "truncated", "closed", "stream-closed"]
+_LOG_INTERRUPTIONS = ["reset", "peer-closed", "truncated", "stream-closed", "stream-closed-410"]
 
 
 @pytest.mark.parametrize("interruption", _RUN_INTERRUPTIONS)
@@ -1538,14 +1549,20 @@ def _mock_process_with_flaky_logs(interruption: str) -> respx.Route:
     respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1").mock(
         return_value=httpx.Response(200, json=_process_response(0))
     )
-    return respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/logs").mock(
-        side_effect=[
+    if interruption == "stream-closed-410":
+        failures = [_stream_closed_response(), _stream_closed_response()]
+    else:
+        failures = [
             _ndjson_stream({"stream": "stdout", "data": "one"}, interruption=interruption),
             _ndjson_stream(
                 {"stream": "stdout", "data": "one two"},
                 {"stream": "stderr", "data": "é"},
                 interruption=interruption,
             ),
+        ]
+    return respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/logs").mock(
+        side_effect=[
+            *failures,
             _ndjson_stream(
                 {"stream": "stdout", "data": "one"},
                 {"stream": "stderr", "data": "é😀"},
@@ -1555,7 +1572,7 @@ def _mock_process_with_flaky_logs(interruption: str) -> respx.Route:
     )
 
 
-@pytest.mark.parametrize("interruption", ["reset", "peer-closed", "truncated"])
+@pytest.mark.parametrize("interruption", _LOG_INTERRUPTIONS)
 @respx.mock
 async def test_async_process_readers_reconnect_without_duplicating_output(
     mock_env_clear: None, no_retry_backoff: None, interruption: str
@@ -1571,7 +1588,7 @@ async def test_async_process_readers_reconnect_without_duplicating_output(
     assert logs.call_count == 3
 
 
-@pytest.mark.parametrize("interruption", ["reset", "peer-closed", "truncated"])
+@pytest.mark.parametrize("interruption", _LOG_INTERRUPTIONS)
 @respx.mock
 def test_sync_process_readers_reconnect_without_duplicating_output(
     mock_env_clear: None, no_retry_backoff: None, interruption: str
@@ -1587,9 +1604,29 @@ def test_sync_process_readers_reconnect_without_duplicating_output(
     assert logs.call_count == 3
 
 
+@pytest.mark.parametrize(
+    ("failure", "error"),
+    [
+        (
+            lambda: _ndjson_stream({"stream": "stdout", "data": "same"}, interruption="reset"),
+            httpx.ReadError,
+        ),
+        (
+            lambda: _ndjson_stream(
+                {"stream": "stdout", "data": "same"}, interruption="stream-closed"
+            ),
+            sandbox.SandboxStreamError,
+        ),
+        (_stream_closed_response, sandbox.SandboxApiError),
+    ],
+    ids=["reset", "stream-closed", "stream-closed-410"],
+)
 @respx.mock
 async def test_process_log_reconnects_are_bounded_without_progress(
-    mock_env_clear: None, no_retry_backoff: None
+    mock_env_clear: None,
+    no_retry_backoff: None,
+    failure: Callable[[], httpx.Response],
+    error: type[Exception],
 ) -> None:
     respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
@@ -1598,16 +1635,14 @@ async def test_process_log_reconnects_are_bounded_without_progress(
         return_value=httpx.Response(200, json=_process_response())
     )
     logs = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/logs").mock(
-        side_effect=lambda _request: _ndjson_stream(
-            {"stream": "stdout", "data": "same"}, interruption="reset"
-        )
+        side_effect=lambda _request: failure()
     )
 
     async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview")
         process = await box.create_process("python")
         assert process.stdout is not None
-        with pytest.raises(httpx.ReadError, match="connection reset"):
+        with pytest.raises(error):
             await process.stdout.read()
 
     assert logs.call_count == 3
@@ -1651,3 +1686,74 @@ async def test_process_wait_retries_transient_failures(
                 await process.wait()
 
     assert wait.call_count == calls
+
+
+def _mock_lifecycle_failure_after_start(
+    interruption: str, failing: str, status: int, code: str
+) -> tuple[respx.Route, respx.Route]:
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    run = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
+        return_value=_ndjson_stream(
+            _process_response(), {"stream": "stdout", "data": "out"}, interruption=interruption
+        )
+    )
+    lifecycle_error = httpx.Response(status, json={"error": {"code": code, "message": code}})
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/logs").mock(
+        return_value=lifecycle_error
+        if failing == "logs"
+        else _ndjson_stream({"stream": "stdout", "data": "out"})
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1").mock(
+        return_value=lifecycle_error
+        if failing == "wait"
+        else httpx.Response(200, json=_process_response(0))
+    )
+    resume = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(200, json=_sandbox_response(session_id="sbx_new"))
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_new/cmd").mock(
+        return_value=_completed_response(session_id="sbx_new")
+    )
+    return run, resume
+
+
+@pytest.mark.parametrize(("status", "code"), [(410, "sandbox_stopped"), (422, "sandbox_stopping")])
+@pytest.mark.parametrize("failing", ["logs", "wait"])
+@pytest.mark.parametrize("interruption", ["reset", "stream-closed"])
+@respx.mock
+async def test_async_run_process_is_not_replayed_after_lifecycle_failure_once_started(
+    mock_env_clear: None,
+    no_retry_backoff: None,
+    interruption: str,
+    failing: str,
+    status: int,
+    code: str,
+) -> None:
+    run, resume = _mock_lifecycle_failure_after_start(interruption, failing, status, code)
+
+    async with session(service_options=_session_options()):
+        box = await sandbox.create_sandbox(name="preview")
+        with pytest.raises(sandbox.SandboxStreamError) as exc_info:
+            await box.run_process("python", capture_output=True)
+
+    assert exc_info.value.code == code
+    assert isinstance(exc_info.value.__cause__, sandbox.SandboxApiError)
+    assert (run.call_count, resume.call_count) == (1, 0)
+
+
+@pytest.mark.parametrize("failing", ["logs", "wait"])
+@respx.mock
+def test_sync_run_process_is_not_replayed_after_lifecycle_failure_once_started(
+    mock_env_clear: None, no_retry_backoff: None, failing: str
+) -> None:
+    run, resume = _mock_lifecycle_failure_after_start("reset", failing, 410, "sandbox_stopped")
+
+    with session(service_options=_session_options()):
+        box = sandbox_sync.create_sandbox(name="preview")
+        with pytest.raises(sandbox.SandboxStreamError) as exc_info:
+            box.run_process("python", capture_output=True)
+
+    assert exc_info.value.code == "sandbox_stopped"
+    assert (run.call_count, resume.call_count) == (1, 0)

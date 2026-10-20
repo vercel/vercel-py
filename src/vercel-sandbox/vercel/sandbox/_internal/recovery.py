@@ -7,7 +7,9 @@ from typing import Protocol, TypeVar
 from vercel.sandbox._internal.errors import (
     SandboxApiError,
     SandboxFilesystemWriteError,
+    SandboxStreamError,
 )
+from vercel.sandbox._internal.log_stream import STREAM_CLOSED_ERROR_CODE
 
 
 class SandboxLifecycle(Enum):
@@ -23,6 +25,7 @@ _LIFECYCLE_ERROR_CODES = {
     "sandbox_stopping": SandboxLifecycle.STOPPING,
     "sandbox_snapshotting": SandboxLifecycle.SNAPSHOTTING,
 }
+_LIFECYCLE_CODES = {lifecycle: code for code, lifecycle in _LIFECYCLE_ERROR_CODES.items()}
 
 
 def classify_sandbox_lifecycle_error(error: BaseException) -> SandboxLifecycle | None:
@@ -30,7 +33,9 @@ def classify_sandbox_lifecycle_error(error: BaseException) -> SandboxLifecycle |
 
     Only direct Sandbox API failures and the direct cause wrapped by a native
     filesystem write failure participate in lifecycle recovery. In particular,
-    stream failures and arbitrary exception chains are intentionally excluded.
+    stream failures and arbitrary exception chains are intentionally excluded,
+    and so is a closed stream reported as an HTTP 410, which does not prove the
+    sandbox stopped.
     """
     api_error: SandboxApiError | None
     if isinstance(error, SandboxApiError):
@@ -41,9 +46,24 @@ def classify_sandbox_lifecycle_error(error: BaseException) -> SandboxLifecycle |
         api_error = error.cause
     else:
         return None
+    if api_error.code == STREAM_CLOSED_ERROR_CODE:
+        return None
     if api_error.status_code == 410:
         return SandboxLifecycle.STOPPED
     return None if api_error.code is None else _LIFECYCLE_ERROR_CODES.get(api_error.code)
+
+
+def _lifecycle_stream_error(error: BaseException) -> SandboxStreamError | None:
+    """Return a lifecycle failure as a stream error that is never replayed.
+
+    Once a process has started, replaying the operation would run it again, so
+    lifecycle failures while following it must end the operation. They surface
+    the same way as a lifecycle failure reported in-band by the process stream.
+    """
+    lifecycle = classify_sandbox_lifecycle_error(error)
+    if lifecycle is None:
+        return None
+    return SandboxStreamError(str(error), code=_LIFECYCLE_CODES[lifecycle])
 
 
 class SandboxRecoveryCoordinator(Protocol):

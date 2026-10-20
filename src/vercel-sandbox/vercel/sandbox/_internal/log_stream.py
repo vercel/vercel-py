@@ -27,6 +27,11 @@ AsyncSleep = Callable[[float], Awaitable[None]]
 _RETRIES = 2
 _RETRY_BACKOFF_SECONDS = 0.2
 
+# Reported when the API loses its connection to the sandbox, whether or not
+# the sandbox itself stopped. It arrives as an in-band stream record, or as an
+# HTTP 410 when it happens before the first record.
+STREAM_CLOSED_ERROR_CODE = "sandbox_stream_closed"
+
 _ResultT = TypeVar("_ResultT")
 
 
@@ -37,12 +42,18 @@ class _TruncatedStreamError(SandboxResponseError):
 def _is_transient_error(error: BaseException) -> bool:
     """Return whether retrying the failed request may succeed.
 
-    Network failures and streams that end mid-record are connection problems
-    rather than answers from the API, and rate limits and server errors are
-    expected to clear up. Cancellation is never an ``Exception`` and so is
-    never retried.
+    Network failures, streams that end mid-record, and the API losing its own
+    connection to the sandbox are connection problems rather than answers
+    from the API, and rate limits and server errors are expected to clear up.
+    If the sandbox did stop, the retried request reports that instead.
+    Cancellation is never an ``Exception`` and so is never retried.
     """
     if isinstance(error, httpx.TransportError | _TruncatedStreamError):
+        return True
+    if (
+        isinstance(error, SandboxApiError | SandboxStreamError)
+        and error.code == STREAM_CLOSED_ERROR_CODE
+    ):
         return True
     return isinstance(error, SandboxApiError) and (
         error.status_code == 429 or error.status_code >= 500
