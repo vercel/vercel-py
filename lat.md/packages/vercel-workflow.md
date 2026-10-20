@@ -54,3 +54,15 @@ Hooks pause a run until an external caller resumes it, and streams let steps pub
 A `BaseHook` subclass waits under a generated or caller-chosen token, and resuming it records the payload as an event. Hook metadata is written once at registration and is not part of the payload.
 
 A run's stream ([[src/vercel-workflow/vercel/workflow/_internal/streams.py]]) is an append-only, indexed log of chunks. Only steps can write to it, and nothing closes it automatically. A step is not recorded as complete until its chunks are flushed, and a retried step writes its chunks again. Readers resume exactly from a chunk index and reconnect when the server ends a long read.
+
+## Local file leases
+
+Local filesystem writers can share directory leases with TypeScript's proper-lockfile library without requiring the protected file to exist.
+
+[[src/vercel-workflow/vercel/workflow/_internal/file_lock.py#file_lock]] implements the `realpath: false` protocol: atomic creation of a sibling `.lock` directory, millisecond-aware heartbeat timestamps, bounded retries, and stale recovery. A stale observation is revalidated against directory identity and mtime before removal.
+
+[[src/vercel-workflow/vercel/workflow/_internal/file_lock.py#FileLock#check]] detects a missing or replaced directory or a changed heartbeat marker. Ownership loss cancels the protected async body and raises [[src/vercel-workflow/vercel/workflow/_internal/file_lock.py#FileLockCompromisedError]]; release never intentionally removes a successor's lease. Participants must agree on the stale threshold and allow heartbeat tasks to run. As with proper-lockfile, this cooperative lease cannot fence a paused writer's filesystem operations atomically.
+
+[[src/vercel-workflow/tests/unit/test_workflow_file_lock.py]] covers contention, cancellation, stale recovery, changed observations, heartbeat renewal, and ownership loss. [[src/vercel-workflow/tests/integration/test_file_lock_interop.py]] runs the pinned proper-lockfile npm package to verify mutual exclusion, heartbeat compatibility, release, and recovery after either runtime crashes.
+
+The interop fixture resolves npm's executable path before installing the pinned package so Windows can launch its command shim as well as Unix executables. Its subprocess readiness handshake accepts both Unix and Windows line endings.
