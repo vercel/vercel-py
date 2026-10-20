@@ -69,17 +69,25 @@ class _StdinServer:
     def apply(self, body: dict[str, Any]) -> httpx.Response:
         chunk = base64.b64decode(body.get("data", ""))
         close = bool(body.get("close"))
+        offset = body.get("offset")
         if self.exited:
             return _failure(404, "command_not_found_or_exited")
-        if not self.attached or ((self.closed or not self.reading) and (chunk or close)):
+        if not self.attached:
             return _failure(400, "command_stdin_unavailable")
-        offset = body.get("offset")
         if offset is None:
-            self.data += chunk
+            new, end = chunk, None
         elif offset > len(self.data):
             return _failure(409, "command_stdin_offset_mismatch")
         else:
-            self.data += chunk[len(self.data) - offset :]
+            new, end = chunk[len(self.data) - offset :], offset + len(chunk)
+        # A replay that adds nothing succeeds even after stdin is closed, as
+        # long as it ends where the stream does.
+        replay = end is not None and not new
+        if (self.closed or not self.reading) and (new or (close and not replay)):
+            return _failure(400, "command_stdin_unavailable")
+        if close and end is not None and end < len(self.data):
+            return _failure(409, "command_stdin_offset_mismatch")
+        self.data += new
         if close:
             self.closed = True
         return _json({"command": _COMMAND, "bytesWritten": len(self.data)})
@@ -520,21 +528,23 @@ def test_timeouts_are_resent_while_the_process_keeps_reading(driver: _Driver) ->
         assert resent == [{"data": base64.b64encode(b"h").decode(), "offset": offset}] * 2
 
 
-def test_a_resent_close_that_finds_the_process_gone_succeeds(driver: _Driver) -> None:
+@pytest.mark.parametrize("exits", [False, True], ids=["still-running", "exited"])
+def test_a_close_whose_response_is_lost_is_resent(driver: _Driver, exits: bool) -> None:
     process = driver.create_process(stdin=subprocess.PIPE)
     process.write(b"a")
 
-    def close_then_exit(
+    def close_then_disconnect(
         server: _StdinServer, request: httpx.Request, body: dict[str, Any]
     ) -> httpx.Response:
         server.apply(body)
-        server.exited = True
+        server.exited = exits
         raise httpx.ReadError("connection reset", request=request)
 
-    driver.server.faults.append(close_then_exit)
+    driver.server.faults.append(close_then_disconnect)
     process.close()
 
     assert driver.server.closed
+    assert driver.server.bodies[-2:] == [{"offset": 1, "close": True}] * 2
 
 
 def test_writes_fail_before_writing_when_the_offset_is_unknown(driver: _Driver) -> None:
