@@ -13,7 +13,8 @@ import os
 
 import pytest
 
-from vercel.workflow._internal import serialization as ser, world as w
+from tests.payloads import PLAIN_ENCODER
+from vercel.workflow._internal import world as w
 from vercel.workflow._internal.worlds import local as local_mod
 
 
@@ -29,7 +30,7 @@ async def _start_run(world: local_mod.LocalWorld) -> str:
             event_data=w.RunCreatedEventData(
                 deployment_id="dpl_1",
                 workflow_name="add_ten",
-                input=ser.dehydrate([7]),
+                input=PLAIN_ENCODER.encode([7]),
             )
         ),
     )
@@ -44,7 +45,7 @@ async def test_events_and_steps_live_in_the_runs_directory(tmp_path, monkeypatch
         run_id,
         w.StepCreatedEvent(
             correlation_id="step_1",
-            event_data=w.StepCreatedEventData(step_name="add", input=ser.dehydrate([1])),
+            event_data=w.StepCreatedEventData(step_name="add", input=PLAIN_ENCODER.encode([1])),
         ),
     )
 
