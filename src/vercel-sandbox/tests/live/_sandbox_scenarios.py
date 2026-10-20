@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import json
 import subprocess
 import tempfile
 import time
@@ -190,6 +191,15 @@ class ProcessFilesystemObservation:
 
 
 @dataclass(frozen=True, slots=True)
+class StdinObservation:
+    responses: list[object]
+    server_exit_code: int | None
+    digest_matches: bool
+    communicated: str
+    broken_after_exit: bool
+
+
+@dataclass(frozen=True, slots=True)
 class StreamingTransferObservation:
     digest_matches: bool
     empty_matches: bool
@@ -299,8 +309,32 @@ class _ScenarioDriver:
         raise NotImplementedError
 
     async def create_process(
-        self, box: Any, command: str, args: list[str], *, kill_after: float | None = None
+        self,
+        box: Any,
+        command: str,
+        args: list[str],
+        *,
+        kill_after: float | None = None,
+        stdin: int | None = None,
     ) -> Any:
+        raise NotImplementedError
+
+    async def write_stdin(self, process: Any, data: bytes) -> None:
+        raise NotImplementedError
+
+    async def close_stdin(self, process: Any) -> None:
+        raise NotImplementedError
+
+    async def readline(self, process: Any) -> str:
+        raise NotImplementedError
+
+    async def communicate(self, process: Any, input: bytes) -> tuple[str, str]:
+        raise NotImplementedError
+
+    async def run_with_input(self, box: Any, command: str, args: list[str], input: bytes) -> str:
+        raise NotImplementedError
+
+    async def write_after_exit_breaks(self, process: Any) -> bool:
         raise NotImplementedError
 
     @asynccontextmanager
@@ -483,9 +517,38 @@ class AsyncDriver(_ScenarioDriver):
         await box.fs.remove(path)
 
     async def create_process(
-        self, box: Any, command: str, args: list[str], *, kill_after: float | None = None
+        self,
+        box: Any,
+        command: str,
+        args: list[str],
+        *,
+        kill_after: float | None = None,
+        stdin: int | None = None,
     ) -> Any:
-        return await box.create_process(command, args, kill_after=kill_after)
+        return await box.create_process(command, args, kill_after=kill_after, stdin=stdin)
+
+    async def write_stdin(self, process: Any, data: bytes) -> None:
+        await process.stdin.send(data)
+
+    async def close_stdin(self, process: Any) -> None:
+        await process.stdin.aclose()
+
+    async def readline(self, process: Any) -> str:
+        return cast(str, await process.stdout.readline())
+
+    async def communicate(self, process: Any, input: bytes) -> tuple[str, str]:
+        return cast(tuple[str, str], await process.communicate(input))
+
+    async def run_with_input(self, box: Any, command: str, args: list[str], input: bytes) -> str:
+        result = await box.run_process(command, args, input=input, capture_output=True, check=True)
+        return cast(str, result.stdout)
+
+    async def write_after_exit_breaks(self, process: Any) -> bool:
+        try:
+            await process.stdin.send(b"late\n")
+        except anyio.BrokenResourceError:
+            return True
+        return False
 
     @asynccontextmanager
     async def open_interactive(self, box: Any) -> AsyncIterator[Any]:
@@ -699,9 +762,38 @@ class SyncDriver(_ScenarioDriver):
         box.fs.remove(path)
 
     async def create_process(
-        self, box: Any, command: str, args: list[str], *, kill_after: float | None = None
+        self,
+        box: Any,
+        command: str,
+        args: list[str],
+        *,
+        kill_after: float | None = None,
+        stdin: int | None = None,
     ) -> Any:
-        return box.create_process(command, args, kill_after=kill_after)
+        return box.create_process(command, args, kill_after=kill_after, stdin=stdin)
+
+    async def write_stdin(self, process: Any, data: bytes) -> None:
+        process.stdin.write(data)
+
+    async def close_stdin(self, process: Any) -> None:
+        process.stdin.close()
+
+    async def readline(self, process: Any) -> str:
+        return cast(str, process.stdout.readline())
+
+    async def communicate(self, process: Any, input: bytes) -> tuple[str, str]:
+        return cast(tuple[str, str], process.communicate(input))
+
+    async def run_with_input(self, box: Any, command: str, args: list[str], input: bytes) -> str:
+        result = box.run_process(command, args, input=input, capture_output=True, check=True)
+        return cast(str, result.stdout)
+
+    async def write_after_exit_breaks(self, process: Any) -> bool:
+        try:
+            process.stdin.write(b"late\n")
+        except BrokenPipeError:
+            return True
+        return False
 
     @asynccontextmanager
     async def open_interactive(self, box: Any) -> AsyncIterator[Any]:
@@ -1123,4 +1215,50 @@ async def persistent_snapshot_flow(driver: _ScenarioDriver, name: str) -> Persis
         session_exit_code=session_exit_code,
         session_cleaned_up=session_cleaned_up,
         resources_cleaned_up=cleanup_complete,
+    )
+
+
+# A stdio server in the shape of an MCP server: newline-delimited JSON-RPC
+# requests on stdin, one response line each on stdout, exit on end of input.
+_STDIO_SERVER = """\
+import json, sys
+for line in sys.stdin:
+    request = json.loads(line)
+    result = {"echo": request["params"], "length": len(line)}
+    print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}), flush=True)
+"""
+
+
+async def process_stdin_flow(driver: _ScenarioDriver, name: str) -> StdinObservation:
+    async with driver.session():
+        async with driver.ephemeral_sandbox(name) as box:
+            server = await driver.create_process(
+                box, "python", ["-u", "-c", _STDIO_SERVER], stdin=subprocess.PIPE
+            )
+            responses: list[object] = []
+            for request_id, params in enumerate(["ping", "héllo", "x" * 100_000]):
+                request = {"jsonrpc": "2.0", "id": request_id, "method": "echo", "params": params}
+                await driver.write_stdin(server, (json.dumps(request) + "\n").encode())
+                response = json.loads(await driver.readline(server))
+                responses.append((response["id"], response["result"]["echo"] == params))
+            await driver.close_stdin(server)
+            server_exit_code = await driver.wait(server)
+
+            # Larger than one stdin request, so it is split and reassembled.
+            data = bytes(range(256)) * 6000
+            digest = await driver.run_with_input(box, "sha256sum", [], data)
+
+            counter = await driver.create_process(box, "wc", ["-c"], stdin=subprocess.PIPE)
+            communicated, _ = await driver.communicate(counter, b"counted\n")
+
+            finished = await driver.create_process(box, "true", [], stdin=subprocess.PIPE)
+            await driver.wait(finished)
+            broken_after_exit = await driver.write_after_exit_breaks(finished)
+
+    return StdinObservation(
+        responses=responses,
+        server_exit_code=server_exit_code,
+        digest_matches=digest.split()[0] == hashlib.sha256(data).hexdigest(),
+        communicated=communicated.strip(),
+        broken_after_exit=broken_after_exit,
     )

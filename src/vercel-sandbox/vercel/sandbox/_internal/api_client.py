@@ -1,10 +1,11 @@
 """Internal Sandbox API client."""
 
+import base64
 import json
 import os
 import platform
 import sys
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import timedelta
@@ -357,6 +358,7 @@ class _RunCommandRequest(_ApiRequestModel):
     wait: bool | None = None
     logs: bool | None = None
     timeout: timedelta | None = None
+    attach_stdin: bool | None = Field(default=None, serialization_alias="attachStdin")
 
     @field_serializer("timeout")
     def _serialize_timeout(self, value: timedelta | None) -> int | None:
@@ -641,6 +643,15 @@ class _CommandResponse(_ApiModel):
                 data=self.model_dump(by_alias=True),
             )
         return _command_state(self.command)
+
+
+class _CommandStdinResponse(_CommandResponse):
+    bytes_written: int | None = Field(
+        default=None,
+        ge=0,
+        validation_alias=AliasChoices("bytes_written", "bytesWritten"),
+        serialization_alias="bytesWritten",
+    )
 
 
 class _CommandsResponse(_ApiModel):
@@ -1790,6 +1801,7 @@ class SandboxApiClient:
         env: Mapping[str, str] | None = None,
         sudo: bool = False,
         kill_after: timedelta | None = None,
+        attach_stdin: bool = False,
     ) -> ProcessState:
         credentials = await self._credentials_factory()
         request = _RunCommandRequest(
@@ -1799,6 +1811,7 @@ class SandboxApiClient:
             env=dict(env) if env is not None else None,
             sudo=sudo,
             timeout=kill_after,
+            attach_stdin=attach_stdin or None,
         )
         data = await self._request_json(
             "POST",
@@ -1819,7 +1832,14 @@ class SandboxApiClient:
         sudo: bool = False,
         kill_after: timedelta | None = None,
         output_router: ProcessOutputRouter,
+        on_started: Callable[[ProcessState], Awaitable[None]] | None = None,
     ) -> CompletedProcessState:
+        """Run a process and stream its output until it exits.
+
+        Passing ``on_started`` starts the process with stdin attached and
+        calls it with the initial process metadata, before any output is
+        routed, so it can write the process's input.
+        """
         credentials = await self._credentials_factory()
         request = _RunCommandRequest(
             command=command,
@@ -1830,6 +1850,7 @@ class SandboxApiClient:
             wait=True,
             logs=True,
             timeout=kill_after,
+            attach_stdin=True if on_started is not None else None,
         )
         response = await self._request_stream(
             "POST",
@@ -1854,6 +1875,8 @@ class SandboxApiClient:
                         process = _validate_response(_CommandResponse, record).to_command()
                         if initial is None:
                             initial = process
+                            if on_started is not None:
+                                await on_started(process)
                         elif final is None:
                             final = process
                         else:
@@ -2007,6 +2030,40 @@ class SandboxApiClient:
             read_response=ReadResponsePolicy.NON_SUCCESS_ONLY,
         ) as request:
             yield _WriteFilesUpload(request)
+
+    async def write_command_stdin(
+        self,
+        *,
+        session_id: str,
+        command_id: str,
+        data: bytes = b"",
+        offset: int | None = None,
+        close: bool = False,
+    ) -> int | None:
+        """Send one stdin request and return the service's ``bytesWritten``.
+
+        An empty request writes nothing and reports the bytes written so far.
+        Sandboxes that predate stdin offsets omit ``bytesWritten``.
+        """
+        credentials = await self._credentials_factory()
+        body: JSONObject = {}
+        if data:
+            body["data"] = base64.b64encode(data).decode("ascii")
+        if offset is not None:
+            body["offset"] = offset
+        if close:
+            body["close"] = True
+        response = await self._request_json(
+            "POST",
+            format_url_path(
+                "v2/sandboxes/sessions/{session_id}/cmd/{command_id}/stdin",
+                session_id=session_id,
+                command_id=command_id,
+            ),
+            credentials=credentials,
+            body=body,
+        )
+        return _validate_response(_CommandStdinResponse, response).bytes_written
 
     async def kill_command(
         self,
