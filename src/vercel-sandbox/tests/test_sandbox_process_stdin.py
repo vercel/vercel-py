@@ -559,6 +559,27 @@ def test_a_close_whose_response_is_lost_is_resent(driver: _Driver, exits: bool) 
     assert driver.server.bodies[-2:] == [{"offset": 1, "close": True}] * 2
 
 
+def test_a_failed_close_can_be_retried(driver: _Driver) -> None:
+    process = driver.create_process(stdin=subprocess.PIPE)
+    process.write(b"a")
+    driver.server.faults.append(_rejected(500))
+
+    with pytest.raises(sandbox.SandboxStdinError):
+        process.close()
+    assert not driver.server.closed
+    process.write(b"b")
+
+    process.close()
+    assert driver.server.closed
+    assert driver.server.data == b"ab"
+    assert driver.server.writes() == [
+        {"data": base64.b64encode(b"a").decode(), "offset": 0},
+        {"offset": 1, "close": True},
+        {"data": base64.b64encode(b"b").decode(), "offset": 1},
+        {"offset": 2, "close": True},
+    ]
+
+
 def test_writes_fail_before_writing_when_the_offset_is_unknown(driver: _Driver) -> None:
     process = driver.create_process(stdin=subprocess.PIPE)
     driver.server.faults.append(lambda server, request, body: _json({"command": _COMMAND}))

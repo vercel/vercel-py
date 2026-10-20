@@ -196,25 +196,24 @@ class StdinCore:
         try:
             if self.closed:
                 return
+            # Only a close that went through, or found nothing to close, marks
+            # the stream closed; a failed one can be retried.
+            if self._not_accepted is None:
+                try:
+                    await self._resolve_offset()
+                    await self._request(offset=self._confirmed(), close=True)
+                except _InputNotAccepted:
+                    pass
+                except SandboxStdinError as error:
+                    # A looked-up process without stdin has nothing to close.
+                    if not _is_stdin_unavailable(error.cause):
+                        raise
+                except _RequestFailed as failure:
+                    if not _is_input_not_accepted(failure.error):
+                        raise SandboxStdinError(
+                            "Failed to close process stdin", cause=failure.error
+                        ) from failure.error
             self.closed = True
-            if self._not_accepted is not None:
-                return
-            try:
-                await self._resolve_offset()
-                await self._request(offset=self._confirmed(), close=True)
-            except _InputNotAccepted:
-                return
-            except SandboxStdinError as error:
-                # A looked-up process without stdin has nothing to close.
-                if _is_stdin_unavailable(error.cause):
-                    return
-                raise
-            except _RequestFailed as failure:
-                if _is_input_not_accepted(failure.error):
-                    return
-                raise SandboxStdinError(
-                    "Failed to close process stdin", cause=failure.error
-                ) from failure.error
         finally:
             self._lock.release()
 
@@ -406,9 +405,9 @@ class ProcessStdin(anyio.abc.ByteSendStream):
     exited or stopped reading stdin, and :class:`SandboxStdinError` if a
     request fails. A looked-up process always has a writer; if the process
     was started without stdin, the first ``send`` raises
-    :class:`SandboxStdinError`. After a failure that may have delivered part of the data,
-    further sends raise :class:`anyio.BrokenResourceError`; the stream can
-    still be closed.
+    :class:`SandboxStdinError`. After a failure that may have delivered part
+    of the data, further sends raise :class:`anyio.BrokenResourceError`; the
+    stream can still be closed. If ``aclose`` fails, calling it again retries.
     """
 
     def __init__(self, core: StdinCore) -> None:
@@ -449,7 +448,8 @@ class SyncProcessStdin(io.RawIOBase):
     A looked-up process always has a writer; if the process was started
     without stdin, the first ``write`` raises :class:`SandboxStdinError`.
     After a failure that may have delivered part of the data, further writes
-    raise :class:`BrokenPipeError`; the stream can still be closed.
+    raise :class:`BrokenPipeError`; the stream can still be closed. If
+    ``close`` fails, the stream stays open and calling it again retries.
 
     Unlike a local pipe, garbage collection does not close the stream, since
     that would need a request to the service. Close it explicitly or use it as
@@ -477,10 +477,8 @@ class SyncProcessStdin(io.RawIOBase):
         """Close stdin. A process that already exited is not an error."""
         if self.closed:
             return
-        try:
-            iter_coroutine(self._core.close())
-        finally:
-            super().close()
+        iter_coroutine(self._core.close())
+        super().close()
 
     def __del__(self) -> None:
         pass
