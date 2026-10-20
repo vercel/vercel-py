@@ -152,6 +152,7 @@ class _Api:
         self.server = server
         self.created: list[dict[str, Any]] = []
         self.signals: list[int] = []
+        self.interrupt_run = False
         router.post("https://sandbox.test/v3/sandboxes").mock(
             return_value=_json(
                 {
@@ -188,6 +189,8 @@ class _Api:
 
         def records() -> Iterator[object]:
             yield {"command": _COMMAND}
+            if self.interrupt_run:
+                raise httpx.ReadError("connection reset by peer")
             yield {"stream": "stdout", "data": self.server.data.decode(errors="replace")}
             yield {"command": {**_COMMAND, "exitCode": 0}}
 
@@ -602,6 +605,21 @@ def test_run_process_feeds_input_while_streaming_output(driver: _Driver) -> None
     assert driver.api.created[0]["attachStdin"] is True
     assert driver.server.data == b"hello\n"
     assert driver.server.closed
+
+
+def test_run_process_feeds_input_once_when_its_output_stream_drops(driver: _Driver) -> None:
+    driver.api.interrupt_run = True
+
+    result = driver.run_process(input="hello\n", capture_output=True)
+
+    # The command keeps running, so its output is followed from the logs
+    # endpoint instead of starting it, and writing its input, again.
+    assert result.stdout == "hello\n"
+    assert len(driver.api.created) == 1
+    assert driver.server.writes() == [
+        {"data": base64.b64encode(b"hello\n").decode(), "offset": 0},
+        {"offset": 6, "close": True},
+    ]
 
 
 def test_run_process_without_input_does_not_attach_stdin(driver: _Driver) -> None:
