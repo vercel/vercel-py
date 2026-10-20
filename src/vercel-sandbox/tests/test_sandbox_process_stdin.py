@@ -607,7 +607,9 @@ def test_stdin_takes_bytes_not_text(driver: _Driver) -> None:
 def test_sync_stdin_composes_with_text_wrappers(mock_env_clear: None) -> None:
     with _open_driver("sync", _StdinServer()) as driver:
         process = driver.box.create_process("cat", stdin=subprocess.PIPE)
-        with io.TextIOWrapper(process.stdin, encoding="utf-8", write_through=True) as text:
+        with io.TextIOWrapper(
+            process.stdin, encoding="utf-8", newline="\n", write_through=True
+        ) as text:
             text.write("héllo\n")
             text.write("wörld\n")
         assert process.stdin.closed
