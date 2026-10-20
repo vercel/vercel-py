@@ -221,15 +221,14 @@ class StdinCore:
     async def communicate(self, data: bytes | None) -> None:
         """Write ``data`` and close stdin, ignoring a process that stopped reading.
 
-        A looked-up handle that was given no input and never written to leaves
-        stdin alone, so reading a running server's output doesn't end its
-        input.
+        With ``data=None``, a looked-up handle that hasn't written leaves stdin
+        open.
         """
+        if data is None and not self.attached and not self.written:
+            return
         if data:
             with suppress(_InputNotAccepted):
                 await self.write(data)
-        elif not self.attached and not self.written:
-            return
         await self.close()
 
     async def _write_chunks(self, data: bytes) -> None:

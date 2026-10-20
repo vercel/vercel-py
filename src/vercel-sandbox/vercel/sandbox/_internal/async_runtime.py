@@ -198,13 +198,16 @@ class Process(_ProcessHandleState):
     async def communicate(self, input: ProcessInput | None = None) -> tuple[str | None, str | None]:
         """Send input, read all output, and wait for the process to exit.
 
+        Stdin is closed whenever ``input`` is given, even if it is empty. With
+        ``input=None`` it is closed only if this handle owns it: the process
+        was created with ``stdin=subprocess.PIPE``, or this handle has written
+        to it. So calling ``communicate()`` on a looked-up process reads its
+        output without ending its input.
+
         Args:
-            input: Data written to stdin before it is closed; text is
-                encoded as UTF-8. Requires ``stdin=subprocess.PIPE``. A
-                process created with stdin has it closed even without input,
-                while a looked-up process only has it closed when given input
-                or written to through this handle. A process that exits or
-                stops reading before taking all of it is not an error.
+            input: Bytes, or text encoded as UTF-8, to write to stdin before
+                closing it. It is not an error if the process exits or stops
+                reading before taking all of it.
 
         Returns:
             A ``(stdout, stderr)`` tuple. A stream without a reader is
@@ -212,10 +215,9 @@ class Process(_ProcessHandleState):
             ``(merged, None)``.
 
         Raises:
-            ValueError: If ``input`` is given to a process created without
-                stdin.
+            ValueError: If ``input`` is given and ``stdin`` is ``None``.
             SandboxStdinError: If writing or closing stdin fails, including
-                when a looked-up process has no stdin.
+                writing to a looked-up process that has no stdin.
         """
         data = None if input is None else _coerce_input(input)
         if self.stdin is not None:

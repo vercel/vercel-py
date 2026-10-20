@@ -333,17 +333,29 @@ def test_a_looked_up_process_continues_after_input_already_written(
     assert [body.get("offset") for body in driver.server.writes()] == [0, 6, 13]
 
 
-def test_communicate_leaves_a_looked_up_process_stdin_open(driver: _Driver) -> None:
+@pytest.mark.parametrize(
+    ("written", "input", "data", "closed"),
+    [
+        (b"", None, b"", False),
+        (b"", b"", b"", True),
+        (b"", "x", b"x", True),
+        (b"later", None, b"later", True),
+    ],
+    ids=["no-input", "empty-input", "input", "written-then-no-input"],
+)
+def test_communicate_closes_a_looked_up_process_stdin_only_when_it_owns_it(
+    driver: _Driver, written: bytes, input: object, data: bytes, closed: bool
+) -> None:
     fetched = driver.get_process()
+    if written:
+        fetched.write(written)
 
-    assert fetched.communicate() == ("", "")
-    assert driver.server.bodies == []
+    fetched.communicate(input)
 
-    # Writing through the handle makes it the owner, so communicate closes.
-    fetched.write(b"later")
-    fetched.communicate()
-    assert driver.server.data == b"later"
-    assert driver.server.closed
+    assert driver.server.data == data
+    assert driver.server.closed is closed
+    if not closed:
+        assert driver.server.bodies == []
 
 
 def test_a_looked_up_process_without_stdin_refuses_input(driver: _Driver) -> None:
