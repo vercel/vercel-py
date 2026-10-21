@@ -151,17 +151,6 @@ class _SyncWriteLock:
         self._lock.release()
 
 
-class _AsyncWriteLock:
-    def __init__(self) -> None:
-        self._lock = anyio.Lock()
-
-    async def acquire(self) -> None:
-        await self._lock.acquire()
-
-    def release(self) -> None:
-        self._lock.release()
-
-
 class _UnsharedLock:
     """Lock for a core that only one caller ever drives."""
 
@@ -537,7 +526,7 @@ def _async_stdin(
             service=service,
             session_id=process.session_id,
             process_id=process.id,
-            lock=_AsyncWriteLock(),
+            lock=anyio.Lock(),
             attached=mode == "attached",
         )
     )
