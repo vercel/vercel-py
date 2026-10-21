@@ -54,7 +54,7 @@ from vercel.workflow._internal.worlds import local as local_mod
 # step with the `@workflow/world-local` release the on-disk format is written
 # against -- an older CLI predates fields the format now carries -- and with the
 # pin in the "Install the workflow CLI" step of .github/workflows/ci.yml.
-WORKFLOW_CLI_VERSION = "5.0.0-beta.38"
+WORKFLOW_CLI_VERSION = "5.2.0"
 
 _IS_CI = bool(os.getenv("CI"))
 

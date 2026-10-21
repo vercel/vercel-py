@@ -581,7 +581,9 @@ async def test_local_world_step_started_too_early_raises(tmp_path, monkeypatch) 
         retry_after=future,
         input=PLAIN_ENCODER.encode(ser.step_arguments((), {})),
     )
-    local_mod.write_json(world.data_dir / "steps" / f"{RUN_ID}-{STEP_ID}.json", step.model_dump())
+    local_mod.write_json(
+        world.data_dir / "steps" / RUN_ID / f"{RUN_ID}-{STEP_ID}.json", step.model_dump()
+    )
 
     with pytest.raises(w.TooEarlyError) as ei:
         await world.events_create(RUN_ID, w.StepStartedEvent(correlation_id=STEP_ID))

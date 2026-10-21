@@ -116,7 +116,9 @@ async def test_stored_run_started_has_no_event_data(tmp_path, monkeypatch) -> No
 
     await world.events_create(RUN_ID, _resilient_event())
 
-    rows = [json.loads(p.read_text()) for p in sorted((tmp_path / "events").glob("*.json"))]
+    rows = [
+        json.loads(p.read_text()) for p in sorted((tmp_path / "events" / RUN_ID).glob("*.json"))
+    ]
     run_started = next(r for r in rows if r["eventType"] == "run_started")
     assert "eventData" not in run_started
 
@@ -210,7 +212,7 @@ async def test_bare_run_started_on_a_missing_run_still_fails(tmp_path, monkeypat
     # No row and no event invented out of nothing.
     with pytest.raises(RuntimeError, match="not found"):
         await world.runs_get(RUN_ID)
-    assert not list((tmp_path / "events").glob("*.json"))
+    assert not list((tmp_path / "events").rglob("*.json"))
 
 
 @pytest.mark.parametrize("field", ["deploymentId", "workflowName", "input"])
