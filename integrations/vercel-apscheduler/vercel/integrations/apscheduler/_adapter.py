@@ -45,7 +45,6 @@ from ._options import (
 from ._payload import StartPayload, WakeupPayload
 from ._time import as_utc, canonical_scheduled_logical_time, earliest
 from ._types import (
-    PROVENANCE_DECLARED,
     APSchedulerConfigurationError,
     NamespaceFencedError,
     StartDecision,
@@ -552,6 +551,11 @@ class SchedulerAdapter:
 
     @contextmanager
     def runtime_mutation(self, *, explicit_id: bool | None = None) -> Iterator[None]:
+        """Mark a post-boundary ``add_job`` so the store classifies it.
+
+        The runtime flag is what routes the write into the coordinator's
+        declared-only rejection instead of the declaration path.
+        """
         self.prepare_runtime_mutation()
         prior_explicit = self._current_add_explicit
         if explicit_id is not None:
@@ -559,28 +563,11 @@ class SchedulerAdapter:
         self._runtime_mutation_depth += 1
         try:
             yield
-        except BaseException:
-            # A retried mutation can fail (for example with a conflicting job
-            # id) after an interrupted earlier attempt armed a wake it never
-            # published. Repair that pending wake so retrying a mutation is
-            # always safe, even when the retry itself errors.
-            if self._runtime_mutation_depth == 1:
-                try:
-                    self.publish_pending_wakeup()
-                except Exception:
-                    self._logger.exception(
-                        "Could not repair the pending wake after a failed runtime mutation"
-                    )
-            raise
         finally:
             self._runtime_mutation_depth -= 1
             self._current_add_explicit = prior_explicit
 
     def prepare_runtime_mutation(self) -> None:
-        if not self._lifecycle_called:
-            raise APSchedulerConfigurationError(
-                "call scheduler.start() before mutating durable jobs in this Function"
-            )
         self.ensure_local_started()
         if not self._owns_namespace():
             raise APSchedulerConfigurationError(
@@ -901,12 +888,11 @@ class SchedulerAdapter:
         """Sync code-declared jobs into a namespace another deployment wrote.
 
         Environment-scoped stores outlive deployments, so on the first touch
-        by a new deployment the code's declarations win for ``declared`` jobs:
-        removed declarations are deleted before any due planning, changed
-        triggers restart their schedule, unchanged jobs keep their progress,
-        and a declared record that no longer loads is rewritten from its
-        declaration. ``runtime`` jobs belong to the store and are never
-        touched; an unloadable one is quarantined.
+        by a new deployment the code's declarations win: removed declarations
+        are deleted before any due planning, changed triggers restart their
+        schedule, unchanged jobs keep their progress, and a record that no
+        longer loads is rewritten from its declaration when the code still
+        declares it and removed when it does not.
         """
         if not self._scope_outlives_deployments:
             return
@@ -952,10 +938,8 @@ class SchedulerAdapter:
         with self.scheduler._jobstores_lock:
             jobs, undecodable = self.coordinator.get_all_jobs_with_revisions()
             clean &= self._reconcile_undecodable(undecodable, missing, now)
-            for job, revision, provenance in jobs:
+            for job, revision in jobs:
                 missing.pop(str(job.id), None)
-                if provenance != PROVENANCE_DECLARED:
-                    continue
                 declared = self._declared_jobs.get(str(job.id))
                 if declared is None:
                     if self.coordinator.cas_remove_job(job.id, revision):
@@ -984,18 +968,14 @@ class SchedulerAdapter:
 
     def _reconcile_undecodable(
         self,
-        undecodable: list[tuple[str, int, str]],
+        undecodable: list[tuple[str, int]],
         missing: dict[str, Any],
         now: datetime,
     ) -> bool:
-        """Repair or sideline records this deployment's code cannot load."""
+        """Repair or remove records this deployment's code cannot load."""
         clean = True
-        for job_id, revision, provenance in undecodable:
+        for job_id, revision in undecodable:
             declared = missing.pop(job_id, None)
-            if provenance != PROVENANCE_DECLARED:
-                # The store owns runtime jobs, even unloadable ones.
-                self.coordinator.quarantine_job(job_id)
-                continue
             if declared is None:
                 if self.coordinator.cas_remove_job(job_id, revision):
                     self._logger.info(
@@ -1027,7 +1007,7 @@ class SchedulerAdapter:
     def _rebase_before(self, activation_time: datetime) -> None:
         with self.scheduler._jobstores_lock:
             jobs, _undecodable = self.coordinator.get_all_jobs_with_revisions()
-            for job, revision, _provenance in jobs:
+            for job, revision in jobs:
                 next_run_time = job.next_run_time
                 if next_run_time is None or next_run_time >= activation_time:
                     continue
@@ -1513,7 +1493,12 @@ def _pin_mutation_to_default(
 
 
 def _patched_mutation(name: str) -> Callable[..., Any]:
-    """Runtime job mutations run inside one repair-aware mutation scope."""
+    """Job mutations are rejected on Vercel: the store is immutable at runtime.
+
+    Queue-serving processes pass through so an executing job's in-wake call
+    reaches the coordinator, whose gate rejects it with the same contract.
+    """
+    subject = name.replace("_", " ")
 
     def patched(self: BaseScheduler, *args: Any, **kwargs: Any) -> Any:
         original = _original(name)
@@ -1523,8 +1508,11 @@ def _patched_mutation(name: str) -> Callable[..., Any]:
         args, kwargs = _pin_mutation_to_default(name, args, kwargs)
         if is_queue_serving_runtime():
             return original(self, *args, **kwargs)
-        with adapter.runtime_mutation():
-            return original(self, *args, **kwargs)
+        raise APSchedulerConfigurationError(
+            f"cannot {subject} on Vercel: the managed job store is "
+            "immutable at runtime; change the declaration and deploy, or "
+            "gate the job's work with state your application owns"
+        )
 
     return patched
 
