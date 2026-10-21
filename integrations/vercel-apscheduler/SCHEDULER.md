@@ -99,13 +99,15 @@ evicted. Each guarantee therefore lives on something that can carry it:
   against the driver document rather than atomically with the write, so a
   demoted deployment's stale pass aborts, but a narrow read-write race
   remains within the documented best-effort envelope.
-- **Code-declared jobs are durable because code is the backup.**
-  Reconciliation rewrites them from the declarations whenever the documents
-  are missing, and the store holds nothing code cannot restate: runtime
-  creation of new jobs is rejected. Runtime changes to declared jobs and
-  lifecycle flags are best-effort by declared policy; `pause()` additionally
-  publishes a queue-borne control message so the flag reaches the process
-  serving the chain even where cache state does not.
+- **Code-declared jobs are durable because code is the backup.** The
+  declarations are the index: reads enumerate the declared job ids, and a
+  record that is missing, unreadable, or written for a different declared
+  schedule is rebuilt from its declaration at the point of use
+  (read-repair). The store holds nothing code cannot restate: jobs are
+  immutable at runtime. Lifecycle flags remain best-effort by declared
+  policy; `pause()` additionally publishes a queue-borne control message so
+  the flag reaches the process serving the chain even where cache state
+  does not.
 
 Under `vercel dev` the cache client falls back to per-process memory, so the
 integration becomes a zero-infrastructure development mode with the
@@ -131,17 +133,19 @@ dirty_logical_time   earliest candidate parked by a concurrent store write
 idle_expires_at      preview idle deadline, when enabled
 ```
 
-Jobs live in a second document beside it, one record per job with a revision
-counter; the takeover reconciliation marker shares the jobs document so
-eviction clears them together. Documents are rewritten on every touch and
-carry a long TTL, so only an abandoned namespace is reaped; LRU eviction is
-survivable by design (see above).
+Each declared job has one record of its own beside it, keyed by the job id,
+holding the serialized job, its execution progress, a per-record revision,
+and a fingerprint of the declared trigger. Records are rewritten on every
+touch and carry a long TTL, so only an abandoned namespace is reaped; LRU
+eviction is survivable by design (see above), and it now costs one job's
+progress, never the population's.
 
-Every record is a code declaration plus execution progress; the store holds
-nothing else. A record the reconciling code cannot load is rewritten from
-its declaration when the code still declares it and removed when it does
-not; a record found unreadable while planning due jobs is sidelined until
-the next sync repairs it.
+The record's fingerprint ties it to the declaration that wrote it. A read
+that finds the fingerprint stale — the code's declared schedule changed —
+rebuilds the record and restarts its schedule; a matching fingerprint keeps
+the record's progress. A record whose declared id no longer exists in code
+is simply unreachable, because enumeration comes from the declarations, and
+it ages out by TTL.
 
 ## Starting
 
@@ -285,7 +289,7 @@ keys are unsupported because they bypass wake rearming and revision checks.
 
 Each persisted job has a monotonic revision. After executing a job, the wake
 updates or removes it only if the revision it read is still current, so a
-concurrent reconciliation write wins instead of being overwritten by a late
+concurrent repair write wins instead of being overwritten by a late
 handler.
 
 A stale wake for a schedule the declarations no longer produce may already
@@ -445,21 +449,20 @@ hands over promptly. Alias routing is judged by the request host, so do not
 point a manually created alias at an old deployment of a scheduler project:
 requests through that alias would let the old deployment take the chain.
 
-On takeover the new owner reconciles the
-store against its own declarations, before planning any due jobs: a job the
-code no longer declares is deleted and never runs, a changed trigger restarts
-its schedule, and an unchanged job keeps its progress. A job whose persisted
-record no longer loads under the new code (typically because its function
-moved) is rewritten from the declaration and restarts its schedule.
+On takeover the store syncs to the new code's declarations through
+read-repair, before any wake plans due jobs: a job the code no longer
+declares is unreachable and never runs, because every read enumerates the
+reading deployment's own declarations; a changed trigger is detected by its
+record's fingerprint and restarts its schedule on first read; an unchanged
+job keeps its progress; and a record that no longer loads under the new
+code (typically because its function moved) is rewritten from the
+declaration. There is no sweep to converge and no marker to stamp — every
+read validates against code.
 
-Reconciliation completes only once it converges. A revision race with a
-concurrent owner write reruns the pass against fresh state, and only the
-owner marks the sync as done, after a clean pass; a reconciliation that
-cannot converge stays unmarked and retries on the next activation. In-flight
-work is never interrupted: the demoted deployment's running job finishes or
-dies with its instance and its late writes are fenced best-effort.
-Jobs that run long should enqueue their work to another queue and return, so
-a promote is never delayed behind them.
+In-flight work is never interrupted: the demoted deployment's running job
+finishes or dies with its instance and its late writes are fenced
+best-effort. Jobs that run long should enqueue their work to another queue
+and return, so a promote is never delayed behind them.
 
 A takeover strands the previous owner's in-flight wake: it is consumed by
 the demoted deployment and acked as stale, and the new owner's chain starts
@@ -487,12 +490,10 @@ Deleting a deployment prevents its Functions from receiving further work.
 | resume while an old wake runs | the old generation cannot reserve a successor |
 | crash before Queue send | pending token is republished |
 | old message after resume | generation check makes it stale |
-| handler finishes after a concurrent reconcile write | revision check preserves the newer record |
+| handler finishes after a concurrent repair write | revision check preserves the newer record |
 | takeover while a wake is in flight | the demoted deployment consumes it and acks it as stale |
 | the owner's wake message dies | the overdue wake is presumed lost and republished by the owner |
-| takeover reconciliation races a demoted deployment's handler | the demoted write aborts on the ownership fence |
-| reconciliation loses a revision race to a concurrent owner write | the pass reruns with fresh state; completion is marked only once converged |
-| a deployment loses the namespace mid-reconciliation | it cannot stamp the marker, and the owner reconciles |
+| a demoted deployment's read wants to repair a record | the owner fence skips the write; it serves a declaration-derived view |
 | concurrent first requests | one automatic generation and one start identity |
 | request arrives after explicit pause | idle deadline renews but state remains paused |
 | preview idle deadline expires before claim | message is stale and no job runs |
