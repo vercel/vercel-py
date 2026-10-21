@@ -225,6 +225,14 @@ closed:
 - work already in flight may finish, but cannot extend the chain; and
 - no periodic message keeps an abandoned preview alive.
 
+The deadline lives only in the driver document, so its absence must also
+fail closed. Start and wake payloads carry an `idle_bounded` marker derived
+from configuration, and a claim refuses to adopt an idle-bounded chain into
+a document that carries no deadline. An evicted preview document therefore
+stops the chain instead of resurrecting it unbounded — the one deliberate
+exception to the message-is-the-authority adoption rule, because for a
+disposable preview, absence maps to stopped.
+
 The next real request changes `inactive` to `running`, increments the
 generation, and publishes one start identity. Activation rebases persisted
 jobs to that request time, so the inactive interval is skipped rather than

@@ -22,6 +22,11 @@ __all__ = ["StartPayload", "WakeupPayload"]
 class StartPayload:
     scheduler_id: str
     generation: int
+    # Whether this chain is bounded by a preview idle deadline. Derived from
+    # configuration, so racing publishers agree; carried in the message so a
+    # claim never adopts an idle-bounded chain into a document that has lost
+    # its deadline.
+    idle_bounded: bool = False
 
     def __post_init__(self) -> None:
         if not self.scheduler_id:
@@ -34,6 +39,7 @@ class StartPayload:
             "vercel": {"kind": START_KIND, "version": START_VERSION},
             "scheduler_id": self.scheduler_id,
             "generation": self.generation,
+            "idle_bounded": self.idle_bounded,
         }
 
     @classmethod
@@ -43,7 +49,11 @@ class StartPayload:
         if not isinstance(scheduler_id, str) or not scheduler_id:
             raise ValueError("Invalid start payload: missing scheduler_id")
         generation = _positive_int(envelope.get("generation"), name="generation")
-        return cls(scheduler_id=scheduler_id, generation=generation)
+        return cls(
+            scheduler_id=scheduler_id,
+            generation=generation,
+            idle_bounded=bool(envelope.get("idle_bounded", False)),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +62,8 @@ class WakeupPayload:
     generation: int
     sequence: int
     logical_time: datetime
+    # See StartPayload.idle_bounded.
+    idle_bounded: bool = False
 
     def __post_init__(self) -> None:
         if not self.scheduler_id:
@@ -67,12 +79,19 @@ class WakeupPayload:
         )
 
     @classmethod
-    def from_token(cls, scheduler_id: str, token: WakeToken) -> WakeupPayload:
+    def from_token(
+        cls,
+        scheduler_id: str,
+        token: WakeToken,
+        *,
+        idle_bounded: bool = False,
+    ) -> WakeupPayload:
         return cls(
             scheduler_id=scheduler_id,
             generation=token.generation,
             sequence=token.sequence,
             logical_time=token.logical_time,
+            idle_bounded=idle_bounded,
         )
 
     def to_token(self) -> WakeToken:
@@ -89,6 +108,7 @@ class WakeupPayload:
             "generation": self.generation,
             "sequence": self.sequence,
             "logical_time": self.logical_time.isoformat(),
+            "idle_bounded": self.idle_bounded,
         }
 
     @classmethod
@@ -112,6 +132,7 @@ class WakeupPayload:
             ),
             sequence=_positive_int(envelope.get("sequence"), name="sequence"),
             logical_time=logical_time,
+            idle_bounded=bool(envelope.get("idle_bounded", False)),
         )
 
 
