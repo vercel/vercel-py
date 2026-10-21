@@ -27,6 +27,7 @@ import vercel.queue.embedded as vqs_embedded
 from vercel._internal.core.polyfills import UTC
 
 from .. import attributes as attrs, world as w
+from ..file_lock import FileLockError, file_lock
 from ..ulid import monotonic_factory
 
 MAX_DELAY_SECONDS = float(
@@ -632,11 +633,35 @@ class LocalWorld(w.World):
         hashed_token = hashlib.sha256(token.encode()).hexdigest()
         return self.data_dir / "hooks" / "tokens" / f"{hashed_token}.json"
 
+    def _hook_token_claim_releasable(self, claim: HookTokenClaim) -> bool:
+        # Disposal and terminal run state are durable even when their cleanup
+        # was interrupted. A new claimant can finish releasing the old token.
+        disposed = self.data_dir / ".locks" / "hooks" / f"{claim.hook_id}.disposed"
+        if disposed.exists():
+            return True
+        run = read_json(self.data_dir / "runs" / f"{claim.run_id}.json", w.WorkflowRunAdaptor)
+        return run is not None and is_run_terminal(run.status)
+
+    @contextlib.asynccontextmanager
+    async def _hook_token_lock(self, token: str) -> AsyncIterator[None]:
+        path = self._hook_token_path(token)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            async with file_lock(path, stale=30, update=1, timeout=35):
+                yield
+        except FileLockError as exc:
+            raise w.WorkflowWorldError(f"Hook token claim lock failed: {exc}", status=500) from exc
+
     def _delete_hook(self, hook: w.Hook) -> None:
-        self._hook_token_path(hook.token).unlink(missing_ok=True)
+        # Caller holds this token's lock. An old hook's cleanup must never
+        # delete the claim belonging to a successor with the same token.
+        constraint_path = self._hook_token_path(hook.token)
+        claim = read_json(constraint_path, HookTokenClaim)
+        if claim is not None and (claim.run_id, claim.hook_id) == (hook.run_id, hook.hook_id):
+            constraint_path.unlink(missing_ok=True)
         (self.data_dir / "hooks" / f"{hook.hook_id}.json").unlink(missing_ok=True)
 
-    def delete_all_hooks_for_run(self, run_id: str) -> None:
+    async def delete_all_hooks_for_run(self, run_id: str) -> None:
         hooks_dir = self.data_dir / "hooks"
         if not hooks_dir.exists():
             return
@@ -645,7 +670,8 @@ class LocalWorld(w.World):
                 continue
             hook = read_json(hook_path, w.Hook)
             if hook is not None and hook.run_id == run_id:
-                self._delete_hook(hook)
+                async with self._hook_token_lock(hook.token):
+                    self._delete_hook(hook)
 
     async def get_deployment_id(self) -> str:
         return ""
@@ -804,18 +830,30 @@ class LocalWorld(w.World):
         raise w.HookNotFoundError(token=token)
 
     async def events_create(self, run_id: str | None, data: w.Event) -> w.EventResult:
-        # run_created has no existing entity to race on — its create is guarded by
-        # the atomic write in write_json. Every other event reads-checks-writes an
-        # existing run/step, so serialize those per run. The body is synchronous,
-        # so holding a threading.Lock across it is safe and brief.
-        if run_id is None:
-            result = self._events_create_impl(run_id, data)
-        else:
-            with self._run_lock(run_id):
+        token = None
+        if isinstance(data, w.HookCreatedEvent):
+            token = data.event_data.token
+        elif isinstance(data, w.HookDisposedEvent):
+            hook = read_json(self.data_dir / "hooks" / f"{data.correlation_id}.json", w.Hook)
+            if hook is None:
+                # Do not let a concurrent publication turn a missing entry
+                # read into an unlocked deletion in _events_create_impl.
+                raise w.HookNotFoundError(hook_id=data.correlation_id)
+            token = hook.token
+
+        async with contextlib.AsyncExitStack() as stack:
+            if token is not None:
+                await stack.enter_async_context(self._hook_token_lock(token))
+            if run_id is None:
                 result = self._events_create_impl(run_id, data)
+            else:
+                # The body is synchronous, so the per-run mutex never spans
+                # a suspension point (token locks are acquired first).
+                with self._run_lock(run_id):
+                    result = self._events_create_impl(run_id, data)
 
         if result.run is not None and is_run_terminal(result.run.status):
-            self.delete_all_hooks_for_run(result.run.run_id)
+            await self.delete_all_hooks_for_run(result.run.run_id)
         return result
 
     def _resilient_create_run(
@@ -1238,6 +1276,16 @@ class LocalWorld(w.World):
                 raise w.EntityConflictError(f'Hook "{data.correlation_id}" already disposed')
             hook_data = data.event_data
             constraint_path = self._hook_token_path(hook_data.token)
+            existing_claim = read_json(constraint_path, HookTokenClaim)
+            if (
+                existing_claim is not None
+                and (existing_claim.run_id, existing_claim.hook_id)
+                != (effective_run_id, data.correlation_id)
+                and self._hook_token_claim_releasable(existing_claim)
+            ):
+                # All claim writers hold the token lock, including delayed
+                # cleanup, so the ownership check and unlink are serialized.
+                constraint_path.unlink()
             token_claimed = write_exclusive(
                 constraint_path,
                 # Compact, key-for-key what TS writes here — including the
@@ -1254,7 +1302,8 @@ class LocalWorld(w.World):
                 ),
             )
             if not token_claimed:
-                existing_claim = HookTokenClaim.from_wire(json.loads(constraint_path.read_text()))
+                existing_claim = read_json(constraint_path, HookTokenClaim)
+                assert existing_claim is not None
                 if (
                     existing_claim.run_id == effective_run_id
                     and existing_claim.hook_id == data.correlation_id

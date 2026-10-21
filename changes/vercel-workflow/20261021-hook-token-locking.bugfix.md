@@ -1,0 +1,1 @@
+Fix local hook token reuse across concurrent processes so delayed cleanup cannot remove a newer hook's claim and interrupted cleanup does not leave tokens unavailable after a run finishes or a hook is disposed.
