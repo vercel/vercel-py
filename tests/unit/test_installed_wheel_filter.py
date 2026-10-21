@@ -1,4 +1,4 @@
-"""Guard the respx exclusion used by the installed-wheel workflow.
+"""Guard vendored import rewrites and respx exclusions in the installed-wheel workflow.
 
 `.github/scripts/test_installed_wheel.sh` installs a bundle wheel, where httpx2 is
 vendored as `vercel.internal._vendor.httpx2`, and runs the package's tests against it. respx
@@ -14,12 +14,61 @@ failing the publish workflow.
 """
 
 import ast
+import re
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / ".github" / "scripts" / "test_installed_wheel.sh"
+
+
+@pytest.mark.parametrize("library", ["anyio", "httpx2"])
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("import {lib}\n", "from vercel.internal._vendor import {lib}\n"),
+        (
+            "import {lib} as client  # alias\n",
+            "from vercel.internal._vendor import {lib} as client  # alias\n",
+        ),
+        (
+            "import {lib}.from_thread\n",
+            "import vercel.internal._vendor.{lib}.from_thread\n"
+            "from vercel.internal._vendor import {lib}\n",
+        ),
+        (
+            "import {lib}.nested.module as client  # alias\n",
+            "import vercel.internal._vendor.{lib}.nested.module as client  # alias\n",
+        ),
+        (
+            "if True:\n    import {lib}.from_thread  # nested\n",
+            "if True:\n    import vercel.internal._vendor.{lib}.from_thread  # nested\n"
+            "    from vercel.internal._vendor import {lib}\n",
+        ),
+        (
+            "from {lib}.abc import Thing\n",
+            "from vercel.internal._vendor.{lib}.abc import Thing\n",
+        ),
+        ("import {lib}_other.from_thread\n", "import {lib}_other.from_thread\n"),
+    ],
+)
+def test_vendored_import_rewrite(tmp_path: Path, library: str, source: str, expected: str) -> None:
+    """Exercise the actual rewrite, including the root binding of dotted imports."""
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    path = tests / "test_import.py"
+    path.write_text(source.format(lib=library), encoding="utf-8")
+    script = SCRIPT.read_text(encoding="utf-8")
+    start = script.index('for path in (test_root / "tests").rglob("*.py"):')
+    end = script.index("\nPY", start)
+    exec(  # noqa: S102 - the script is repo-owned
+        script[start:end],
+        {"re": re, "test_root": tmp_path, "vendored_libraries": (library,)},
+    )
+    rewritten = path.read_text(encoding="utf-8")
+    assert rewritten == expected.format(lib=library)
+    compile(rewritten, str(path), "exec")
 
 
 def _load_scanner() -> dict[str, object]:
