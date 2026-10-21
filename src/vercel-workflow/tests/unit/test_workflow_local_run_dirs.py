@@ -1,9 +1,9 @@
 """LocalWorld stores event and step files one directory per run.
 
 Mirrors ``@workflow/world-local``: ``events/<runId>/<runId>-<eventId>.json`` and
-``steps/<runId>/<runId>-<stepId>.json``, and a data directory still holding the
-old flat files is deleted on startup rather than read, while one that mixes
-layouts or holds unknown ``.json`` files is refused and left alone.
+``steps/<runId>/<runId>-<stepId>.json``. A data directory with ``.json`` files
+directly under ``events/`` or ``steps/``, such as the old flat layout, is
+refused and left alone.
 """
 
 from __future__ import annotations
@@ -79,27 +79,30 @@ async def test_listing_reads_only_that_run(tmp_path, monkeypatch) -> None:
         ] == on_disk
 
 
-def test_a_flat_data_directory_is_deleted_on_startup(tmp_path, monkeypatch, capsys) -> None:
+def test_a_flat_data_directory_is_refused_and_kept(tmp_path, monkeypatch) -> None:
     (tmp_path / "events").mkdir()
     (tmp_path / "events" / "wrun_old-evnt_1.json").write_text(json.dumps({}))
+    (tmp_path / "steps").mkdir()
+    (tmp_path / "steps" / "wrun_old-step_1.json").write_text(json.dumps({}))
     (tmp_path / "runs").mkdir()
     (tmp_path / "runs" / "wrun_old.json").write_text(json.dumps({}))
 
-    _world(tmp_path, monkeypatch)
+    with pytest.raises(local_mod.DataDirLayoutError) as raised:
+        _world(tmp_path, monkeypatch)
 
-    assert not (tmp_path / "events").exists()
-    assert not (tmp_path / "runs").exists()
-    assert "incompatible storage layout" in capsys.readouterr().err
+    assert raised.value.files == ["events/wrun_old-evnt_1.json", "steps/wrun_old-step_1.json"]
+    assert (tmp_path / "events" / "wrun_old-evnt_1.json").is_file()
+    assert (tmp_path / "steps" / "wrun_old-step_1.json").is_file()
+    assert (tmp_path / "runs" / "wrun_old.json").is_file()
 
 
-async def test_a_run_scoped_data_directory_is_kept(tmp_path, monkeypatch, capsys) -> None:
+async def test_a_run_scoped_data_directory_is_kept(tmp_path, monkeypatch) -> None:
     run_id = await _start_run(_world(tmp_path, monkeypatch))
 
     world = _world(tmp_path, monkeypatch)
 
     assert (await world.runs_get(run_id)).run_id == run_id
     assert len((await world.events_list(run_id)).data) == 1
-    assert "incompatible" not in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
@@ -130,19 +133,3 @@ async def test_a_symlinked_run_directory_is_refused(tmp_path, monkeypatch) -> No
     with pytest.raises(local_mod.UnsafeEntityIdError):
         await world.steps_get("wrun_A", "step_1")
     assert list(outside.iterdir()) == []
-
-
-def test_a_failed_wipe_fails_startup(tmp_path, monkeypatch) -> None:
-    (tmp_path / "events").mkdir()
-    (tmp_path / "events" / "wrun_old-evnt_1.json").write_text("{}")
-
-    def refuse(path, ignore_errors=False, **kwargs):
-        if ignore_errors:
-            return
-        raise PermissionError(13, "Permission denied", str(path))
-
-    monkeypatch.setattr(local_mod.shutil, "rmtree", refuse)
-
-    with pytest.raises(PermissionError):
-        _world(tmp_path, monkeypatch)
-    assert (tmp_path / "events" / "wrun_old-evnt_1.json").is_file()
