@@ -1831,8 +1831,6 @@ async def test_run_process_on_start_receives_running_handle_before_output(
     assert handles[0].status is sandbox.ProcessStatus.EXITED
 
 
-# ``sync`` is drawn rather than parametrized: ggt cannot run more than one
-# parametrization of an async ``@given`` test in the same worker.
 @given(
     sync=st.booleans(),
     records=st.lists(

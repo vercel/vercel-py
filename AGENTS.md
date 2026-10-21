@@ -57,6 +57,14 @@ include = "../../scripts/poe/poe.toml"
 verbosity = -1
 ```
 
+# Testing
+
+- Do not combine `pytest.mark.parametrize` with Hypothesis `@given` tests.
+  Draw the varying value from a strategy instead, such as `st.booleans()` for
+  a sync/async mode. ggt fails every parametrization after the first one of an
+  async `@given` test that runs in the same worker, with `asyncio.run() cannot
+  be called from a running event loop`.
+
 # News Fragments
 
 - Before opening a pull request or handing work back to the user, run
