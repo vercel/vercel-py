@@ -1881,7 +1881,7 @@ class SandboxApiClient:
                             if on_start is not None:
                                 try:
                                     on_start(process)
-                                except BaseException:
+                                except Exception:
                                     on_start_failed = True
                                     # Write the input anyway, so the process
                                     # is not left waiting on an open stdin.
