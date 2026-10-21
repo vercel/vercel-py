@@ -6,7 +6,7 @@ import os
 import platform
 import sys
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import timedelta
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
@@ -1885,8 +1885,12 @@ class SandboxApiClient:
                                     on_start_failed = True
                                     # Write the input anyway, so the process
                                     # is not left waiting on an open stdin.
+                                    # As in the TypeScript SDK, a failed write
+                                    # only kills the process; the caller sees
+                                    # the callback's exception, untouched.
                                     if on_started is not None:
-                                        await on_started(process)
+                                        with suppress(Exception):
+                                            await on_started(process)
                                     raise
                             if on_started is not None:
                                 await on_started(process)

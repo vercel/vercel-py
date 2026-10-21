@@ -666,6 +666,21 @@ def test_run_process_on_start_runs_before_input_is_written(driver: _Driver, rais
     assert driver.api.signals == []
 
 
+def test_run_process_on_start_error_is_raised_when_input_also_fails(driver: _Driver) -> None:
+    driver.server.faults.extend([lambda server, _, body: server.apply(body), _rejected(500)])
+    error = RuntimeError("hook failed")
+
+    def on_start(_process: Any) -> None:
+        raise error
+
+    with pytest.raises(RuntimeError) as raised:
+        driver.run_process(input=b"data", capture_output=True, on_start=on_start)
+
+    assert raised.value is error
+    assert raised.value.__context__ is None
+    assert driver.api.signals == [sandbox.ProcessSignal.SIGKILL]
+
+
 @pytest.mark.parametrize("stdin", [subprocess.STDOUT, 42, True, io.BytesIO(), "pipe"])
 def test_create_process_rejects_stdin_options_before_request(
     driver: _Driver, stdin: object

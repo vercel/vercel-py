@@ -1057,7 +1057,9 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         killing the process, which keeps running in the sandbox, and ``check``
         is not applied. A process that has started is never run again. With
         ``input``, ``on_start`` runs before the input is written, and the input
-        is still written if it raises.
+        is still written if it raises. If that write fails, the process is
+        killed as for any failure to write ``input``, and the callback's
+        exception is still the one raised.
         """
         output_router = ProcessOutputRouter(
             stdout=stdout, stderr=stderr, capture_output=capture_output
