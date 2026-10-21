@@ -77,6 +77,8 @@ def _assert_process_filesystem(result: ProcessFilesystemObservation) -> None:
     assert result.returncode == 3
     assert result.terminated_returncode != 0
     assert result.timed_out_returncode != 0
+    assert result.on_start_stdout == "hi\n"
+    assert result.on_start_process_found
     assert result.missing_executable_failed
     assert result.text == "hello\n"
     assert result.binary == b"\x00\xff"

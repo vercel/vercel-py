@@ -101,6 +101,7 @@ from vercel.sandbox._internal.runtime_common import (
     _coerce_remote_path,
     _normalize_tar_path,
     _ProcessHandleState,
+    _ProcessStartHook,
     _SandboxFilesystemBatchBase,
     _signal_number,
     _UploadFileEntry,
@@ -1070,6 +1071,7 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         stderr: TextIO | int | None = None,
         capture_output: bool = False,
         input: ProcessInput | None = None,
+        on_start: Callable[[SyncProcess], None] | None = None,
     ) -> CompletedProcess:
         """Run a process to completion.
 
@@ -1092,6 +1094,14 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
                 text is encoded as UTF-8. Without it the process reads an
                 empty stdin. A process that exits or stops reading before
                 taking all of it is not an error.
+            on_start: Callable called once with a ``SyncProcess`` handle as
+                soon as the process starts, before any of its output is
+                delivered. Output is held until it returns, so keep it short.
+                It may call handle methods such as ``kill()`` or
+                ``refresh()``, which send their own requests. The handle has
+                no ``stdout`` or ``stderr`` readers; output still goes to
+                ``stdout`` and ``stderr`` above. Once the run completes, the
+                same handle reports the final return code.
 
         Returns:
             The completed process result.
@@ -1101,11 +1111,28 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
                 exits unsuccessfully.
             SandboxStdinError: If writing ``input`` fails. The process is
                 killed, since nothing else could stop it waiting for input.
+            TypeError: If ``on_start`` is not a synchronous callable, checked
+                before the process starts, or if it returns an awaitable.
+
+        An exception raised by ``on_start`` propagates unchanged without
+        killing the process, which keeps running in the sandbox, and ``check``
+        is not applied. A process that has started is never run again. With
+        ``input``, ``on_start`` runs before the input is written, and the input
+        is still written if it raises.
         """
         output_router = ProcessOutputRouter(
             stdout=stdout, stderr=stderr, capture_output=capture_output
         )
         data = None if input is None else _coerce_input(input)
+        start_hook = _ProcessStartHook.create(
+            on_start,
+            lambda payload: SyncProcess(
+                payload=payload,
+                service=self._service,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            ),
+        )
         state = iter_coroutine(
             self._service.run_process(
                 session_id=self.id,
@@ -1117,8 +1144,11 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
                 kill_after=parse_duration_seconds(kill_after),
                 output_router=output_router,
                 input=data,
+                on_start=start_hook,
             )
         )
+        if start_hook is not None:
+            start_hook.complete(state.process)
         assert state.process.returncode is not None
         result = CompletedProcess(
             id=state.process.id,
@@ -1537,15 +1567,30 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         stderr: TextIO | int | None = None,
         capture_output: bool = False,
         input: ProcessInput | None = None,
+        on_start: Callable[[SyncProcess], None] | None = None,
     ) -> CompletedProcess:
         """Run a process to completion in the current session.
 
         See ``SyncSandboxRuntimeSession.run_process`` for argument behavior.
+
+        A stopped sandbox is resumed and the run replayed only if the process
+        never started, so ``on_start`` runs at most once, against the session
+        that runs the process. Once it has been called, failures are raised,
+        including lifecycle errors raised by ``on_start`` itself.
         """
         output_router = ProcessOutputRouter(
             stdout=stdout, stderr=stderr, capture_output=capture_output
         )
         data = None if input is None else _coerce_input(input)
+        start_hook = _ProcessStartHook.create(
+            on_start,
+            lambda payload: SyncProcess(
+                payload=payload,
+                service=self._service,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            ),
+        )
         parsed_kill_after = parse_duration_seconds(kill_after)
         state = iter_coroutine(
             execute_with_sandbox_recovery(
@@ -1559,10 +1604,14 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
                     kill_after=parsed_kill_after,
                     output_router=output_router,
                     input=data,
+                    on_start=start_hook,
                 ),
                 coordinator=self,
+                can_replay=None if start_hook is None else start_hook.can_replay,
             )
         )
+        if start_hook is not None:
+            start_hook.complete(state.process)
         assert state.process.returncode is not None
         result = CompletedProcess(
             id=state.process.id,
