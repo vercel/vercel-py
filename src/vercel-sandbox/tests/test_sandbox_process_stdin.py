@@ -9,6 +9,8 @@ import base64
 import io
 import json
 import subprocess
+import threading
+import time
 from collections import deque
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import contextmanager
@@ -711,6 +713,49 @@ async def test_async_stdin_orders_concurrent_sends_and_composes_with_anyio(
                 await process.stdin.send(b"late")
 
     assert server.data == b"".join(f"{index};".encode() for index in range(10)) + b"done\n"
+    assert server.closed
+
+
+def test_sync_stdin_keeps_writes_from_threads_whole(
+    mock_env_clear: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = _StdinServer()
+    holding, release = threading.Event(), threading.Event()
+
+    async def held_sleep(self: SandboxService, seconds: float) -> None:
+        holding.set()
+        release.wait(timeout=5)
+
+    monkeypatch.setattr(SandboxService, "sleep", held_sleep)
+    # Every write spans several requests, so one that interleaved with another
+    # thread's would garble both.
+    monkeypatch.setattr("vercel.sandbox._internal.process_stdin.STDIN_CHUNK_SIZE", 2)
+    payloads = [f"{index}" * 6 + ";" for index in range(5)]
+    with _open_driver("sync", server) as driver:
+        process = driver.box.create_process("cat", stdin=subprocess.PIPE)
+        # The first write backs off after a failure and holds the stream until
+        # released, while the other threads queue up behind it.
+        server.faults.append(_applied_then(503))
+        first = threading.Thread(target=process.stdin.write, args=(payloads[0].encode(),))
+        first.start()
+        assert holding.wait(timeout=5)
+        held = len(server.bodies)
+        rest = [
+            threading.Thread(target=process.stdin.write, args=(payload.encode(),))
+            for payload in payloads[1:]
+        ]
+        for thread in rest:
+            thread.start()
+        time.sleep(0.05)
+        assert len(server.bodies) == held
+        release.set()
+        for thread in [first, *rest]:
+            thread.join(timeout=5)
+        process.stdin.close()
+
+    delivered = server.data.decode().split(";")[:-1]
+    assert delivered[0] == payloads[0][:-1]
+    assert sorted(delivered) == [payload[:-1] for payload in payloads]
     assert server.closed
 
 

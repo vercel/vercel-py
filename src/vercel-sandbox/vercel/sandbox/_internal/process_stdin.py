@@ -8,8 +8,9 @@ duplicate input.
 
 import io
 import subprocess
+import threading
 from contextlib import suppress
-from typing import TYPE_CHECKING, Literal, TypeAlias
+from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias
 
 import anyio
 
@@ -23,7 +24,6 @@ from vercel.sandbox._internal.errors import (
 )
 from vercel.sandbox._internal.models import ProcessSignal
 from vercel.sandbox._internal.state import ProcessState
-from vercel.sandbox._internal.text_reader import _AsyncPumpLock, _PumpLock, _SyncPumpLock
 
 if TYPE_CHECKING:
     from vercel.sandbox._internal.service import SandboxService
@@ -134,6 +134,34 @@ class _RequestFailed(Exception):
         self.maybe_applied = maybe_applied
 
 
+class _WriteLock(Protocol):
+    async def acquire(self) -> None: ...
+
+    def release(self) -> None: ...
+
+
+class _SyncWriteLock:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+
+    async def acquire(self) -> None:
+        self._lock.acquire()
+
+    def release(self) -> None:
+        self._lock.release()
+
+
+class _AsyncWriteLock:
+    def __init__(self) -> None:
+        self._lock = anyio.Lock()
+
+    async def acquire(self) -> None:
+        await self._lock.acquire()
+
+    def release(self) -> None:
+        self._lock.release()
+
+
 class _UnsharedLock:
     """Lock for a core that only one caller ever drives."""
 
@@ -153,7 +181,7 @@ class StdinCore:
         service: "SandboxService",
         session_id: str,
         process_id: str,
-        lock: _PumpLock,
+        lock: _WriteLock,
         attached: bool = True,
     ) -> None:
         self._service = service
@@ -509,7 +537,7 @@ def _async_stdin(
             service=service,
             session_id=process.session_id,
             process_id=process.id,
-            lock=_AsyncPumpLock(),
+            lock=_AsyncWriteLock(),
             attached=mode == "attached",
         )
     )
@@ -525,7 +553,7 @@ def _sync_stdin(
             service=service,
             session_id=process.session_id,
             process_id=process.id,
-            lock=_SyncPumpLock(),
+            lock=_SyncWriteLock(),
             attached=mode == "attached",
         )
     )
