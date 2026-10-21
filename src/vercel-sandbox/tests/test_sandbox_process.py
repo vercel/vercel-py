@@ -1831,8 +1831,10 @@ async def test_run_process_on_start_receives_running_handle_before_output(
     assert handles[0].status is sandbox.ProcessStatus.EXITED
 
 
-@pytest.mark.parametrize("sync", [False, True], ids=["async", "sync"])
+# ``sync`` is drawn rather than parametrized: ggt cannot run more than one
+# parametrization of an async ``@given`` test in the same worker.
 @given(
+    sync=st.booleans(),
     records=st.lists(
         st.tuples(st.sampled_from(["stdout", "stderr"]), st.text(max_size=8)), max_size=8
     ),
@@ -1840,7 +1842,7 @@ async def test_run_process_on_start_receives_running_handle_before_output(
     merge=st.booleans(),
 )
 @settings(
-    max_examples=25, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture]
+    max_examples=50, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture]
 )
 async def test_run_process_on_start_does_not_change_output_or_result(
     mock_env_clear: None,
