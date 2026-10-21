@@ -27,12 +27,12 @@ def plan(*packages: publish.PackagePlan) -> publish.ReleasePlan:
 def test_detection_freezes_the_complete_native_release_plan(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    package_root = tmp_path / "env"
+    package_root = tmp_path / "headers"
     package_root.mkdir()
     version_file = package_root / "version.py"
     version_file.write_text('__version__ = "1.2.3"\n', encoding="utf-8")
-    env_package = workspace.Package("vercel-env", package_root, version_file, ())
-    monkeypatch.setattr(release, "changed_packages", lambda **_: ["vercel-env"])
+    headers_package = workspace.Package("vercel-headers", package_root, version_file, ())
+    monkeypatch.setattr(release, "changed_packages", lambda **_: ["vercel-headers"])
     monkeypatch.setattr(release, "github_release_body", lambda _: "Release notes\n")
     snapshots: list[bool] = []
 
@@ -42,11 +42,11 @@ def test_detection_freezes_the_complete_native_release_plan(
 
     monkeypatch.setattr(bundle_release, "shared_vendored_release", shared_release)
     monkeypatch.setattr(bundle_release, "shared_github_release_body", lambda: "Shared notes\n")
-    monkeypatch.setattr(workspace, "packages", lambda: {"vercel-env": env_package})
+    monkeypatch.setattr(workspace, "packages", lambda: {"vercel-headers": headers_package})
     monkeypatch.setattr(
         publish,
         "dependency_graph",
-        lambda _: {publish.SHARED: set(), "vercel-env": {publish.SHARED}},
+        lambda _: {publish.SHARED: set(), "vercel-headers": {publish.SHARED}},
     )
     monkeypatch.setattr(bundle_release, "is_vendored_eligible", lambda _: False)
 
@@ -55,7 +55,9 @@ def test_detection_freezes_the_complete_native_release_plan(
     assert result == publish.ReleasePlan(
         (
             publish.PackagePlan(publish.SHARED, "0.8.2", None, (), "Shared notes\n"),
-            publish.PackagePlan("vercel-env", "1.2.3", None, (publish.SHARED,), "Release notes\n"),
+            publish.PackagePlan(
+                "vercel-headers", "1.2.3", None, (publish.SHARED,), "Release notes\n"
+            ),
         ),
         "0.8.2",
         False,
@@ -70,7 +72,7 @@ def test_detection_freezes_the_complete_native_release_plan(
 def test_detection_fails_when_the_shared_registry_snapshot_cannot_be_frozen(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(release, "changed_packages", lambda **_: ["vercel-env"])
+    monkeypatch.setattr(release, "changed_packages", lambda **_: ["vercel-headers"])
 
     def unavailable() -> tuple[str, bool]:
         raise OSError("PyPI unavailable")
