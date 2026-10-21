@@ -12,7 +12,7 @@ from pathlib import PurePosixPath
 from typing import Any, Generic, Literal, TypeAlias, TypeVar
 
 from vercel._internal.core.byte_stream import ReadableByteStream
-from vercel.sandbox._internal.errors import SandboxResponseError
+from vercel.sandbox._internal.errors import SandboxApiError, SandboxResponseError
 from vercel.sandbox._internal.models import (
     JSONObject,
     NetworkPolicyReadback,
@@ -460,6 +460,24 @@ class RuntimeSessionHandleBase:
 
     def _write_files_cwd(self, cwd: RemotePath | None) -> str:
         return _resolve_write_files_cwd(cwd, default=self.cwd or "/vercel/sandbox")
+
+
+def _is_ignorable_live_network_policy_error(error: SandboxApiError) -> bool:
+    """Return whether ``Sandbox.update`` may skip a failed live policy update.
+
+    The saved sandbox configuration is already updated when this applies, so
+    only failures meaning the attached session is going away are ignored:
+    any HTTP 410, and HTTP 422 ``sandbox_stopping``. This deliberately does
+    not use the lifecycle-recovery classification, because a snapshotting
+    session (422 ``sandbox_snapshotting``) is still live and must surface.
+
+    This mirrors the TypeScript SDK, including its limitation that HTTP 410
+    is not specific to a cleanly stopped session: a failed session is also
+    skipped. Ignoring the error is not proof that the policy is enforced.
+    """
+    if error.status_code == 410:
+        return True
+    return error.status_code == 422 and error.code == "sandbox_stopping"
 
 
 class SandboxHandleBase(Generic[RuntimeSessionHandleT]):

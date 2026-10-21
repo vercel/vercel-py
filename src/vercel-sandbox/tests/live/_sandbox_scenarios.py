@@ -421,7 +421,7 @@ class AsyncDriver(_ScenarioDriver):
         )
 
     async def update_network_policy(self, box: Any, network_policy: NetworkPolicy) -> Any:
-        return await box.update_network_policy(network_policy)
+        return await box.update(network_policy=network_policy)
 
     async def update(
         self,
@@ -674,7 +674,7 @@ class SyncDriver(_ScenarioDriver):
         )
 
     async def update_network_policy(self, box: Any, network_policy: NetworkPolicy) -> Any:
-        return box.update_network_policy(network_policy)
+        return box.update(network_policy=network_policy)
 
     async def update(
         self,
@@ -1100,8 +1100,8 @@ async def network_policy_flow(driver: _ScenarioDriver, name: str) -> NetworkPoli
             box = await driver.create_with_network_policy(name, NetworkPolicy.allow_all())
             allow_all_created = box.network_policy == NetworkPolicyReadback(mode="allow-all")
 
-            session = await driver.update_network_policy(box, custom)
-            returned = session.network_policy
+            assert await driver.update_network_policy(box, custom) is box
+            returned = box.current_session.network_policy
             custom_returned = (
                 returned is not None
                 and returned.mode == "custom"
@@ -1141,8 +1141,11 @@ async def network_policy_flow(driver: _ScenarioDriver, name: str) -> NetworkPoli
             assert unchanged.current_session is not None
             assert unchanged.current_session.network_policy == returned
 
-            session = await driver.update_network_policy(box, NetworkPolicy.deny_all())
-            deny_all_returned = session.network_policy == NetworkPolicyReadback(mode="deny-all")
+            await driver.update_network_policy(box, NetworkPolicy.deny_all())
+            deny_all = NetworkPolicyReadback(mode="deny-all")
+            deny_all_returned = (
+                box.network_policy == deny_all and box.current_session.network_policy == deny_all
+            )
         finally:
             if box is not None:
                 await driver.destroy(box)

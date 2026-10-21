@@ -1,0 +1,1 @@
+Remove `SandboxRuntimeSession.update_network_policy()` and `SyncSandboxRuntimeSession.update_network_policy()`. An explicit session handle can be stale, so the update could reach a session other than the sandbox's current one; use `Sandbox.update(network_policy=...)` instead.
