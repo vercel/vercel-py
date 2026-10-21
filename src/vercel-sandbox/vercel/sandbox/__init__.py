@@ -52,6 +52,7 @@ from vercel.sandbox._internal.errors import (
     SandboxInvalidHandleError,
     SandboxPathNotFoundError,
     SandboxResponseError,
+    SandboxStdinError,
     SandboxStreamError,
     SandboxTerminalStateError,
     SandboxTimeoutError as SandboxTimeoutError,
@@ -110,6 +111,7 @@ from vercel.sandbox._internal.options import (
     SandboxCredentialsFactory,
     SandboxServiceOptions,
 )
+from vercel.sandbox._internal.process_stdin import ProcessStdin
 from vercel.sandbox._internal.service import SandboxService, get_sandbox_service
 from vercel.sandbox._internal.state import SnapshotRetentionState
 from vercel.sandbox._internal.text_reader import TextReader
@@ -649,6 +651,7 @@ __all__ = [
     "InteractiveSessionOperation",
     "InteractiveStream",
     "Process",
+    "ProcessStdin",
     "CompletedProcess",
     "SandboxCredentials",
     "SandboxCredentialsError",
@@ -685,6 +688,7 @@ __all__ = [
     "SandboxResponseError",
     "ResumeSandboxOperation",
     "SandboxInteractiveError",
+    "SandboxStdinError",
     "SandboxStreamError",
     "SandboxRuntimeSession",
     "SandboxSessionOperation",

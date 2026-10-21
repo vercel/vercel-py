@@ -88,6 +88,14 @@ from vercel.sandbox._internal.process_output import (
     ProcessOutputRouter,
     _validate_reader_destination,
 )
+from vercel.sandbox._internal.process_stdin import (
+    ProcessInput,
+    ProcessStdin,
+    StdinMode,
+    _async_stdin,
+    _coerce_input,
+    _validate_stdin,
+)
 from vercel.sandbox._internal.recovery import (
     SandboxLifecycle,
     classify_sandbox_lifecycle_error,
@@ -136,11 +144,15 @@ class Process(_ProcessHandleState):
     The ``stdout`` and ``stderr`` readers each consume their process log
     stream once; reads make forward progress through the stream and cannot
     rewind. A reader is ``None`` when its stream was dropped with
-    ``subprocess.DEVNULL`` or merged with ``subprocess.STDOUT``.
+    ``subprocess.DEVNULL`` or merged with ``subprocess.STDOUT``. ``stdin`` is
+    ``None`` for a process created without ``stdin=subprocess.PIPE``; a
+    looked-up process always has a writer, which fails on first use if the
+    process has no stdin.
     """
 
-    __slots__ = ("_service", "stderr", "stdout")
+    __slots__ = ("_service", "stderr", "stdin", "stdout")
 
+    stdin: ProcessStdin | None
     stdout: TextReader | None
     stderr: TextReader | None
 
@@ -149,11 +161,13 @@ class Process(_ProcessHandleState):
         *,
         payload: ProcessState,
         service: SandboxService,
+        stdin: StdinMode = None,
         stdout: int = subprocess.PIPE,
         stderr: int = subprocess.PIPE,
     ) -> None:
         super().__init__(payload)
         self._service = service
+        self.stdin = _async_stdin(service, payload, stdin)
         self.stdout, self.stderr = _text_readers(
             lambda: service.process_logs_response(session_id=self._session_id, process_id=self.id),
             stdout=stdout,
@@ -181,12 +195,19 @@ class Process(_ProcessHandleState):
             raise SandboxResponseError("Wait response did not include a process return code")
         return self.returncode
 
-    async def communicate(self, input: None = None) -> tuple[str | None, str | None]:
-        """Read all output and wait for the process to exit.
+    async def communicate(self, input: ProcessInput | None = None) -> tuple[str | None, str | None]:
+        """Send input, read all output, and wait for the process to exit.
+
+        Stdin is closed whenever ``input`` is given, even if it is empty. With
+        ``input=None`` it is closed only if this handle owns it: the process
+        was created with ``stdin=subprocess.PIPE``, or this handle has written
+        to it. So calling ``communicate()`` on a looked-up process reads its
+        output without ending its input.
 
         Args:
-            input: Reserved for subprocess compatibility. Process standard
-                input is not supported and must be ``None``.
+            input: Bytes, or text encoded as UTF-8, to write to stdin before
+                closing it. It is not an error if the process exits or stops
+                reading before taking all of it.
 
         Returns:
             A ``(stdout, stderr)`` tuple. A stream without a reader is
@@ -194,10 +215,15 @@ class Process(_ProcessHandleState):
             ``(merged, None)``.
 
         Raises:
-            NotImplementedError: If ``input`` is not ``None``.
+            ValueError: If ``input`` is given and ``stdin`` is ``None``.
+            SandboxStdinError: If writing or closing stdin fails, including
+                writing to a looked-up process that has no stdin.
         """
-        if input is not None:
-            raise NotImplementedError("process stdin is not supported")
+        data = None if input is None else _coerce_input(input)
+        if self.stdin is not None:
+            await self.stdin._communicate(data)
+        elif data is not None:
+            raise ValueError("input requires a process created with stdin=subprocess.PIPE")
         stdout = None if self.stdout is None else await self.stdout.read()
         stderr = None if self.stderr is None else await self.stderr.read()
         await self.wait()
@@ -980,6 +1006,7 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         stdout: TextIO | int | None = None,
         stderr: TextIO | int | None = None,
         capture_output: bool = False,
+        input: ProcessInput | None = None,
     ) -> CompletedProcess:
         """Run a process to completion.
 
@@ -998,6 +1025,10 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
                 stderr. ``None`` inherits the local stderr stream; ``STDOUT``
                 merges stderr into the stdout destination.
             capture_output: Whether to capture stdout and stderr in the result.
+            input: Data written to the process's stdin, which is then closed;
+                text is encoded as UTF-8. Without it the process reads an
+                empty stdin. A process that exits or stops reading before
+                taking all of it is not an error.
 
         Returns:
             The completed process result.
@@ -1005,10 +1036,13 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         Raises:
             subprocess.CalledProcessError: If ``check`` is true and the process
                 exits unsuccessfully.
+            SandboxStdinError: If writing ``input`` fails. The process is
+                killed, since nothing else could stop it waiting for input.
         """
         output_router = ProcessOutputRouter(
             stdout=stdout, stderr=stderr, capture_output=capture_output
         )
+        data = None if input is None else _coerce_input(input)
         state = await self._service.run_process(
             session_id=self.id,
             command=command,
@@ -1018,6 +1052,7 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
             sudo=sudo,
             kill_after=parse_duration_seconds(kill_after),
             output_router=output_router,
+            input=data,
         )
         assert state.process.returncode is not None
         result = CompletedProcess(
@@ -1044,6 +1079,7 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         env: Mapping[str, str] | None = None,
         sudo: bool = False,
         kill_after: float | timedelta | None = None,
+        stdin: int | None = None,
         stdout: int = subprocess.PIPE,
         stderr: int = subprocess.PIPE,
     ) -> Process:
@@ -1057,6 +1093,8 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
             sudo: Whether to run with elevated privileges.
             kill_after: Duration after which the service kills the process
                 with ``SIGKILL``.
+            stdin: ``subprocess.PIPE`` for a writer at ``stdin``, or ``None``
+                (default) or ``subprocess.DEVNULL`` for an empty stdin.
             stdout: ``subprocess.PIPE`` (default) for a live reader or
                 ``subprocess.DEVNULL`` to drop the stream.
             stderr: ``subprocess.PIPE`` (default), ``subprocess.DEVNULL``, or
@@ -1068,6 +1106,7 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         """
         stdout = _validate_reader_destination(stdout, name="stdout")
         stderr = _validate_reader_destination(stderr, name="stderr", allow_stdout_merge=True)
+        attach_stdin = _validate_stdin(stdin)
         state = await self._service.create_process(
             session_id=self.id,
             command=command,
@@ -1076,8 +1115,15 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
             env=env,
             sudo=sudo,
             kill_after=parse_duration_seconds(kill_after),
+            attach_stdin=attach_stdin,
         )
-        return Process(payload=state, service=self._service, stdout=stdout, stderr=stderr)
+        return Process(
+            payload=state,
+            service=self._service,
+            stdin="attached" if attach_stdin else None,
+            stdout=stdout,
+            stderr=stderr,
+        )
 
     def open_interactive(
         self,
@@ -1132,17 +1178,20 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
             wait: Whether the API call should wait for process completion.
 
         Returns:
-            A process handle populated with the latest state.
+            A process handle populated with the latest state. Its ``stdin``
+            writer continues after any input already written, so it can take
+            over from the handle that started the process; only one handle
+            should write at a time.
         """
         state = await self._service.get_process(
             session_id=self.id, process_id=process_id, wait=wait
         )
-        return Process(payload=state, service=self._service)
+        return Process(payload=state, service=self._service, stdin="fetched")
 
     async def query_processes(self) -> list[Process]:
         """Return handles for the processes in this session."""
         states = await self._service.query_processes(session_id=self.id)
-        return [Process(payload=state, service=self._service) for state in states]
+        return [Process(payload=state, service=self._service, stdin="fetched") for state in states]
 
     async def refresh(self, *, include_system_routes: bool | None = None) -> Self:
         """Refresh this session's state and return the same handle."""
@@ -1360,6 +1409,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         stdout: TextIO | int | None = None,
         stderr: TextIO | int | None = None,
         capture_output: bool = False,
+        input: ProcessInput | None = None,
     ) -> CompletedProcess:
         """Run a process to completion in the current session.
 
@@ -1368,6 +1418,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         output_router = ProcessOutputRouter(
             stdout=stdout, stderr=stderr, capture_output=capture_output
         )
+        data = None if input is None else _coerce_input(input)
         parsed_kill_after = parse_duration_seconds(kill_after)
         state = await execute_with_sandbox_recovery(
             lambda session_id: self._service.run_process(
@@ -1379,6 +1430,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
                 sudo=sudo,
                 kill_after=parsed_kill_after,
                 output_router=output_router,
+                input=data,
             ),
             coordinator=self,
         )
@@ -1407,6 +1459,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         env: Mapping[str, str] | None = None,
         sudo: bool = False,
         kill_after: float | timedelta | None = None,
+        stdin: int | None = None,
         stdout: int = subprocess.PIPE,
         stderr: int = subprocess.PIPE,
     ) -> Process:
@@ -1419,6 +1472,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         """
         stdout = _validate_reader_destination(stdout, name="stdout")
         stderr = _validate_reader_destination(stderr, name="stderr", allow_stdout_merge=True)
+        attach_stdin = _validate_stdin(stdin)
         parsed_args = list(args) if args is not None else None
         parsed_kill_after = parse_duration_seconds(kill_after)
         state = await execute_with_sandbox_recovery(
@@ -1430,10 +1484,17 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
                 env=env,
                 sudo=sudo,
                 kill_after=parsed_kill_after,
+                attach_stdin=attach_stdin,
             ),
             coordinator=self,
         )
-        return Process(payload=state, service=self._service, stdout=stdout, stderr=stderr)
+        return Process(
+            payload=state,
+            service=self._service,
+            stdin="attached" if attach_stdin else None,
+            stdout=stdout,
+            stderr=stderr,
+        )
 
     def open_interactive(
         self,
@@ -1479,7 +1540,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
             ),
             coordinator=self,
         )
-        return Process(payload=state, service=self._service)
+        return Process(payload=state, service=self._service, stdin="fetched")
 
     async def query_processes(self) -> list[Process]:
         """Return handles for processes in the current session."""
@@ -1487,7 +1548,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
             lambda session_id: self._service.query_processes(session_id=session_id),
             coordinator=self,
         )
-        return [Process(payload=state, service=self._service) for state in states]
+        return [Process(payload=state, service=self._service, stdin="fetched") for state in states]
 
     async def list_sessions(
         self,

@@ -13,6 +13,11 @@ from vercel.sandbox._internal.process_output import (
     ProcessOutputRouter,
     _validate_reader_destination,
 )
+from vercel.sandbox._internal.process_stdin import (
+    ProcessInput,
+    _coerce_input,
+    _validate_stdin,
+)
 from vercel.sandbox._internal.sync_runtime import SyncProcess, SyncSandboxFilesystem
 from vercel.sandbox._internal.user_core import UserContext
 
@@ -56,6 +61,7 @@ class SyncSandboxUser:
         stdout: TextIO | int | None = None,
         stderr: TextIO | int | None = None,
         capture_output: bool = False,
+        input: ProcessInput | None = None,
     ) -> CompletedProcess:
         """Run to completion; defaults to this user and their home directory.
 
@@ -73,6 +79,7 @@ class SyncSandboxUser:
             output_router=ProcessOutputRouter(
                 stdout=stdout, stderr=stderr, capture_output=capture_output
             ),
+            input=None if input is None else _coerce_input(input),
         )
         return iter_coroutine(operation)
 
@@ -85,6 +92,7 @@ class SyncSandboxUser:
         env: Mapping[str, str] | None = None,
         sudo: bool = False,
         kill_after: float | timedelta | None = None,
+        stdin: int | None = None,
         stdout: int = subprocess.PIPE,
         stderr: int = subprocess.PIPE,
     ) -> SyncProcess:
@@ -96,6 +104,7 @@ class SyncSandboxUser:
         """
         stdout = _validate_reader_destination(stdout, name="stdout")
         stderr = _validate_reader_destination(stderr, name="stderr", allow_stdout_merge=True)
+        attach_stdin = _validate_stdin(stdin)
         parsed_args = None if args is None else list(args)
         duration = parse_duration_seconds(kill_after)
         operation = self._context.execute(
@@ -107,9 +116,14 @@ class SyncSandboxUser:
                 env=env,
                 sudo=sudo,
                 kill_after=duration,
+                attach_stdin=attach_stdin,
             )
         )
         state = iter_coroutine(operation)
         return SyncProcess(
-            payload=state, service=self._context.service, stdout=stdout, stderr=stderr
+            payload=state,
+            service=self._context.service,
+            stdin="attached" if attach_stdin else None,
+            stdout=stdout,
+            stderr=stderr,
         )

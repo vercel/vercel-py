@@ -63,6 +63,7 @@ from vercel.sandbox._internal.options import (
     SyncSandboxServiceOptions,
 )
 from vercel.sandbox._internal.process_output import ProcessOutputRouter
+from vercel.sandbox._internal.process_stdin import feed_process_input
 from vercel.sandbox._internal.recovery import _lifecycle_stream_error
 from vercel.sandbox._internal.runtime_common import (
     _StreamUploadFileEntry,
@@ -710,6 +711,7 @@ class SandboxService:
         env: Mapping[str, str] | None = None,
         sudo: bool = False,
         kill_after: timedelta | None = None,
+        attach_stdin: bool = False,
         wait: bool,
     ) -> ProcessState:
         self._ensure_open()
@@ -721,6 +723,7 @@ class SandboxService:
             env=env,
             sudo=sudo,
             kill_after=kill_after,
+            attach_stdin=attach_stdin,
         )
         if not wait:
             return started
@@ -759,8 +762,15 @@ class SandboxService:
         sudo: bool = False,
         kill_after: timedelta | None = None,
         output_router: ProcessOutputRouter,
+        input: bytes | None = None,
     ) -> CompletedProcessState:
         self._ensure_open()
+        on_started = None
+        if input is not None:
+
+            async def on_started(process: ProcessState) -> None:
+                await feed_process_input(self, process, input)
+
         try:
             return await self._api_client.run_process(
                 session_id=session_id,
@@ -771,6 +781,7 @@ class SandboxService:
                 sudo=sudo,
                 kill_after=kill_after,
                 output_router=output_router,
+                on_started=on_started,
             )
         except _RunProcessInterrupted as interrupted:
             started, delivered = interrupted.process, interrupted.delivered
@@ -806,6 +817,7 @@ class SandboxService:
         env: Mapping[str, str] | None = None,
         sudo: bool = False,
         kill_after: timedelta | None = None,
+        attach_stdin: bool = False,
     ) -> ProcessState:
         return await self._run_process(
             session_id=session_id,
@@ -815,6 +827,7 @@ class SandboxService:
             env=env,
             sudo=sudo,
             kill_after=kill_after,
+            attach_stdin=attach_stdin,
             wait=False,
         )
 
@@ -1143,6 +1156,27 @@ class SandboxService:
         return await self._api_client.kill_command(
             session_id=session_id, command_id=process_id, signal=signal
         )
+
+    async def write_process_stdin(
+        self,
+        *,
+        session_id: str,
+        process_id: str,
+        data: bytes = b"",
+        offset: int | None = None,
+        close: bool = False,
+    ) -> int | None:
+        self._ensure_open()
+        return await self._api_client.write_command_stdin(
+            session_id=session_id,
+            command_id=process_id,
+            data=data,
+            offset=offset,
+            close=close,
+        )
+
+    async def sleep(self, seconds: float) -> None:
+        await self._sleep(seconds)
 
     async def process_logs_response(self, *, session_id: str, process_id: str) -> StreamingResponse:
         self._ensure_open()

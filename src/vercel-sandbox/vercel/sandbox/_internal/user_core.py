@@ -289,6 +289,7 @@ class UserContext:
         kill_after: timedelta | None,
         output_router: ProcessOutputRouter,
         check: bool,
+        input: bytes | None = None,
     ) -> CompletedProcess:
         state = await self.execute(
             lambda session_id: self.service.run_process(
@@ -300,6 +301,7 @@ class UserContext:
                 sudo=sudo,
                 kill_after=kill_after,
                 output_router=output_router,
+                input=input,
             )
         )
         assert state.process.returncode is not None
@@ -462,6 +464,7 @@ class UserService(SandboxService):
         sudo: bool = False,
         kill_after: timedelta | None = None,
         output_router: ProcessOutputRouter,
+        input: bytes | None = None,
     ) -> CompletedProcessState:
         wrapped = await self._wrap(session_id, command, args, cwd, env, sudo, kill_after)
         return await self._parent.run_process(
@@ -472,6 +475,7 @@ class UserService(SandboxService):
             sudo=True,
             kill_after=None,
             output_router=output_router,
+            input=input,
         )
 
     async def _run_process(
@@ -484,6 +488,7 @@ class UserService(SandboxService):
         env: Mapping[str, str] | None = None,
         sudo: bool = False,
         kill_after: timedelta | None = None,
+        attach_stdin: bool = False,
         wait: bool,
     ) -> ProcessState:
         wrapped = await self._wrap(session_id, command, args, cwd, env, sudo, kill_after)
@@ -494,6 +499,7 @@ class UserService(SandboxService):
             cwd="/",
             sudo=True,
             kill_after=None,
+            attach_stdin=attach_stdin,
             wait=wait,
         )
 
@@ -507,6 +513,7 @@ class UserService(SandboxService):
         env: Mapping[str, str] | None = None,
         sudo: bool = False,
         kill_after: timedelta | None = None,
+        attach_stdin: bool = False,
     ) -> ProcessState:
         state = await super().create_process(
             session_id=session_id,
@@ -516,6 +523,7 @@ class UserService(SandboxService):
             env=env,
             sudo=sudo,
             kill_after=kill_after,
+            attach_stdin=attach_stdin,
         )
         state = replace(
             state, name=command, args=tuple(args or ()), cwd=self._context.write_files_cwd(cwd)

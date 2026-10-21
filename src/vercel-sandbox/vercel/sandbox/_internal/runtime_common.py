@@ -234,10 +234,6 @@ class _ProcessHandleState:
     def status(self) -> ProcessStatus:
         return ProcessStatus.RUNNING if self.returncode is None else ProcessStatus.EXITED
 
-    @property
-    def stdin(self) -> None:
-        return None
-
     def _apply_payload(self, payload: ProcessState) -> None:
         if payload.id != self._payload.id or payload.session_id != self._payload.session_id:
             raise SandboxResponseError(

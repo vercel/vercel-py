@@ -17,6 +17,7 @@ from ._sandbox_scenarios import (
     NetworkPolicyObservation,
     PersistentObservation,
     ProcessFilesystemObservation,
+    StdinObservation,
     StreamingTransferObservation,
     SyncDriver,
     WorkspaceObservation,
@@ -24,6 +25,7 @@ from ._sandbox_scenarios import (
     network_policy_flow,
     persistent_snapshot_flow,
     process_filesystem_flow,
+    process_stdin_flow,
     reconcile_sandbox_drive_cleanup,
     streaming_transfer_flow,
     workspace_command_flow,
@@ -581,3 +583,21 @@ async def test_drive_fork_and_fork_by_name_copy_committed_data_independently() -
                     drive_name=source_name,
                     original_error=original_error,
                 )
+
+
+@requires_sandbox_credentials
+@pytest.mark.live
+@pytest.mark.asyncio
+async def test_process_stdin_flow_has_sync_async_semantic_parity() -> None:
+    expected = StdinObservation(
+        responses=[(0, True), (1, True), (2, True)],
+        server_exit_code=0,
+        digest_matches=True,
+        communicated="8",
+        broken_after_exit=True,
+        refused_without_stdin=True,
+    )
+    async_result = await process_stdin_flow(AsyncDriver(), _name("stdin", "async"))
+    sync_result = await process_stdin_flow(SyncDriver(), _name("stdin", "sync"))
+    assert async_result == expected
+    assert sync_result == expected

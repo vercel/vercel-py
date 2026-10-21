@@ -39,6 +39,18 @@ Processes and file transfers stream with bounded memory in both I/O modes.
 
 Process output is routed by [[src/vercel-sandbox/vercel/sandbox/_internal/process_output.py#ProcessOutputRouter]] and read through [[src/vercel-sandbox/vercel/sandbox/_internal/text_reader.py]]. File reads and writes share state machines in [[src/vercel-sandbox/vercel/sandbox/_internal/filesystem_handle_core.py]], with sync and async facades on top. Bulk transfers are encoded as tar+gzip on the fly by [[src/vercel-sandbox/vercel/sandbox/_internal/streaming_archive.py#ArchiveRequestWriter]] rather than being built in memory.
 
+## Process stdin
+
+Process stdin is a byte stream backed by offset-carrying requests, so writes can be resent without duplicating input and any handle can continue a stream.
+
+[[src/vercel-sandbox/vercel/sandbox/_internal/process_stdin.py#StdinCore]] holds the shared write logic. The async [[src/vercel-sandbox/vercel/sandbox/_internal/process_stdin.py#ProcessStdin]] is an AnyIO `ByteSendStream`; the sync [[src/vercel-sandbox/vercel/sandbox/_internal/process_stdin.py#SyncProcessStdin]] is a writable `io.RawIOBase`. Writes are serialized in call order and split into [[src/vercel-sandbox/vercel/sandbox/_internal/process_stdin.py#STDIN_CHUNK_SIZE]] requests.
+
+Before its first write a handle reads the service's confirmed byte count, and fails without writing if the service doesn't report it. Every write then carries that offset, which is what makes network errors, 429, 502, 503, and progressing 504 timeouts safe to resend; a timeout without a byte count counts as stalled. A failure that may have delivered part of a write breaks the stream for further writes but not for closing.
+
+Processes created with `stdin=subprocess.PIPE`, and every process from `get_process` or `query_processes`, have a writer. The service reports "never attached" and "stopped reading" with the same error, so a looked-up handle treats that error on its first request as stdin being unavailable rather than as a closed pipe. `communicate()` on a looked-up handle closes stdin only when given input or after writing. `run_process(input=...)` feeds input via [[src/vercel-sandbox/vercel/sandbox/_internal/process_stdin.py#feed_process_input]] once the start record arrives, killing the command if that fails.
+
+User processes inherit stdin through the launcher, which saves the original descriptor and hands it to the command.
+
 ## Linux user contexts
 
 User handles enforce Linux permissions for commands and reads while treating SDK uploads and directory creation as trusted orchestration.

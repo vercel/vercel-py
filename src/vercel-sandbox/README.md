@@ -3,6 +3,8 @@
 Create and manage Vercel Sandboxes with synchronous and asynchronous APIs.
 
 ```python
+import subprocess
+
 from vercel import sandbox
 from vercel.api import session
 
@@ -10,6 +12,13 @@ async with session():
     async with sandbox.create_sandbox() as instance:
         process = await instance.run_process("echo", ["hello"], capture_output=True)
         print(process.stdout)
+
+        # Pass input to run_process, or keep stdin open with stdin=subprocess.PIPE.
+        result = await instance.run_process("sort", input="b\na\n", capture_output=True)
+        server = await instance.create_process("cat", stdin=subprocess.PIPE)
+        await server.stdin.send(b"ping\n")
+        print(await server.stdout.readline())
+        print(await server.communicate())  # Close stdin, read the rest, and wait.
 ```
 
 The package can be installed independently with `pip install vercel-sandbox`.
@@ -40,6 +49,12 @@ with session():
         process = instance.run_process("echo", ["hello"], capture_output=True)
         print(process.stdout)
 ```
+
+Process APIs follow `subprocess`. Asynchronously, `process.stdin` is an
+`anyio.abc.ByteSendStream`, so it works with `TextSendStream` under asyncio or
+Trio. Synchronously it is a writable `io.RawIOBase`; wrap it in
+`io.TextIOWrapper` for text. For a long-running stdio server, see
+[`examples/sandbox_10_mcp_everything.py`](examples/sandbox_10_mcp_everything.py).
 
 ## Standalone clients
 
