@@ -1,1 +1,3 @@
 Add an `on_start` callback to `run_process` on sandboxes and runtime sessions in both APIs, the counterpart of `runCommand({ onStart })` in the TypeScript SDK. It receives the `Process` or `SyncProcess` handle as soon as the command starts, before any output is delivered, while the same request keeps streaming output and waiting for the exit. The callback must be synchronous. If it raises, `run_process` raises the same exception without killing the process, and a started process is never resumed or run again.
+
+Process handles no longer lose their return code when a `send_signal`, `kill`, or `refresh` response that was in flight when the process exited arrives after its exit was recorded.

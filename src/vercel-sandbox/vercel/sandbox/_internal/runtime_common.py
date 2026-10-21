@@ -241,6 +241,10 @@ class _ProcessHandleState:
                 "Sandbox process mutation response returned a different process identity",
                 data=payload,
             )
+        # An exited process never runs again, so a response that was in
+        # flight when the exit was recorded must not clear the return code.
+        if payload.returncode is None and self._payload.returncode is not None:
+            return
         self._payload = payload
 
 
@@ -275,10 +279,14 @@ class _ProcessStartHook(Generic[_ProcessHandleT]):
         """Validate ``callback`` before any request is sent."""
         if callback is None:
             return None
-        if inspect.iscoroutinefunction(callback):
-            raise TypeError("on_start must be a synchronous callable, not a coroutine function")
         if not callable(callback):
             raise TypeError(f"on_start must be callable, not {type(callback).__name__}")
+        # An instance with ``async def __call__`` is only detectable through
+        # its type; the instance itself is not a coroutine function.
+        if inspect.iscoroutinefunction(callback) or inspect.iscoroutinefunction(
+            type(callback).__call__
+        ):
+            raise TypeError("on_start must be a synchronous callable, not a coroutine function")
         return cls(callback, make_handle)
 
     def __call__(self, payload: ProcessState) -> None:

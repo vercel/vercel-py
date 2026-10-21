@@ -2002,7 +2002,14 @@ async def _async_on_start(_process: object) -> None:
     pass
 
 
-@pytest.mark.parametrize("kind", ["coroutine-function", "awaitable-result", "non-callable"])
+class _AsyncCallOnStart:
+    async def __call__(self, _process: object) -> None:
+        pass
+
+
+@pytest.mark.parametrize(
+    "kind", ["coroutine-function", "async-call-instance", "awaitable-result", "non-callable"]
+)
 @_ON_START_MODES
 @respx.mock
 async def test_run_process_rejects_non_synchronous_on_start(
@@ -2022,6 +2029,7 @@ async def test_run_process_rejects_non_synchronous_on_start(
 
     on_start = {
         "coroutine-function": _async_on_start,
+        "async-call-instance": _AsyncCallOnStart(),
         "awaitable-result": returns_awaitable,
         "non-callable": "not callable",
     }[kind]
@@ -2063,6 +2071,47 @@ async def test_sync_run_process_on_start_can_kill_the_process(
         process.kill()
 
     result = await _run_through(True, target, capture_output=True, on_start=on_start)
+
+    assert signals == [sandbox.ProcessSignal.SIGKILL]
+    assert result.returncode == 137
+    assert handles[0].returncode == 137
+
+
+@respx.mock
+async def test_async_on_start_kill_response_after_exit_keeps_returncode(
+    mock_env_clear: None,
+) -> None:
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
+        return_value=_completed_response(137)
+    )
+    release_kill = anyio.Event()
+    signals: list[int] = []
+
+    async def signal_handler(request: httpx.Request) -> httpx.Response:
+        signals.append(json.loads(request.content)["signal"])
+        await release_kill.wait()
+        # Describes the process as it was when the signal was sent.
+        return httpx.Response(200, json=_process_response())
+
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/kill").mock(
+        side_effect=signal_handler
+    )
+    handles: list[sandbox.Process] = []
+
+    async with session(service_options=_session_options()):
+        box = await sandbox.create_sandbox(name="preview")
+        async with anyio.create_task_group() as tg:
+
+            def on_start(process: sandbox.Process) -> None:
+                handles.append(process)
+                tg.start_soon(process.kill)
+
+            result = await box.run_process("python", capture_output=True, on_start=on_start)
+            assert handles[0].returncode == 137
+            release_kill.set()
 
     assert signals == [sandbox.ProcessSignal.SIGKILL]
     assert result.returncode == 137
