@@ -33,6 +33,12 @@ Operations through a `Sandbox` handle that fail because the sandbox is stopped, 
 
 Sandboxes can be created from a runtime, image, Git repository, tarball, or snapshot. Forking copies a named sandbox's configuration and current snapshot, but never its drive mounts.
 
+## Sandbox updates
+
+`Sandbox.update()` changes the live current session before saving sandbox configuration, and does not resume a stopped session.
+
+[[src/vercel-sandbox/vercel/sandbox/_internal/runtime_common.py#update_sandbox_configuration]] is shared by [[src/vercel-sandbox/vercel/sandbox/_internal/async_runtime.py#Sandbox#update]] and [[src/vercel-sandbox/vercel/sandbox/_internal/sync_runtime.py#SyncSandbox#update]]. A larger `execution_time_limit` extends a running cached current session by the difference, swallowing stopped and stopping errors. `network_policy` is applied to the cached current session unless its status is stopped, stopping, aborted, or failed; a live-policy failure raises before configuration is saved. The configuration and tags are saved last, and the operations are not atomic.
+
 ## Processes and filesystem
 
 Processes and file transfers stream with bounded memory in both I/O modes.

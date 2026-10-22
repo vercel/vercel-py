@@ -114,6 +114,7 @@ from vercel.sandbox._internal.runtime_common import (
     _signal_number,
     _UploadFileEntry,
     _validate_file_mode,
+    update_sandbox_configuration,
 )
 from vercel.sandbox._internal.service import SandboxService, _SandboxTerminalState
 from vercel.sandbox._internal.state import (
@@ -1760,6 +1761,11 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         Only non-``None`` values are sent, except ``snapshot_retention`` where
         explicitly passing ``None`` removes the retention policy.
 
+        A larger ``execution_time_limit`` also extends a running current
+        session. ``network_policy`` is applied to an active current session
+        before the configuration and tags are saved; a live-policy failure
+        raises without saving. These operations are not atomic.
+
         Args:
             mounts: Complete Drive mount replacement for the next session.
                 Pass ``None`` to leave mounts unchanged or ``{}`` to remove all
@@ -1770,9 +1776,9 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         Returns:
             This handle refreshed with the updated sandbox state.
         """
-        payload = await self._service.update_sandbox(
-            name=self.name,
-            project_id=self.project_id,
+        await update_sandbox_configuration(
+            self._service,
+            self,
             ports=ports,
             execution_time_limit=parse_duration_seconds(execution_time_limit),
             resources=resources,
@@ -1788,7 +1794,6 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
             region=region,
             failover_regions=normalize_failover_regions(failover_regions),
         )
-        self._apply_payload(payload)
         return self
 
 

@@ -1,7 +1,7 @@
 import asyncio
 import gc
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from itertools import islice
@@ -776,6 +776,241 @@ async def test_service_region_defaults_placement_operations_and_allows_call_over
         "tags": {"updated": "true"},
         "region": "iad1",
     }
+
+
+def _recorded_response(
+    order: list[str],
+    label: str,
+    response: httpx.Response,
+) -> Callable[[httpx.Request], httpx.Response]:
+    def respond(request: httpx.Request) -> httpx.Response:
+        order.append(label)
+        return response
+
+    return respond
+
+
+def _mock_update_routes(
+    order: list[str],
+    *,
+    session_status: str | None = "running",
+    extend: httpx.Response | None = None,
+    policy: httpx.Response | None = None,
+    patch: httpx.Response | None = None,
+) -> tuple[respx.Route, respx.Route, respx.Route]:
+    sandbox_response = _sandbox_response(session_status=session_status)
+    if session_status is None:
+        del sandbox_response["session"]["status"]
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(200, json=sandbox_response)
+    )
+    extend_route = respx.post(
+        "https://sandbox.test/v2/sandboxes/sessions/sbx_123/extend-timeout"
+    ).mock(
+        side_effect=_recorded_response(
+            order,
+            "extend",
+            extend or httpx.Response(200, json={"session": _sandbox_response()["session"]}),
+        )
+    )
+    policy_route = respx.post(
+        "https://sandbox.test/v2/sandboxes/sessions/sbx_123/network-policy"
+    ).mock(
+        side_effect=_recorded_response(
+            order,
+            "policy",
+            policy or httpx.Response(200, json={"session": _sandbox_response()["session"]}),
+        )
+    )
+    patch_route = respx.patch("https://sandbox.test/v2/sandboxes/preview").mock(
+        side_effect=_recorded_response(
+            order,
+            "patch",
+            patch or httpx.Response(200, json={"sandbox": _sandbox_response()["sandbox"]}),
+        )
+    )
+    return extend_route, policy_route, patch_route
+
+
+async def _run_sandbox_update(sync: bool, **kwargs: Any) -> Any:
+    handle: Any
+    if sync:
+        with session(service_options=_session_options(sync=True)):
+            handle = sandbox_sync.get_sandbox(name="preview")
+            handle.update(**kwargs)
+            return handle
+    async with session(service_options=_session_options()):
+        handle = await sandbox.get_sandbox(name="preview")
+        await handle.update(**kwargs)
+        return handle
+
+
+@respx.mock
+@pytest.mark.parametrize("sync", [False, True])
+async def test_update_applies_live_session_changes_before_configuration(
+    mock_env_clear: None,
+    sync: bool,
+) -> None:
+    order: list[str] = []
+    extended_session = _sandbox_response()["session"]
+    extended_session["timeout"] = 360000
+    policy_session = _sandbox_response(session_network_policy={"mode": "deny-all"})["session"]
+    policy_session["timeout"] = 360000
+    extend_route, policy_route, patch_route = _mock_update_routes(
+        order,
+        extend=httpx.Response(200, json={"session": extended_session}),
+        policy=httpx.Response(200, json={"session": policy_session}),
+    )
+
+    handle = await _run_sandbox_update(
+        sync,
+        execution_time_limit=360,
+        network_policy=_authored_network_policy(),
+        tags={"env": "updated"},
+    )
+
+    assert order == ["extend", "policy", "patch"]
+    assert json.loads(extend_route.calls.last.request.content) == {"duration": 60000}
+    assert "allow" in json.loads(policy_route.calls.last.request.content)
+    patch_body = json.loads(patch_route.calls.last.request.content)
+    assert patch_body["tags"] == {"env": "updated"}
+    assert "networkPolicy" in patch_body
+    assert handle.current_session is not None
+    assert handle.current_session.execution_time_limit == timedelta(minutes=6)
+    assert handle.current_session.network_policy == NetworkPolicyReadback(mode="deny-all")
+
+
+@respx.mock
+@pytest.mark.parametrize("sync", [False, True])
+async def test_update_live_policy_failure_skips_configuration(
+    mock_env_clear: None,
+    sync: bool,
+) -> None:
+    order: list[str] = []
+    _, policy_route, patch_route = _mock_update_routes(
+        order,
+        policy=httpx.Response(
+            500,
+            json={"error": {"code": "policy_failed", "message": "failed"}},
+        ),
+    )
+
+    with pytest.raises(SandboxApiError):
+        await _run_sandbox_update(
+            sync,
+            network_policy=_authored_network_policy(),
+            tags={"env": "updated"},
+        )
+
+    assert order == ["policy"]
+    assert policy_route.call_count == 1
+    assert patch_route.call_count == 0
+
+
+@respx.mock
+@pytest.mark.parametrize("sync", [False, True])
+@pytest.mark.parametrize("session_status", ["stopping", "stopped", "aborted", "failed"])
+async def test_update_skips_live_policy_for_inactive_session(
+    mock_env_clear: None,
+    sync: bool,
+    session_status: str,
+) -> None:
+    order: list[str] = []
+    _, policy_route, patch_route = _mock_update_routes(order, session_status=session_status)
+
+    await _run_sandbox_update(
+        sync,
+        network_policy=_authored_network_policy(),
+        tags={"env": "updated"},
+    )
+
+    assert order == ["patch"]
+    assert policy_route.call_count == 0
+    patch_body = json.loads(patch_route.calls.last.request.content)
+    assert patch_body["tags"] == {"env": "updated"}
+    assert "networkPolicy" in patch_body
+
+
+@respx.mock
+@pytest.mark.parametrize("sync", [False, True])
+@pytest.mark.parametrize("session_status", ["pending", "snapshotting", None])
+async def test_update_applies_live_policy_for_other_session_statuses(
+    mock_env_clear: None,
+    sync: bool,
+    session_status: str | None,
+) -> None:
+    order: list[str] = []
+    _, policy_route, patch_route = _mock_update_routes(order, session_status=session_status)
+
+    await _run_sandbox_update(
+        sync,
+        network_policy=_authored_network_policy(),
+        tags={"env": "updated"},
+    )
+
+    assert order == ["policy", "patch"]
+    assert policy_route.call_count == 1
+    assert patch_route.call_count == 1
+
+
+@respx.mock
+@pytest.mark.parametrize("sync", [False, True])
+@pytest.mark.parametrize(
+    ("status_code", "data", "raises"),
+    [
+        (410, {"error": {"message": "gone"}}, False),
+        (422, {"error": {"code": "sandbox_stopping", "message": "stopping"}}, False),
+        (500, {"error": {"code": "extend_failed", "message": "failed"}}, True),
+    ],
+)
+async def test_update_extend_timeout_swallows_only_lifecycle_errors(
+    mock_env_clear: None,
+    sync: bool,
+    status_code: int,
+    data: dict[str, object],
+    raises: bool,
+) -> None:
+    order: list[str] = []
+    _, _, patch_route = _mock_update_routes(
+        order,
+        extend=httpx.Response(status_code, json=data),
+    )
+
+    if raises:
+        with pytest.raises(SandboxApiError):
+            await _run_sandbox_update(sync, execution_time_limit=360)
+        assert order == ["extend"]
+        assert patch_route.call_count == 0
+    else:
+        await _run_sandbox_update(sync, execution_time_limit=360)
+        assert order == ["extend", "patch"]
+        assert patch_route.call_count == 1
+
+
+@respx.mock
+@pytest.mark.parametrize("sync", [False, True])
+@pytest.mark.parametrize(
+    ("session_status", "execution_time_limit"),
+    [("running", 300), ("running", 120), ("pending", 600)],
+)
+async def test_update_skips_extend_without_running_growth(
+    mock_env_clear: None,
+    sync: bool,
+    session_status: str,
+    execution_time_limit: int,
+) -> None:
+    order: list[str] = []
+    extend_route, _, patch_route = _mock_update_routes(order, session_status=session_status)
+
+    await _run_sandbox_update(
+        sync,
+        execution_time_limit=execution_time_limit,
+        tags={"env": "updated"},
+    )
+
+    assert order == ["patch"]
+    assert extend_route.call_count == 0
+    assert json.loads(patch_route.calls.last.request.content)["tags"] == {"env": "updated"}
 
 
 @respx.mock
