@@ -1,6 +1,7 @@
 import asyncio
 import gc
 import json
+import warnings
 from collections.abc import AsyncIterator, Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
@@ -1194,32 +1195,34 @@ async def test_update_extend_timeout_ignores_only_session_gone_errors(
 
 @respx.mock
 @pytest.mark.parametrize("sync", [False, True])
-async def test_update_network_policy_methods_are_deprecated(
+async def test_only_sandbox_update_network_policy_is_deprecated(
     mock_env_clear: None,
     sync: bool,
 ) -> None:
     order: list[str] = []
     _, policy_route, _ = _mock_update_routes(order)
     sandbox_class = "SyncSandbox" if sync else "Sandbox"
-    session_class = f"{sandbox_class}RuntimeSession"
     sandbox_warning = rf"^{sandbox_class}\.update_network_policy\(\) is deprecated"
-    session_warning = rf"^{session_class}\.update_network_policy\(\) is deprecated"
+    session_warnings: list[warnings.WarningMessage] = []
 
     if sync:
         with session(service_options=_session_options(sync=True)):
             handle: Any = sandbox_sync.get_sandbox(name="preview")
             with pytest.warns(DeprecationWarning, match=sandbox_warning):
                 handle.update_network_policy(NetworkPolicy.deny_all())
-            with pytest.warns(DeprecationWarning, match=session_warning):
+            with warnings.catch_warnings(record=True) as session_warnings:
+                warnings.simplefilter("always")
                 handle.current_session.update_network_policy(NetworkPolicy.deny_all())
     else:
         async with session(service_options=_session_options()):
             handle = await sandbox.get_sandbox(name="preview")
             with pytest.warns(DeprecationWarning, match=sandbox_warning):
                 await handle.update_network_policy(NetworkPolicy.deny_all())
-            with pytest.warns(DeprecationWarning, match=session_warning):
+            with warnings.catch_warnings(record=True) as session_warnings:
+                warnings.simplefilter("always")
                 await handle.current_session.update_network_policy(NetworkPolicy.deny_all())
 
+    assert session_warnings == []
     assert policy_route.call_count == 2
 
 

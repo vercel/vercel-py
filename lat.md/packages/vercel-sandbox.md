@@ -41,7 +41,7 @@ Sandboxes can be created from a runtime, image, Git repository, tarball, or snap
 
 [[src/vercel-sandbox/vercel/sandbox/_internal/async_runtime.py#Sandbox#update]] and [[src/vercel-sandbox/vercel/sandbox/_internal/sync_runtime.py#SyncSandbox#update]] drain it through [[src/vercel-sandbox/vercel/sandbox/_internal/runtime_common.py#SandboxHandleBase#_apply_update_steps]], a coroutine the sync runtime runs with `iter_coroutine`. Each step is applied before the next one runs, so a later failure keeps the changes that already succeeded. Live session results go through [[src/vercel-sandbox/vercel/sandbox/_internal/runtime_common.py#SandboxHandleBase#_apply_current_session_payload_if_current]], which ignores a result for a session that a concurrent recovery has replaced. The final saved sandbox is applied whole.
 
-The older `update_network_policy()` methods on sandboxes and sessions still work but emit `DeprecationWarning` in favor of `update(network_policy=...)`. The session-level one can target a session that is no longer current.
+The sandbox-level `update_network_policy()` still works but emits `DeprecationWarning` in favor of `update(network_policy=...)`, matching the TypeScript SDK. [[src/vercel-sandbox/vercel/sandbox/_internal/async_runtime.py#SandboxRuntimeSession#update_network_policy]] is not deprecated: like TypeScript `session.update()`, it changes only that session without saving the policy, and keeps the parent sandbox's cached session state in sync.
 
 ## Processes and filesystem
 
