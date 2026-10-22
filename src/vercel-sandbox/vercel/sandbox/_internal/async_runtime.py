@@ -1689,20 +1689,6 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         self._apply_current_session_payload_if_current(result.session, target_id)
         return Snapshot(payload=result.snapshot, service=self._service)
 
-    def _apply_current_session_payload_if_current(
-        self, payload: SandboxRuntimeSessionState, target_id: str
-    ) -> SandboxRuntimeSession:
-        """Ignore an operation reply superseded by a concurrent recovery."""
-        if target_id == self.current_session_id:
-            return self._apply_current_session_payload(payload)
-        session = self.current_session
-        if session is None:
-            raise SandboxResponseError(
-                "Sandbox current-session operation returned a different session identity",
-                data=payload,
-            )
-        return session
-
     async def stop(self) -> Self:
         """Stop the current session and return this sandbox handle."""
         session = self.current_session
@@ -1775,9 +1761,12 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         Returns:
             This handle refreshed with the updated sandbox state.
         """
-        await self._apply_payloads(
+        session = self.current_session
+        await self._apply_update_steps(
             self._service.update_sandbox(
-                sandbox=self._payload,
+                name=self.name,
+                project_id=self.project_id,
+                current_session=None if session is None else session._payload,
                 ports=ports,
                 execution_time_limit=parse_duration_seconds(execution_time_limit),
                 resources=resources,

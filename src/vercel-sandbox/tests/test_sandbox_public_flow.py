@@ -947,6 +947,166 @@ async def test_update_keeps_live_changes_before_a_failed_step(
     assert handle.current_session.execution_time_limit == timedelta(minutes=6)
 
 
+def _extend_by_requested_duration(
+    timeouts_ms: list[int],
+) -> Callable[[httpx.Request], httpx.Response]:
+    def respond(request: httpx.Request) -> httpx.Response:
+        timeouts_ms.append(timeouts_ms[-1] + json.loads(request.content)["duration"])
+        extended_session = _sandbox_response()["session"]
+        extended_session["timeout"] = timeouts_ms[-1]
+        return httpx.Response(200, json={"session": extended_session})
+
+    return respond
+
+
+@respx.mock
+@pytest.mark.parametrize("sync", [False, True])
+async def test_update_measures_timeout_growth_from_the_current_session_handle(
+    mock_env_clear: None,
+    sync: bool,
+) -> None:
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    timeouts_ms = [300000]
+    extend_route = respx.post(
+        "https://sandbox.test/v2/sandboxes/sessions/sbx_123/extend-timeout"
+    ).mock(side_effect=_extend_by_requested_duration(timeouts_ms))
+    respx.patch("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(200, json={"sandbox": _sandbox_response()["sandbox"]})
+    )
+
+    handle: Any
+    if sync:
+        with session(service_options=_session_options(sync=True)):
+            handle = sandbox_sync.get_sandbox(name="preview")
+            handle.current_session.extend_execution_time_limit(60)
+            handle.update(execution_time_limit=360)
+    else:
+        async with session(service_options=_session_options()):
+            handle = await sandbox.get_sandbox(name="preview")
+            await handle.current_session.extend_execution_time_limit(60)
+            await handle.update(execution_time_limit=360)
+
+    assert [json.loads(call.request.content)["duration"] for call in extend_route.calls] == [60000]
+    assert timeouts_ms[-1] == 360000
+
+
+def _mock_update_superseded_by_recovery(
+    extend_old: Callable[[httpx.Request], Any],
+) -> tuple[respx.Route, respx.Route]:
+    def sandbox_handler(request: httpx.Request) -> httpx.Response:
+        session_id = "sbx_old" if request.url.params["resume"] == "false" else "sbx_new"
+        return httpx.Response(200, json=_sandbox_response(session_id=session_id))
+
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(side_effect=sandbox_handler)
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_old/extend-timeout").mock(
+        side_effect=extend_old
+    )
+    policy_route = respx.post(
+        "https://sandbox.test/v2/sandboxes/sessions/sbx_old/network-policy"
+    ).mock(
+        return_value=httpx.Response(
+            500,
+            json={"error": {"code": "policy_failed", "message": "failed"}},
+        )
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_old/cmd").mock(
+        return_value=httpx.Response(
+            409,
+            json={"error": {"code": "sandbox_stopped", "message": "session is stopped"}},
+        )
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_new/cmd").mock(
+        return_value=_recovery_success_response("query_processes", session_id="sbx_new")
+    )
+    patch_route = respx.patch("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(200, json={"sandbox": _sandbox_response()["sandbox"]})
+    )
+    return policy_route, patch_route
+
+
+def _extended_old_session_response() -> httpx.Response:
+    extended_session = _sandbox_response(session_id="sbx_old")["session"]
+    extended_session["timeout"] = 360000
+    return httpx.Response(200, json={"session": extended_session})
+
+
+@respx.mock
+async def test_async_update_step_superseded_by_recovery_keeps_current_session(
+    mock_env_clear: None,
+) -> None:
+    extend_started = anyio.Event()
+    allow_extend = anyio.Event()
+
+    async def extend_old(_request: httpx.Request) -> httpx.Response:
+        extend_started.set()
+        await allow_extend.wait()
+        return _extended_old_session_response()
+
+    policy_route, patch_route = _mock_update_superseded_by_recovery(extend_old)
+    errors: list[SandboxApiError] = []
+
+    async with session(service_options=_session_options()):
+        handle = await sandbox.get_sandbox(name="preview")
+
+        async def run_update() -> None:
+            try:
+                await handle.update(
+                    execution_time_limit=360, network_policy=_authored_network_policy()
+                )
+            except SandboxApiError as error:
+                errors.append(error)
+
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(run_update)
+            await extend_started.wait()
+            assert len(await handle.query_processes()) == 1
+            allow_extend.set()
+
+    assert len(errors) == 1
+    assert policy_route.call_count == 1
+    assert patch_route.call_count == 0
+    assert handle.current_session_id == "sbx_new"
+    assert handle.current_session is not None
+    assert handle.current_session.id == "sbx_new"
+
+
+@respx.mock
+def test_sync_update_step_superseded_by_recovery_keeps_current_session(
+    mock_env_clear: None,
+) -> None:
+    extend_started = Event()
+    allow_extend = Event()
+
+    def extend_old(_request: httpx.Request) -> httpx.Response:
+        extend_started.set()
+        assert allow_extend.wait(timeout=5)
+        return _extended_old_session_response()
+
+    policy_route, patch_route = _mock_update_superseded_by_recovery(extend_old)
+
+    with session(service_options=_session_options(sync=True)):
+        handle = sandbox_sync.get_sandbox(name="preview")
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            update = executor.submit(
+                handle.update,
+                execution_time_limit=360,
+                network_policy=_authored_network_policy(),
+            )
+            assert extend_started.wait(timeout=5)
+            assert len(handle.query_processes()) == 1
+            allow_extend.set()
+            with pytest.raises(SandboxApiError):
+                update.result(timeout=5)
+
+    assert policy_route.call_count == 1
+    assert patch_route.call_count == 0
+    assert handle.current_session_id == "sbx_new"
+    assert handle.current_session is not None
+    assert handle.current_session.id == "sbx_new"
+
+
 @respx.mock
 @pytest.mark.parametrize("sync", [False, True])
 @pytest.mark.parametrize("session_status", ["stopping", "stopped", "aborted", "failed"])
