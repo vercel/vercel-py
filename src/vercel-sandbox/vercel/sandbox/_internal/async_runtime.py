@@ -114,7 +114,6 @@ from vercel.sandbox._internal.runtime_common import (
     _signal_number,
     _UploadFileEntry,
     _validate_file_mode,
-    update_sandbox_configuration,
 )
 from vercel.sandbox._internal.service import SandboxService, _SandboxTerminalState
 from vercel.sandbox._internal.state import (
@@ -1776,23 +1775,24 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         Returns:
             This handle refreshed with the updated sandbox state.
         """
-        await update_sandbox_configuration(
-            self._service,
-            self,
-            ports=ports,
-            execution_time_limit=parse_duration_seconds(execution_time_limit),
-            resources=resources,
-            persistent=persistent,
-            network_policy=network_policy,
-            network_id=network_id,
-            env=env,
-            tags=tags,
-            mounts=mounts,
-            snapshot_expiration=_parse_snapshot_expiration(snapshot_expiration),
-            snapshot_retention=snapshot_retention,
-            current_snapshot_id=current_snapshot_id,
-            region=region,
-            failover_regions=normalize_failover_regions(failover_regions),
+        await self._apply_payloads(
+            self._service.update_sandbox(
+                sandbox=self._payload,
+                ports=ports,
+                execution_time_limit=parse_duration_seconds(execution_time_limit),
+                resources=resources,
+                persistent=persistent,
+                network_policy=network_policy,
+                network_id=network_id,
+                env=env,
+                tags=tags,
+                mounts=mounts,
+                snapshot_expiration=_parse_snapshot_expiration(snapshot_expiration),
+                snapshot_retention=snapshot_retention,
+                current_snapshot_id=current_snapshot_id,
+                region=region,
+                failover_regions=normalize_failover_regions(failover_regions),
+            )
         )
         return self
 

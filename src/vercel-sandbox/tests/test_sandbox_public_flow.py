@@ -909,6 +909,46 @@ async def test_update_live_policy_failure_skips_configuration(
 
 @respx.mock
 @pytest.mark.parametrize("sync", [False, True])
+async def test_update_keeps_live_changes_before_a_failed_step(
+    mock_env_clear: None,
+    sync: bool,
+) -> None:
+    order: list[str] = []
+    extended_session = _sandbox_response()["session"]
+    extended_session["timeout"] = 360000
+    _, _, patch_route = _mock_update_routes(
+        order,
+        extend=httpx.Response(200, json={"session": extended_session}),
+        policy=httpx.Response(
+            500,
+            json={"error": {"code": "policy_failed", "message": "failed"}},
+        ),
+    )
+
+    handle: Any
+    if sync:
+        with session(service_options=_session_options(sync=True)):
+            handle = sandbox_sync.get_sandbox(name="preview")
+            original_session = handle.current_session
+            with pytest.raises(SandboxApiError):
+                handle.update(execution_time_limit=360, network_policy=_authored_network_policy())
+    else:
+        async with session(service_options=_session_options()):
+            handle = await sandbox.get_sandbox(name="preview")
+            original_session = handle.current_session
+            with pytest.raises(SandboxApiError):
+                await handle.update(
+                    execution_time_limit=360, network_policy=_authored_network_policy()
+                )
+
+    assert order == ["extend", "policy"]
+    assert patch_route.call_count == 0
+    assert handle.current_session is original_session
+    assert handle.current_session.execution_time_limit == timedelta(minutes=6)
+
+
+@respx.mock
+@pytest.mark.parametrize("sync", [False, True])
 @pytest.mark.parametrize("session_status", ["stopping", "stopped", "aborted", "failed"])
 async def test_update_skips_live_policy_for_inactive_session(
     mock_env_clear: None,

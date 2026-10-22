@@ -37,7 +37,9 @@ Sandboxes can be created from a runtime, image, Git repository, tarball, or snap
 
 `Sandbox.update()` changes the live current session before saving sandbox configuration, and does not resume a stopped session.
 
-[[src/vercel-sandbox/vercel/sandbox/_internal/runtime_common.py#update_sandbox_configuration]] is shared by [[src/vercel-sandbox/vercel/sandbox/_internal/async_runtime.py#Sandbox#update]] and [[src/vercel-sandbox/vercel/sandbox/_internal/sync_runtime.py#SyncSandbox#update]]. A larger `execution_time_limit` extends a running cached current session by the difference, swallowing stopped and stopping errors. `network_policy` is applied to the cached current session unless its status is stopped, stopping, aborted, or failed; a live-policy failure raises before configuration is saved. The configuration and tags are saved last, and the operations are not atomic.
+[[src/vercel-sandbox/vercel/sandbox/_internal/service.py#SandboxService#update_sandbox]] owns the ordering. It is an async generator that takes the handle's cached sandbox state and yields the resulting sandbox state after each step. A larger `execution_time_limit` extends a running cached current session by the difference, ignoring stopped and stopping errors. `network_policy` is applied to the cached current session unless its status is stopped, stopping, aborted, or failed; a live-policy failure raises before configuration is saved. The configuration and tags are saved last, and the operations are not atomic.
+
+[[src/vercel-sandbox/vercel/sandbox/_internal/async_runtime.py#Sandbox#update]] and [[src/vercel-sandbox/vercel/sandbox/_internal/sync_runtime.py#SyncSandbox#update]] drain it through [[src/vercel-sandbox/vercel/sandbox/_internal/runtime_common.py#SandboxHandleBase#_apply_payloads]], a coroutine the sync runtime runs with `iter_coroutine`. Each yielded state is applied before the next step, so a later failure keeps the changes that already succeeded.
 
 ## Processes and filesystem
 

@@ -5,35 +5,25 @@ import inspect
 import posixpath
 import signal as signal_module
 import weakref
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Callable, Sequence
+from contextlib import aclosing
 from dataclasses import dataclass, replace
 from datetime import timedelta
 from enum import Enum, auto
 from pathlib import PurePosixPath
-from typing import TYPE_CHECKING, Any, Generic, Literal, TypeAlias, TypeVar
+from typing import Any, Generic, Literal, TypeAlias, TypeVar
 
 from vercel._internal.core.byte_stream import ReadableByteStream
 from vercel.sandbox._internal.errors import SandboxResponseError
 from vercel.sandbox._internal.models import (
-    DriveMountsInput,
     JSONObject,
-    NetworkIdUpdate,
-    NetworkPolicy,
     NetworkPolicyReadback,
     ProcessSignal,
     ProcessStatus,
     RemotePath,
     SandboxMount,
-    SandboxResources,
     SandboxStatus,
-    SnapshotExpiration,
-    SnapshotRetentionUpdate,
-    _RemotePathT,
     _WriteFile,
-)
-from vercel.sandbox._internal.recovery import (
-    SandboxLifecycle,
-    classify_sandbox_lifecycle_error,
 )
 from vercel.sandbox._internal.state import (
     DriveState,
@@ -45,9 +35,6 @@ from vercel.sandbox._internal.state import (
     SnapshotRetentionState,
     SnapshotState,
 )
-
-if TYPE_CHECKING:
-    from vercel.sandbox._internal.service import SandboxService
 
 RuntimeSessionHandleT = TypeVar("RuntimeSessionHandleT", bound="RuntimeSessionHandleBase")
 _SourceT = TypeVar("_SourceT")
@@ -711,6 +698,12 @@ class SandboxHandleBase(Generic[RuntimeSessionHandleT]):
             _current_session_attached=True,
         )
 
+    async def _apply_payloads(self, payloads: AsyncGenerator[SandboxState, None]) -> None:
+        """Apply each state produced by a multi-step service operation."""
+        async with aclosing(payloads):
+            async for payload in payloads:
+                self._apply_payload(payload)
+
     def _apply_current_session_payload(
         self, payload: SandboxRuntimeSessionState
     ) -> RuntimeSessionHandleT:
@@ -761,92 +754,3 @@ class SandboxHandleBase(Generic[RuntimeSessionHandleT]):
         else:
             default = self.cwd or "/vercel/sandbox"
         return _resolve_write_files_cwd(cwd, default=default)
-
-
-_SESSION_STATUSES_WITHOUT_LIVE_POLICY = frozenset(
-    {
-        SandboxStatus.STOPPED,
-        SandboxStatus.STOPPING,
-        SandboxStatus.ABORTED,
-        SandboxStatus.FAILED,
-    }
-)
-
-
-async def update_sandbox_configuration(
-    service: "SandboxService",
-    handle: SandboxHandleBase[RuntimeSessionHandleT],
-    *,
-    ports: list[int] | None,
-    execution_time_limit: timedelta | None,
-    resources: SandboxResources | None,
-    persistent: bool | None,
-    network_policy: NetworkPolicy | None,
-    network_id: NetworkIdUpdate,
-    env: Mapping[str, str] | None,
-    tags: Mapping[str, str] | None,
-    mounts: DriveMountsInput[_RemotePathT] | None,
-    snapshot_expiration: SnapshotExpiration | None,
-    snapshot_retention: SnapshotRetentionUpdate,
-    current_snapshot_id: str | None,
-    region: str | None,
-    failover_regions: tuple[str, ...] | None,
-) -> None:
-    """Apply live session changes, then save the sandbox configuration.
-
-    Only the cached current session is touched, and the configuration is
-    saved only after every live change succeeds.
-    """
-    session = handle.current_session
-    if (
-        session is not None
-        and execution_time_limit is not None
-        and session.status is SandboxStatus.RUNNING
-        and session.execution_time_limit is not None
-    ):
-        increment = execution_time_limit - session.execution_time_limit
-        if increment > timedelta(0):
-            try:
-                extended_session = await service.extend_runtime_session_timeout(
-                    session_id=session.id,
-                    duration=increment,
-                )
-            except Exception as error:
-                if classify_sandbox_lifecycle_error(error) not in (
-                    SandboxLifecycle.STOPPED,
-                    SandboxLifecycle.STOPPING,
-                ):
-                    raise
-            else:
-                session._apply_payload_with_parent(extended_session)
-
-    if (
-        session is not None
-        and network_policy is not None
-        and session.status not in _SESSION_STATUSES_WITHOUT_LIVE_POLICY
-    ):
-        updated_session = await service.update_runtime_session_network_policy(
-            session_id=session.id,
-            network_policy=network_policy,
-        )
-        session._apply_payload_with_parent(updated_session)
-
-    sandbox = await service.update_sandbox(
-        name=handle.name,
-        project_id=handle.project_id,
-        ports=ports,
-        execution_time_limit=execution_time_limit,
-        resources=resources,
-        persistent=persistent,
-        network_policy=network_policy,
-        network_id=network_id,
-        env=env,
-        tags=tags,
-        mounts=mounts,
-        snapshot_expiration=snapshot_expiration,
-        snapshot_retention=snapshot_retention,
-        current_snapshot_id=current_snapshot_id,
-        region=region,
-        failover_regions=failover_regions,
-    )
-    handle._apply_payload(sandbox)

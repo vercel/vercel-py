@@ -2,7 +2,7 @@
 
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
 from contextlib import aclosing, asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from typing import TYPE_CHECKING, Literal, cast
 
@@ -64,7 +64,11 @@ from vercel.sandbox._internal.options import (
 )
 from vercel.sandbox._internal.process_output import ProcessOutputRouter
 from vercel.sandbox._internal.process_stdin import feed_process_input
-from vercel.sandbox._internal.recovery import _lifecycle_stream_error
+from vercel.sandbox._internal.recovery import (
+    SandboxLifecycle,
+    _lifecycle_stream_error,
+    classify_sandbox_lifecycle_error,
+)
 from vercel.sandbox._internal.runtime_common import (
     _StreamUploadFileEntry,
 )
@@ -94,6 +98,12 @@ _TERMINAL_SANDBOX_STATUSES = frozenset(
 )
 _TRANSITIONAL_SANDBOX_STATUSES = frozenset(
     {SandboxStatus.PENDING, SandboxStatus.STOPPING, SandboxStatus.SNAPSHOTTING}
+)
+_SESSION_STATUSES_WITHOUT_LIVE_POLICY = frozenset(
+    {SandboxStatus.STOPPED, SandboxStatus.STOPPING, SandboxStatus.ABORTED, SandboxStatus.FAILED}
+)
+_IGNORED_TIMEOUT_EXTENSION_LIFECYCLES = frozenset(
+    {SandboxLifecycle.STOPPED, SandboxLifecycle.STOPPING}
 )
 _READY_POLL_INTERVAL_SECONDS = 0.5
 ProcessOutputCollector = Callable[[ProcessState], Awaitable[tuple[str, str]]]
@@ -516,8 +526,7 @@ class SandboxService:
     async def update_sandbox(
         self,
         *,
-        name: str,
-        project_id: str | None = None,
+        sandbox: SandboxState,
         ports: list[int] | None = None,
         execution_time_limit: timedelta | None = None,
         resources: SandboxResources | None = None,
@@ -532,11 +541,49 @@ class SandboxService:
         current_snapshot_id: str | None = None,
         region: str | None = None,
         failover_regions: tuple[str, ...] | None = None,
-    ) -> SandboxState:
+    ) -> AsyncGenerator[SandboxState, None]:
+        """Apply live session changes, then save the sandbox configuration.
+
+        ``sandbox`` is the caller's cached state. Only its cached current
+        session is changed, and stopped sandboxes are never resumed. Each step
+        yields the resulting sandbox state so callers keep the changes that
+        succeeded before a later step fails. Configuration and tags are saved
+        last, only after every live change succeeds.
+        """
         self._ensure_open()
-        return await self._api_client.update_sandbox(
-            name=name,
-            project_id=project_id,
+        session = sandbox.current_session
+        if (
+            session is not None
+            and execution_time_limit is not None
+            and session.status is SandboxStatus.RUNNING
+            and session.execution_time_limit is not None
+        ):
+            increment = execution_time_limit - session.execution_time_limit
+            if increment > timedelta(0):
+                try:
+                    session = await self._api_client.extend_runtime_session_timeout(
+                        session_id=session.id, duration=increment
+                    )
+                except SandboxApiError as error:
+                    lifecycle = classify_sandbox_lifecycle_error(error)
+                    if lifecycle not in _IGNORED_TIMEOUT_EXTENSION_LIFECYCLES:
+                        raise
+                else:
+                    yield replace(sandbox, current_session=session, _current_session_attached=True)
+
+        if (
+            session is not None
+            and network_policy is not None
+            and session.status not in _SESSION_STATUSES_WITHOUT_LIVE_POLICY
+        ):
+            session = await self._api_client.update_runtime_session_network_policy(
+                session_id=session.id, network_policy=network_policy
+            )
+            yield replace(sandbox, current_session=session, _current_session_attached=True)
+
+        yield await self._api_client.update_sandbox(
+            name=sandbox.name,
+            project_id=sandbox.project_id,
             ports=ports,
             execution_time_limit=execution_time_limit,
             resources=resources,
