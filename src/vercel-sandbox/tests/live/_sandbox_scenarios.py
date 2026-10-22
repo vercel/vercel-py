@@ -184,6 +184,8 @@ class ProcessFilesystemObservation:
     returncode: int
     terminated_returncode: int
     timed_out_returncode: int
+    on_start_stdout: str | None
+    on_start_process_found: bool
     missing_executable_failed: bool
     text: str
     binary: bytes
@@ -340,6 +342,11 @@ class _ScenarioDriver:
         raise NotImplementedError
 
     async def write_after_exit_breaks(self, process: Any) -> bool:
+        raise NotImplementedError
+
+    async def run_process_with_on_start(
+        self, box: Any, command: str, args: list[str], on_start: Callable[[Any], None]
+    ) -> sandbox.CompletedProcess:
         raise NotImplementedError
 
     @asynccontextmanager
@@ -557,6 +564,11 @@ class AsyncDriver(_ScenarioDriver):
         except anyio.BrokenResourceError:
             return True
         return False
+
+    async def run_process_with_on_start(
+        self, box: Any, command: str, args: list[str], on_start: Callable[[Any], None]
+    ) -> sandbox.CompletedProcess:
+        return await box.run_process(command, args, capture_output=True, on_start=on_start)
 
     @asynccontextmanager
     async def open_interactive(self, box: Any) -> AsyncIterator[Any]:
@@ -806,6 +818,11 @@ class SyncDriver(_ScenarioDriver):
             return True
         return False
 
+    async def run_process_with_on_start(
+        self, box: Any, command: str, args: list[str], on_start: Callable[[Any], None]
+    ) -> sandbox.CompletedProcess:
+        return box.run_process(command, args, capture_output=True, on_start=on_start)
+
     @asynccontextmanager
     async def open_interactive(self, box: Any) -> AsyncIterator[Any]:
         with box.open_interactive("/bin/bash", cols=100, rows=30) as pty:
@@ -989,6 +1006,17 @@ async def process_filesystem_flow(
             timed = await driver.create_process(box, "sleep", ["60"], kill_after=2.5)
             timed_out_returncode = await driver.wait(timed)
 
+            started_ids: list[str] = []
+            observed = await driver.run_process_with_on_start(
+                box,
+                "sh",
+                ["-c", "sleep 1; echo hi"],
+                lambda process: started_ids.append(process.id),
+            )
+            on_start_process_found = started_ids == [observed.id] and (
+                (await driver.get_process(box, started_ids[0])).id == observed.id
+            )
+
             text = await driver.read_text(box, "message.txt")
             binary = await driver.read_bytes(box, "data.bin")
             missing_read_failed = await driver.missing_read_failed(box)
@@ -1004,6 +1032,8 @@ async def process_filesystem_flow(
         returncode=returncode,
         terminated_returncode=terminated_returncode,
         timed_out_returncode=timed_out_returncode,
+        on_start_stdout=observed.stdout,
+        on_start_process_found=on_start_process_found,
         missing_executable_failed=missing_executable_failed,
         text=text,
         binary=binary,

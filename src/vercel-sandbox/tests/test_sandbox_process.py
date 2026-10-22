@@ -1,3 +1,4 @@
+import inspect
 import io
 import json
 import signal
@@ -6,10 +7,12 @@ from collections.abc import AsyncIterator, Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from threading import Condition, Event, Lock
+from typing import Any
 
 import anyio
 import httpx2 as httpx
 import pytest
+from hypothesis import HealthCheck, given, settings, strategies as st
 from sandbox_fixtures import sandbox_service_options
 
 import vendor.respx as respx
@@ -1757,3 +1760,381 @@ def test_sync_run_process_is_not_replayed_after_lifecycle_failure_once_started(
 
     assert exc_info.value.code == "sandbox_stopped"
     assert (run.call_count, resume.call_count) == (1, 0)
+
+
+_ON_START_MODES = pytest.mark.parametrize(
+    ("sync", "target"),
+    [(False, "sandbox"), (False, "session"), (True, "sandbox"), (True, "session")],
+    ids=["async-sandbox", "async-session", "sync-sandbox", "sync-session"],
+)
+
+
+async def _run_through(sync: bool, target: str, **kwargs: Any) -> sandbox.CompletedProcess:
+    """Create a sandbox and run ``python`` through the selected public handle."""
+    options = sandbox_service_options(team_id="team_1", project_id="prj_1", sync=sync)
+    if sync:
+        with session(service_options=options):
+            sync_box = sandbox_sync.create_sandbox(name="preview")
+            sync_handle = sync_box if target == "sandbox" else sync_box.current_session
+            assert sync_handle is not None
+            return sync_handle.run_process("python", **kwargs)
+    async with session(service_options=options):
+        box = await sandbox.create_sandbox(name="preview")
+        handle = box if target == "sandbox" else box.current_session
+        assert handle is not None
+        return await handle.run_process("python", **kwargs)
+
+
+class _EventSink(io.StringIO):
+    def __init__(self, events: list[object]) -> None:
+        super().__init__()
+        self._events = events
+
+    def write(self, value: str) -> int:
+        self._events.append(value)
+        return super().write(value)
+
+
+@_ON_START_MODES
+@respx.mock
+async def test_run_process_on_start_receives_running_handle_before_output(
+    mock_env_clear: None, sync: bool, target: str
+) -> None:
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
+        side_effect=lambda _request: _interleaved_completed_response(3)
+    )
+    events: list[object] = []
+    handles: list[Any] = []
+
+    def on_start(process: Any) -> None:
+        handles.append(process)
+        events.append(
+            (process.id, process.session_id, process.returncode, process.stdout, process.stderr)
+        )
+
+    hooked = await _run_through(
+        sync, target, stdout=_EventSink(events), stderr=subprocess.PIPE, on_start=on_start
+    )
+    plain_events: list[object] = []
+    plain = await _run_through(
+        sync, target, stdout=_EventSink(plain_events), stderr=subprocess.PIPE
+    )
+
+    assert events == [("cmd_1", "sbx_1", None, None, None), *plain_events]
+    assert plain_events == ["out-1\n", "out-2\n"]
+    assert hooked == plain
+    assert len(handles) == 1
+    assert handles[0].returncode == 3
+    assert handles[0].status is sandbox.ProcessStatus.EXITED
+
+
+@given(
+    sync=st.booleans(),
+    records=st.lists(
+        st.tuples(st.sampled_from(["stdout", "stderr"]), st.text(max_size=8)), max_size=8
+    ),
+    returncode=st.integers(min_value=0, max_value=255),
+    merge=st.booleans(),
+)
+@settings(
+    max_examples=50, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture]
+)
+async def test_run_process_on_start_does_not_change_output_or_result(
+    mock_env_clear: None,
+    sync: bool,
+    records: list[tuple[str, str]],
+    returncode: int,
+    merge: bool,
+) -> None:
+    body = "".join(
+        json.dumps(record) + "\n"
+        for record in (
+            _process_response(),
+            *({"stream": stream, "data": data} for stream, data in records),
+            _process_response(returncode),
+        )
+    )
+    output: dict[str, Any] = (
+        {"stdout": subprocess.PIPE, "stderr": subprocess.STDOUT}
+        if merge
+        else {"capture_output": True}
+    )
+    started: list[Any] = []
+
+    with respx.mock:
+        respx.post("https://sandbox.test/v3/sandboxes").mock(
+            return_value=httpx.Response(200, json=_sandbox_response())
+        )
+        respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
+            side_effect=lambda _request: httpx.Response(200, text=body)
+        )
+        plain = await _run_through(sync, "sandbox", **output)
+        hooked = await _run_through(sync, "sandbox", on_start=started.append, **output)
+
+    assert hooked == plain
+    assert [process.returncode for process in started] == [returncode]
+
+
+@pytest.mark.parametrize(
+    "make_error",
+    [
+        lambda: RuntimeError("hook failed"),
+        # Would otherwise look like a broken connection and resume following the process.
+        lambda: httpx.ReadError("hook request failed"),
+        # Would otherwise resume the sandbox and run the command again.
+        lambda: sandbox.SandboxApiError(
+            httpx.Response(410),
+            "session stopped",
+            data={"error": {"code": "sandbox_stopped", "message": "session stopped"}},
+        ),
+    ],
+    ids=["plain", "transient", "sandbox-stopped"],
+)
+@_ON_START_MODES
+@respx.mock
+async def test_run_process_on_start_error_propagates_without_kill_or_replay(
+    mock_env_clear: None, sync: bool, target: str, make_error: Callable[[], Exception]
+) -> None:
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    body = "".join(
+        json.dumps(record) + "\n"
+        for record in (
+            _process_response(),
+            {"stream": "stdout", "data": "out\n"},
+            _process_response(9),
+        )
+    ).encode()
+    stream = _TrackingSyncStream(body) if sync else _TrackingAsyncStream(body)
+    run = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
+        return_value=httpx.Response(200, stream=stream)
+    )
+    untouched = [
+        respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/kill"),
+        respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/logs"),
+        respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1"),
+        respx.get("https://sandbox.test/v2/sandboxes/preview"),
+    ]
+    error = make_error()
+    sink = io.StringIO()
+
+    def on_start(_process: object) -> None:
+        raise error
+
+    with pytest.raises(type(error)) as raised:
+        await _run_through(sync, target, stdout=sink, check=True, on_start=on_start)
+
+    assert raised.value is error
+    assert stream.closed
+    assert sink.getvalue() == ""
+    assert run.call_count == 1
+    assert not any(route.called for route in untouched)
+
+
+@pytest.mark.parametrize("sync", [False, True], ids=["async", "sync"])
+@respx.mock
+async def test_run_process_on_start_runs_once_after_pre_start_replay(
+    mock_env_clear: None, sync: bool
+) -> None:
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response(session_id="sbx_old"))
+    )
+    old = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_old/cmd").mock(
+        return_value=httpx.Response(
+            410, json={"error": {"code": "sandbox_stopped", "message": "session is stopped"}}
+        )
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(200, json=_sandbox_response(session_id="sbx_new"))
+    )
+    new = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_new/cmd").mock(
+        return_value=_completed_response(session_id="sbx_new")
+    )
+    started: list[Any] = []
+
+    result = await _run_through(sync, "sandbox", capture_output=True, on_start=started.append)
+
+    assert result.session_id == "sbx_new"
+    assert [(process.session_id, process.returncode) for process in started] == [("sbx_new", 0)]
+    assert (old.call_count, new.call_count) == (1, 1)
+
+
+@pytest.mark.parametrize(
+    ("make_response", "error"),
+    [
+        (
+            lambda: httpx.Response(
+                400, json={"error": {"code": "bad_request", "message": "bad command"}}
+            ),
+            sandbox.SandboxApiError,
+        ),
+        (lambda: httpx.Response(200, text=""), sandbox.SandboxResponseError),
+    ],
+    ids=["http-error", "missing-metadata"],
+)
+@pytest.mark.parametrize("sync", [False, True], ids=["async", "sync"])
+@respx.mock
+async def test_run_process_on_start_is_not_called_when_process_never_starts(
+    mock_env_clear: None,
+    sync: bool,
+    make_response: Callable[[], httpx.Response],
+    error: type[Exception],
+) -> None:
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
+        side_effect=lambda _request: make_response()
+    )
+    started: list[Any] = []
+
+    with pytest.raises(error):
+        await _run_through(sync, "sandbox", on_start=started.append)
+
+    assert started == []
+
+
+async def _async_on_start(_process: object) -> None:
+    pass
+
+
+class _AsyncCallOnStart:
+    async def __call__(self, _process: object) -> None:
+        pass
+
+
+@pytest.mark.parametrize(
+    "kind", ["coroutine-function", "async-call-instance", "awaitable-result", "non-callable"]
+)
+@_ON_START_MODES
+@respx.mock
+async def test_run_process_rejects_non_synchronous_on_start(
+    mock_env_clear: None, sync: bool, target: str, kind: str
+) -> None:
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    run = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
+        side_effect=lambda _request: _completed_response()
+    )
+    returned: list[Any] = []
+
+    def returns_awaitable(_process: object) -> object:
+        returned.append(_async_on_start(_process))
+        return returned[-1]
+
+    on_start = {
+        "coroutine-function": _async_on_start,
+        "async-call-instance": _AsyncCallOnStart(),
+        "awaitable-result": returns_awaitable,
+        "non-callable": "not callable",
+    }[kind]
+
+    with pytest.raises(TypeError, match="on_start"):
+        await _run_through(sync, target, on_start=on_start)
+
+    # Only a returned awaitable can be detected after the process starts.
+    assert run.call_count == (1 if kind == "awaitable-result" else 0)
+    assert [inspect.getcoroutinestate(coroutine) for coroutine in returned] == (
+        [inspect.CORO_CLOSED] if kind == "awaitable-result" else []
+    )
+
+
+@pytest.mark.parametrize("target", ["sandbox", "session"])
+@respx.mock
+async def test_sync_run_process_on_start_can_kill_the_process(
+    mock_env_clear: None, target: str
+) -> None:
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
+        return_value=_completed_response(137)
+    )
+    signals: list[int] = []
+
+    def signal_handler(request: httpx.Request) -> httpx.Response:
+        signals.append(json.loads(request.content)["signal"])
+        return httpx.Response(200, json=_process_response())
+
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/kill").mock(
+        side_effect=signal_handler
+    )
+    handles: list[sandbox_sync.SyncProcess] = []
+
+    def on_start(process: sandbox_sync.SyncProcess) -> None:
+        handles.append(process)
+        process.kill()
+
+    result = await _run_through(True, target, capture_output=True, on_start=on_start)
+
+    assert signals == [sandbox.ProcessSignal.SIGKILL]
+    assert result.returncode == 137
+    assert handles[0].returncode == 137
+
+
+@respx.mock
+async def test_async_on_start_kill_response_after_exit_keeps_returncode(
+    mock_env_clear: None,
+) -> None:
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
+        return_value=_completed_response(137)
+    )
+    release_kill = anyio.Event()
+    signals: list[int] = []
+
+    async def signal_handler(request: httpx.Request) -> httpx.Response:
+        signals.append(json.loads(request.content)["signal"])
+        await release_kill.wait()
+        # Describes the process as it was when the signal was sent.
+        return httpx.Response(200, json=_process_response())
+
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/kill").mock(
+        side_effect=signal_handler
+    )
+    handles: list[sandbox.Process] = []
+
+    async with session(service_options=_session_options()):
+        box = await sandbox.create_sandbox(name="preview")
+        async with anyio.create_task_group() as tg:
+
+            def on_start(process: sandbox.Process) -> None:
+                handles.append(process)
+                tg.start_soon(process.kill)
+
+            result = await box.run_process("python", capture_output=True, on_start=on_start)
+            assert handles[0].returncode == 137
+            release_kill.set()
+
+    assert signals == [sandbox.ProcessSignal.SIGKILL]
+    assert result.returncode == 137
+    assert handles[0].returncode == 137
+
+
+@pytest.mark.parametrize("sync", [False, True], ids=["async", "sync"])
+@respx.mock
+async def test_run_process_on_start_runs_before_check_fails(
+    mock_env_clear: None, sync: bool
+) -> None:
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
+        return_value=_completed_response(9)
+    )
+    started: list[Any] = []
+
+    with pytest.raises(subprocess.CalledProcessError) as raised:
+        await _run_through(
+            sync, "sandbox", capture_output=True, check=True, on_start=started.append
+        )
+
+    assert (raised.value.returncode, raised.value.stdout) == (9, "out\n")
+    assert [process.returncode for process in started] == [9]

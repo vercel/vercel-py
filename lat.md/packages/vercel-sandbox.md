@@ -39,6 +39,8 @@ Processes and file transfers stream with bounded memory in both I/O modes.
 
 Process output is routed by [[src/vercel-sandbox/vercel/sandbox/_internal/process_output.py#ProcessOutputRouter]] and read through [[src/vercel-sandbox/vercel/sandbox/_internal/text_reader.py]]. File reads and writes share state machines in [[src/vercel-sandbox/vercel/sandbox/_internal/filesystem_handle_core.py]], with sync and async facades on top. Bulk transfers are encoded as tar+gzip on the fly by [[src/vercel-sandbox/vercel/sandbox/_internal/streaming_archive.py#ArchiveRequestWriter]] rather than being built in memory.
 
+`run_process` accepts a synchronous `on_start` callback, adapted by [[src/vercel-sandbox/vercel/sandbox/_internal/runtime_common.py#_ProcessStartHook]]. [[src/vercel-sandbox/vercel/sandbox/_internal/api_client.py#SandboxApiClient#run_process]] calls it in the caller's task or thread right after the start record and before routing output, so output waits until it returns. With `input`, it runs before the input is fed, which still happens if it raises; if that feed fails the process is killed, but the callback's exception is the one raised, as in the TypeScript SDK. Its exceptions bypass the interrupted-stream resume path, and the hook's `can_replay` stops lifecycle recovery from rerunning a started command. [[src/vercel-sandbox/tests/test_sandbox_process.py#test_run_process_on_start_error_propagates_without_kill_or_replay|Process tests]] cover ordering, output equivalence, error propagation, and replay.
+
 ## Process stdin
 
 Process stdin is a byte stream backed by offset-carrying requests, so writes can be resent without duplicating input and any handle can continue a stream.

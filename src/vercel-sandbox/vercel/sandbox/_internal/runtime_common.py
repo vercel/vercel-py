@@ -1,6 +1,7 @@
 """Execution-mode-neutral helpers for Sandbox runtime handles."""
 
 import copy
+import inspect
 import posixpath
 import signal as signal_module
 import weakref
@@ -240,7 +241,71 @@ class _ProcessHandleState:
                 "Sandbox process mutation response returned a different process identity",
                 data=payload,
             )
+        # An exited process never runs again, so a response that was in
+        # flight when the exit was recorded must not clear the return code.
+        if payload.returncode is None and self._payload.returncode is not None:
+            return
         self._payload = payload
+
+
+_ProcessHandleT = TypeVar("_ProcessHandleT", bound=_ProcessHandleState)
+
+
+class _ProcessStartHook(Generic[_ProcessHandleT]):
+    """Deliver a running process handle to a caller's ``on_start`` callback.
+
+    ``started`` is set before the callback runs, so a lifecycle error raised
+    from inside the callback can never replay a command that already started.
+    """
+
+    __slots__ = ("_callback", "_make_handle", "handle", "started")
+
+    def __init__(
+        self,
+        callback: Callable[[_ProcessHandleT], object],
+        make_handle: Callable[[ProcessState], _ProcessHandleT],
+    ) -> None:
+        self._callback = callback
+        self._make_handle = make_handle
+        self.handle: _ProcessHandleT | None = None
+        self.started = False
+
+    @classmethod
+    def create(
+        cls,
+        callback: Callable[[_ProcessHandleT], object] | None,
+        make_handle: Callable[[ProcessState], _ProcessHandleT],
+    ) -> "_ProcessStartHook[_ProcessHandleT] | None":
+        """Validate ``callback`` before any request is sent."""
+        if callback is None:
+            return None
+        if not callable(callback):
+            raise TypeError(f"on_start must be callable, not {type(callback).__name__}")
+        # An instance with ``async def __call__`` is only detectable through
+        # its type; the instance itself is not a coroutine function.
+        if inspect.iscoroutinefunction(callback) or inspect.iscoroutinefunction(
+            type(callback).__call__
+        ):
+            raise TypeError("on_start must be a synchronous callable, not a coroutine function")
+        return cls(callback, make_handle)
+
+    def __call__(self, payload: ProcessState) -> None:
+        self.started = True
+        self.handle = self._make_handle(payload)
+        result = self._callback(self.handle)
+        if inspect.isawaitable(result):
+            close = getattr(result, "close", None)
+            if callable(close):
+                close()
+            raise TypeError("on_start must be a synchronous callable; it returned an awaitable")
+
+    def can_replay(self) -> bool:
+        return not self.started
+
+    def complete(self, payload: ProcessState) -> None:
+        """Give the handle passed to the callback the process's final state."""
+        if self.handle is not None:
+            self.handle._apply_payload(payload)
 
 
 class SnapshotHandleBase:

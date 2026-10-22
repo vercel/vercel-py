@@ -6,7 +6,7 @@ import os
 import platform
 import sys
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import timedelta
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
@@ -1833,12 +1833,14 @@ class SandboxApiClient:
         kill_after: timedelta | None = None,
         output_router: ProcessOutputRouter,
         on_started: Callable[[ProcessState], Awaitable[None]] | None = None,
+        on_start: Callable[[ProcessState], None] | None = None,
     ) -> CompletedProcessState:
         """Run a process and stream its output until it exits.
 
         Passing ``on_started`` starts the process with stdin attached and
         calls it with the initial process metadata, before any output is
-        routed, so it can write the process's input.
+        routed, so it can write the process's input. ``on_start`` is the
+        caller's callback, called first with the same metadata.
         """
         credentials = await self._credentials_factory()
         request = _RunCommandRequest(
@@ -1865,6 +1867,7 @@ class SandboxApiClient:
         initial: ProcessState | None = None
         final: ProcessState | None = None
         delivered = _OutputOffsets()
+        on_start_failed = False
         try:
             try:
                 async for line, terminated in _ndjson_lines(response):
@@ -1875,6 +1878,20 @@ class SandboxApiClient:
                         process = _validate_response(_CommandResponse, record).to_command()
                         if initial is None:
                             initial = process
+                            if on_start is not None:
+                                try:
+                                    on_start(process)
+                                except Exception:
+                                    on_start_failed = True
+                                    # Write the input anyway, so the process
+                                    # is not left waiting on an open stdin.
+                                    # As in the TypeScript SDK, a failed write
+                                    # only kills the process; the caller sees
+                                    # the callback's exception, untouched.
+                                    if on_started is not None:
+                                        with suppress(Exception):
+                                            await on_started(process)
+                                    raise
                             if on_started is not None:
                                 await on_started(process)
                         elif final is None:
@@ -1914,7 +1931,14 @@ class SandboxApiClient:
         except Exception as error:
             # Once the process has started, a broken connection must not rerun
             # it; the caller resumes following it from the delivered output.
-            if initial is None or final is not None or not _is_transient_error(error):
+            # An on_start failure is the caller's own error, not a broken
+            # connection, so it propagates as raised.
+            if (
+                on_start_failed
+                or initial is None
+                or final is not None
+                or not _is_transient_error(error)
+            ):
                 raise
             raise _RunProcessInterrupted(initial, delivered) from error
 

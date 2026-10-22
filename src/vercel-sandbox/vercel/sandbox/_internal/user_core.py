@@ -465,6 +465,7 @@ class UserService(SandboxService):
         kill_after: timedelta | None = None,
         output_router: ProcessOutputRouter,
         input: bytes | None = None,
+        on_start: Callable[[ProcessState], None] | None = None,
     ) -> CompletedProcessState:
         wrapped = await self._wrap(session_id, command, args, cwd, env, sudo, kill_after)
         return await self._parent.run_process(
@@ -476,6 +477,7 @@ class UserService(SandboxService):
             kill_after=None,
             output_router=output_router,
             input=input,
+            on_start=on_start,
         )
 
     async def _run_process(

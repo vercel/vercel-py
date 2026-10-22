@@ -641,6 +641,46 @@ def test_run_process_kills_the_process_when_input_fails(driver: _Driver) -> None
     assert len(driver.api.created) == 1
 
 
+@pytest.mark.parametrize("raises", [False, True], ids=["returns", "raises"])
+def test_run_process_on_start_runs_before_input_is_written(driver: _Driver, raises: bool) -> None:
+    error = RuntimeError("hook failed")
+    seen: list[tuple[str, bytes, bool]] = []
+
+    def on_start(process: Any) -> None:
+        seen.append((process.id, bytes(driver.server.data), driver.server.closed))
+        if raises:
+            raise error
+
+    if raises:
+        with pytest.raises(RuntimeError) as raised:
+            driver.run_process(input="hello\n", capture_output=True, on_start=on_start)
+        assert raised.value is error
+    else:
+        result = driver.run_process(input="hello\n", capture_output=True, on_start=on_start)
+        assert result.stdout == "hello\n"
+
+    assert seen == [("cmd_1", b"", False)]
+    # The input is written and stdin closed even when on_start raises, so the
+    # process is not left waiting for input.
+    assert (driver.server.data, driver.server.closed) == (b"hello\n", True)
+    assert driver.api.signals == []
+
+
+def test_run_process_on_start_error_is_raised_when_input_also_fails(driver: _Driver) -> None:
+    driver.server.faults.extend([lambda server, _, body: server.apply(body), _rejected(500)])
+    error = RuntimeError("hook failed")
+
+    def on_start(_process: Any) -> None:
+        raise error
+
+    with pytest.raises(RuntimeError) as raised:
+        driver.run_process(input=b"data", capture_output=True, on_start=on_start)
+
+    assert raised.value is error
+    assert raised.value.__context__ is None
+    assert driver.api.signals == [sandbox.ProcessSignal.SIGKILL]
+
+
 @pytest.mark.parametrize("stdin", [subprocess.STDOUT, 42, True, io.BytesIO(), "pipe"])
 def test_create_process_rejects_stdin_options_before_request(
     driver: _Driver, stdin: object

@@ -763,6 +763,7 @@ class SandboxService:
         kill_after: timedelta | None = None,
         output_router: ProcessOutputRouter,
         input: bytes | None = None,
+        on_start: Callable[[ProcessState], None] | None = None,
     ) -> CompletedProcessState:
         self._ensure_open()
         on_started = None
@@ -782,6 +783,7 @@ class SandboxService:
                 kill_after=kill_after,
                 output_router=output_router,
                 on_started=on_started,
+                on_start=on_start,
             )
         except _RunProcessInterrupted as interrupted:
             started, delivered = interrupted.process, interrupted.delivered
