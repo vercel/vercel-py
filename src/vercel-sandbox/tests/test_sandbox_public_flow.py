@@ -1159,11 +1159,16 @@ async def test_update_applies_live_policy_for_other_session_statuses(
     ("status_code", "data", "raises"),
     [
         (410, {"error": {"message": "gone"}}, False),
+        (410, {"error": {"code": "sandbox_failed", "message": "failed"}}, False),
+        (410, {"error": {"code": "sandbox_stream_closed", "message": "closed"}}, False),
         (422, {"error": {"code": "sandbox_stopping", "message": "stopping"}}, False),
+        (409, {"error": {"code": "sandbox_stopped", "message": "stopped"}}, True),
+        (409, {"error": {"code": "sandbox_stopping", "message": "stopping"}}, True),
+        (422, {"error": {"code": "sandbox_snapshotting", "message": "snapshotting"}}, True),
         (500, {"error": {"code": "extend_failed", "message": "failed"}}, True),
     ],
 )
-async def test_update_extend_timeout_swallows_only_lifecycle_errors(
+async def test_update_extend_timeout_ignores_only_session_gone_errors(
     mock_env_clear: None,
     sync: bool,
     status_code: int,
@@ -1185,6 +1190,37 @@ async def test_update_extend_timeout_swallows_only_lifecycle_errors(
         await _run_sandbox_update(sync, execution_time_limit=360)
         assert order == ["extend", "patch"]
         assert patch_route.call_count == 1
+
+
+@respx.mock
+@pytest.mark.parametrize("sync", [False, True])
+async def test_update_network_policy_methods_are_deprecated(
+    mock_env_clear: None,
+    sync: bool,
+) -> None:
+    order: list[str] = []
+    _, policy_route, _ = _mock_update_routes(order)
+    sandbox_class = "SyncSandbox" if sync else "Sandbox"
+    session_class = f"{sandbox_class}RuntimeSession"
+    sandbox_warning = rf"^{sandbox_class}\.update_network_policy\(\) is deprecated"
+    session_warning = rf"^{session_class}\.update_network_policy\(\) is deprecated"
+
+    if sync:
+        with session(service_options=_session_options(sync=True)):
+            handle: Any = sandbox_sync.get_sandbox(name="preview")
+            with pytest.warns(DeprecationWarning, match=sandbox_warning):
+                handle.update_network_policy(NetworkPolicy.deny_all())
+            with pytest.warns(DeprecationWarning, match=session_warning):
+                handle.current_session.update_network_policy(NetworkPolicy.deny_all())
+    else:
+        async with session(service_options=_session_options()):
+            handle = await sandbox.get_sandbox(name="preview")
+            with pytest.warns(DeprecationWarning, match=sandbox_warning):
+                await handle.update_network_policy(NetworkPolicy.deny_all())
+            with pytest.warns(DeprecationWarning, match=session_warning):
+                await handle.current_session.update_network_policy(NetworkPolicy.deny_all())
+
+    assert policy_route.call_count == 2
 
 
 @respx.mock

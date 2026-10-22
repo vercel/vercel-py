@@ -1318,7 +1318,20 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         return self
 
     def update_network_policy(self, network_policy: NetworkPolicy) -> Self:
-        """Replace the session network policy."""
+        """Replace the session network policy.
+
+        .. deprecated::
+            Use ``SyncSandbox.update(network_policy=...)``, which saves the policy
+            for future sessions and applies it to the current session. This
+            method only changes this session, which may no longer be the
+            sandbox's current one.
+        """
+        warnings.warn(
+            "SyncSandboxRuntimeSession.update_network_policy() is deprecated; use "
+            "SyncSandbox.update(network_policy=...) instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         payload = iter_coroutine(
             self._service.update_runtime_session_network_policy(
                 session_id=self.id, network_policy=network_policy
@@ -1795,7 +1808,20 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         return self._apply_current_session_payload_if_current(payload, target_id)
 
     def update_network_policy(self, network_policy: NetworkPolicy) -> SyncSandboxRuntimeSession:
-        """Replace the current session's network policy."""
+        """Replace the current session's network policy.
+
+        .. deprecated::
+            Use ``update(network_policy=...)``, which saves the policy for
+            future sessions and applies it to the current session. This method
+            only changes the current session, resuming the sandbox if it is
+            stopped.
+        """
+        warnings.warn(
+            "SyncSandbox.update_network_policy() is deprecated; use "
+            "SyncSandbox.update(network_policy=...) instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
         async def update(
             session_id: str,

@@ -64,11 +64,7 @@ from vercel.sandbox._internal.options import (
 )
 from vercel.sandbox._internal.process_output import ProcessOutputRouter
 from vercel.sandbox._internal.process_stdin import feed_process_input
-from vercel.sandbox._internal.recovery import (
-    SandboxLifecycle,
-    _lifecycle_stream_error,
-    classify_sandbox_lifecycle_error,
-)
+from vercel.sandbox._internal.recovery import _lifecycle_stream_error
 from vercel.sandbox._internal.runtime_common import (
     _StreamUploadFileEntry,
 )
@@ -102,9 +98,6 @@ _TRANSITIONAL_SANDBOX_STATUSES = frozenset(
 )
 _SESSION_STATUSES_WITHOUT_LIVE_POLICY = frozenset(
     {SandboxStatus.STOPPED, SandboxStatus.STOPPING, SandboxStatus.ABORTED, SandboxStatus.FAILED}
-)
-_IGNORED_TIMEOUT_EXTENSION_LIFECYCLES = frozenset(
-    {SandboxLifecycle.STOPPED, SandboxLifecycle.STOPPING}
 )
 _READY_POLL_INTERVAL_SECONDS = 0.5
 ProcessOutputCollector = Callable[[ProcessState], Awaitable[tuple[str, str]]]
@@ -249,6 +242,19 @@ def _listdir_entries(output: str) -> list[DirectoryEntry]:
             )
         )
     return sorted(entries, key=lambda entry: entry.path)
+
+
+def _is_session_gone_error(error: SandboxApiError) -> bool:
+    """Return whether a live update failed because its session is going away.
+
+    This matches the TypeScript SDK: any HTTP 410, and HTTP 422
+    ``sandbox_stopping``. It deliberately does not use lifecycle-recovery
+    classification, which also treats 409 ``sandbox_stopped`` as stopped and
+    excludes closed-stream 410s. HTTP 410 also covers failed sessions.
+    """
+    if error.status_code == 410:
+        return True
+    return error.status_code == 422 and error.code == "sandbox_stopping"
 
 
 def _require_same_session(
@@ -580,8 +586,7 @@ class SandboxService:
                         session_id=session.id, duration=increment
                     )
                 except SandboxApiError as error:
-                    lifecycle = classify_sandbox_lifecycle_error(error)
-                    if lifecycle not in _IGNORED_TIMEOUT_EXTENSION_LIFECYCLES:
+                    if not _is_session_gone_error(error):
                         raise
                 else:
                     session = _require_same_session(extended, session.id)
