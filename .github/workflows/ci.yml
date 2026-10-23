@@ -5,13 +5,14 @@ on:
     branches:
       - main
   pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
 
 permissions: {}
 
 jobs:
   lint-and-typecheck:
     name: Lint and typecheck
+    if: github.head_ref != 'release-packages' || !github.event.pull_request.draft
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -39,6 +40,7 @@ jobs:
 
   lat-check:
     name: lat.md check
+    if: github.head_ref != 'release-packages' || !github.event.pull_request.draft
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -59,6 +61,7 @@ jobs:
 
   test:
     name: Test (${{ matrix.os.name }}, py${{ matrix.python-version }}, anyio ${{ matrix.anyio }})
+    if: github.head_ref != 'release-packages' || !github.event.pull_request.draft
     runs-on: ${{ matrix.os.runner }}
     # A healthy run finishes in under 7 minutes on every OS. Without a cap, a
     # single hung test holds its matrix slot until GitHub's 6-hour default.
@@ -178,6 +181,7 @@ jobs:
 
   build:
     name: Build packages (anyio ${{ matrix.anyio }})
+    if: github.head_ref != 'release-packages' || !github.event.pull_request.draft
     strategy:
       fail-fast: false
       matrix:
@@ -218,6 +222,7 @@ jobs:
     name: Release publish dry run
     if: >-
       github.event_name == 'pull_request' &&
+      (github.head_ref != 'release-packages' || !github.event.pull_request.draft) &&
       github.event.pull_request.base.ref == 'main' &&
       contains(github.event.pull_request.labels.*.name, 'release')
     runs-on: ubuntu-latest
@@ -260,7 +265,7 @@ jobs:
 
   overall:
     name: CI Overall
-    if: always()
+    if: always() && (github.head_ref != 'release-packages' || !github.event.pull_request.draft)
     needs:
       - build
       - lat-check

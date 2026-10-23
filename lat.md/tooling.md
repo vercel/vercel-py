@@ -40,6 +40,16 @@ Packages declare dependencies under `[tool.vercel.release.dependencies]` and mar
 
 The workspace root itself is not buildable: [[scripts/no_root_build.py]] is its build backend and always fails.
 
+### Rolling release PR
+
+[[.github/workflows/release-pr.yml]] maintains one draft release PR from all pending fragments on main, regenerating the candidate on each push rather than incrementally bumping it.
+
+[[scripts/release.py#prepare]] writes release files and a PR description using the same preparation logic as manual releases. The workflow uses signed bot commits, applies the `release` label, and closes an obsolete PR when its diff disappears. With no fragments after a merge, no replacement PR is opened until another change needs release.
+
+[[tests/unit/test_release_system.py#test_rolling_release_preparation_accumulates_main_changes]] exercises successive main updates, dependency cascades, changelog PR references, and the empty release set after merging.
+
+Bot updates use `GITHUB_TOKEN` and do not trigger PR CI. [[.github/workflows/ci.yml]], [[.github/workflows/news-fragments.yml]], and [[.github/workflows/zizmor.yml]] also skip the managed draft branch and listen for a maintainer's `ready_for_review` event. Further candidate updates return the PR to draft so the maintainer can start CI for the new revision. Merging uses the existing publishing workflow.
+
 ### Publishing
 
 Merged release PRs are published by GitHub Actions through PyPI trusted publishing; maintainers never upload from their machines.
