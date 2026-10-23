@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.10.0 - 2026-10-23
+
+### Features
+
+- Add `ensure_running()` to the embedded dev server, allowing callers to check that the server is running and get the underlying error if it stopped unexpectedly. (#471)
+
+### Bug Fixes
+
+- Stop a late lease renewal from overwriting the visibility delay set by `RetryAfter`. (#469)
+
 ## 0.9.2 - 2026-10-15
 
 - Update dependencies.

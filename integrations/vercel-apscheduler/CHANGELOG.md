@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.5 - 2026-10-23
+
+- Update dependencies.
+
 ## 0.3.4 - 2026-10-15
 
 - Update dependencies.

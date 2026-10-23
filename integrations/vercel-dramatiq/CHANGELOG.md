@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.9 - 2026-10-23
+
+- Update dependencies.
+
 ## 0.7.8 - 2026-10-15
 
 - Update dependencies.
