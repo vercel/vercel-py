@@ -72,7 +72,31 @@ version file has moved past `0.0.0`.
 
 ## Release Prep
 
-Run:
+The **Release PR** workflow runs on every push to `main` and can also be dispatched
+manually from `main`. It maintains one draft **Release Packages** PR on the
+`release-packages` branch, with the `release` label and a description containing
+the pending package versions and changelog entries.
+
+Each run starts from current `main` and regenerates the versions, changelogs,
+consumed fragments, and lockfile using `scripts/release.py prepare`. New changes
+accumulate in the same PR without repeatedly bumping the previous candidate's
+versions. No PR is opened when there are no pending releases; an obsolete PR is
+closed and its branch deleted when it no longer differs from `main`. After a
+release is merged, the next fragments start a new draft PR.
+
+Draft updates use the repository's `GITHUB_TOKEN`, so they do not trigger PR CI.
+The PR workflows also skip the managed branch while it is draft. To release,
+mark the PR **ready for review**: this maintainer action starts CI, including the
+release publish dry run. Wait for CI and review, then merge to use the existing
+PyPI publishing workflow. If `main` changes before the PR is merged, the next
+refresh returns an updated PR to draft. Mark it ready again to check that revision.
+
+The workflow uses signed bot commits and requires GitHub Actions to be allowed
+to create pull requests in the repository's Actions settings. It needs no PAT or
+additional release credentials. The `release-packages` branch is managed by the
+workflow; edits to it are overwritten on refresh.
+
+For local inspection or an exceptional manual release, run:
 
 ```sh
 uv run poe release-status
