@@ -82,6 +82,7 @@ from vercel.sandbox._internal.state import (
     SnapshotSessionState,
     SnapshotsPageState,
     SnapshotState,
+    UpdateSandboxStep,
 )
 from vercel.sandbox._internal.streaming_archive import ArchiveRequestWriter
 
@@ -94,6 +95,9 @@ _TERMINAL_SANDBOX_STATUSES = frozenset(
 )
 _TRANSITIONAL_SANDBOX_STATUSES = frozenset(
     {SandboxStatus.PENDING, SandboxStatus.STOPPING, SandboxStatus.SNAPSHOTTING}
+)
+_SESSION_STATUSES_WITHOUT_LIVE_POLICY = frozenset(
+    {SandboxStatus.STOPPED, SandboxStatus.STOPPING, SandboxStatus.ABORTED, SandboxStatus.FAILED}
 )
 _READY_POLL_INTERVAL_SECONDS = 0.5
 ProcessOutputCollector = Callable[[ProcessState], Awaitable[tuple[str, str]]]
@@ -238,6 +242,30 @@ def _listdir_entries(output: str) -> list[DirectoryEntry]:
             )
         )
     return sorted(entries, key=lambda entry: entry.path)
+
+
+def _is_session_gone_error(error: SandboxApiError) -> bool:
+    """Return whether a live update failed because its session is going away.
+
+    This matches the TypeScript SDK: any HTTP 410, and HTTP 422
+    ``sandbox_stopping``. It deliberately does not use lifecycle-recovery
+    classification, which also treats 409 ``sandbox_stopped`` as stopped and
+    excludes closed-stream 410s. HTTP 410 also covers failed sessions.
+    """
+    if error.status_code == 410:
+        return True
+    return error.status_code == 422 and error.code == "sandbox_stopping"
+
+
+def _require_same_session(
+    payload: SandboxRuntimeSessionState, session_id: str
+) -> SandboxRuntimeSessionState:
+    if payload.id != session_id:
+        raise SandboxResponseError(
+            "Sandbox current-session operation returned a different session identity",
+            data=payload,
+        )
+    return payload
 
 
 class SandboxService:
@@ -518,6 +546,7 @@ class SandboxService:
         *,
         name: str,
         project_id: str | None = None,
+        current_session: SandboxRuntimeSessionState | None = None,
         ports: list[int] | None = None,
         execution_time_limit: timedelta | None = None,
         resources: SandboxResources | None = None,
@@ -532,9 +561,49 @@ class SandboxService:
         current_snapshot_id: str | None = None,
         region: str | None = None,
         failover_regions: tuple[str, ...] | None = None,
-    ) -> SandboxState:
+    ) -> AsyncGenerator[UpdateSandboxStep, None]:
+        """Apply live session changes, then save the sandbox configuration.
+
+        ``current_session`` is the caller's latest cached session. Only that
+        session is changed, and stopped sandboxes are never resumed. Each live
+        step yields the updated session so callers keep the changes that
+        succeeded before a later step fails. The final step saves the
+        configuration and tags, only after every live change succeeds, and
+        yields the saved sandbox.
+        """
         self._ensure_open()
-        return await self._api_client.update_sandbox(
+        session = current_session
+        if (
+            session is not None
+            and execution_time_limit is not None
+            and session.status is SandboxStatus.RUNNING
+            and session.execution_time_limit is not None
+        ):
+            increment = execution_time_limit - session.execution_time_limit
+            if increment > timedelta(0):
+                try:
+                    extended = await self._api_client.extend_runtime_session_timeout(
+                        session_id=session.id, duration=increment
+                    )
+                except SandboxApiError as error:
+                    if not _is_session_gone_error(error):
+                        raise
+                else:
+                    session = _require_same_session(extended, session.id)
+                    yield session
+
+        if (
+            session is not None
+            and network_policy is not None
+            and session.status not in _SESSION_STATUSES_WITHOUT_LIVE_POLICY
+        ):
+            updated = await self._api_client.update_runtime_session_network_policy(
+                session_id=session.id, network_policy=network_policy
+            )
+            session = _require_same_session(updated, session.id)
+            yield session
+
+        yield await self._api_client.update_sandbox(
             name=name,
             project_id=project_id,
             ports=ports,

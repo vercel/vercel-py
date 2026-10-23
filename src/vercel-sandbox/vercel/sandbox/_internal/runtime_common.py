@@ -5,7 +5,8 @@ import inspect
 import posixpath
 import signal as signal_module
 import weakref
-from collections.abc import Callable, Sequence
+from collections.abc import AsyncGenerator, Callable, Sequence
+from contextlib import aclosing
 from dataclasses import dataclass, replace
 from datetime import timedelta
 from enum import Enum, auto
@@ -33,6 +34,7 @@ from vercel.sandbox._internal.state import (
     SandboxState,
     SnapshotRetentionState,
     SnapshotState,
+    UpdateSandboxStep,
 )
 
 RuntimeSessionHandleT = TypeVar("RuntimeSessionHandleT", bound="RuntimeSessionHandleBase")
@@ -696,6 +698,30 @@ class SandboxHandleBase(Generic[RuntimeSessionHandleT]):
             _routes_attached=True,
             _current_session_attached=True,
         )
+
+    async def _apply_update_steps(self, steps: AsyncGenerator[UpdateSandboxStep, None]) -> None:
+        """Apply each step of a sandbox update as the service produces it."""
+        async with aclosing(steps):
+            async for step in steps:
+                match step:
+                    case SandboxRuntimeSessionState():
+                        self._apply_current_session_payload_if_current(step, step.id)
+                    case SandboxState():
+                        self._apply_payload(step)
+
+    def _apply_current_session_payload_if_current(
+        self, payload: SandboxRuntimeSessionState, target_id: str
+    ) -> RuntimeSessionHandleT:
+        """Ignore an operation reply superseded by a concurrent recovery."""
+        if target_id == self.current_session_id:
+            return self._apply_current_session_payload(payload)
+        session = self.current_session
+        if session is None:
+            raise SandboxResponseError(
+                "Sandbox current-session operation returned a different session identity",
+                data=payload,
+            )
+        return session
 
     def _apply_current_session_payload(
         self, payload: SandboxRuntimeSessionState

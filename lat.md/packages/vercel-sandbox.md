@@ -33,6 +33,16 @@ Operations through a `Sandbox` handle that fail because the sandbox is stopped, 
 
 Sandboxes can be created from a runtime, image, Git repository, tarball, or snapshot. Forking copies a named sandbox's configuration and current snapshot, but never its drive mounts.
 
+## Sandbox updates
+
+`Sandbox.update()` changes the live current session before saving sandbox configuration, and does not resume a stopped session.
+
+[[src/vercel-sandbox/vercel/sandbox/_internal/service.py#SandboxService#update_sandbox]] owns the ordering. It is an async generator that takes the current session handle's latest state and yields an [[src/vercel-sandbox/vercel/sandbox/_internal/state.py#UpdateSandboxStep]] per step. A larger `execution_time_limit` extends a running current session by the difference. Failures that [[src/vercel-sandbox/vercel/sandbox/_internal/service.py#_is_session_gone_error]] recognizes are ignored: any HTTP 410 and HTTP 422 `sandbox_stopping`, matching the TypeScript SDK rather than lifecycle recovery. `network_policy` is applied to the current session unless its status is stopped, stopping, aborted, or failed; a live-policy failure raises before configuration is saved. The configuration and tags are saved last, and the operations are not atomic.
+
+[[src/vercel-sandbox/vercel/sandbox/_internal/async_runtime.py#Sandbox#update]] and [[src/vercel-sandbox/vercel/sandbox/_internal/sync_runtime.py#SyncSandbox#update]] drain it through [[src/vercel-sandbox/vercel/sandbox/_internal/runtime_common.py#SandboxHandleBase#_apply_update_steps]], a coroutine the sync runtime runs with `iter_coroutine`. Each step is applied before the next one runs, so a later failure keeps the changes that already succeeded. Live session results go through [[src/vercel-sandbox/vercel/sandbox/_internal/runtime_common.py#SandboxHandleBase#_apply_current_session_payload_if_current]], which ignores a result for a session that a concurrent recovery has replaced. The final saved sandbox is applied whole.
+
+The sandbox-level `update_network_policy()` still works but emits `DeprecationWarning` in favor of `update(network_policy=...)`, matching the TypeScript SDK. [[src/vercel-sandbox/vercel/sandbox/_internal/async_runtime.py#SandboxRuntimeSession#update_network_policy]] is not deprecated: like TypeScript `session.update()`, it changes only that session without saving the policy, and keeps the parent sandbox's cached session state in sync.
+
 ## Processes and filesystem
 
 Processes and file transfers stream with bounded memory in both I/O modes.

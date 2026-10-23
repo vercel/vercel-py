@@ -1318,13 +1318,18 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         return self
 
     def update_network_policy(self, network_policy: NetworkPolicy) -> Self:
-        """Replace the session network policy."""
+        """Replace this session's network policy without saving it.
+
+        Only this session changes, even if the sandbox has since moved to a
+        newer session. Use ``update(network_policy=...)`` on the sandbox to
+        also save the policy for future sessions.
+        """
         payload = iter_coroutine(
             self._service.update_runtime_session_network_policy(
                 session_id=self.id, network_policy=network_policy
             )
         )
-        self._apply_payload(payload)
+        self._apply_payload_with_parent(payload)
         return self
 
     def snapshot(self, *, expiration: SnapshotExpirationInput = None) -> SyncSnapshot:
@@ -1795,7 +1800,20 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         return self._apply_current_session_payload_if_current(payload, target_id)
 
     def update_network_policy(self, network_policy: NetworkPolicy) -> SyncSandboxRuntimeSession:
-        """Replace the current session's network policy."""
+        """Replace the current session's network policy.
+
+        .. deprecated::
+            Use ``update(network_policy=...)``, which saves the policy for
+            future sessions and applies it to the current session. This method
+            only changes the current session, resuming the sandbox if it is
+            stopped.
+        """
+        warnings.warn(
+            "SyncSandbox.update_network_policy() is deprecated; use "
+            "SyncSandbox.update(network_policy=...) instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
         async def update(
             session_id: str,
@@ -1827,17 +1845,8 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
     def _apply_current_session_payload_if_current(
         self, payload: SandboxRuntimeSessionState, target_id: str
     ) -> SyncSandboxRuntimeSession:
-        """Ignore an operation reply superseded by a concurrent recovery."""
         with self._recovery_condition:
-            if target_id == self.current_session_id:
-                return self._apply_current_session_payload(payload)
-            session = self.current_session
-            if session is None:
-                raise SandboxResponseError(
-                    "Sandbox current-session operation returned a different session identity",
-                    data=payload,
-                )
-            return session
+            return super()._apply_current_session_payload_if_current(payload, target_id)
 
     def stop(self) -> Self:
         """Stop the current session and return this sandbox handle."""
@@ -1899,6 +1908,11 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         Only non-``None`` values are sent, except ``snapshot_retention`` where
         explicitly passing ``None`` removes the retention policy.
 
+        A larger ``execution_time_limit`` also extends a running current
+        session. ``network_policy`` is applied to an active current session
+        before the configuration and tags are saved; a live-policy failure
+        raises without saving. These operations are not atomic.
+
         Args:
             mounts: Complete Drive mount replacement for the next session.
                 Pass ``None`` to leave mounts unchanged or ``{}`` to remove all
@@ -1909,27 +1923,30 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         Returns:
             This handle refreshed with the updated sandbox state.
         """
-        payload = iter_coroutine(
-            self._service.update_sandbox(
-                name=self.name,
-                project_id=self.project_id,
-                ports=ports,
-                execution_time_limit=parse_duration_seconds(execution_time_limit),
-                resources=resources,
-                persistent=persistent,
-                network_policy=network_policy,
-                network_id=network_id,
-                env=env,
-                tags=tags,
-                mounts=mounts,
-                snapshot_expiration=_parse_snapshot_expiration(snapshot_expiration),
-                snapshot_retention=snapshot_retention,
-                region=region,
-                failover_regions=normalize_failover_regions(failover_regions),
-                current_snapshot_id=current_snapshot_id,
+        session = self.current_session
+        iter_coroutine(
+            self._apply_update_steps(
+                self._service.update_sandbox(
+                    name=self.name,
+                    project_id=self.project_id,
+                    current_session=None if session is None else session._payload,
+                    ports=ports,
+                    execution_time_limit=parse_duration_seconds(execution_time_limit),
+                    resources=resources,
+                    persistent=persistent,
+                    network_policy=network_policy,
+                    network_id=network_id,
+                    env=env,
+                    tags=tags,
+                    mounts=mounts,
+                    snapshot_expiration=_parse_snapshot_expiration(snapshot_expiration),
+                    snapshot_retention=snapshot_retention,
+                    current_snapshot_id=current_snapshot_id,
+                    region=region,
+                    failover_regions=normalize_failover_regions(failover_regions),
+                )
             )
         )
-        self._apply_payload(payload)
         return self
 
 
