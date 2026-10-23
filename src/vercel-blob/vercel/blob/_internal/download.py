@@ -7,10 +7,13 @@ from types import TracebackType
 
 import anyio
 
+from vercel._internal.core.http._compat import http_errors
 from vercel._internal.core.http.transport import StreamingResponse
 from vercel._internal.core.iter_coroutine import iter_coroutine
 from vercel.blob.errors import BlobStreamError
 from vercel.blob.models import DownloadMetadata
+
+from .transport_errors import body_read_failure
 
 
 class _BlobDownloadCore:
@@ -62,6 +65,12 @@ class _BlobDownloadCore:
         except StopAsyncIteration:
             await self._close()
             raise
+        except http_errors() as exc:
+            try:
+                await self._close()
+            except BaseException:
+                pass
+            raise body_read_failure(exc) from exc
         except BaseException:
             try:
                 await self._close()

@@ -18,15 +18,15 @@ Arguments are validated by [[src/vercel-blob/vercel/blob/_internal/validation.py
 
 Each operation obtains credentials from the session's factory, which defaults to OIDC with a store ID and falls back to a read-write token.
 
-[[src/vercel-blob/vercel/blob/_internal/credentials.py#default_async_credentials]] and its sync twin prefer a [[vercel-oidc]] token combined with `BLOB_STORE_ID`, then `BLOB_READ_WRITE_TOKEN` or `VERCEL_BLOB_READ_WRITE_TOKEN`. A read-write token embeds its store ID, which [[src/vercel-blob/vercel/blob/_internal/credentials.py#normalize_credentials]] checks against the declared one. OIDC requests carry the store ID in a header instead.
+[[src/vercel-blob/vercel/blob/_internal/credentials.py#default_async_credentials]] and its sync twin prefer a [[vercel-oidc]] token combined with `BLOB_STORE_ID`, then `BLOB_READ_WRITE_TOKEN` or `VERCEL_BLOB_READ_WRITE_TOKEN`. The OIDC token is looked up only when `BLOB_STORE_ID` is set, because the async lookup can refresh it over the network and persist it. A read-write token embeds its store ID, which [[src/vercel-blob/vercel/blob/_internal/credentials.py#normalize_credentials]] checks against the declared one. OIDC requests carry the store ID in a header instead.
 
-[[src/vercel-blob/vercel/blob/_internal/options.py#BlobServiceOptions]] and [[src/vercel-blob/vercel/blob/_internal/options.py#SyncBlobServiceOptions]] share one service options key and set the API base URL and credential factory. The factory runs once per operation so tokens can rotate, but [[src/vercel-blob/vercel/blob/_internal/service.py#BlobService#_get_credentials]] fails if it ever names a different store. The sync factory adapter rejects awaitables rather than running them.
+[[src/vercel-blob/vercel/blob/_internal/options.py#BlobServiceOptions]] and [[src/vercel-blob/vercel/blob/_internal/options.py#SyncBlobServiceOptions]] share one service options key and set the API base URL, credential factory, and `transfer_timeout`. The factory runs once per operation so tokens can rotate, but [[src/vercel-blob/vercel/blob/_internal/service.py#BlobService#_get_credentials]] fails if it ever names a different store. The sync factory adapter rejects awaitables rather than running them.
 
 ## Pathnames and delivery URLs
 
 Targets are store-relative pathnames or delivery URLs on the standard Blob host, both validated strictly before use.
 
-Pathnames are literal object names: one leading slash is stripped, while empty paths, control characters, lone surrogates, `//`, and dot segments are rejected. Uploads and copy destinations are capped at 950 UTF-16 code units to match the TypeScript SDK. Delivery URLs must be HTTPS on `<store>.<access>.blob.vercel-storage.com`; custom domains are unsupported, and redirects are never followed.
+Pathnames are literal object names: one leading slash is stripped, while empty paths, Unicode control characters (category Cc), lone surrogates, `//`, and dot segments are rejected for every operation, so reads and deletes follow the same rules as writes. Uploads and copy destinations are capped at 950 UTF-16 code units to match the TypeScript SDK. Delivery URLs must be HTTPS on `<store>.<access>.blob.vercel-storage.com` with well-formed percent-encoding; custom domains are unsupported, and redirects are never followed. Requests send Blob API version 13, under which the service derives keys from the URL path as written rather than resolving it, so the path the SDK validated is the key the service uses.
 
 Downloads build the delivery URL themselves rather than asking the API. A public URL can be downloaded without credentials. Private downloads attach credentials only after confirming that the URL's store matches the credential's store.
 
@@ -52,7 +52,7 @@ Downloads are streamed with one owner per response; the buffered form is a thin 
 
 [[src/vercel-blob/vercel/blob/__init__.py#stream_blob]] returns a context that opens the response on entry. [[src/vercel-blob/vercel/blob/_internal/download.py#AsyncBlobDownload]] and [[src/vercel-blob/vercel/blob/_internal/download.py#SyncBlobDownload]] may be iterated once, reject concurrent reads, and close the response at EOF, on error, on cancellation, or on context exit. [[src/vercel-blob/vercel/blob/__init__.py#get_blob]] joins that stream into `bytes` and returns a result that outlives the session.
 
-Download metadata comes from response headers, with no preliminary HEAD request. Missing headers stay `None`, even when the body has been read.
+Download metadata comes from response headers, with no preliminary HEAD request. Missing headers stay `None`. The size is `None` for content-encoded responses, whose `content-length` counts the compressed bytes rather than the decoded body; `get_blob` replaces it with the length of the body it read.
 
 ## Collections
 
@@ -66,7 +66,7 @@ Catalog queries are lazy iterators that follow cursors on demand, mirroring Sand
 
 Service failures map to `BlobError` subclasses carrying the HTTP status and Blob error code.
 
-[[src/vercel-blob/vercel/blob/_internal/api_client.py#_map_http_error]] turns error responses into types from [[src/vercel-blob/vercel/blob/errors.py]], such as [[src/vercel-blob/vercel/blob/errors.py#BlobNotFoundError]] and [[src/vercel-blob/vercel/blob/errors.py#BlobPreconditionFailedError]], parsing `Retry-After` for rate limits. Transport failures become [[src/vercel-blob/vercel/blob/errors.py#BlobUnknownError]]. The SDK does not retry requests itself.
+[[src/vercel-blob/vercel/blob/_internal/api_client.py#_map_http_error]] turns error responses into types from [[src/vercel-blob/vercel/blob/errors.py]], such as [[src/vercel-blob/vercel/blob/errors.py#BlobNotFoundError]] and [[src/vercel-blob/vercel/blob/errors.py#BlobPreconditionFailedError]], parsing `Retry-After` for rate limits. Transport failures become [[src/vercel-blob/vercel/blob/errors.py#BlobUnknownError]], or its subclass [[src/vercel-blob/vercel/blob/errors.py#BlobTimeoutError]] when an HTTP timeout expires, through [[src/vercel-blob/vercel/blob/_internal/transport_errors.py]]. Downloads map failures while reading the body the same way, except that an undecodable body raises [[src/vercel-blob/vercel/blob/errors.py#BlobStreamError]]. Uploads, multipart parts and completion, and copies, whose duration grows with object size, use the service's `transfer_timeout` (five minutes by default, like Sandbox file transfers) instead of the session client's timeout. The SDK does not retry requests itself.
 
 ## Tests and examples
 
