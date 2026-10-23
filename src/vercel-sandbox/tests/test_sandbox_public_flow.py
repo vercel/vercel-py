@@ -775,8 +775,72 @@ async def test_service_region_defaults_placement_operations_and_allows_call_over
     }
     assert json.loads(update_route.calls.last.request.content) == {
         "tags": {"updated": "true"},
-        "region": "iad1",
     }
+
+
+@respx.mock
+@pytest.mark.parametrize("sync", [False, True])
+@pytest.mark.parametrize("region_source", ["options", "environment"])
+@pytest.mark.parametrize(
+    "kwargs, expected_body",
+    [
+        ({}, {}),
+        ({"tags": {"updated": "true"}}, {"tags": {"updated": "true"}}),
+        ({"region": "sfo1"}, {"region": "sfo1"}),
+        ({"region": None}, {}),
+        (
+            {
+                "ports": [],
+                "persistent": False,
+                "env": {},
+                "tags": {},
+                "mounts": {},
+                "failover_regions": [],
+                "network_id": None,
+                "snapshot_retention": None,
+            },
+            {
+                "ports": [],
+                "persistent": False,
+                "env": {},
+                "tags": {},
+                "mounts": {},
+                "failoverRegions": [],
+                "networkId": None,
+                "keepLastSnapshots": None,
+            },
+        ),
+    ],
+    ids=["omitted", "tags", "explicit-region", "none-region", "empty-false-and-null"],
+)
+async def test_update_sends_only_explicit_configuration(
+    mock_env_clear: None,
+    monkeypatch: pytest.MonkeyPatch,
+    sync: bool,
+    region_source: str,
+    kwargs: dict[str, Any],
+    expected_body: dict[str, Any],
+) -> None:
+    if region_source == "environment":
+        monkeypatch.setenv("VERCEL_REGION", "cle1")
+    service_region = "cle1" if region_source == "options" else None
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    update_route = respx.patch("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(200, json={"sandbox": _sandbox_response()["sandbox"]})
+    )
+
+    if sync:
+        with session(service_options=_session_options(sync=True, region=service_region)):
+            handle = sandbox_sync.get_sandbox(name="preview")
+            handle.update(**kwargs)
+    else:
+        async with session(service_options=_session_options(region=service_region)):
+            async_handle = await sandbox.get_sandbox(name="preview")
+            await async_handle.update(**kwargs)
+
+    assert json.loads(update_route.calls.last.request.content) == expected_body
 
 
 def _recorded_response(
