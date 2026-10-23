@@ -26,7 +26,7 @@ def rotate_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Callable[[]
     def rotate() -> str:
         nonlocal now
         now += 60
-        payload = base64.urlsafe_b64encode(json.dumps({"exp": now + 120}).encode()).decode()
+        payload = base64.urlsafe_b64encode(json.dumps({"exp": now + 1200}).encode()).decode()
         token = f"header.{payload}.signature"
         replacement = tmp_path / "replacement"
         replacement.write_text(token, encoding="utf-8")
