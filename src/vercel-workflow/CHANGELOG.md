@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.12.0 - 2026-10-23
+
+### Breaking Changes
+
+- `LocalWorld` now stores event and step files one directory per run (`events/<runId>/`, `steps/<runId>/`), matching `@workflow/world-local`, so reading a run lists only that run's files. A data directory holding only old flat-layout event and step files is deleted on startup, as `@workflow/world-local` does; one that mixes both layouts or holds unknown `.json` files in `events/` or `steps/` raises `DataDirLayoutError` and is left untouched. Inspect runs with `workflow` CLI 5.2.0 or later. (#475)
+
+### Bug Fixes
+
+- Fix hook lifecycle event recording and ordering. (#432)
+- Persist pending hook registration and explicit disposal before workflows complete or fail. (#433)
+- Treat files removed during LocalWorld JSON reads as missing instead of raising `FileNotFoundError`. (#472)
+
+### Internal
+
+- Consolidate local hook token paths, claim models, and deletion helpers without changing hook lifecycle behavior. (#474)
+
 ## 0.11.2 - 2026-10-15
 
 ### Bug Fixes

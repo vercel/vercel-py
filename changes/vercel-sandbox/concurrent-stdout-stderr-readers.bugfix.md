@@ -1,1 +1,0 @@
-Fix process stdout and stderr readers stalling when both are read at the same time from separate tasks or threads: a line routed to one reader while another was pulling from the shared log stream could sit unread until more output arrived.
