@@ -26,6 +26,8 @@ Inbound token verification is deliberately narrow, because the known JWT failure
 
 [[src/vercel-oidc/vercel/oidc/verify.py#verify_vercel_oidc_token]] accepts only RS256, pins the issuer to Vercel's OIDC service (including team-scoped issuers), and resolves keys by `kid` from a constant JWKS URL. Claims are checked only after the signature verifies. The JWKS is cached with a rate-limited refetch, so an attacker cycling unknown `kid` values cannot force a fetch per request.
 
+Passing `issuer="passport"` pins the issuer to Vercel Passport instead, for [[vercel-passport]]. The issuer is chosen from a closed set rather than given as a URL, so a caller can never widen verification beyond Vercel's issuers.
+
 It fails closed: if the expected project or environment cannot be resolved from arguments, `VERCEL_PROJECT_ID`, or `VERCEL_TARGET_ENV`/`VERCEL_ENV`, every token is rejected. Verification needs the `verify` extra, and `cryptography` is never imported without it.
 
 [[src/vercel-oidc/vercel/oidc/verify.py#resolve_vercel_oidc_token_identity]] verifies a token and reduces its identity claims to an opaque digest, so callers can key state on an identity that stays stable across token refreshes. It does not authorize; [[vercel-connect]] uses it for cache keys.
