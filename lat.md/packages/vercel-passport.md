@@ -1,0 +1,53 @@
+# vercel-passport
+
+Reads and verifies the visitor identity that Vercel Passport forwards to an app after authenticating the visitor at Vercel's edge.
+
+Lives in [[src/vercel-passport]] and is exposed as [[src/vercel-passport/vercel/passport/__init__.py|vercel.passport]] (async) and [[src/vercel-passport/vercel/passport/sync.py|vercel.passport.sync]], which use identical names and arguments, following [[vercel-connect]]. It is a port of the TypeScript `@vercel/passport` package, as of version 1.2.0.
+
+## Layering
+
+All behavior except verification is synchronous and shared, so the two surfaces differ only in how they call the verifier.
+
+[[src/vercel-passport/vercel/passport/_internal/resolve.py#resolve_identity]] decides which token `get_identity` uses, where it came from, and whether it must be verified, returning either an identity or a [[src/vercel-passport/vercel/passport/_internal/resolve.py#PendingVerification]]. [[src/vercel-passport/vercel/passport/_internal/resolve.py#resolve_token]] does the same for `verify_identity`. Each surface then calls [[src/vercel-passport/vercel/passport/_internal/resolve.py#verify_async]] or [[src/vercel-passport/vercel/passport/_internal/resolve.py#verify_sync]] and finishes with [[src/vercel-passport/vercel/passport/_internal/resolve.py#verified_identity]].
+
+## Token sources
+
+`get_identity` prefers the trusted `x-vercel-oidc-passport-token` header, then the `_vercel_passport` cookie, and always verifies a token taken from the request.
+
+With no request argument, the headers come from [[vercel-headers]], which the Vercel Python runtime fills for every request it serves. A request may also be passed as a header mapping or any object exposing `headers`. Header names match case-insensitively even for a plain dict.
+
+A token the caller supplies directly, as an argument or in `VERCEL_PASSPORT_TOKEN`, is decoded without verification unless `verify=True`, for local debugging. Unlike the TypeScript package, `allow_unverified` defaults to [[src/vercel-passport/vercel/passport/_internal/development.py#is_local_development]], so on a deployment such a token raises unless the caller opts in. `verify_identity` is the verified path for explicit tokens.
+
+### Chunked cookies
+
+A session token too large for one cookie is split by Vercel's proxy across several, and [[src/vercel-passport/vercel/passport/_internal/resolve.py#_cookie]] reassembles it.
+
+The `_vercel_passport` cookie then holds a manifest with the chunk count and the SHA-256 of the joined token, and each chunk's cookie name carries the checksum's first 32 hex digits as a generation, so chunks of an older session never mix in. The count is bounded to 100 and checked before any chunk is read, and a missing chunk or mismatched checksum raises [[src/vercel-passport/vercel/passport/_internal/models.py#PassportIdentityError]] rather than a verification error.
+
+The cookie is read only when no higher-priority token exists, as in the TypeScript package, so a corrupt chunked cookie cannot break a request that also carries a valid header or bearer token.
+
+`require_identity` resolves exactly as `get_identity` does, then [[src/vercel-passport/vercel/passport/_internal/resolve.py#required_identity]] rejects a missing identity or one without a token, which excludes every local and development identity. It mirrors `requireIdentity` from the TypeScript package's 1.2.0 release.
+
+`verify_identity` searches an `Authorization: Bearer` header, then the Passport header, then the cookie. It never reads the request context and never falls back to a local identity, so the token it verifies is always named explicitly.
+
+## Verification
+
+Passport tokens are verified by [[vercel-oidc#Verification]] with the issuer pinned to Passport instead of OIDC.
+
+Passport tokens are signed by the same global key as other Vercel OIDC tokens, so they verify against the same pinned JWKS. [[src/vercel-oidc/vercel/oidc/verify.py#verify_vercel_oidc_token]] takes `issuer="passport"` to accept `https://passport.vercel.com` and its owner-scoped issuers instead. Because the signature alone cannot tell the two token kinds apart, [[src/vercel-passport/vercel/passport/_internal/payload.py#build_identity]] also requires the Passport shape (`typ`, `sub`, `owner`, `connector_id`, and `external_sub`) on every identity, verified or not.
+
+Time claims use `vercel-oidc`'s 60-second leeway ([[src/vercel-oidc/vercel/oidc/verify.py#DEFAULT_LEEWAY]]). Zero leeway would match `jose` on `exp` and `nbf`, but PyJWT also rejects a future `iat`, which `jose` never checks, so an edge clock even a second ahead would reject fresh tokens. A token claiming to be issued more than 60 seconds in the future is still rejected, unlike in the TypeScript package.
+
+Unlike the TypeScript package, `"*"` is not a wildcard for the expected project or environment, and lists of accepted values are not supported. Expectations compare by equality, as everywhere else in [[vercel-oidc]], so a backend cannot accidentally accept tokens minted for any project. Only `audience` is exposed from `jose`'s verify options.
+
+## Local identities
+
+When the request carries no token, the identity comes from the caller, then `VERCEL_PASSPORT_IDENTITY`, then a synthesized development identity.
+
+[[src/vercel-passport/vercel/passport/_internal/development.py#local_identity]] resolves that order. The synthesized identity exists only when [[src/vercel-passport/vercel/passport/_internal/development.py#is_local_development]] holds, which excludes every Vercel deployment except `VERCEL_ENV=development`. It can be disabled with `development=False` or `VERCEL_PASSPORT_DEV=0`, and emits a warning once per process, attributed to the caller's line. None of these identities is verified.
+
+## Identity values
+
+Identities are frozen dataclasses whose `payload` is a plain-dict copy of the claims, so they pickle, deep-copy, and serialize with `dataclasses.asdict`.
+
+The fields cannot be reassigned, but `payload` is mutable in place: a read-only mapping cannot be pickled or copied, which broke frameworks that serialize dataclasses. `payload` takes no part in equality or hashing, so identities stay hashable. [[src/vercel-passport/vercel/passport/_internal/models.py#PassportIdentity]] leaves `token` and `payload` out of its repr, so logging an identity never writes a bearer credential. Verification failures raise [[src/vercel-passport/vercel/passport/_internal/models.py#PassportVerificationError]], a subclass of [[src/vercel-passport/vercel/passport/_internal/models.py#PassportIdentityError]], so one `except` handles every rejection.
