@@ -92,6 +92,7 @@ EXTERNAL_DEPENDENCIES = {
     # the `vercel-oidc[verify]` extra rather than this package's own table, and
     # extras are already passed through unvendored.
     "vercel-connect": {"pydantic"},
+    "vercel-passport": {"pydantic"},
     # redis-py's dotted self-imports cannot be rewritten for namespace
     # vendoring, and applications import redis directly to build the job
     # store's connection pool anyway.
