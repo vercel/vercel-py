@@ -19,6 +19,8 @@ New features should follow this split: put the logic in the service, then expose
 
 Sandbox configuration comes from the active SDK session, or from a standalone client that never touches the session.
 
+Public Sandbox functions and methods must not expose a `project_id` keyword argument: OAuth scopes access to a single team/project. Apply this rule to async and sync module functions, handles, and standalone clients; resolve project scope from the configured credentials.
+
 [[src/vercel-sandbox/vercel/sandbox/_internal/service.py#get_sandbox_service]] builds one service per session from [[src/vercel-sandbox/vercel/sandbox/_internal/options.py#SandboxServiceOptions]]: base URL, credentials factory, file-transfer timeout, and default region (falling back to `VERCEL_REGION`). The sync and async options classes share one registry key. Supplying options replaces the whole Sandbox configuration for that session scope. Default credentials come from [[vercel-oidc#Credentials]].
 
 [[src/vercel-sandbox/vercel/sandbox/client.py#SandboxClient]] and [[src/vercel-sandbox/vercel/sandbox/sync/client.py#SyncSandboxClient]] serve dependency-injected applications. Construction performs no I/O, and the owner must close the client.
