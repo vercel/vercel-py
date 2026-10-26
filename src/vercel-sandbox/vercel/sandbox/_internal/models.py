@@ -1,5 +1,6 @@
 """Public value types for the Sandbox API."""
 
+import stat as stat_module
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import timedelta
@@ -726,6 +727,43 @@ class DirectoryEntry:
 
     path: str
     kind: Literal["file", "directory", "symlink", "other"]
+
+
+@dataclass(frozen=True, slots=True)
+class StatResult:
+    """Remote file metadata with the field names of ``os.stat_result``.
+
+    Timestamps are Unix seconds with whole-second precision. ``st_birthtime``
+    is ``None`` when the filesystem does not report a creation time.
+    ``st_blksize`` is the preferred I/O block size; ``st_blocks`` counts
+    allocated 512-byte blocks. ``st_mode`` includes file type and permission bits.
+    """
+
+    st_mode: int
+    st_ino: int
+    st_dev: int
+    st_nlink: int
+    st_uid: int
+    st_gid: int
+    st_size: int
+    st_atime: float
+    st_mtime: float
+    st_ctime: float
+    st_blksize: int
+    st_blocks: int
+    st_birthtime: float | None
+
+    def is_file(self) -> bool:
+        """Return whether this metadata describes a regular file."""
+        return stat_module.S_ISREG(self.st_mode)
+
+    def is_dir(self) -> bool:
+        """Return whether this metadata describes a directory."""
+        return stat_module.S_ISDIR(self.st_mode)
+
+    def is_symlink(self) -> bool:
+        """Return whether this metadata describes a symbolic link."""
+        return stat_module.S_ISLNK(self.st_mode)
 
 
 class DriveHandle(Protocol):

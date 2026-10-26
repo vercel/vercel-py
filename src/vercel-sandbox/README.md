@@ -279,6 +279,59 @@ Drive name may appear only once. Mounted sandboxes cannot use failover regions,
 and each Drive must use the sandbox region. Drives default to `iad1` when
 `region` is omitted.
 
+## Filesystem
+
+Use `box.fs` for files in a sandbox, or `box.current_session.fs` for operations
+pinned to its current session. Paths accept strings or `PurePosixPath` values.
+Relative paths use the sandbox working directory, or the optional `cwd`:
+
+```python
+await box.fs.mkdir("workspace")
+await box.fs.write_text("data.txt", "hello", cwd="workspace")
+await box.run_process("ln", ["-s", "data.txt", "link"], cwd="workspace", check=True)
+
+info = await box.fs.stat("link", cwd="workspace")
+assert info.is_file() and info.st_size == 5
+assert (await box.fs.lstat("link", cwd="workspace")).is_symlink()
+assert await box.fs.readlink("link", cwd="workspace") == "data.txt"
+print(await box.fs.realpath("link", cwd="workspace"))  # Absolute target path
+```
+
+`stat()` follows symbolic links; `lstat()` describes the link itself. Both
+return a frozen `StatResult`, exported from `vercel.sandbox` and
+`vercel.sandbox.sync`. It uses `os.stat_result` field names: `st_mode`, `st_ino`,
+`st_dev`, `st_nlink`, `st_uid`, `st_gid`, `st_size`, `st_atime`, `st_mtime`,
+`st_ctime`, `st_blksize`, and `st_blocks`, plus `st_birthtime`. The
+`is_file()`, `is_dir()`, and `is_symlink()` helpers inspect the file type in
+`st_mode`; permission bits are also preserved. Times are Unix seconds with
+whole-second precision. `st_birthtime` is `None` when unavailable.
+`st_blksize` is the preferred I/O block size, and `st_blocks` counts allocated
+512-byte blocks.
+
+`readlink()` returns the stored link target, preserving relative paths and
+whitespace. It also works for dangling links. `realpath()` resolves links and
+`.`/`..` to an absolute path and requires every component to exist.
+
+These methods run GNU filesystem commands inside the sandbox. A missing path
+raises `SandboxPathNotFoundError`, whose `cause` is a
+`SandboxFilesystemCommandError` containing the exit code and captured output.
+A dangling target is missing for `stat()` and `realpath()`, while `lstat()`
+can still inspect the link. Other command failures raise
+`SandboxFilesystemCommandError` directly, including `readlink()` on a regular
+file. No method returns `None` for a missing path.
+
+The synchronous filesystem exposes the same signatures without `await`:
+
+```python
+info = box.fs.stat("link", cwd="workspace")
+assert box.fs.lstat("link", cwd="workspace").is_symlink()
+print(box.fs.readlink("link", cwd="workspace"))
+print(box.fs.realpath("link", cwd="workspace"))
+```
+
+See [`examples/sandbox_06_streaming_files.py`](examples/sandbox_06_streaming_files.py)
+for metadata inspection alongside file transfers.
+
 ## Interactive PTY sessions
 
 `open_interactive(...)` starts a process attached to a pseudo-terminal and
