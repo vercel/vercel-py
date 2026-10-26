@@ -4,9 +4,16 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from typing import Any, Literal, TypeAlias
+from typing import Any, Literal, TypeAlias, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from vercel.oidc.verify import VERCEL_PASSPORT_ISSUER
 
@@ -60,7 +67,17 @@ class PassportDevelopmentIdentityWarning(UserWarning):
 
 
 def as_passport_error(exc: ValidationError) -> PassportValidationError:
-    """Report a pydantic validation failure as the package's own error."""
+    """Report a pydantic validation failure as the package's own error.
+
+    A nested model's own `PassportValidationError` is unwrapped, so its message
+    keeps the field path rather than pydantic's "Value error" wrapping. Only
+    pydantic's message is kept, never the input, which could hold a token.
+    """
+    for error in exc.errors():
+        original = (error.get("ctx") or {}).get("error")
+        if isinstance(original, PassportValidationError):
+            location = ".".join(str(part) for part in error["loc"])
+            return PassportValidationError(f"{location}.{original}" if location else str(original))
     details = "; ".join(
         f"{'.'.join(str(part) for part in error['loc']) or 'value'}: {error['msg']}"
         for error in exc.errors()
@@ -68,11 +85,15 @@ def as_passport_error(exc: ValidationError) -> PassportValidationError:
     return PassportValidationError(details)
 
 
+_Model = TypeVar("_Model", bound="PassportModel")
+
+
 class PassportModel(BaseModel):
     """Frozen, validated value type.
 
     `extra="forbid"` so a misspelled keyword is an error rather than a silently
-    dropped field, and validation failures surface as `PassportValidationError`
+    dropped field. Construction, `model_validate`, `model_validate_json`,
+    assignment, and deletion all report failures as `PassportValidationError`
     rather than pydantic's own error, which spares callers an import of pydantic.
     """
 
@@ -84,11 +105,33 @@ class PassportModel(BaseModel):
         except ValidationError as exc:
             raise as_passport_error(exc) from exc
 
+    @classmethod
+    def model_validate(cls: type[_Model], obj: Any, *args: Any, **kwargs: Any) -> _Model:
+        try:
+            return super().model_validate(obj, *args, **kwargs)  # type: ignore[misc]
+        except ValidationError as exc:
+            raise as_passport_error(exc) from exc
+
+    @classmethod
+    def model_validate_json(
+        cls: type[_Model], json_data: str | bytes | bytearray, *args: Any, **kwargs: Any
+    ) -> _Model:
+        try:
+            return super().model_validate_json(json_data, *args, **kwargs)  # type: ignore[misc]
+        except ValidationError as exc:
+            raise as_passport_error(exc) from exc
+
     def __setattr__(self, name: str, value: Any) -> None:
         # Assigning to a frozen model is a pydantic ValidationError; report it the
         # same way as every other misuse of a Passport value.
         try:
             super().__setattr__(name, value)
+        except ValidationError as exc:
+            raise as_passport_error(exc) from exc
+
+    def __delattr__(self, name: str) -> None:
+        try:
+            super().__delattr__(name)
         except ValidationError as exc:
             raise as_passport_error(exc) from exc
 
@@ -127,16 +170,25 @@ class PassportDevelopmentIdentity(PassportModel):
     environment: str = "development"
     project: str = "local"
     project_id: str | None = None
+    # The factories read with `get`: before pydantic 2.12 they run even when the
+    # field they read failed validation, and a `KeyError` would escape unwrapped.
     issuer: str = Field(
-        default_factory=lambda data: f"{VERCEL_PASSPORT_ISSUER}/{data['owner']}",
+        default_factory=lambda data: f"{VERCEL_PASSPORT_ISSUER}/{data.get('owner')}",
         serialization_alias="iss",
     )
     audience: str = Field(
         default_factory=lambda data: (
-            f"https://vercel.com/{data['owner']}/{data['project']}/{data['environment']}"
+            f"https://vercel.com/{data.get('owner')}/{data.get('project')}/{data.get('environment')}"
         ),
         serialization_alias="aud",
     )
+
+    @field_validator("owner_id", "external_issuer", "project_id", mode="before")
+    @classmethod
+    def _empty_is_unset(cls, value: Any) -> Any:
+        # An optional claim is omitted rather than emitted empty, as in the
+        # TypeScript package.
+        return None if value == "" else value
 
     @model_validator(mode="before")
     @classmethod
@@ -188,13 +240,16 @@ class PassportProject(PassportModel):
 class PassportIdentity(PassportModel):
     """A visitor identity established by Vercel Passport.
 
-    `token` and `payload` are omitted from the repr so that logging an identity
-    never writes a bearer credential to the logs.
+    `token` and `payload` are omitted from the repr, and `token` from
+    `model_dump`, so neither logging an identity nor returning one from an
+    endpoint exposes the bearer credential. Read it as `identity.token`.
 
-    The fields are frozen, but `payload` holds a copy of the claims as a plain
-    dict, so an identity can be pickled, copied, and serialized with
-    `model_dump`. Equality compares every field, `payload` included; the hash
-    leaves `payload` out, because a dict cannot be hashed.
+    The fields are frozen, but `payload` holds a deep copy of the claims as a
+    plain dict, so an identity can be pickled, copied, and serialized with
+    `model_dump`. `payload` takes no part in equality or hashing: it stays
+    mutable, and an identity used as a set member or dict key must not change.
+    Two identities without a `token` that differ only in claims lacking a
+    dedicated field therefore compare equal; key on `payload` if that matters.
     """
 
     subject: str
@@ -213,18 +268,25 @@ class PassportIdentity(PassportModel):
     name: str | None = None
     project: PassportProject | None = None
     environment: str | None = None
-    token: str | None = Field(default=None, repr=False)
+    # Left out of the repr and of `model_dump`, so neither a log line nor an
+    # identity returned from an endpoint ever carries the bearer credential.
+    token: str | None = Field(default=None, repr=False, exclude=True)
     """The encoded token, or `None` for an identity supplied without one."""
     payload: dict[str, Any] = Field(default_factory=dict, repr=False)
     """Every claim on the token, including ones without a dedicated field."""
 
+    def _key(self) -> tuple[Any, ...]:
+        return (
+            type(self),
+            *(getattr(self, name) for name in type(self).model_fields if name != "payload"),
+        )
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, PassportIdentity):
+            return NotImplemented
+        return self._key() == other._key()
+
     def __hash__(self) -> int:
         # Defined here so pydantic does not install its own, which hashes every
-        # field and fails on the `payload` dict. Equal identities have equal
-        # payloads, so leaving it out keeps the hash consistent with equality.
-        return hash(
-            (
-                type(self),
-                *(getattr(self, name) for name in type(self).model_fields if name != "payload"),
-            )
-        )
+        # field and fails on the `payload` dict.
+        return hash(self._key())

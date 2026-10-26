@@ -113,9 +113,37 @@ def test_rejects_an_unknown_field() -> None:
         PassportDevelopmentIdentity(ownr="acme")  # type: ignore[call-arg]
 
 
-def test_rejects_a_value_of_the_wrong_type() -> None:
-    with pytest.raises(PassportValidationError, match="owner"):
-        PassportDevelopmentIdentity(owner=42)  # type: ignore[arg-type]
+@pytest.mark.parametrize(
+    "values",
+    [
+        pytest.param({"owner": 42}, id="owner"),
+        pytest.param({"owner": None}, id="owner none"),
+        pytest.param({"project": 42}, id="project"),
+        pytest.param({"environment": ["x"]}, id="environment"),
+    ],
+)
+def test_rejects_a_value_of_the_wrong_type(values: dict[str, object]) -> None:
+    """Including the fields the derived defaults read, which pydantic before 2.12
+    still passes to the default factories after they fail validation."""
+    import pydantic
+
+    with pytest.raises(PassportValidationError) as caught:
+        PassportDevelopmentIdentity(**values)  # type: ignore[arg-type]
+    assert not isinstance(caught.value, pydantic.ValidationError)
+
+
+def test_model_validate_reports_errors_as_validation_errors() -> None:
+    import pydantic
+
+    with pytest.raises(PassportValidationError, match="ownr") as caught:
+        PassportDevelopmentIdentity.model_validate({"ownr": "acme"})
+    assert not isinstance(caught.value, pydantic.ValidationError)
+
+
+def test_omits_an_explicitly_empty_optional_claim() -> None:
+    identity = PassportDevelopmentIdentity(project_id="", owner_id="", external_issuer="")
+
+    assert not {"project_id", "owner_id", "external_iss"} & identity.to_claims().keys()
 
 
 def test_is_frozen_and_picklable() -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import copy
 import json
 import re
 from collections.abc import Mapping
@@ -104,8 +105,9 @@ def build_identity(
         project=project,
         environment=_string(claims, "environment"),
         token=token,
-        # A copy, so the identity is unaffected by later changes to `claims`.
-        payload=dict(claims),
+        # A deep copy, so the identity and the caller's claims, nested values
+        # included, never change each other.
+        payload=copy.deepcopy(dict(claims)),
     )
 
 

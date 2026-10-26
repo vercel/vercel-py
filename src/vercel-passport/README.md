@@ -79,9 +79,10 @@ minted for any project:
 - In `PassportDevelopmentIdentity`, an explicit `None` clears a field its
   `VERCEL_PASSPORT_DEV_*` variable sets.
 
-Identities are frozen Pydantic models. Serialize one with `identity.model_dump()`
-or `identity.model_dump_json()`; `token` and `payload` are left out of its repr so
-logging an identity never writes the bearer token.
+Identities are frozen Pydantic models, so an endpoint can return one directly, or
+serialize it with `identity.model_dump()`. The bearer token is left out of both
+`model_dump()` and the repr, so neither a response nor a log line exposes it;
+read it as `identity.token` when you need to forward it.
 
 Use `require_identity()` when a route needs a real Passport token. It takes the
 same arguments as `get_identity()`, but raises `PassportIdentityError` instead of
@@ -195,7 +196,9 @@ with local_identity({
 ```
 
 The identity is held in a context variable, so it applies to the current
-request or test and to tasks and threads started inside the block. Full claims
+request or test, to tasks started inside the block, and to threads started with
+`anyio.to_thread` or `asyncio.to_thread`, but not a plain `threading.Thread`.
+Full claims
 can also be given as JSON in `VERCEL_PASSPORT_IDENTITY`. The identity set with
 `local_identity()` comes first, then `VERCEL_PASSPORT_IDENTITY`, then the
 `VERCEL_PASSPORT_DEV=1` test identity.

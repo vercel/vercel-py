@@ -27,6 +27,7 @@ from vercel.passport import (
     PASSPORT_HEADER_NAME,
     PassportDevelopmentIdentity,
     PassportDevelopmentIdentityWarning,
+    PassportIdentity,
     PassportIdentityError,
     PassportOwner,
     PassportProject,
@@ -852,12 +853,29 @@ async def test_uses_local_identities_on_a_vercel_development_environment(
 async def test_repr_never_includes_the_token(
     surface: Surface, jwks: respx.Route, sign: Sign
 ) -> None:
-    token = sign()
+    token = sign(tenant_id="tenant-only-in-payload")
 
     identity = await surface.get_identity({PASSPORT_HEADER_NAME: token}, **EXPECTATIONS)
 
     assert token not in repr(identity)
     assert token.split(".")[1] not in repr(identity)
+    # Claims without a dedicated field stay out too.
+    assert "tenant-only-in-payload" not in repr(identity)
+    assert "tenant-only-in-payload" not in str(identity)
+
+
+async def test_serialization_never_includes_the_token(
+    surface: Surface, jwks: respx.Route, sign: Sign
+) -> None:
+    """Returning an identity from an endpoint must not hand the bearer token to the client."""
+    token = sign()
+
+    identity = await surface.get_identity({PASSPORT_HEADER_NAME: token}, **EXPECTATIONS)
+
+    assert identity is not None
+    assert identity.token == token
+    assert "token" not in identity.model_dump()
+    assert token not in identity.model_dump_json()
 
 
 async def test_identity_is_immutable(surface: Surface) -> None:
@@ -871,15 +889,51 @@ async def test_identity_is_immutable(surface: Surface) -> None:
         identity.payload = {}  # type: ignore[misc]
 
 
-async def test_identity_payload_is_a_copy_of_the_claims(surface: Surface) -> None:
-    claims = dict(PAYLOAD)
+async def test_identity_payload_is_a_deep_copy_of_the_claims(surface: Surface) -> None:
+    claims = {**PAYLOAD, "groups": ["staff"]}
 
     with local_identity(claims):
         claims["sub"] = "someone-else"
-        identity = await surface.get_identity()
+        claims["groups"].append("admin")
+        first = await surface.get_identity()
+        assert first is not None
+        first.payload["groups"].append("root")
+        second = await surface.get_identity()
 
+    assert second is not None
+    assert first.payload["sub"] == PAYLOAD["sub"]
+    assert second.payload["groups"] == ["staff"]
+    assert claims["groups"] == ["staff", "admin"]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [pytest.param('{"typ": "passport"}', id="string"), pytest.param(None, id="none")],
+)
+async def test_local_identity_rejects_a_value_that_is_not_an_identity(value: object) -> None:
+    with pytest.raises(TypeError, match="PassportDevelopmentIdentity or a mapping"):
+        with local_identity(value):  # type: ignore[arg-type]
+            pass
+
+
+async def test_identity_misuse_raises_a_validation_error(
+    surface: Surface, jwks: respx.Route, sign: Sign
+) -> None:
+    import pydantic
+
+    identity = await surface.get_identity({PASSPORT_HEADER_NAME: sign()}, **EXPECTATIONS)
     assert identity is not None
-    assert identity.payload["sub"] == PAYLOAD["sub"]
+
+    for misuse in (
+        lambda: delattr(identity, "token"),
+        lambda: PassportIdentity.model_validate({"subject": 1}),
+        lambda: PassportIdentity.model_validate_json('{"subject": 1}'),
+        lambda: PassportOwner.model_validate({"slug": 1}),
+        lambda: PassportOwner(slug=1),  # type: ignore[arg-type]
+    ):
+        with pytest.raises(PassportValidationError) as caught:
+            misuse()
+        assert not isinstance(caught.value, pydantic.ValidationError)
 
 
 async def test_identity_can_be_copied_pickled_serialized_and_hashed(
@@ -896,20 +950,28 @@ async def test_identity_can_be_copied_pickled_serialized_and_hashed(
     assert copy.deepcopy(identity) == identity
     serialized = json.loads(identity.model_dump_json())
     assert serialized["payload"]["sub"] == PAYLOAD["sub"]
+    assert "token" not in serialized
     assert serialized["owner"] == {"slug": "team-slug", "id": "team_123"}
     assert serialized["project"] == {"id": "prj_123", "name": "my-project"}
     assert hash(identity) == hash(copy.deepcopy(identity))
 
 
-async def test_identity_equality_includes_the_payload(surface: Surface) -> None:
-    with local_identity({**PAYLOAD, "role": "admin"}):
-        first = await surface.get_identity()
-    with local_identity({**PAYLOAD, "role": "user"}):
-        second = await surface.get_identity()
+async def test_identity_equality_and_hash_ignore_the_payload(
+    surface: Surface, jwks: respx.Route, sign: Sign
+) -> None:
+    """`payload` is mutable, so an identity in a set or dict must not depend on it."""
+    import copy
 
-    assert first is not None
-    assert second is not None
-    assert first != second
+    identity = await surface.get_identity({PASSPORT_HEADER_NAME: sign()}, **EXPECTATIONS)
+    assert identity is not None
+    snapshot = copy.deepcopy(identity)
+    members = {identity}
+
+    identity.payload["role"] = "admin"
+
+    assert identity == snapshot
+    assert hash(identity) == hash(snapshot)
+    assert snapshot in members
 
 
 async def test_rejects_a_request_that_is_not_a_header_mapping(surface: Surface) -> None:

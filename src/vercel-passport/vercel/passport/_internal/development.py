@@ -10,6 +10,7 @@ deployment other than `VERCEL_ENV=development`.
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import threading
@@ -50,21 +51,30 @@ def local_identity(identity: PassportDevelopmentIdentity | Mapping[str, Any]) ->
 
     For tests and local development: inside the block, `get_identity` returns
     this identity, unverified, when the request carries no token. It is ignored
-    on a Vercel deployment other than `VERCEL_ENV=development`. Like any context
-    variable, it is visible to tasks and threads started inside the block.
+    on a Vercel deployment other than `VERCEL_ENV=development`. It is held in a
+    context variable, so tasks started inside the block see it, as do threads
+    started with `anyio.to_thread` or `asyncio.to_thread`, which copy the
+    context; a plain `threading.Thread` or executor does not.
 
     Args:
         identity: A `PassportDevelopmentIdentity`, or the full claims of a
             Passport token.
 
     Raises:
+        TypeError: If `identity` is neither of those.
         PassportIdentityError: If the claims are not Passport-shaped.
     """
-    claims = (
-        identity.to_claims()
-        if isinstance(identity, PassportDevelopmentIdentity)
-        else dict(identity)
-    )
+    if isinstance(identity, PassportDevelopmentIdentity):
+        claims = dict(identity.to_claims())
+    elif isinstance(identity, Mapping):
+        # A deep copy, so later changes to the caller's claims, nested values
+        # included, never reach the identity.
+        claims = copy.deepcopy(dict(identity))
+    else:
+        raise TypeError(
+            "identity must be a PassportDevelopmentIdentity or a mapping of claims, "
+            f"not {type(identity).__name__}"
+        )
     # Checked on entry, so a malformed identity fails where it is set rather
     # than at some later `get_identity`.
     build_identity(claims, token=None, token_source="local", verified=False)
