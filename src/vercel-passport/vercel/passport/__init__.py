@@ -12,7 +12,7 @@ the same names and arguments, without `await`.
 """
 
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, Literal
 
 from vercel.passport._internal.models import (
     PassportClaims,
@@ -23,6 +23,7 @@ from vercel.passport._internal.models import (
     PassportIdentityError,
     PassportOwner,
     PassportProject,
+    PassportValidationError,
     PassportVerificationError,
     TokenSource,
 )
@@ -49,7 +50,7 @@ async def get_identity(
     cookies: Mapping[str, str] | None = None,
     verify: bool = False,
     allow_unverified: bool | None = None,
-    development: bool | PassportDevelopmentIdentity = True,
+    development: PassportDevelopmentIdentity | Literal[False] | None = None,
     local_identity: Mapping[str, Any] | str | None = None,
     local_identity_env: str = "VERCEL_PASSPORT_IDENTITY",
     local_token_env: str = "VERCEL_PASSPORT_TOKEN",
@@ -83,9 +84,10 @@ async def get_identity(
             local development, so on a Vercel deployment other than
             `VERCEL_ENV=development` an unverified token raises unless this is
             true.
-        development: Pass `False` to never synthesize a development identity, or
-            a `PassportDevelopmentIdentity` to override its fields. The
-            `VERCEL_PASSPORT_DEV=0` environment variable also disables it.
+        development: The identity to synthesize in local development. `None`
+            builds a default `PassportDevelopmentIdentity`, whose fields come
+            from `VERCEL_PASSPORT_DEV_*` environment variables, and `False`
+            never synthesizes one. `VERCEL_PASSPORT_DEV=0` also disables it.
         local_identity: Identity claims to use when the request has no token,
             as a mapping or a JSON string.
         local_identity_env: Environment variable holding JSON identity claims.
@@ -133,7 +135,7 @@ async def require_identity(
     cookies: Mapping[str, str] | None = None,
     verify: bool = False,
     allow_unverified: bool | None = None,
-    development: bool | PassportDevelopmentIdentity = True,
+    development: PassportDevelopmentIdentity | Literal[False] | None = None,
     local_identity: Mapping[str, Any] | str | None = None,
     local_identity_env: str = "VERCEL_PASSPORT_IDENTITY",
     local_token_env: str = "VERCEL_PASSPORT_TOKEN",
@@ -237,6 +239,7 @@ __all__ = [
     "PassportIdentityError",
     "PassportOwner",
     "PassportProject",
+    "PassportValidationError",
     "PassportVerificationError",
     "TokenSource",
     "__version__",

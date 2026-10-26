@@ -12,7 +12,7 @@ import os
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from vercel.headers import get_headers
 from vercel.oidc import verify as oidc_verify
@@ -73,7 +73,7 @@ def resolve_identity(
     cookies: Mapping[str, str] | None,
     verify: bool,
     allow_unverified: bool | None,
-    development: bool | PassportDevelopmentIdentity,
+    development: PassportDevelopmentIdentity | Literal[False] | None,
     local_identity_value: Mapping[str, Any] | str | None,
     local_identity_env: str,
     local_token_env: str,

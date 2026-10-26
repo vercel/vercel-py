@@ -68,6 +68,14 @@ minted for any project:
   `jose` does not check `iat` at all.
 - An unverified debugging token is accepted only in local development by default.
   See [Local development](#local-development).
+- `identity.project` is set only when the token names a project ID, which every
+  verified token does, so `identity.project.id` is never `None`.
+- In `PassportDevelopmentIdentity`, an explicit `None` clears a field its
+  `VERCEL_PASSPORT_DEV_*` variable sets.
+
+Identities are frozen Pydantic models. Serialize one with `identity.model_dump()`
+or `identity.model_dump_json()`; `token` and `payload` are left out of its repr so
+logging an identity never writes the bearer token.
 
 Use `require_identity()` when a route needs a real Passport token. It takes the
 same arguments as `get_identity()`, but raises `PassportIdentityError` instead of

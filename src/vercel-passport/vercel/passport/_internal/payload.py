@@ -86,9 +86,9 @@ def build_identity(
         raise PassportIdentityError('Passport identity is missing an "external_sub" claim')
 
     project_id = _string(claims, "project_id")
-    project_name = _string(claims, "project")
+    # Only a project ID identifies a project; every verified token has one.
     project = (
-        PassportProject(id=project_id, name=project_name) if project_id or project_name else None
+        PassportProject(id=project_id, name=_string(claims, "project")) if project_id else None
     )
 
     return PassportIdentity(

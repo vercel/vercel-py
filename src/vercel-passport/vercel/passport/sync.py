@@ -6,7 +6,7 @@ which does not block the event loop while it does.
 """
 
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, Literal
 
 from vercel.passport._internal.models import (
     PassportClaims,
@@ -17,6 +17,7 @@ from vercel.passport._internal.models import (
     PassportIdentityError,
     PassportOwner,
     PassportProject,
+    PassportValidationError,
     PassportVerificationError,
     TokenSource,
 )
@@ -40,7 +41,7 @@ def get_identity(
     cookies: Mapping[str, str] | None = None,
     verify: bool = False,
     allow_unverified: bool | None = None,
-    development: bool | PassportDevelopmentIdentity = True,
+    development: PassportDevelopmentIdentity | Literal[False] | None = None,
     local_identity: Mapping[str, Any] | str | None = None,
     local_identity_env: str = "VERCEL_PASSPORT_IDENTITY",
     local_token_env: str = "VERCEL_PASSPORT_TOKEN",
@@ -79,7 +80,7 @@ def require_identity(
     cookies: Mapping[str, str] | None = None,
     verify: bool = False,
     allow_unverified: bool | None = None,
-    development: bool | PassportDevelopmentIdentity = True,
+    development: PassportDevelopmentIdentity | Literal[False] | None = None,
     local_identity: Mapping[str, Any] | str | None = None,
     local_identity_env: str = "VERCEL_PASSPORT_IDENTITY",
     local_token_env: str = "VERCEL_PASSPORT_TOKEN",
@@ -142,6 +143,7 @@ __all__ = [
     "PassportIdentityError",
     "PassportOwner",
     "PassportProject",
+    "PassportValidationError",
     "PassportVerificationError",
     "TokenSource",
     "get_identity",

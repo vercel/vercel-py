@@ -21,6 +21,9 @@ dependencies = [
     # version at build time, which picks up the `issuer` option.
     "vercel-oidc[verify]>=0.10.0",
     "vercel-headers>=0.6.0",
+    # 2.10 for `default_factory` that reads other fields, which derives the
+    # development identity's issuer and audience from its owner and project.
+    "pydantic>=2.10.0,<3",
 ]
 
 [tool.uv.sources]

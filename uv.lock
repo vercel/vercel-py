@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.10"
 resolution-markers = [
     "python_full_version >= '3.15'",
@@ -2942,12 +2942,14 @@ provides-extras = ["verify"]
 name = "vercel-passport"
 source = { editable = "src/vercel-passport" }
 dependencies = [
+    { name = "pydantic" },
     { name = "vercel-headers" },
     { name = "vercel-oidc", extra = ["verify"] },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "pydantic", specifier = ">=2.10.0,<3" },
     { name = "vercel-headers", editable = "src/vercel-headers" },
     { name = "vercel-oidc", extras = ["verify"], editable = "src/vercel-oidc" },
 ]

@@ -30,6 +30,7 @@ from vercel.passport import (
     PassportIdentityError,
     PassportOwner,
     PassportProject,
+    PassportValidationError,
     PassportVerificationError,
 )
 
@@ -613,7 +614,8 @@ async def test_synthesizes_a_development_identity_outside_vercel(surface: Surfac
     assert identity.environment == "development"
     assert identity.external_subject == "test-user"
     assert identity.owner == PassportOwner(slug="local", id=None)
-    assert identity.project == PassportProject(id=None, name="local")
+    # No project ID locally, so no project: only a project ID identifies one.
+    assert identity.project is None
     assert identity.subject == "owner:local:connector:local:principal:test-user"
     assert identity.token is None
     assert identity.token_source == "local"
@@ -680,7 +682,8 @@ async def test_omits_empty_optional_development_claims(
     assert not {"project_id", "owner_id", "external_iss"} & identity.payload.keys()
     assert identity.owner.id is None
     assert identity.external_issuer is None
-    assert identity.project == PassportProject(id=None, name="local")
+    # No project ID locally, so no project: only a project ID identifies one.
+    assert identity.project is None
 
 
 async def test_development_overrides_take_precedence_over_the_environment(
@@ -757,14 +760,12 @@ async def test_repr_never_includes_the_token(
 
 
 async def test_identity_is_immutable(surface: Surface) -> None:
-    import dataclasses
-
     identity = await surface.get_identity(local_identity=PAYLOAD)
     assert identity is not None
 
-    with pytest.raises(dataclasses.FrozenInstanceError):
+    with pytest.raises(PassportValidationError, match="frozen"):
         identity.subject = "someone-else"  # type: ignore[misc]
-    with pytest.raises(dataclasses.FrozenInstanceError):
+    with pytest.raises(PassportValidationError, match="frozen"):
         identity.payload = {}  # type: ignore[misc]
 
 
@@ -782,7 +783,6 @@ async def test_identity_can_be_copied_pickled_serialized_and_hashed(
     surface: Surface, jwks: respx.Route, sign: Sign
 ) -> None:
     import copy
-    import dataclasses
     import json
     import pickle
 
@@ -791,10 +791,20 @@ async def test_identity_can_be_copied_pickled_serialized_and_hashed(
 
     assert pickle.loads(pickle.dumps(identity)) == identity
     assert copy.deepcopy(identity) == identity
-    serialized = json.loads(json.dumps(dataclasses.asdict(identity)))
+    serialized = json.loads(identity.model_dump_json())
     assert serialized["payload"]["sub"] == PAYLOAD["sub"]
     assert serialized["owner"] == {"slug": "team-slug", "id": "team_123"}
+    assert serialized["project"] == {"id": "prj_123", "name": "my-project"}
     assert hash(identity) == hash(copy.deepcopy(identity))
+
+
+async def test_identity_equality_includes_the_payload(surface: Surface) -> None:
+    first = await surface.get_identity(local_identity={**PAYLOAD, "role": "admin"})
+    second = await surface.get_identity(local_identity={**PAYLOAD, "role": "user"})
+
+    assert first is not None
+    assert second is not None
+    assert first != second
 
 
 async def test_rejects_a_request_that_is_not_a_header_mapping(surface: Surface) -> None:
