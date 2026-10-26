@@ -618,7 +618,7 @@ class SandboxService:
             snapshot_expiration=snapshot_expiration,
             snapshot_retention=snapshot_retention,
             current_snapshot_id=current_snapshot_id,
-            region=region or self._options.region,
+            region=region,
             failover_regions=failover_regions,
         )
 
