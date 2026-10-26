@@ -44,6 +44,15 @@ async def _main() -> None:
                 while chunk := await source.read(CHUNK_SIZE):
                     await target.write(chunk)
 
+            info = await box.fs.stat("reference.bin", cwd="workspace")
+            assert info.is_file() and info.st_size == DATA_SIZE
+            await box.run_process(
+                "ln", ["-s", "reference.bin", "reference-link"], cwd="workspace", check=True
+            )
+            assert (await box.fs.lstat("reference-link", cwd="workspace")).is_symlink()
+            assert await box.fs.readlink("reference-link", cwd="workspace") == "reference.bin"
+            print(await box.fs.realpath("reference-link", cwd="workspace"))
+
             copied = 0
             async with (
                 box.fs.open("workspace/reference.bin", "rb") as source,

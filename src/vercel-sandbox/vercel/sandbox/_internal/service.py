@@ -52,6 +52,7 @@ from vercel.sandbox._internal.models import (
     SnapshotExpiration,
     SnapshotRetention,
     SnapshotRetentionUpdate,
+    StatResult,
     TagFilter,
     _RemotePathT,
 )
@@ -160,6 +161,39 @@ mv "$source" "$destination"
 """
 
 
+# GNU stat: mode (hex), inode, device, links, owner, group, size, timestamps,
+# preferred I/O block size, allocated 512-byte blocks, birth time.
+_STAT_FORMAT = "%f|%i|%d|%h|%u|%g|%s|%X|%Y|%Z|%o|%b|%W"
+_STAT_SCRIPT = """\
+case "$1" in
+  /*) path=$1 ;;
+  *) path=./$1 ;;
+esac
+LC_ALL=C stat -L -c "$2" -- "$path"
+"""
+_LSTAT_SCRIPT = """\
+case "$1" in
+  /*) path=$1 ;;
+  *) path=./$1 ;;
+esac
+LC_ALL=C stat -c "$2" -- "$path"
+"""
+_READLINK_SCRIPT = """\
+case "$1" in
+  /*) path=$1 ;;
+  *) path=./$1 ;;
+esac
+LC_ALL=C readlink -v -- "$path"
+"""
+_REALPATH_SCRIPT = """\
+case "$1" in
+  /*) path=$1 ;;
+  *) path=./$1 ;;
+esac
+LC_ALL=C realpath -e -- "$path"
+"""
+
+
 @dataclass(frozen=True, slots=True)
 class _SandboxQueryCriteria:
     sort_by: str | None = None
@@ -222,6 +256,31 @@ def _sandbox_status(sandbox: SandboxState) -> SandboxStatus | None:
     if sandbox.current_session is not None and sandbox.current_session.status is not None:
         return sandbox.current_session.status
     return sandbox.status
+
+
+def _stat_result(output: str) -> StatResult:
+    parts = output.strip().split("|")
+    try:
+        if len(parts) != 13:
+            raise ValueError("expected 13 stat fields")
+        values = [int(part, 16 if index == 0 else 10) for index, part in enumerate(parts)]
+    except ValueError as error:
+        raise SandboxResponseError("Malformed sandbox stat output", data=output) from error
+    return StatResult(
+        st_mode=values[0],
+        st_ino=values[1],
+        st_dev=values[2],
+        st_nlink=values[3],
+        st_uid=values[4],
+        st_gid=values[5],
+        st_size=values[6],
+        st_atime=float(values[7]),
+        st_mtime=float(values[8]),
+        st_ctime=float(values[9]),
+        st_blksize=values[10],
+        st_blocks=values[11],
+        st_birthtime=float(values[12]) if values[12] != 0 else None,
+    )
 
 
 def _listdir_entries(output: str) -> list[DirectoryEntry]:
@@ -1140,6 +1199,116 @@ class SandboxService:
             cwd=cwd,
             collect_output=collect_output,
         )
+
+    async def _filesystem_path_output(
+        self,
+        *,
+        operation: str,
+        session_id: str,
+        path: str,
+        cwd: str | None,
+        script: str,
+        args: list[str],
+        collect_output: ProcessOutputCollector,
+    ) -> str:
+        command, stdout, stderr = await self._filesystem_command(
+            operation=operation,
+            session_id=session_id,
+            script=script,
+            args=[path, *args],
+            cwd=cwd,
+            collect_output=collect_output,
+        )
+        if command.returncode != 0:
+            error = SandboxFilesystemCommandError(
+                operation,
+                paths=(path,),
+                exit_code=command.returncode,
+                stdout=stdout,
+                stderr=stderr,
+            )
+            if stderr.endswith(": No such file or directory\n"):
+                raise SandboxPathNotFoundError(
+                    path, operation=operation, cwd=cwd, cause=error
+                ) from error
+            raise error
+        return stdout
+
+    async def stat(
+        self,
+        *,
+        session_id: str,
+        path: str,
+        cwd: str | None,
+        collect_output: ProcessOutputCollector,
+    ) -> StatResult:
+        output = await self._filesystem_path_output(
+            operation="stat",
+            session_id=session_id,
+            path=path,
+            cwd=cwd,
+            script=_STAT_SCRIPT,
+            args=[_STAT_FORMAT],
+            collect_output=collect_output,
+        )
+        return _stat_result(output)
+
+    async def lstat(
+        self,
+        *,
+        session_id: str,
+        path: str,
+        cwd: str | None,
+        collect_output: ProcessOutputCollector,
+    ) -> StatResult:
+        output = await self._filesystem_path_output(
+            operation="lstat",
+            session_id=session_id,
+            path=path,
+            cwd=cwd,
+            script=_LSTAT_SCRIPT,
+            args=[_STAT_FORMAT],
+            collect_output=collect_output,
+        )
+        return _stat_result(output)
+
+    async def readlink(
+        self,
+        *,
+        session_id: str,
+        path: str,
+        cwd: str | None,
+        collect_output: ProcessOutputCollector,
+    ) -> str:
+        output = await self._filesystem_path_output(
+            operation="readlink",
+            session_id=session_id,
+            path=path,
+            cwd=cwd,
+            script=_READLINK_SCRIPT,
+            args=[],
+            collect_output=collect_output,
+        )
+        return output.removesuffix("\n")
+
+    async def realpath(
+        self,
+        *,
+        session_id: str,
+        path: str,
+        cwd: str | None,
+        collect_output: ProcessOutputCollector,
+    ) -> str:
+        output = await self._filesystem_path_output(
+            operation="realpath",
+            session_id=session_id,
+            path=path,
+            cwd=cwd,
+            script=_REALPATH_SCRIPT,
+            args=[],
+            collect_output=collect_output,
+        )
+        return output.removesuffix("\n")
 
     async def listdir(
         self,

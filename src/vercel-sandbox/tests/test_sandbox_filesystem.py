@@ -1,8 +1,13 @@
+import inspect
 import io
 import json
+import subprocess
+import sys
 import tarfile
 from collections.abc import AsyncIterator, Iterator
-from pathlib import PurePosixPath
+from contextlib import AsyncExitStack
+from dataclasses import FrozenInstanceError
+from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
 import httpx2 as httpx
@@ -19,9 +24,12 @@ from vercel.sandbox import (
     SandboxFilesystemCommandError,
     SandboxFilesystemWriteError,
     SandboxPathNotFoundError,
+    SandboxResponseError,
     SandboxUploadSizeMismatchError,
+    StatResult,
     sync as sandbox_sync,
 )
+from vercel.sandbox._internal.service import _stat_result
 
 
 async def _read_as_chunks(source: bytes, chunk_size: int) -> AsyncIterator[bytes]:
@@ -1337,3 +1345,206 @@ async def test_read_bytes_and_read_text_still_work(mock_env_clear: None) -> None
         assert text == "content"
 
     assert response_count == 2
+
+
+_STAT_OUTPUT = (
+    "81a0|9007199254740993|2049|2|1000|1001|42|1700000000|1700000001|1700000002|4096|8|1699999999\n"
+)
+
+
+def test_stat_result_parses_gnu_fields_and_is_frozen() -> None:
+    result = _stat_result(_STAT_OUTPUT)
+    assert result == StatResult(
+        st_mode=0o100640,
+        st_ino=9007199254740993,
+        st_dev=2049,
+        st_nlink=2,
+        st_uid=1000,
+        st_gid=1001,
+        st_size=42,
+        st_atime=1700000000.0,
+        st_mtime=1700000001.0,
+        st_ctime=1700000002.0,
+        st_blksize=4096,
+        st_blocks=8,
+        st_birthtime=1699999999.0,
+    )
+    assert result.is_file()
+    assert not result.is_dir()
+    assert not result.is_symlink()
+    assert sandbox.StatResult is sandbox_sync.StatResult
+    with pytest.raises(FrozenInstanceError):
+        result.st_size = 0  # type: ignore[misc]
+    unknown_birthtime = _stat_result(_STAT_OUTPUT.rsplit("|", 1)[0] + "|0\n")
+    assert unknown_birthtime.st_birthtime is None
+
+
+@pytest.mark.parametrize(
+    "output", ["", "81a0|1", _STAT_OUTPUT + "extra", _STAT_OUTPUT.replace("42", "bad")]
+)
+def test_stat_result_rejects_malformed_output(output: str) -> None:
+    with pytest.raises(SandboxResponseError) as error:
+        _stat_result(output)
+    assert error.value.data == output
+
+
+async def _filesystem_for_test(stack: AsyncExitStack, sync_mode: bool) -> Any:
+    manager = session(service_options=_session_options(sync=sync_mode))
+    if sync_mode:
+        stack.enter_context(manager)
+        return sandbox_sync.create_sandbox(name="preview").fs
+    await stack.enter_async_context(manager)
+    return (await sandbox.create_sandbox(name="preview")).fs
+
+
+async def _call_filesystem(method: Any, *args: Any, **kwargs: Any) -> Any:
+    result = method(*args, **kwargs)
+    return await result if inspect.isawaitable(result) else result
+
+
+@pytest.mark.parametrize("sync_mode", [False, True], ids=["async", "sync"])
+@pytest.mark.parametrize("operation", ["stat", "lstat", "readlink", "realpath"])
+@respx.mock
+async def test_filesystem_metadata_commands_and_errors(
+    mock_env_clear: None, sync_mode: bool, operation: str
+) -> None:
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    start = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
+        return_value=httpx.Response(200, json=_command_response(operation))
+    )
+    status = respx.get(f"https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/{operation}")
+    logs = respx.get(f"https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/{operation}/logs")
+    status.mock(return_value=httpx.Response(200, json=_command_response(operation, exit_code=0)))
+    output = _STAT_OUTPUT if operation in {"stat", "lstat"} else " target\nname \n\n"
+    logs.mock(return_value=_logs_response(output))
+
+    async with AsyncExitStack() as stack:
+        fs = await _filesystem_for_test(stack, sync_mode)
+        method = getattr(fs, operation)
+        path = "-path; printf injected"
+        cwd = PurePosixPath("/workspace")
+        result = await _call_filesystem(method, path, cwd=cwd)
+        assert result == (_stat_result(output) if operation in {"stat", "lstat"} else output[:-1])
+        request = json.loads(start.calls[-1].request.content)
+        assert request["cwd"] == "/workspace"
+        assert request["args"][3] == path
+        assert path not in request["args"][1]
+
+        status.mock(
+            return_value=httpx.Response(200, json=_command_response(operation, exit_code=1))
+        )
+        for message, missing in [
+            ("tool: 'missing': No such file or directory\n", True),
+            ("tool: 'missing': Permission denied\n", False),
+            ("tool: 'missing': Too many levels of symbolic links\n", False),
+            ("tool: 'missing': Invalid argument\n", False),
+        ]:
+            logs.mock(return_value=_logs_response("", message))
+            with pytest.raises(
+                SandboxPathNotFoundError if missing else SandboxFilesystemCommandError
+            ) as error:
+                await _call_filesystem(method, PurePosixPath("missing"), cwd=cwd)
+            command_error: BaseException = error.value
+            if missing:
+                assert isinstance(command_error, SandboxPathNotFoundError)
+                assert command_error.path == "missing"
+                assert command_error.cwd == "/workspace"
+                assert command_error.operation == operation
+                command_error = command_error.cause
+            assert isinstance(command_error, SandboxFilesystemCommandError)
+            assert command_error.operation == operation
+            assert command_error.paths == ("missing",)
+            assert command_error.exit_code == 1
+            assert command_error.stderr == message
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Sandbox scripts require GNU coreutils")
+@pytest.mark.parametrize("sync_mode", [False, True], ids=["async", "sync"])
+@respx.mock
+async def test_filesystem_metadata_scripts_follow_links_and_resolve_relative_paths(
+    mock_env_clear: None, tmp_path: Path, sync_mode: bool
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target = workspace / "-target; $(touch injected) \n"
+    target.write_bytes(b"hello")
+    target.chmod(0o640)
+    link = workspace / "link"
+    link.symlink_to(target.name)
+    (workspace / "dangling").symlink_to("absent")
+    (workspace / "loop").symlink_to("loop")
+    (workspace / "-").write_bytes(b"dash")
+
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    count = 0
+
+    def run_script(request: httpx.Request) -> httpx.Response:
+        nonlocal count
+        count += 1
+        payload = json.loads(request.content)
+        result = subprocess.run(
+            ["sh", *payload["args"]],
+            cwd=tmp_path / payload.get("cwd", "."),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        command_id = str(count)
+        respx.get(f"https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/{command_id}").mock(
+            return_value=httpx.Response(
+                200, json=_command_response(command_id, exit_code=result.returncode)
+            )
+        )
+        respx.get(f"https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/{command_id}/logs").mock(
+            return_value=_logs_response(result.stdout, result.stderr)
+        )
+        return httpx.Response(200, json=_command_response(command_id))
+
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(side_effect=run_script)
+    async with AsyncExitStack() as stack:
+        fs = await _filesystem_for_test(stack, sync_mode)
+        cwd = PurePosixPath("workspace")
+        followed = await _call_filesystem(fs.stat, PurePosixPath("link"), cwd=cwd)
+        own = await _call_filesystem(fs.lstat, "link", cwd=cwd)
+        assert followed.is_file() and not followed.is_symlink()
+        assert own.is_symlink() and not own.is_file()
+        local = target.stat()
+        for field in (
+            "st_mode",
+            "st_ino",
+            "st_dev",
+            "st_nlink",
+            "st_uid",
+            "st_gid",
+            "st_size",
+            "st_blksize",
+            "st_blocks",
+        ):
+            assert getattr(followed, field) == getattr(local, field)
+        for field in ("st_atime", "st_mtime", "st_ctime"):
+            assert getattr(followed, field) == int(getattr(local, field))
+        assert own.st_ino == link.lstat().st_ino
+        assert (await _call_filesystem(fs.stat, "workspace")).is_dir()
+        assert (await _call_filesystem(fs.lstat, "workspace")).is_dir()
+        assert (await _call_filesystem(fs.stat, str(target))).st_size == 5
+        assert (await _call_filesystem(fs.stat, "-", cwd=cwd)).st_size == 4
+        assert await _call_filesystem(fs.readlink, "link", cwd=cwd) == target.name
+        assert await _call_filesystem(fs.realpath, "./link", cwd=cwd) == str(target)
+        assert (await _call_filesystem(fs.lstat, "dangling", cwd=cwd)).is_symlink()
+        assert await _call_filesystem(fs.readlink, "dangling", cwd=cwd) == "absent"
+        assert (await _call_filesystem(fs.lstat, "loop", cwd=cwd)).is_symlink()
+        for operation in ("stat", "lstat", "readlink", "realpath"):
+            with pytest.raises(SandboxPathNotFoundError):
+                await _call_filesystem(getattr(fs, operation), "absent", cwd=cwd)
+        for operation in ("stat", "realpath"):
+            with pytest.raises(SandboxPathNotFoundError):
+                await _call_filesystem(getattr(fs, operation), "dangling", cwd=cwd)
+            with pytest.raises(SandboxFilesystemCommandError):
+                await _call_filesystem(getattr(fs, operation), "loop", cwd=cwd)
+        with pytest.raises(SandboxFilesystemCommandError):
+            await _call_filesystem(fs.readlink, target.name, cwd=cwd)
+    assert not (workspace / "injected").exists()

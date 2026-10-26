@@ -69,6 +69,7 @@ from vercel.sandbox._internal.models import (
     SnapshotExpirationInput,
     SnapshotRetention,
     SnapshotRetentionUpdate,
+    StatResult,
     _parse_snapshot_expiration,
     _RemotePathT,
     _WriteFile,
@@ -814,6 +815,94 @@ class SandboxFilesystem:
         remote_cwd = None if cwd is None else _coerce_remote_path(cwd)
         return await self._execution.execute(
             lambda session_id: self._service.is_dir(
+                session_id=session_id,
+                path=remote_path,
+                cwd=remote_cwd,
+                collect_output=self._collect_output,
+            )
+        )
+
+    async def stat(self, path: RemotePath, *, cwd: RemotePath | None = None) -> StatResult:
+        """Return file metadata, following symbolic links.
+
+        Args:
+            path: Absolute path or path relative to ``cwd``.
+            cwd: Base directory for a relative path.
+
+        Raises:
+            SandboxPathNotFoundError: If the path or its target does not exist.
+            SandboxFilesystemCommandError: If the remote command fails.
+        """
+        remote_path = _coerce_remote_path(path)
+        remote_cwd = None if cwd is None else _coerce_remote_path(cwd)
+        return await self._execution.execute(
+            lambda session_id: self._service.stat(
+                session_id=session_id,
+                path=remote_path,
+                cwd=remote_cwd,
+                collect_output=self._collect_output,
+            )
+        )
+
+    async def lstat(self, path: RemotePath, *, cwd: RemotePath | None = None) -> StatResult:
+        """Return file metadata without following symbolic links.
+
+        Args:
+            path: Absolute path or path relative to ``cwd``.
+            cwd: Base directory for a relative path.
+
+        Raises:
+            SandboxPathNotFoundError: If the path does not exist.
+            SandboxFilesystemCommandError: If the remote command fails.
+        """
+        remote_path = _coerce_remote_path(path)
+        remote_cwd = None if cwd is None else _coerce_remote_path(cwd)
+        return await self._execution.execute(
+            lambda session_id: self._service.lstat(
+                session_id=session_id,
+                path=remote_path,
+                cwd=remote_cwd,
+                collect_output=self._collect_output,
+            )
+        )
+
+    async def readlink(self, path: RemotePath, *, cwd: RemotePath | None = None) -> str:
+        """Return the stored target of a symbolic link.
+
+        Args:
+            path: Absolute path or path relative to ``cwd``.
+            cwd: Base directory for a relative path.
+
+        Raises:
+            SandboxPathNotFoundError: If the path does not exist.
+            SandboxFilesystemCommandError: If the remote command fails.
+        """
+        remote_path = _coerce_remote_path(path)
+        remote_cwd = None if cwd is None else _coerce_remote_path(cwd)
+        return await self._execution.execute(
+            lambda session_id: self._service.readlink(
+                session_id=session_id,
+                path=remote_path,
+                cwd=remote_cwd,
+                collect_output=self._collect_output,
+            )
+        )
+
+    async def realpath(self, path: RemotePath, *, cwd: RemotePath | None = None) -> str:
+        """Return the absolute canonical path, resolving symbolic links.
+
+        Args:
+            path: Absolute path or path relative to ``cwd``.
+            cwd: Base directory for a relative path.
+
+        Raises:
+            SandboxPathNotFoundError: If the path or its target does not exist.
+            SandboxFilesystemCommandError: If the remote command fails.
+        """
+        remote_path = _coerce_remote_path(path)
+        remote_cwd = None if cwd is None else _coerce_remote_path(cwd)
+        return await self._execution.execute(
+            lambda session_id: self._service.realpath(
                 session_id=session_id,
                 path=remote_path,
                 cwd=remote_cwd,
