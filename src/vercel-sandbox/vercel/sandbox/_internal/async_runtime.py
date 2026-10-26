@@ -1629,7 +1629,6 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         """
         return query_sessions(
             self._service,
-            project_id=self.project_id,
             name=self.name,
             page_size=page_size,
             cursor=cursor,
@@ -1656,7 +1655,6 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         """
         return query_snapshots(
             self._service,
-            project_id=self.project_id,
             name=self.name,
             page_size=page_size,
             cursor=cursor,

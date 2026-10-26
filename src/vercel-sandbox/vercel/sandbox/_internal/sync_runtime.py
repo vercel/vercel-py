@@ -1766,7 +1766,6 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         """
         return query_sessions(
             self._service,
-            project_id=self.project_id,
             name=self.name,
             page_size=page_size,
             cursor=cursor,
@@ -1793,7 +1792,6 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         """
         return query_snapshots(
             self._service,
-            project_id=self.project_id,
             name=self.name,
             page_size=page_size,
             cursor=cursor,

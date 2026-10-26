@@ -3215,7 +3215,7 @@ def test_sync_query_sandboxes_binds_session_at_iterator_creation(mock_env_clear:
 
 
 def _mock_sandbox_history_pages(
-    resource: str, *, empty_final_page: bool
+    resource: str, *, empty_final_page: bool, expected_project_id: str = "prj_123"
 ) -> tuple[list[dict[str, str]], list[str]]:
     response = _sandbox_response(project_id="prj_bound")
     response["sandbox"]["projectId"] = "prj_bound"
@@ -3243,7 +3243,7 @@ def _mock_sandbox_history_pages(
         requests.append(params)
         assert params == {
             "teamId": "team_123",
-            "project": "prj_bound",
+            "project": expected_project_id,
             "name": "preview",
             "limit": "2",
             "cursor": "start" if index == 0 else f"cursor_{index + 1}",
@@ -3331,7 +3331,9 @@ def test_sync_sandbox_history_queries_paginate(
 async def test_async_list_history_warns_and_preserves_one_page(
     mock_env_clear: None, resource: str
 ) -> None:
-    requests, expected_ids = _mock_sandbox_history_pages(resource, empty_final_page=False)
+    requests, expected_ids = _mock_sandbox_history_pages(
+        resource, empty_final_page=False, expected_project_id="prj_bound"
+    )
     items: Sequence[sandbox.SandboxRuntimeSession | sandbox.Snapshot]
 
     async with session(service_options=_session_options()):
@@ -3353,7 +3355,9 @@ async def test_async_list_history_warns_and_preserves_one_page(
 def test_sync_list_history_warns_and_preserves_one_page(
     mock_env_clear: None, resource: str
 ) -> None:
-    requests, expected_ids = _mock_sandbox_history_pages(resource, empty_final_page=False)
+    requests, expected_ids = _mock_sandbox_history_pages(
+        resource, empty_final_page=False, expected_project_id="prj_bound"
+    )
     items: Sequence[sandbox_sync.SyncSandboxRuntimeSession | sandbox_sync.SyncSnapshot]
 
     with session(service_options=_session_options()):

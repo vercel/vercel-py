@@ -213,8 +213,9 @@ with session():
 
 The module-level `sandbox.query_sessions(name=...)` and
 `sandbox.query_snapshots(name=...)` functions support the same pagination
-options. The handle methods restrict results to that sandbox's project and
-name. `list_sessions()` and `list_snapshots()` are deprecated; they return only
+options. The handle methods restrict results by sandbox name and use the project
+resolved by the configured Sandbox credentials. They do not accept a `project_id`
+override. `list_sessions()` and `list_snapshots()` are deprecated; they return only
 one page. Replace `await box.list_sessions()` with
 `[item async for item in box.query_sessions()]`, or synchronously replace
 `box.list_sessions()` with `list(box.query_sessions())`. Use the same pattern
