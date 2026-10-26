@@ -51,6 +51,26 @@ Process output is routed by [[src/vercel-sandbox/vercel/sandbox/_internal/proces
 
 `run_process` accepts a synchronous `on_start` callback, adapted by [[src/vercel-sandbox/vercel/sandbox/_internal/runtime_common.py#_ProcessStartHook]]. [[src/vercel-sandbox/vercel/sandbox/_internal/api_client.py#SandboxApiClient#run_process]] calls it in the caller's task or thread right after the start record and before routing output, so output waits until it returns. With `input`, it runs before the input is fed, which still happens if it raises; if that feed fails the process is killed, but the callback's exception is the one raised, as in the TypeScript SDK. Its exceptions bypass the interrupted-stream resume path, and the hook's `can_replay` stops lifecycle recovery from rerunning a started command. [[src/vercel-sandbox/tests/test_sandbox_process.py#test_run_process_on_start_error_propagates_without_kill_or_replay|Process tests]] cover ordering, output equivalence, error propagation, and replay.
 
+## Filesystem mutations
+
+Filesystem handles expose metadata changes, links, resizing, temporary directories, copies, and eager append operations in both I/O modes.
+
+[[src/vercel-sandbox/vercel/sandbox/_internal/service.py#SandboxService#chmod|chmod]], [[src/vercel-sandbox/vercel/sandbox/_internal/service.py#SandboxService#chown|chown]], [[src/vercel-sandbox/vercel/sandbox/_internal/service.py#SandboxService#symlink|symlink]], [[src/vercel-sandbox/vercel/sandbox/_internal/service.py#SandboxService#truncate|truncate]], [[src/vercel-sandbox/vercel/sandbox/_internal/service.py#SandboxService#mkdtemp|mkdtemp]], and [[src/vercel-sandbox/vercel/sandbox/_internal/service.py#SandboxService#copyfile|copyfile]] use shell commands through [[src/vercel-sandbox/vercel/sandbox/_internal/service.py#SandboxService#_filesystem_command]]. Paths and values are positional arguments, with option terminators where appropriate. The checked command helper maps nonzero exits to [[src/vercel-sandbox/vercel/sandbox/_internal/errors.py#SandboxFilesystemCommandError]]. Copies reject directories, symlink targets remain literal, truncation can extend with zeros, and temporary directories are private with caller-owned cleanup.
+
+[[src/vercel-sandbox/vercel/sandbox/_internal/async_runtime.py#SandboxFilesystem#write_bytes|write_bytes]] and [[src/vercel-sandbox/vercel/sandbox/_internal/async_runtime.py#SandboxFilesystem#write_text|write_text]] accept an append flag, as do their sync counterparts. [[src/vercel-sandbox/vercel/sandbox/_internal/service.py#SandboxService#append_bytes|Append]] uses command stdin, preserving binary data without reading the existing file or putting payloads in command arguments. It binds an active session without lifecycle replay to avoid duplicate appends. Explicit mode bits apply after appending; otherwise existing permissions remain. Commands retain selected-user permissions. Streaming archive writers and batches retain replacement semantics.
+
+### Filesystem mutation tests
+
+Public API tests execute the actual remote scripts locally behind mocked HTTP, covering async/sync parity, quoting, file contents, metadata, validation, and command error details.
+
+[[src/vercel-sandbox/tests/test_sandbox_filesystem.py]] also covers lifecycle recovery for command operations and verifies an append start failure does not replay. Local script execution requires Linux utilities; HTTP-only regression tests remain portable.
+
+### Live filesystem mutation tests
+
+Credential-gated live tests exercise each mutation in both I/O modes, including actual ownership changes through the root user and cleanup of temporary directories.
+
+[[src/vercel-sandbox/tests/live/test_sandbox_filesystem_live.py#test_filesystem_mutations]] checks binary and encoded text appends, private unique directories, relative links, copies, truncation, permission bits, ownership, and remote error paths. [[src/vercel-sandbox/examples/sandbox_11_filesystem.py#main|The executable example]] demonstrates all new operations with cleanup.
+
 ## Process stdin
 
 Process stdin is a byte stream backed by offset-carrying requests, so writes can be resent without duplicating input and any handle can continue a stream.
