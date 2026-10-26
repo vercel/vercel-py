@@ -2,7 +2,7 @@ import asyncio
 import gc
 import json
 import warnings
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from itertools import islice
@@ -3147,10 +3147,10 @@ async def _run_async_unrecovered_operation(handle: sandbox.Sandbox, operation: s
         return await handle.stop()
     if operation == "destroy":
         return await handle.destroy()
-    if operation == "list_sessions":
-        return await handle.list_sessions()
-    if operation == "list_snapshots":
-        return await handle.list_snapshots()
+    if operation == "query_sessions":
+        return [item async for item in handle.query_sessions()]
+    if operation == "query_snapshots":
+        return [item async for item in handle.query_snapshots()]
     raise AssertionError(f"Unexpected operation: {operation}")
 
 
@@ -3161,10 +3161,10 @@ def _run_sync_unrecovered_operation(handle: sandbox_sync.SyncSandbox, operation:
         return handle.stop()
     if operation == "destroy":
         return handle.destroy()
-    if operation == "list_sessions":
-        return handle.list_sessions()
-    if operation == "list_snapshots":
-        return handle.list_snapshots()
+    if operation == "query_sessions":
+        return list(handle.query_sessions())
+    if operation == "query_snapshots":
+        return list(handle.query_snapshots())
     raise AssertionError(f"Unexpected operation: {operation}")
 
 
@@ -3212,6 +3212,162 @@ def test_sync_query_sandboxes_binds_session_at_iterator_creation(mock_env_clear:
 
     with pytest.raises(VercelSessionClosedError):
         next(handles)
+
+
+def _mock_sandbox_history_pages(
+    resource: str, *, empty_final_page: bool
+) -> tuple[list[dict[str, str]], list[str]]:
+    response = _sandbox_response(project_id="prj_bound")
+    response["sandbox"]["projectId"] = "prj_bound"
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(200, json=response)
+    )
+    prefix = "sbx" if resource == "sessions" else "snap"
+    ids = [f"{prefix}_{index}" for index in range(6)]
+    items = [
+        (
+            _sandbox_response(session_id=item_id)["session"]
+            if resource == "sessions"
+            else _snapshot_response(snapshot_id=item_id)["snapshot"]
+        )
+        for item_id in ids
+    ]
+    pages = [items[:2], items[2:4], items[4:]]
+    if empty_final_page:
+        pages.append([])
+    requests: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        index = len(requests)
+        params = dict(request.url.params)
+        requests.append(params)
+        assert params == {
+            "teamId": "team_123",
+            "project": "prj_bound",
+            "name": "preview",
+            "limit": "2",
+            "cursor": "start" if index == 0 else f"cursor_{index + 1}",
+            "sortOrder": "asc",
+        }
+        return httpx.Response(
+            200,
+            json={
+                resource: pages[index],
+                "pagination": {
+                    "count": len(items),
+                    # An empty page must stop iteration even with another cursor.
+                    "next": (
+                        f"cursor_{index + 2}"
+                        if empty_final_page or index < len(pages) - 1
+                        else None
+                    ),
+                    "prev": None,
+                },
+            },
+        )
+
+    respx.get(f"https://sandbox.test/v2/sandboxes/{resource}").mock(side_effect=handler)
+    return requests, ids
+
+
+@pytest.mark.parametrize("resource", ["sessions", "snapshots"])
+@pytest.mark.parametrize("empty_final_page", [False, True])
+@respx.mock
+async def test_async_sandbox_history_queries_paginate(
+    mock_env_clear: None, resource: str, empty_final_page: bool
+) -> None:
+    requests, expected_ids = _mock_sandbox_history_pages(
+        resource, empty_final_page=empty_final_page
+    )
+    items: Sequence[sandbox.SandboxRuntimeSession | sandbox.Snapshot]
+
+    async with session(service_options=_session_options()):
+        handle = await sandbox.get_sandbox(name="preview")
+        if resource == "sessions":
+            sessions = handle.query_sessions(page_size=2, cursor="start", sort_order="asc")
+            assert requests == []
+            items = [item async for item in sessions]
+            assert all(isinstance(item, sandbox.SandboxRuntimeSession) for item in items)
+        else:
+            snapshots = handle.query_snapshots(page_size=2, cursor="start", sort_order="asc")
+            assert requests == []
+            items = [item async for item in snapshots]
+            assert all(isinstance(item, sandbox.Snapshot) for item in items)
+
+    assert [item.id for item in items] == expected_ids
+    assert len(requests) == (4 if empty_final_page else 3)
+
+
+@pytest.mark.parametrize("resource", ["sessions", "snapshots"])
+@pytest.mark.parametrize("empty_final_page", [False, True])
+@respx.mock
+def test_sync_sandbox_history_queries_paginate(
+    mock_env_clear: None, resource: str, empty_final_page: bool
+) -> None:
+    requests, expected_ids = _mock_sandbox_history_pages(
+        resource, empty_final_page=empty_final_page
+    )
+    items: Sequence[sandbox_sync.SyncSandboxRuntimeSession | sandbox_sync.SyncSnapshot]
+
+    with session(service_options=_session_options()):
+        handle = sandbox_sync.get_sandbox(name="preview")
+        if resource == "sessions":
+            sessions = handle.query_sessions(page_size=2, cursor="start", sort_order="asc")
+            assert requests == []
+            items = list(sessions)
+            assert all(isinstance(item, sandbox_sync.SyncSandboxRuntimeSession) for item in items)
+        else:
+            snapshots = handle.query_snapshots(page_size=2, cursor="start", sort_order="asc")
+            assert requests == []
+            items = list(snapshots)
+            assert all(isinstance(item, sandbox_sync.SyncSnapshot) for item in items)
+
+    assert [item.id for item in items] == expected_ids
+    assert len(requests) == (4 if empty_final_page else 3)
+
+
+@pytest.mark.parametrize("resource", ["sessions", "snapshots"])
+@respx.mock
+async def test_async_list_history_warns_and_preserves_one_page(
+    mock_env_clear: None, resource: str
+) -> None:
+    requests, expected_ids = _mock_sandbox_history_pages(resource, empty_final_page=False)
+    items: Sequence[sandbox.SandboxRuntimeSession | sandbox.Snapshot]
+
+    async with session(service_options=_session_options()):
+        handle = await sandbox.get_sandbox(name="preview")
+        with pytest.warns(
+            DeprecationWarning, match=rf"Sandbox\.list_{resource}\(\).*query_{resource}"
+        ):
+            if resource == "sessions":
+                items = await handle.list_sessions(page_size=2, cursor="start", sort_order="asc")
+            else:
+                items = await handle.list_snapshots(page_size=2, cursor="start", sort_order="asc")
+
+    assert [item.id for item in items] == expected_ids[:2]
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize("resource", ["sessions", "snapshots"])
+@respx.mock
+def test_sync_list_history_warns_and_preserves_one_page(
+    mock_env_clear: None, resource: str
+) -> None:
+    requests, expected_ids = _mock_sandbox_history_pages(resource, empty_final_page=False)
+    items: Sequence[sandbox_sync.SyncSandboxRuntimeSession | sandbox_sync.SyncSnapshot]
+
+    with session(service_options=_session_options()):
+        handle = sandbox_sync.get_sandbox(name="preview")
+        with pytest.warns(
+            DeprecationWarning, match=rf"SyncSandbox\.list_{resource}\(\).*query_{resource}"
+        ):
+            if resource == "sessions":
+                items = handle.list_sessions(page_size=2, cursor="start", sort_order="asc")
+            else:
+                items = handle.list_snapshots(page_size=2, cursor="start", sort_order="asc")
+
+    assert [item.id for item in items] == expected_ids[:2]
+    assert len(requests) == 1
 
 
 @respx.mock
@@ -3724,7 +3880,7 @@ async def test_async_session_cleanup_finishes_before_cancellation_propagates(
 
 
 @respx.mock
-def test_listed_sync_session_cleanup_has_no_parent_linkage(mock_env_clear: None) -> None:
+def test_queried_sync_session_cleanup_has_no_parent_linkage(mock_env_clear: None) -> None:
     respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
@@ -3746,7 +3902,7 @@ def test_listed_sync_session_cleanup_has_no_parent_linkage(mock_env_clear: None)
 
     with session(service_options=_session_options()):
         box = sandbox_sync.get_sandbox(name="preview")
-        historical = box.list_sessions()[0]
+        historical = next(box.query_sessions())
         with historical:
             pass
 

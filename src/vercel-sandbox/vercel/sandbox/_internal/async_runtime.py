@@ -1609,6 +1609,60 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         )
         return [Process(payload=state, service=self._service, stdin="fetched") for state in states]
 
+    def query_sessions(
+        self,
+        *,
+        page_size: int | None = None,
+        cursor: str | None = None,
+        sort_order: str | None = None,
+    ) -> AsyncIterator[SandboxRuntimeSession]:
+        """Iterate over runtime sessions belonging to this sandbox.
+
+        Args:
+            page_size: Maximum number of sessions fetched per API request.
+            cursor: Cursor at which to begin pagination.
+            sort_order: Result order by creation time, either ``"asc"`` or
+                ``"desc"``.
+
+        Returns:
+            An async iterator that transparently follows pagination cursors.
+        """
+        return query_sessions(
+            self._service,
+            project_id=self.project_id,
+            name=self.name,
+            page_size=page_size,
+            cursor=cursor,
+            sort_order=sort_order,
+        )
+
+    def query_snapshots(
+        self,
+        *,
+        page_size: int | None = None,
+        cursor: str | None = None,
+        sort_order: str | None = None,
+    ) -> AsyncIterator[Snapshot]:
+        """Iterate over snapshots belonging to this sandbox.
+
+        Args:
+            page_size: Maximum number of snapshots fetched per API request.
+            cursor: Cursor at which to begin pagination.
+            sort_order: Result order by creation time, either ``"asc"`` or
+                ``"desc"``.
+
+        Returns:
+            An async iterator that transparently follows pagination cursors.
+        """
+        return query_snapshots(
+            self._service,
+            project_id=self.project_id,
+            name=self.name,
+            page_size=page_size,
+            cursor=cursor,
+            sort_order=sort_order,
+        )
+
     async def list_sessions(
         self,
         *,
@@ -1616,7 +1670,16 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         cursor: str | None = None,
         sort_order: str | None = None,
     ) -> list[SandboxRuntimeSession]:
-        """Return one page of runtime sessions belonging to this sandbox."""
+        """Return one page of runtime sessions belonging to this sandbox.
+
+        .. deprecated::
+            Use ``query_sessions()`` to iterate over all pages.
+        """
+        warnings.warn(
+            "Sandbox.list_sessions() is deprecated; use Sandbox.query_sessions() instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         page = await query_sessions_page(
             self._service,
             project_id=self.project_id,
@@ -1634,7 +1697,16 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         cursor: str | None = None,
         sort_order: str | None = None,
     ) -> list[Snapshot]:
-        """Return one page of snapshots belonging to this sandbox."""
+        """Return one page of snapshots belonging to this sandbox.
+
+        .. deprecated::
+            Use ``query_snapshots()`` to iterate over all pages.
+        """
+        warnings.warn(
+            "Sandbox.list_snapshots() is deprecated; use Sandbox.query_snapshots() instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         page = await query_snapshots_page(
             self._service,
             project_id=self.project_id,

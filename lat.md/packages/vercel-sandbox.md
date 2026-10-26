@@ -33,6 +33,16 @@ Operations through a `Sandbox` handle that fail because the sandbox is stopped, 
 
 Sandboxes can be created from a runtime, image, Git repository, tarball, or snapshot. Forking copies a named sandbox's configuration and current snapshot, but never its drive mounts.
 
+## History queries
+
+Sandbox handles expose lazy session and snapshot iterators scoped to their project and name, following cursors until the API returns no cursor or an empty page.
+
+The async [[src/vercel-sandbox/vercel/sandbox/_internal/async_runtime.py#Sandbox#query_sessions|query_sessions]] and [[src/vercel-sandbox/vercel/sandbox/_internal/async_runtime.py#Sandbox#query_snapshots|query_snapshots]] methods delegate to the existing runtime iterators. Their [[src/vercel-sandbox/vercel/sandbox/_internal/sync_runtime.py#SyncSandbox#query_sessions|sync session]] and [[src/vercel-sandbox/vercel/sandbox/_internal/sync_runtime.py#SyncSandbox#query_snapshots|sync snapshot]] counterparts return regular iterators. All accept a page size, initial cursor, and creation-time sort order, matching the module-level query functions.
+
+The async [[src/vercel-sandbox/vercel/sandbox/_internal/async_runtime.py#Sandbox#list_sessions|list_sessions]] and [[src/vercel-sandbox/vercel/sandbox/_internal/async_runtime.py#Sandbox#list_snapshots|list_snapshots]] methods and their sync counterparts emit `DeprecationWarning` and retain their one-page list results for compatibility.
+
+[[src/vercel-sandbox/tests/test_sandbox_public_flow.py#test_async_sandbox_history_queries_paginate|Async pagination tests]] and [[src/vercel-sandbox/tests/test_sandbox_public_flow.py#test_sync_sandbox_history_queries_paginate|sync pagination tests]] verify lazy requests, project/name binding, option forwarding across several pages, and termination on a missing cursor or an empty page with a cursor. Deprecation tests cover warning emission and one-page compatibility in both modes.
+
 ## Sandbox updates
 
 `Sandbox.update()` changes the live current session before saving sandbox configuration, and does not resume a stopped session.
