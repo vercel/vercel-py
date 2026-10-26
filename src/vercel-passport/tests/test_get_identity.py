@@ -32,6 +32,7 @@ from vercel.passport import (
     PassportProject,
     PassportValidationError,
     PassportVerificationError,
+    local_identity,
 )
 
 Sign = Callable[..., str]
@@ -564,14 +565,75 @@ async def test_rejects_a_malformed_token(surface: Surface, token: str) -> None:
 # --------------------------------------------------------------------------
 
 
-async def test_uses_an_explicit_local_identity(surface: Surface) -> None:
-    identity = await surface.get_identity(local_identity=PAYLOAD)
+async def test_uses_the_local_identity_set_for_the_context(surface: Surface) -> None:
+    with local_identity(PAYLOAD):
+        identity = await surface.get_identity()
 
     assert identity is not None
     assert identity.external_subject == "user_123"
     assert identity.token is None
     assert identity.token_source == "local"
     assert identity.verified is False
+    assert await surface.get_identity() is None
+
+
+async def test_uses_a_development_identity_set_for_the_context(surface: Surface) -> None:
+    import warnings
+
+    with warnings.catch_warnings():
+        # Set explicitly in code, so it is not worth a warning.
+        warnings.simplefilter("error", PassportDevelopmentIdentityWarning)
+        with local_identity(PassportDevelopmentIdentity(owner="acme", external_subject="dev")):
+            identity = await surface.get_identity()
+
+    assert identity is not None
+    assert identity.owner.slug == "acme"
+    assert identity.subject == "owner:acme:connector:local:principal:dev"
+    assert identity.payload["iss"] == "https://passport.vercel.com/acme"
+
+
+async def test_nested_local_identities_restore_the_outer_one(surface: Surface) -> None:
+    with local_identity(PAYLOAD):
+        with local_identity(PassportDevelopmentIdentity(external_subject="inner")):
+            inner = await surface.get_identity()
+        outer = await surface.get_identity()
+
+    assert inner is not None
+    assert inner.external_subject == "inner"
+    assert outer is not None
+    assert outer.external_subject == "user_123"
+
+
+async def test_a_local_identity_reaches_tasks_and_threads(surface: Surface) -> None:
+    import anyio
+    import anyio.to_thread
+
+    from vercel.passport.sync import get_identity as get_identity_sync
+
+    results: list[str] = []
+
+    async def read() -> None:
+        identity = await surface.get_identity()
+        assert identity is not None
+        results.append(identity.external_subject)
+
+    def read_in_thread() -> str:
+        identity = get_identity_sync()
+        assert identity is not None
+        return identity.external_subject
+
+    with local_identity(PAYLOAD):
+        async with anyio.create_task_group() as group:
+            group.start_soon(read)
+        results.append(await anyio.to_thread.run_sync(read_in_thread))
+
+    assert results == ["user_123", "user_123"]
+
+
+async def test_rejects_a_local_identity_that_is_not_passport_shaped() -> None:
+    with pytest.raises(PassportIdentityError, match='missing typ "passport"'):
+        with local_identity({**PAYLOAD, "typ": "vercel-oidc"}):
+            pass
 
 
 async def test_uses_a_local_identity_from_the_environment(
@@ -588,25 +650,69 @@ async def test_uses_a_local_identity_from_the_environment(
     assert identity.external_subject == "user_123"
 
 
+async def test_the_context_identity_takes_precedence_over_the_environment(
+    surface: Surface, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+
+    monkeypatch.setenv("VERCEL_PASSPORT_IDENTITY", json.dumps(PAYLOAD))
+    monkeypatch.setenv("VERCEL_PASSPORT_DEV", "1")
+
+    with local_identity(PassportDevelopmentIdentity(external_subject="from-context")):
+        identity = await surface.get_identity()
+
+    assert identity is not None
+    assert identity.external_subject == "from-context"
+
+
 @pytest.mark.parametrize("value", ["{not json", "[1, 2]"])
-async def test_rejects_an_invalid_local_identity(surface: Surface, value: str) -> None:
+async def test_rejects_an_invalid_local_identity_from_the_environment(
+    surface: Surface, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("VERCEL_PASSPORT_IDENTITY", value)
+
     with pytest.raises(PassportIdentityError, match="local Passport identity"):
-        await surface.get_identity(local_identity=value)
+        await surface.get_identity()
 
 
 async def test_a_request_token_takes_precedence_over_a_local_identity(
     surface: Surface, jwks: respx.Route, sign: Sign
 ) -> None:
-    identity = await surface.get_identity(
-        {PASSPORT_HEADER_NAME: sign()}, local_identity=PAYLOAD, **EXPECTATIONS
-    )
+    with local_identity(PAYLOAD):
+        identity = await surface.get_identity({PASSPORT_HEADER_NAME: sign()}, **EXPECTATIONS)
 
     assert identity is not None
     assert identity.verified is True
 
 
-async def test_synthesizes_a_development_identity_outside_vercel(surface: Surface) -> None:
-    with pytest.warns(PassportDevelopmentIdentityWarning, match="VERCEL_PASSPORT_DEV=0"):
+async def test_a_debugging_token_takes_precedence_over_a_local_identity(
+    surface: Surface, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("VERCEL_PASSPORT_TOKEN", unsigned({**PAYLOAD, "external_sub": "token"}))
+
+    with local_identity(PAYLOAD):
+        identity = await surface.get_identity()
+
+    assert identity is not None
+    assert identity.external_subject == "token"
+
+
+async def test_has_no_identity_by_default(surface: Surface) -> None:
+    """A development identity is opt-in, so local development without one has none."""
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", PassportDevelopmentIdentityWarning)
+        assert await surface.get_identity() is None
+
+
+@pytest.mark.parametrize("value", ["1", "true", "TRUE"])
+async def test_synthesizes_a_development_identity_when_opted_in(
+    surface: Surface, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("VERCEL_PASSPORT_DEV", value)
+
+    with pytest.warns(PassportDevelopmentIdentityWarning, match="VERCEL_PASSPORT_DEV is set"):
         identity = await surface.get_identity()
 
     assert identity is not None
@@ -626,8 +732,21 @@ async def test_synthesizes_a_development_identity_outside_vercel(surface: Surfac
     assert identity.payload["name"] == "Test User"
 
 
-async def test_warns_about_the_development_identity_once(surface: Surface) -> None:
+@pytest.mark.parametrize("value", ["0", "false", "yes", ""])
+async def test_does_not_synthesize_unless_opted_in(
+    surface: Surface, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("VERCEL_PASSPORT_DEV", value)
+
+    assert await surface.get_identity() is None
+
+
+async def test_warns_about_the_development_identity_once(
+    surface: Surface, monkeypatch: pytest.MonkeyPatch
+) -> None:
     import warnings
+
+    monkeypatch.setenv("VERCEL_PASSPORT_DEV", "1")
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -671,6 +790,7 @@ async def test_synthesizes_a_development_identity_from_the_environment(
 async def test_omits_empty_optional_development_claims(
     surface: Surface, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv("VERCEL_PASSPORT_DEV", "1")
     monkeypatch.setenv("VERCEL_PROJECT_ID", "")
     monkeypatch.setenv("VERCEL_PASSPORT_DEV_OWNER_ID", "")
     monkeypatch.setenv("VERCEL_PASSPORT_DEV_EXTERNAL_ISS", "")
@@ -682,65 +802,46 @@ async def test_omits_empty_optional_development_claims(
     assert not {"project_id", "owner_id", "external_iss"} & identity.payload.keys()
     assert identity.owner.id is None
     assert identity.external_issuer is None
-    # No project ID locally, so no project: only a project ID identifies one.
     assert identity.project is None
-
-
-async def test_development_overrides_take_precedence_over_the_environment(
-    surface: Surface, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("VERCEL_PASSPORT_DEV_OWNER", "from-env")
-
-    with pytest.warns(PassportDevelopmentIdentityWarning):
-        identity = await surface.get_identity(
-            development=PassportDevelopmentIdentity(owner="acme", external_subject="user_dev")
-        )
-
-    assert identity is not None
-    assert identity.owner.slug == "acme"
-    assert identity.subject == "owner:acme:connector:local:principal:user_dev"
-    assert identity.payload["iss"] == "https://passport.vercel.com/acme"
 
 
 @pytest.mark.parametrize(
     "env",
     [
-        {"VERCEL": "1", "VERCEL_ENV": "production", "VERCEL_PASSPORT_DEV": "1"},
+        {"VERCEL": "1", "VERCEL_ENV": "production"},
         {"VERCEL": "1", "VERCEL_ENV": "preview"},
         {"VERCEL": "1"},
         {"VERCEL_ENV": "production"},
     ],
 )
-async def test_never_synthesizes_a_development_identity_on_a_deployment(
+async def test_never_uses_a_local_identity_on_a_deployment(
     surface: Surface, monkeypatch: pytest.MonkeyPatch, env: dict[str, str]
 ) -> None:
-    for name, value in env.items():
+    import json
+
+    for name, value in {
+        **env,
+        "VERCEL_PASSPORT_DEV": "1",
+        "VERCEL_PASSPORT_IDENTITY": json.dumps(PAYLOAD),
+    }.items():
         monkeypatch.setenv(name, value)
 
     assert await surface.get_identity() is None
+    with local_identity(PAYLOAD):
+        assert await surface.get_identity() is None
 
 
-async def test_synthesizes_on_a_vercel_development_environment(
+async def test_uses_local_identities_on_a_vercel_development_environment(
     surface: Surface, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("VERCEL", "1")
     monkeypatch.setenv("VERCEL_ENV", "development")
+    monkeypatch.setenv("VERCEL_PASSPORT_DEV", "1")
 
+    with local_identity(PAYLOAD):
+        assert await surface.get_identity() is not None
     with pytest.warns(PassportDevelopmentIdentityWarning):
         assert await surface.get_identity() is not None
-
-
-async def test_returns_none_when_development_is_disabled(surface: Surface) -> None:
-    assert await surface.get_identity(development=False) is None
-
-
-@pytest.mark.parametrize("value", ["0", "false"])
-async def test_returns_none_when_development_is_disabled_by_the_environment(
-    surface: Surface, monkeypatch: pytest.MonkeyPatch, value: str
-) -> None:
-    monkeypatch.setenv("VERCEL_PASSPORT_DEV", value)
-
-    assert await surface.get_identity() is None
 
 
 # --------------------------------------------------------------------------
@@ -760,7 +861,8 @@ async def test_repr_never_includes_the_token(
 
 
 async def test_identity_is_immutable(surface: Surface) -> None:
-    identity = await surface.get_identity(local_identity=PAYLOAD)
+    with local_identity(PAYLOAD):
+        identity = await surface.get_identity()
     assert identity is not None
 
     with pytest.raises(PassportValidationError, match="frozen"):
@@ -772,8 +874,9 @@ async def test_identity_is_immutable(surface: Surface) -> None:
 async def test_identity_payload_is_a_copy_of_the_claims(surface: Surface) -> None:
     claims = dict(PAYLOAD)
 
-    identity = await surface.get_identity(local_identity=claims)
-    claims["sub"] = "someone-else"
+    with local_identity(claims):
+        claims["sub"] = "someone-else"
+        identity = await surface.get_identity()
 
     assert identity is not None
     assert identity.payload["sub"] == PAYLOAD["sub"]
@@ -799,8 +902,10 @@ async def test_identity_can_be_copied_pickled_serialized_and_hashed(
 
 
 async def test_identity_equality_includes_the_payload(surface: Surface) -> None:
-    first = await surface.get_identity(local_identity={**PAYLOAD, "role": "admin"})
-    second = await surface.get_identity(local_identity={**PAYLOAD, "role": "user"})
+    with local_identity({**PAYLOAD, "role": "admin"}):
+        first = await surface.get_identity()
+    with local_identity({**PAYLOAD, "role": "user"}):
+        second = await surface.get_identity()
 
     assert first is not None
     assert second is not None

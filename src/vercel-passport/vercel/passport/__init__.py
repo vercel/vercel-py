@@ -8,12 +8,13 @@ helpers read that identity and verify it.
 does the same but raises unless there is one with a token. `verify_identity`
 verifies a Passport token another app forwarded, typically as an
 `Authorization: Bearer` header. `vercel.passport.sync` mirrors all three with
-the same names and arguments, without `await`.
+the same names and arguments, without `await`. In local development and tests,
+`local_identity` sets the identity of requests that carry no token.
 """
 
 from collections.abc import Mapping, Sequence
-from typing import Any, Literal
 
+from vercel.passport._internal.development import local_identity
 from vercel.passport._internal.models import (
     PassportClaims,
     PassportDevelopmentIdentity,
@@ -50,10 +51,6 @@ async def get_identity(
     cookies: Mapping[str, str] | None = None,
     verify: bool = False,
     allow_unverified: bool | None = None,
-    development: PassportDevelopmentIdentity | Literal[False] | None = None,
-    local_identity: Mapping[str, Any] | str | None = None,
-    local_identity_env: str = "VERCEL_PASSPORT_IDENTITY",
-    local_token_env: str = "VERCEL_PASSPORT_TOKEN",
     project_id: str | None = None,
     environment: str | None = None,
     owner_id: str | None = None,
@@ -67,9 +64,11 @@ async def get_identity(
     `_vercel_passport` cookie, which may be split across several cookies. A
     token from the request is always verified.
 
-    When the request carries no token, the identity comes from `local_identity`,
-    then the `VERCEL_PASSPORT_IDENTITY` environment variable, then, in local
-    development only, a synthesized test identity. None of these is verified.
+    When the request carries no token, local development can still have an
+    identity: the one set with `local_identity`, then the JSON in
+    `VERCEL_PASSPORT_IDENTITY`, then, when `VERCEL_PASSPORT_DEV=1`, a synthesized
+    `PassportDevelopmentIdentity`. None of these is verified, and none is used on
+    a Vercel deployment other than `VERCEL_ENV=development`.
 
     Args:
         request: Request headers, or any request object exposing a `headers`
@@ -84,15 +83,6 @@ async def get_identity(
             local development, so on a Vercel deployment other than
             `VERCEL_ENV=development` an unverified token raises unless this is
             true.
-        development: The identity to synthesize in local development. `None`
-            builds a default `PassportDevelopmentIdentity`, whose fields come
-            from `VERCEL_PASSPORT_DEV_*` environment variables, and `False`
-            never synthesizes one. `VERCEL_PASSPORT_DEV=0` also disables it.
-        local_identity: Identity claims to use when the request has no token,
-            as a mapping or a JSON string.
-        local_identity_env: Environment variable holding JSON identity claims.
-        local_token_env: Environment variable holding a Passport token for local
-            debugging.
         project_id: Expected project. Defaults to `VERCEL_PROJECT_ID`.
         environment: Expected environment. Defaults to `VERCEL_TARGET_ENV`, then
             `VERCEL_ENV`.
@@ -115,10 +105,6 @@ async def get_identity(
         cookies=cookies,
         verify=verify,
         allow_unverified=allow_unverified,
-        development=development,
-        local_identity_value=local_identity,
-        local_identity_env=local_identity_env,
-        local_token_env=local_token_env,
     )
     if not isinstance(outcome, PendingVerification):
         return outcome
@@ -135,10 +121,6 @@ async def require_identity(
     cookies: Mapping[str, str] | None = None,
     verify: bool = False,
     allow_unverified: bool | None = None,
-    development: PassportDevelopmentIdentity | Literal[False] | None = None,
-    local_identity: Mapping[str, Any] | str | None = None,
-    local_identity_env: str = "VERCEL_PASSPORT_IDENTITY",
-    local_token_env: str = "VERCEL_PASSPORT_TOKEN",
     project_id: str | None = None,
     environment: str | None = None,
     owner_id: str | None = None,
@@ -162,10 +144,6 @@ async def require_identity(
         cookies=cookies,
         verify=verify,
         allow_unverified=allow_unverified,
-        development=development,
-        local_identity_value=local_identity,
-        local_identity_env=local_identity_env,
-        local_token_env=local_token_env,
     )
     if not isinstance(outcome, PendingVerification):
         return required_identity(outcome)
@@ -244,6 +222,7 @@ __all__ = [
     "TokenSource",
     "__version__",
     "get_identity",
+    "local_identity",
     "require_identity",
     "sync",
     "verify_identity",

@@ -12,14 +12,13 @@ import os
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal, cast
+from typing import Any, cast
 
 from vercel.headers import get_headers
 from vercel.oidc import verify as oidc_verify
-from vercel.passport._internal.development import is_local_development, local_identity
+from vercel.passport._internal.development import is_local_development, local_claims
 from vercel.passport._internal.models import (
     PassportClaims,
-    PassportDevelopmentIdentity,
     PassportIdentity,
     PassportIdentityError,
     PassportVerificationError,
@@ -29,6 +28,8 @@ from vercel.passport._internal.payload import build_identity, decode_unverified
 
 PASSPORT_HEADER_NAME = "x-vercel-oidc-passport-token"
 PASSPORT_COOKIE_NAME = "_vercel_passport"
+# A Passport token for local debugging, decoded unverified unless asked otherwise.
+TOKEN_ENV = "VERCEL_PASSPORT_TOKEN"
 
 _BEARER = re.compile(r"bearer\s+(\S.*)", re.IGNORECASE)
 
@@ -73,10 +74,6 @@ def resolve_identity(
     cookies: Mapping[str, str] | None,
     verify: bool,
     allow_unverified: bool | None,
-    development: PassportDevelopmentIdentity | Literal[False] | None,
-    local_identity_value: Mapping[str, Any] | str | None,
-    local_identity_env: str,
-    local_token_env: str,
 ) -> PassportIdentity | PendingVerification | None:
     """Decide what `get_identity` returns, short of verifying a token."""
     headers = _resolve_headers(request) if request is not None else get_headers()
@@ -92,7 +89,7 @@ def resolve_identity(
     elif cookie_token := _cookie(cookies, headers):
         resolved, source = cookie_token, "cookie"
     else:
-        resolved, source = os.environ.get(local_token_env) or None, "local"
+        resolved, source = os.environ.get(TOKEN_ENV) or None, "local"
 
     if resolved:
         # A token from the request is always verified. Only a token the caller
@@ -113,11 +110,7 @@ def resolve_identity(
             decode_unverified(resolved), token=resolved, token_source=source, verified=False
         )
 
-    claims = local_identity(
-        explicit=local_identity_value,
-        identity_env=local_identity_env,
-        development=development,
-    )
+    claims = local_claims()
     if claims is None:
         return None
     return build_identity(claims, token=None, token_source="local", verified=False)

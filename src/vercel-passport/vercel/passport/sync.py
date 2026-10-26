@@ -6,8 +6,8 @@ which does not block the event loop while it does.
 """
 
 from collections.abc import Mapping, Sequence
-from typing import Any, Literal
 
+from vercel.passport._internal.development import local_identity
 from vercel.passport._internal.models import (
     PassportClaims,
     PassportDevelopmentIdentity,
@@ -41,10 +41,6 @@ def get_identity(
     cookies: Mapping[str, str] | None = None,
     verify: bool = False,
     allow_unverified: bool | None = None,
-    development: PassportDevelopmentIdentity | Literal[False] | None = None,
-    local_identity: Mapping[str, Any] | str | None = None,
-    local_identity_env: str = "VERCEL_PASSPORT_IDENTITY",
-    local_token_env: str = "VERCEL_PASSPORT_TOKEN",
     project_id: str | None = None,
     environment: str | None = None,
     owner_id: str | None = None,
@@ -60,10 +56,6 @@ def get_identity(
         cookies=cookies,
         verify=verify,
         allow_unverified=allow_unverified,
-        development=development,
-        local_identity_value=local_identity,
-        local_identity_env=local_identity_env,
-        local_token_env=local_token_env,
     )
     if not isinstance(outcome, PendingVerification):
         return outcome
@@ -80,10 +72,6 @@ def require_identity(
     cookies: Mapping[str, str] | None = None,
     verify: bool = False,
     allow_unverified: bool | None = None,
-    development: PassportDevelopmentIdentity | Literal[False] | None = None,
-    local_identity: Mapping[str, Any] | str | None = None,
-    local_identity_env: str = "VERCEL_PASSPORT_IDENTITY",
-    local_token_env: str = "VERCEL_PASSPORT_TOKEN",
     project_id: str | None = None,
     environment: str | None = None,
     owner_id: str | None = None,
@@ -99,10 +87,6 @@ def require_identity(
         cookies=cookies,
         verify=verify,
         allow_unverified=allow_unverified,
-        development=development,
-        local_identity_value=local_identity,
-        local_identity_env=local_identity_env,
-        local_token_env=local_token_env,
     )
     if not isinstance(outcome, PendingVerification):
         return required_identity(outcome)
@@ -147,6 +131,7 @@ __all__ = [
     "PassportVerificationError",
     "TokenSource",
     "get_identity",
+    "local_identity",
     "require_identity",
     "verify_identity",
 ]

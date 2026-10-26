@@ -42,9 +42,13 @@ Unlike the TypeScript package, `"*"` is not a wildcard for the expected project 
 
 ## Local identities
 
-When the request carries no token, the identity comes from the caller, then `VERCEL_PASSPORT_IDENTITY`, then a synthesized development identity.
+When the request carries no token, local development can still have an identity: one set for the context, then `VERCEL_PASSPORT_IDENTITY`, then an opt-in synthesized one.
 
-[[src/vercel-passport/vercel/passport/_internal/development.py#local_identity]] resolves that order. The synthesized identity exists only when [[src/vercel-passport/vercel/passport/_internal/development.py#is_local_development]] holds, which excludes every Vercel deployment except `VERCEL_ENV=development`. It can be disabled with `development=False` or `VERCEL_PASSPORT_DEV=0`, and emits a warning once per process, attributed to the caller's line. None of these identities is verified.
+[[src/vercel-passport/vercel/passport/_internal/development.py#local_claims]] resolves that order, and only while [[src/vercel-passport/vercel/passport/_internal/development.py#is_local_development]] holds, which excludes every Vercel deployment except `VERCEL_ENV=development`. None of these identities is verified.
+
+[[src/vercel-passport/vercel/passport/_internal/development.py#local_identity]] sets the context's identity in a context variable, the pattern [[vercel-headers]] uses, so tests and local apps set it in code rather than through `get_identity` arguments, and it reaches tasks and threads started inside the block. It validates the claims on entry, so a malformed identity fails where it is set.
+
+The synthesized identity is opt-in with `VERCEL_PASSPORT_DEV=1`, where the TypeScript package synthesizes one by default. A default-on identity authenticates every request in any process that merely is not on Vercel, such as a self-hosted server without `VERCEL_ENV`. It emits a warning once per process, attributed to the caller's line; an identity set in code does not.
 
 [[src/vercel-passport/vercel/passport/_internal/models.py#PassportDevelopmentIdentity]] states its own precedence: each field is the explicit value, then its `VERCEL_PASSPORT_DEV_*` variable, then the default, applied by a before-validator, so every way of building one resolves alike. An explicit `None` clears an optional field that its variable sets, which the TypeScript package cannot express. The issuer and audience defaults derive from the resolved owner, project, and environment.
 

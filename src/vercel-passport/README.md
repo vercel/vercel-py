@@ -68,6 +68,12 @@ minted for any project:
   `jose` does not check `iat` at all.
 - An unverified debugging token is accepted only in local development by default.
   See [Local development](#local-development).
+- The synthesized development identity is opt-in with `VERCEL_PASSPORT_DEV=1`
+  rather than on by default, so a process that is merely not on Vercel, such as
+  a self-hosted server, never authenticates every visitor as a test user.
+- Local identities are set with the `local_identity()` context manager or
+  `VERCEL_PASSPORT_IDENTITY` rather than `getIdentity` options, and are ignored
+  on Vercel deployments other than `VERCEL_ENV=development`.
 - `identity.project` is set only when the token names a project ID, which every
   verified token does, so `identity.project.id` is never `None`.
 - In `PassportDevelopmentIdentity`, an explicit `None` clears a field its
@@ -138,11 +144,16 @@ the backend verifying it, pass the source project's `project_id` and
 ## Local development
 
 Local development usually has no Passport header or cookie, because Passport
-creates them in Vercel's edge network. So locally, `get_identity()` returns a
-synthesized test identity and emits a `PassportDevelopmentIdentityWarning` the
-first time it does so.
+creates them in Vercel's edge network, so `get_identity()` returns `None` there.
+To work locally as a signed-in visitor, opt in to a synthesized test identity:
 
-The test identity uses:
+```bash
+VERCEL_PASSPORT_DEV=1
+```
+
+`get_identity()` then returns a test identity when the request has no token, and
+emits a `PassportDevelopmentIdentityWarning` the first time it does so. The test
+identity uses:
 
 ```txt
 external_subject: test-user
@@ -161,41 +172,36 @@ VERCEL_PASSPORT_DEV_PROJECT=my-project
 VERCEL_PASSPORT_DEV_PROJECT_ID=prj_local
 ```
 
-or in code:
+To set the identity in code, such as in tests, use `local_identity()`. Inside the
+block, requests without a token get that identity, with no environment variable
+needed. Pass a `PassportDevelopmentIdentity`, whose unset fields still come from
+the environment, or the full claims yourself:
 
 ```python
-from vercel.passport import PassportDevelopmentIdentity, get_identity
+from vercel.passport import PassportDevelopmentIdentity, local_identity
 
-identity = await get_identity(
-    development=PassportDevelopmentIdentity(owner="acme", external_subject="user_dev"),
-)
+with local_identity(PassportDevelopmentIdentity(owner="acme", external_subject="user_dev")):
+    response = client.get("/api/me")
+
+with local_identity({
+    "typ": "passport",
+    "iss": "https://passport.vercel.com/local",
+    "owner": "local",
+    "connector_id": "local",
+    "external_sub": "local-user",
+    "sub": "owner:local:connector:local:principal:local-user",
+}):
+    ...
 ```
 
-Disable the test identity with `VERCEL_PASSPORT_DEV=0`, or:
+The identity is held in a context variable, so it applies to the current
+request or test and to tasks and threads started inside the block. Full claims
+can also be given as JSON in `VERCEL_PASSPORT_IDENTITY`. The identity set with
+`local_identity()` comes first, then `VERCEL_PASSPORT_IDENTITY`, then the
+`VERCEL_PASSPORT_DEV=1` test identity.
 
-```python
-identity = await get_identity(development=False)
-```
-
-Or provide the full claims yourself, as a mapping or as JSON in
-`VERCEL_PASSPORT_IDENTITY`:
-
-```python
-identity = await get_identity(
-    local_identity={
-        "typ": "passport",
-        "iss": "https://passport.vercel.com/local",
-        "owner": "local",
-        "connector_id": "local",
-        "external_sub": "local-user",
-        "sub": "owner:local:connector:local:principal:local-user",
-    },
-)
-```
-
-A synthesized identity is never used on a Vercel deployment unless
-`VERCEL_ENV=development`. Local identities are never verified, so
-`identity.verified` is `False`.
+None of these is used on a Vercel deployment unless `VERCEL_ENV=development`,
+and none is verified, so `identity.verified` is `False`.
 
 To debug with a real token copied from a deployed request, pass it directly or
 set `VERCEL_PASSPORT_TOKEN`. Such a token is decoded without verification
