@@ -368,6 +368,72 @@ Managed sandbox and session exit does not wait for concurrent operations.
 Callers must join sandbox work before leaving a context when deterministic
 cleanup is required.
 
+## Filesystem operations
+
+Use `box.fs` or an explicit runtime session's `fs` for file operations. Paths
+accept strings and `pathlib.PurePosixPath`; relative paths resolve against
+`cwd`, or the sandbox's working directory when `cwd` is omitted.
+
+```python
+workspace = await box.fs.mkdtemp(prefix="build", dir="/tmp")
+try:
+    await box.fs.write_text("build.log", "started\n", cwd=workspace)
+    await box.fs.write_text("build.log", "finished\n", append=True, cwd=workspace)
+    await box.fs.copyfile("build.log", "saved.log", cwd=workspace)
+    await box.fs.chmod("saved.log", 0o640, cwd=workspace)
+    await box.fs.chown("saved.log", "vercel-sandbox", cwd=workspace)
+    await box.fs.symlink("saved.log", "latest.log", cwd=workspace)
+    await box.fs.truncate("build.log", cwd=workspace)
+finally:
+    await box.fs.remove(workspace, recursive=True)
+```
+
+The synchronous API has the same methods and options; omit `await`:
+
+```python
+from vercel.sandbox import sync as sandbox
+
+with sandbox.create_sandbox() as box:
+    box.fs.write_bytes("data.bin", b"first")
+    box.fs.write_bytes("data.bin", b"second", append=True)
+    box.fs.copyfile("data.bin", "backup.bin")
+    box.fs.truncate("data.bin", 5)
+```
+
+- `chmod(path, mode)` accepts integer POSIX permission bits, including special
+  bits (`0o0000` through `0o7777`).
+- `chown(path, uid, gid=None)` accepts numeric IDs or account/group names.
+  Omitting `gid` preserves the current group. Changing ownership requires the
+  corresponding Linux permissions; use `box.as_user("root").fs` when needed.
+- `symlink(target, link_path)` creates a new link and allows dangling targets.
+  A relative target resolves from the link's parent directory.
+- `truncate(path, size=0)` shrinks or extends a file to a non-negative byte size.
+  Extensions read as zero bytes; a missing file is created.
+- `mkdtemp(prefix="tmp", dir="/tmp")` returns the path of a unique directory
+  with mode `0o700`. The name begins with the prefix followed by a dot and a
+  random suffix. The parent directory must exist; callers own cleanup.
+- `copyfile(src, dst)` copies file contents inside the sandbox, following
+  symlinks and overwriting a destination file. Directories and copying a file
+  onto itself fail.
+
+`write_text(..., append=True)` and `write_bytes(..., append=True)` preserve
+existing contents and create a missing file. Parent directories must exist.
+Text still uses the requested encoding and error policy. Existing permissions
+are preserved unless `mode` is supplied, which applies those bits after the
+append. Append runs with the selected Linux user's permissions, and sends the
+payload over command stdin. Streaming `fs.open` handles and batches continue
+to replace files; they use archive uploads and have no append mode.
+
+These operations raise `SandboxFilesystemCommandError` for nonzero command
+exits, with `operation`, `paths`, `exit_code`, `stdout`, and `stderr`. Append
+uses the operation name `"append"`; stdin transport failures can also raise
+`SandboxStdinError`. An append may leave partial data on failure. It binds to
+an active session before starting and is never automatically replayed, to
+avoid appending the same data twice.
+
+See [the filesystem example](examples/sandbox_11_filesystem.py) for a complete
+program with cleanup.
+
 ## Isolated users and shared capabilities
 
 Create a Linux account with a private home directory, or select an existing
@@ -408,8 +474,8 @@ Use `as_user("root")` for a persistent root identity.
 
 Commands, reads, listing, renaming, and removal run as the selected account
 and honor Linux permissions. Another user cannot read a private home.
-Uploads (`write_bytes`, `write_text`, batches, and writable `fs.open` handles)
-and `mkdir` are trusted SDK orchestration: they use the native HTTP filesystem
+Uploads (`write_bytes` and `write_text` without `append=True`, batches, and
+writable `fs.open` handles) and `mkdir` are trusted SDK orchestration: they use the native HTTP filesystem
 API as the sandbox default account, then run privileged ownership commands.
 Upload contents never appear in command arguments. Successful uploads belong
 to the selected user and its actual primary group. Directories created by

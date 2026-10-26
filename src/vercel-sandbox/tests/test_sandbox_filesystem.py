@@ -1,8 +1,15 @@
+import base64
+import inspect
 import io
 import json
+import os
+import stat
+import subprocess
+import sys
 import tarfile
-from collections.abc import AsyncIterator, Iterator
-from pathlib import PurePosixPath
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
 import httpx2 as httpx
@@ -117,6 +124,12 @@ _RECOVERABLE_FILESYSTEM_OPERATIONS = (
     "batch",
     "listdir",
     "rename",
+    "chmod",
+    "chown",
+    "symlink",
+    "truncate",
+    "mkdtemp",
+    "copyfile",
 )
 
 
@@ -135,6 +148,23 @@ async def _run_async_filesystem_operation(handle: sandbox.Sandbox, operation: st
     if operation == "rename":
         await handle.fs.rename("before.txt", "after.txt")
         return None
+    if operation == "chmod":
+        await handle.fs.chmod("file", 0o600)
+        return None
+    if operation == "chown":
+        await handle.fs.chown("file", 1000)
+        return None
+    if operation == "symlink":
+        await handle.fs.symlink("target", "link")
+        return None
+    if operation == "truncate":
+        await handle.fs.truncate("file")
+        return None
+    if operation == "mkdtemp":
+        return await handle.fs.mkdtemp()
+    if operation == "copyfile":
+        await handle.fs.copyfile("source", "destination")
+        return None
     raise AssertionError(f"Unexpected filesystem operation: {operation}")
 
 
@@ -152,6 +182,23 @@ def _run_sync_filesystem_operation(handle: sandbox_sync.SyncSandbox, operation: 
         return handle.fs.listdir("directory")
     if operation == "rename":
         handle.fs.rename("before.txt", "after.txt")
+        return None
+    if operation == "chmod":
+        handle.fs.chmod("file", 0o600)
+        return None
+    if operation == "chown":
+        handle.fs.chown("file", 1000)
+        return None
+    if operation == "symlink":
+        handle.fs.symlink("target", "link")
+        return None
+    if operation == "truncate":
+        handle.fs.truncate("file")
+        return None
+    if operation == "mkdtemp":
+        return handle.fs.mkdtemp()
+    if operation == "copyfile":
+        handle.fs.copyfile("source", "destination")
         return None
     raise AssertionError(f"Unexpected filesystem operation: {operation}")
 
@@ -207,7 +254,13 @@ def _install_filesystem_recovery_routes(
             )
         )
         respx.get(f"https://sandbox.test/v2/sandboxes/sessions/sbx_new/cmd/{command_id}/logs").mock(
-            return_value=_logs_response("listed\0file\0" if operation == "listdir" else "")
+            return_value=_logs_response(
+                "listed\0file\0"
+                if operation == "listdir"
+                else "/tmp/tmp.mock\n"
+                if operation == "mkdtemp"
+                else ""
+            )
         )
 
     return events, resume_route, (old_route, replacement_route)
@@ -235,6 +288,8 @@ async def test_async_sandbox_filesystem_replays_recoverable_operations(
         assert result == b"replacement"
     elif operation == "listdir":
         assert result == [DirectoryEntry(path="listed", kind="file")]
+    elif operation == "mkdtemp":
+        assert result == "/tmp/tmp.mock"
     else:
         assert result is None
 
@@ -261,6 +316,8 @@ def test_sync_sandbox_filesystem_replays_recoverable_operations(
         assert result == b"replacement"
     elif operation == "listdir":
         assert result == [DirectoryEntry(path="listed", kind="file")]
+    elif operation == "mkdtemp":
+        assert result == "/tmp/tmp.mock"
     else:
         assert result is None
 
@@ -1337,3 +1394,333 @@ async def test_read_bytes_and_read_text_still_work(mock_env_clear: None) -> None
         assert text == "content"
 
     assert response_count == 2
+
+
+class _FilesystemCommandStream(httpx.SyncByteStream, httpx.AsyncByteStream):
+    """Delay command completion until the SDK has sent stdin."""
+
+    def __init__(self, records: Callable[[], Iterator[object]]) -> None:
+        self._records = records
+
+    def __iter__(self) -> Iterator[bytes]:
+        for record in self._records():
+            yield (json.dumps(record) + "\n").encode()
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        for record in self:
+            yield record
+
+
+class _LocalFilesystemCommands:
+    """Execute the SDK's actual scripts behind the mocked Sandbox HTTP API."""
+
+    def __init__(self, cwd: Path) -> None:
+        self.cwd = cwd
+        self.requests: list[dict[str, Any]] = []
+        self.stdin = bytearray()
+        self.failure: tuple[int, str, str] | None = None
+        self.start_error: httpx.Response | None = None
+
+    def start(self, request: httpx.Request) -> httpx.Response:
+        if self.start_error is not None:
+            return self.start_error
+        body = json.loads(request.content)
+        self.requests.append(body)
+        command_id = f"fs_{len(self.requests)}"
+        self.stdin.clear()
+
+        def execute() -> tuple[int, str, str]:
+            if self.failure is not None:
+                return self.failure
+            result = subprocess.run(
+                [body["command"], *body["args"]],
+                cwd=body.get("cwd", str(self.cwd)),
+                input=bytes(self.stdin),
+                capture_output=True,
+                check=False,
+            )
+            return result.returncode, result.stdout.decode(), result.stderr.decode()
+
+        if body.get("wait"):
+
+            def records() -> Iterator[object]:
+                yield _command_response(command_id)
+                code, stdout, stderr = execute()
+                if stdout:
+                    yield {"stream": "stdout", "data": stdout}
+                if stderr:
+                    yield {"stream": "stderr", "data": stderr}
+                yield _command_response(command_id, exit_code=code)
+
+            respx.post(
+                f"https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/{command_id}/stdin"
+            ).mock(side_effect=self.send_stdin)
+            return httpx.Response(200, stream=_FilesystemCommandStream(records))
+
+        code, stdout, stderr = execute()
+        respx.get(f"https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/{command_id}").mock(
+            return_value=httpx.Response(200, json=_command_response(command_id, exit_code=code))
+        )
+        respx.get(f"https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/{command_id}/logs").mock(
+            return_value=_logs_response(stdout, stderr)
+        )
+        return httpx.Response(200, json=_command_response(command_id))
+
+    def send_stdin(self, request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        data = base64.b64decode(body.get("data", ""))
+        self.stdin.extend(data[len(self.stdin) - body.get("offset", len(self.stdin)) :])
+        return httpx.Response(200, json={"bytesWritten": len(self.stdin)})
+
+
+async def _filesystem_call(method: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    result = method(*args, **kwargs)
+    return await result if inspect.isawaitable(result) else result
+
+
+_CommandFilesystem = AbstractAsyncContextManager[tuple[Any, _LocalFilesystemCommands]]
+
+
+@pytest.fixture(params=[False, True], ids=["async", "sync"])
+def command_fs(
+    request: pytest.FixtureRequest, tmp_path: Path, mock_env_clear: None
+) -> _CommandFilesystem:
+    if sys.platform != "linux":
+        pytest.skip("Remote script execution tests require Linux utilities")
+    sync = request.param
+
+    @asynccontextmanager
+    async def open_fs() -> AsyncIterator[tuple[Any, _LocalFilesystemCommands]]:
+        with respx.mock:
+            respx.post("https://sandbox.test/v3/sandboxes").mock(
+                return_value=httpx.Response(200, json=_sandbox_response())
+            )
+            respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+                return_value=httpx.Response(200, json=_sandbox_response())
+            )
+            commands = _LocalFilesystemCommands(tmp_path)
+            respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
+                side_effect=commands.start
+            )
+            if sync:
+                with session(service_options=_session_options(sync=True)):
+                    box = sandbox_sync.create_sandbox(name="preview")
+                    yield box.fs, commands
+            else:
+                async with session(service_options=_session_options(sync=False)):
+                    async_box = await sandbox.create_sandbox(name="preview")
+                    yield async_box.fs, commands
+
+    return open_fs()
+
+
+# @lat: [[vercel-sandbox#Filesystem mutations#Filesystem mutation tests]]
+async def test_filesystem_chmod(command_fs: _CommandFilesystem) -> None:
+    async with command_fs as (fs, commands):
+        path = commands.cwd / "-file; $(touch injected)"
+        path.touch()
+        await _filesystem_call(fs.chmod, PurePosixPath(path.name), 0o640, cwd=commands.cwd)
+        assert stat.S_IMODE(path.stat().st_mode) == 0o640
+        await _filesystem_call(fs.chmod, path, 0o1600)
+        assert stat.S_IMODE(path.stat().st_mode) == 0o1600
+        assert not (commands.cwd / "injected").exists()
+        assert path.name not in commands.requests[0]["args"][1]
+
+
+async def test_filesystem_chown(command_fs: _CommandFilesystem) -> None:
+    async with command_fs as (fs, commands):
+        path = commands.cwd / "-owner; file"
+        path.touch()
+        await _filesystem_call(fs.chown, path.name, os.getuid(), os.getgid(), cwd=commands.cwd)
+        await _filesystem_call(
+            fs.chown, path, subprocess.check_output(["id", "-un"], text=True).strip()
+        )
+        await _filesystem_call(
+            fs.chown,
+            path,
+            str(os.getuid()),
+            subprocess.check_output(["id", "-gn"], text=True).strip(),
+        )
+        assert (path.stat().st_uid, path.stat().st_gid) == (os.getuid(), os.getgid())
+        assert commands.requests[1]["args"][3:] == [
+            str(path),
+            subprocess.check_output(["id", "-un"], text=True).strip(),
+        ]
+
+
+async def test_filesystem_symlink(command_fs: _CommandFilesystem) -> None:
+    async with command_fs as (fs, commands):
+        target = "-target ' ; $()\n"
+        link = commands.cwd / "link ' ; $()"
+        await _filesystem_call(fs.symlink, PurePosixPath(target), link.name, cwd=commands.cwd)
+        assert link.is_symlink()
+        assert os.readlink(link) == target
+        assert not link.exists()  # Dangling targets are valid and remain relative.
+        (commands.cwd / target).write_text("target")
+        assert link.read_text() == "target"
+        with pytest.raises(SandboxFilesystemCommandError):
+            await _filesystem_call(fs.symlink, "elsewhere", link)
+
+
+async def test_filesystem_truncate(command_fs: _CommandFilesystem) -> None:
+    async with command_fs as (fs, commands):
+        path = commands.cwd / "-truncate; '"
+        path.write_bytes(b"abcdef")
+        await _filesystem_call(fs.truncate, path.name, 3, cwd=commands.cwd)
+        assert path.read_bytes() == b"abc"
+        await _filesystem_call(fs.truncate, path, 6)
+        assert path.read_bytes() == b"abc\0\0\0"
+        await _filesystem_call(fs.truncate, path)
+        assert path.read_bytes() == b""
+        path.unlink()
+        await _filesystem_call(fs.truncate, path, 2)
+        assert path.read_bytes() == b"\0\0"
+
+
+async def test_filesystem_mkdtemp(command_fs: _CommandFilesystem) -> None:
+    async with command_fs as (fs, commands):
+        prefix = "-private ' ; $()\nX"
+        first = await _filesystem_call(fs.mkdtemp, prefix, PurePosixPath(commands.cwd))
+        second = await _filesystem_call(fs.mkdtemp, prefix, commands.cwd)
+        assert first != second
+        assert Path(first).name.startswith(prefix)
+        assert Path(first).parent == commands.cwd
+        assert stat.S_IMODE(Path(first).stat().st_mode) == 0o700
+        relative = await _filesystem_call(fs.mkdtemp, dir=".", cwd=commands.cwd)
+        assert (commands.cwd / relative).is_dir()
+        default = await _filesystem_call(fs.mkdtemp)
+        try:
+            assert default.startswith("/tmp/tmp")
+            assert Path(default).is_dir()
+        finally:
+            Path(default).rmdir()
+        assert all(prefix not in body["args"][1] for body in commands.requests)
+
+
+async def test_filesystem_copyfile(command_fs: _CommandFilesystem) -> None:
+    async with command_fs as (fs, commands):
+        src = commands.cwd / "-source ' ; $()"
+        dst = commands.cwd / "destination\nname"
+        src.write_bytes(b"\0\xffcontents")
+        dst.write_bytes(b"longer existing contents")
+        await _filesystem_call(fs.copyfile, PurePosixPath(src.name), dst.name, cwd=commands.cwd)
+        assert dst.read_bytes() == src.read_bytes()
+        with pytest.raises(SandboxFilesystemCommandError):
+            await _filesystem_call(fs.copyfile, src, src)
+        with pytest.raises(SandboxFilesystemCommandError):
+            await _filesystem_call(fs.copyfile, src, commands.cwd)
+        with pytest.raises(SandboxFilesystemCommandError):
+            await _filesystem_call(fs.copyfile, commands.cwd, dst)
+
+
+@pytest.mark.parametrize("text", [False, True], ids=["bytes", "text"])
+async def test_filesystem_append(command_fs: _CommandFilesystem, text: bool) -> None:
+    async with command_fs as (fs, commands):
+        path = commands.cwd / "-append ' ; $()\n"
+        path.write_bytes(b"existing\0")
+        path.chmod(0o640)
+        data = "café\n' ; $(touch injected)\0"
+        if text:
+            await _filesystem_call(
+                fs.write_text, path.name, data, encoding="latin1", append=True, cwd=commands.cwd
+            )
+            expected = data.encode("latin1")
+        else:
+            expected = b"\0\xff" + data.encode()
+            await _filesystem_call(
+                fs.write_bytes, path.name, expected, append=True, cwd=commands.cwd
+            )
+        assert path.read_bytes() == b"existing\0" + expected
+        assert stat.S_IMODE(path.stat().st_mode) == 0o640
+        assert bytes(commands.stdin) == expected
+        assert expected not in json.dumps(commands.requests).encode()
+        assert commands.requests[-1]["attachStdin"] is True
+        assert not (commands.cwd / "injected").exists()
+        await _filesystem_call(fs.write_bytes, path, b"", append=True, mode=0o600)
+        assert path.read_bytes() == b"existing\0" + expected
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        path.unlink()
+        await _filesystem_call(fs.write_text, path, "", append=True)
+        assert path.read_bytes() == b""
+
+
+@pytest.mark.parametrize(
+    "operation, args, paths",
+    [
+        ("chmod", ("missing", 0o600), ("missing",)),
+        ("chown", ("missing", 0), ("missing",)),
+        ("symlink", ("target", "missing/link"), ("target", "missing/link")),
+        ("truncate", ("missing/file",), ("missing/file",)),
+        ("mkdtemp", ("prefix", "missing"), ("missing",)),
+        ("copyfile", ("missing", "dst"), ("missing", "dst")),
+        ("write_bytes", ("missing/file", b"data"), ("missing/file",)),
+    ],
+)
+async def test_filesystem_mutation_errors(
+    command_fs: _CommandFilesystem,
+    operation: str,
+    args: tuple[Any, ...],
+    paths: tuple[str, ...],
+) -> None:
+    async with command_fs as (fs, commands):
+        kwargs = {"append": True} if operation == "write_bytes" else {}
+        with pytest.raises(SandboxFilesystemCommandError) as raised:
+            await _filesystem_call(getattr(fs, operation), *args, cwd=commands.cwd, **kwargs)
+        error = raised.value
+        assert error.operation == ("append" if operation == "write_bytes" else operation)
+        assert error.paths == paths
+        assert error.exit_code != 0
+        assert error.stderr
+        commands.failure = (7, "partial output", "permission denied")
+        with pytest.raises(SandboxFilesystemCommandError) as raised:
+            await _filesystem_call(getattr(fs, operation), *args, cwd=commands.cwd, **kwargs)
+        assert (raised.value.exit_code, raised.value.stdout, raised.value.stderr) == (
+            7,
+            "partial output",
+            "permission denied",
+        )
+
+
+@pytest.mark.parametrize(
+    "operation, args, error",
+    [
+        ("chmod", ("file", True), TypeError),
+        ("chmod", ("file", "755"), TypeError),
+        ("chmod", ("file", -1), ValueError),
+        ("chmod", ("file", 0o10000), ValueError),
+        ("chown", ("file", -1), ValueError),
+        ("chown", ("file", True), TypeError),
+        ("chown", ("file", ""), ValueError),
+        ("chown", ("file", "user:group"), ValueError),
+        ("chown", ("file", 0, -1), ValueError),
+        ("chown", ("file", 0, []), TypeError),
+        ("truncate", ("file", -1), ValueError),
+        ("truncate", ("file", True), TypeError),
+        ("truncate", ("file", 1.5), TypeError),
+        ("mkdtemp", ("../escape",), ValueError),
+        ("mkdtemp", ("nul\0",), ValueError),
+        ("mkdtemp", (5,), TypeError),
+    ],
+)
+async def test_filesystem_mutation_validation(
+    command_fs: _CommandFilesystem,
+    operation: str,
+    args: tuple[Any, ...],
+    error: type[Exception],
+) -> None:
+    async with command_fs as (fs, commands):
+        with pytest.raises(error):
+            await _filesystem_call(getattr(fs, operation), *args)
+        assert commands.requests == []
+
+
+async def test_filesystem_append_does_not_replay_after_start_failure(
+    command_fs: _CommandFilesystem,
+) -> None:
+    async with command_fs as (fs, commands):
+        commands.start_error = httpx.Response(
+            422, json={"error": {"code": "sandbox_stopped", "message": "stopped"}}
+        )
+        with pytest.raises(SandboxApiError):
+            await _filesystem_call(fs.write_bytes, "file", b"once", append=True)
+        assert len(respx.calls) == 3  # create, bind/refresh, one failed append; no resume.

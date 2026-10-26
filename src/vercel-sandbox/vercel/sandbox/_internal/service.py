@@ -4,6 +4,7 @@ from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequen
 from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass
 from datetime import timedelta
+from posixpath import join as join_remote_path
 from typing import TYPE_CHECKING, Literal, cast
 
 from vercel._internal.core.byte_stream import (
@@ -67,6 +68,7 @@ from vercel.sandbox._internal.process_stdin import feed_process_input
 from vercel.sandbox._internal.recovery import _lifecycle_stream_error
 from vercel.sandbox._internal.runtime_common import (
     _StreamUploadFileEntry,
+    _validate_transfer_size,
 )
 from vercel.sandbox._internal.state import (
     CompletedProcessState,
@@ -157,6 +159,19 @@ case "$2" in
   *) destination=./$2 ;;
 esac
 mv "$source" "$destination"
+"""
+_CHMOD_SCRIPT = 'chmod -- "$2" "$1"'
+_CHOWN_SCRIPT = 'chown -- "$2" "$1"'
+_SYMLINK_SCRIPT = 'ln -sT -- "$1" "$2"'
+# -T gives copyfile file-to-file semantics even when the destination is a directory.
+_COPYFILE_SCRIPT = 'cp -T -- "$1" "$2"'
+_TRUNCATE_SCRIPT = 'truncate -s "$2" -- "$1"'
+_MKDTEMP_SCRIPT = 'mktemp -d -- "$1"'
+_APPEND_SCRIPT = """\
+cat >> "$1" || exit
+if test -n "$2"; then
+  chmod -- "$2" "$1"
+fi
 """
 
 
@@ -1050,7 +1065,18 @@ class SandboxService:
         args: list[str],
         cwd: str | None,
         collect_output: ProcessOutputCollector,
+        input: bytes | None = None,
     ) -> tuple[ProcessState, str, str]:
+        if input is not None:
+            result = await self.run_process(
+                session_id=session_id,
+                command="sh",
+                args=["-c", script, f"vercel-fs-{operation}", *args],
+                cwd=cwd,
+                input=input,
+                output_router=ProcessOutputRouter(stdout=None, stderr=None, capture_output=True),
+            )
+            return result.process, result.stdout or "", result.stderr or ""
         command = await self._wait_process(
             session_id=session_id,
             command="sh",
@@ -1059,6 +1085,197 @@ class SandboxService:
         )
         stdout, stderr = await collect_output(command)
         return command, stdout, stderr
+
+    async def _checked_filesystem_command(
+        self,
+        *,
+        operation: str,
+        session_id: str,
+        script: str,
+        args: list[str],
+        paths: tuple[str, ...],
+        cwd: str | None,
+        collect_output: ProcessOutputCollector,
+        input: bytes | None = None,
+    ) -> str:
+        command, stdout, stderr = await self._filesystem_command(
+            operation=operation,
+            session_id=session_id,
+            script=script,
+            args=args,
+            cwd=cwd,
+            collect_output=collect_output,
+            input=input,
+        )
+        if command.returncode != 0:
+            raise SandboxFilesystemCommandError(
+                operation,
+                paths=paths,
+                exit_code=command.returncode,
+                stdout=stdout,
+                stderr=stderr,
+            )
+        return stdout
+
+    async def chmod(
+        self,
+        *,
+        session_id: str,
+        path: str,
+        mode: int,
+        cwd: str | None,
+        collect_output: ProcessOutputCollector,
+    ) -> None:
+        if isinstance(mode, bool) or not isinstance(mode, int):
+            raise TypeError("mode must be an integer")
+        if not 0 <= mode <= 0o7777:
+            raise ValueError("mode must be between 0 and 0o7777")
+        await self._checked_filesystem_command(
+            operation="chmod",
+            session_id=session_id,
+            script=_CHMOD_SCRIPT,
+            args=[path, format(mode, "o")],
+            paths=(path,),
+            cwd=cwd,
+            collect_output=collect_output,
+        )
+
+    async def chown(
+        self,
+        *,
+        session_id: str,
+        path: str,
+        uid: int | str,
+        gid: int | str | None,
+        cwd: str | None,
+        collect_output: ProcessOutputCollector,
+    ) -> None:
+        for name, value in (("uid", uid), ("gid", gid)):
+            if value is None and name == "gid":
+                continue
+            if isinstance(value, bool) or not isinstance(value, (int, str)):
+                raise TypeError(f"{name} must be an integer or string")
+            if isinstance(value, int) and value < 0:
+                raise ValueError(f"{name} must be non-negative")
+            if isinstance(value, str) and (not value or ":" in value or "\0" in value):
+                raise ValueError(f"{name} must be a non-empty name or ID without ':' or NUL")
+        owner = str(uid) if gid is None else f"{uid}:{gid}"
+        await self._checked_filesystem_command(
+            operation="chown",
+            session_id=session_id,
+            script=_CHOWN_SCRIPT,
+            args=[path, owner],
+            paths=(path,),
+            cwd=cwd,
+            collect_output=collect_output,
+        )
+
+    async def symlink(
+        self,
+        *,
+        session_id: str,
+        target: str,
+        link_path: str,
+        cwd: str | None,
+        collect_output: ProcessOutputCollector,
+    ) -> None:
+        await self._checked_filesystem_command(
+            operation="symlink",
+            session_id=session_id,
+            script=_SYMLINK_SCRIPT,
+            args=[target, link_path],
+            paths=(target, link_path),
+            cwd=cwd,
+            collect_output=collect_output,
+        )
+
+    async def copyfile(
+        self,
+        *,
+        session_id: str,
+        src: str,
+        dst: str,
+        cwd: str | None,
+        collect_output: ProcessOutputCollector,
+    ) -> None:
+        await self._checked_filesystem_command(
+            operation="copyfile",
+            session_id=session_id,
+            script=_COPYFILE_SCRIPT,
+            args=[src, dst],
+            paths=(src, dst),
+            cwd=cwd,
+            collect_output=collect_output,
+        )
+
+    async def truncate(
+        self,
+        *,
+        session_id: str,
+        path: str,
+        size: int,
+        cwd: str | None,
+        collect_output: ProcessOutputCollector,
+    ) -> None:
+        size = _validate_transfer_size(size)
+        await self._checked_filesystem_command(
+            operation="truncate",
+            session_id=session_id,
+            script=_TRUNCATE_SCRIPT,
+            args=[path, str(size)],
+            paths=(path,),
+            cwd=cwd,
+            collect_output=collect_output,
+        )
+
+    async def mkdtemp(
+        self,
+        *,
+        session_id: str,
+        prefix: str,
+        dir: str,
+        cwd: str | None,
+        collect_output: ProcessOutputCollector,
+    ) -> str:
+        if not isinstance(prefix, str):
+            raise TypeError("prefix must be a string")
+        if "/" in prefix or "\0" in prefix:
+            raise ValueError("prefix must not contain '/' or NUL")
+        # Avoid option-like relative templates. Preserve newlines in the returned path.
+        template = join_remote_path(dir, prefix + ".XXXXXX")
+        if not template.startswith("/"):
+            template = "./" + template
+        output = await self._checked_filesystem_command(
+            operation="mkdtemp",
+            session_id=session_id,
+            script=_MKDTEMP_SCRIPT,
+            args=[template],
+            paths=(dir,),
+            cwd=cwd,
+            collect_output=collect_output,
+        )
+        return output.removesuffix("\n")
+
+    async def append_bytes(
+        self,
+        *,
+        session_id: str,
+        path: str,
+        data: bytes,
+        mode: int | None,
+        cwd: str | None,
+        collect_output: ProcessOutputCollector,
+    ) -> None:
+        await self._checked_filesystem_command(
+            operation="append",
+            session_id=session_id,
+            script=_APPEND_SCRIPT,
+            args=[path, "" if mode is None else format(mode, "o")],
+            paths=(path,),
+            cwd=cwd,
+            collect_output=collect_output,
+            input=data,
+        )
 
     async def _predicate(
         self,

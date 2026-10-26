@@ -704,18 +704,37 @@ class SyncSandboxFilesystem:
         *,
         cwd: RemotePath | None = None,
         mode: int | None = None,
+        append: bool = False,
     ) -> None:
-        """Write bytes to a file, replacing any existing contents.
+        """Write bytes to a file, replacing contents unless ``append=True``.
 
         Args:
             path: Absolute path or path relative to ``cwd``.
             data: File contents.
             cwd: Base directory for a relative path.
-            mode: Optional POSIX permission bits for the file.
+            mode: Optional POSIX permission bits, also applied after appending.
+            append: Append over command stdin, creating a missing file. No automatic
+                replay; failures can leave partial data. Parent directories must exist.
 
         Raises:
             SandboxFilesystemWriteError: If the write request fails.
+            SandboxFilesystemCommandError: If the append command fails.
         """
+        if append:
+            _validate_file_mode(mode)
+
+            async def append_once() -> None:
+                await self._service.append_bytes(
+                    session_id=await self._execution.bind(),
+                    path=_coerce_remote_path(path),
+                    data=data,
+                    mode=mode,
+                    cwd=None if cwd is None else _coerce_remote_path(cwd),
+                    collect_output=self._collect_output,
+                )
+
+            iter_coroutine(append_once())
+            return
         self._write_files(
             [_WriteFile(path=_coerce_remote_path(path), content=data, mode=mode)], cwd=cwd
         )
@@ -729,6 +748,7 @@ class SyncSandboxFilesystem:
         encoding: str = "utf-8",
         errors: str = "strict",
         mode: int | None = None,
+        append: bool = False,
     ) -> None:
         """Encode and write text to a file.
 
@@ -738,20 +758,16 @@ class SyncSandboxFilesystem:
             cwd: Base directory for a relative path.
             encoding: Text encoding used to encode ``text``.
             errors: Encoding error policy.
-            mode: Optional POSIX permission bits for the file.
+            mode: Optional POSIX permission bits, also applied after appending.
+            append: Append over command stdin, creating a missing file. No automatic
+                replay; failures can leave partial data. Parent directories must exist.
 
         Raises:
             SandboxFilesystemWriteError: If the write request fails.
+            SandboxFilesystemCommandError: If the append command fails.
         """
-        self._write_files(
-            [
-                _WriteFile(
-                    path=_coerce_remote_path(path),
-                    content=text.encode(encoding, errors=errors),
-                    mode=mode,
-                )
-            ],
-            cwd=cwd,
+        self.write_bytes(
+            path, text.encode(encoding, errors=errors), cwd=cwd, mode=mode, append=append
         )
 
     def _write_files(self, files: Sequence[_WriteFile], *, cwd: RemotePath | None = None) -> None:
@@ -799,6 +815,126 @@ class SyncSandboxFilesystem:
         """
         return SyncSandboxFilesystemBatch(
             write_files=lambda files: self._write_files(files, cwd=cwd)
+        )
+
+    def chmod(self, path: RemotePath, mode: int, *, cwd: RemotePath | None = None) -> None:
+        """Change POSIX permission bits, including special bits (0o0000–0o7777).
+
+        Paths are relative to ``cwd``. Remote failures raise
+        ``SandboxFilesystemCommandError``.
+        """
+        iter_coroutine(
+            self._execution.execute(
+                lambda session_id: self._service.chmod(
+                    session_id=session_id,
+                    path=_coerce_remote_path(path),
+                    mode=mode,
+                    cwd=None if cwd is None else _coerce_remote_path(cwd),
+                    collect_output=self._collect_output,
+                )
+            )
+        )
+
+    def chown(
+        self,
+        path: RemotePath,
+        uid: int | str,
+        gid: int | str | None = None,
+        *,
+        cwd: RemotePath | None = None,
+    ) -> None:
+        """Change owner and optionally group by numeric ID or account name.
+
+        Paths are relative to ``cwd``. Remote failures raise
+        ``SandboxFilesystemCommandError``.
+        """
+        iter_coroutine(
+            self._execution.execute(
+                lambda session_id: self._service.chown(
+                    session_id=session_id,
+                    path=_coerce_remote_path(path),
+                    uid=uid,
+                    gid=gid,
+                    cwd=None if cwd is None else _coerce_remote_path(cwd),
+                    collect_output=self._collect_output,
+                )
+            )
+        )
+
+    def symlink(
+        self, target: RemotePath, link_path: RemotePath, *, cwd: RemotePath | None = None
+    ) -> None:
+        """Create a symbolic link; relative targets resolve from the link directory.
+
+        Paths are relative to ``cwd``. Remote failures raise
+        ``SandboxFilesystemCommandError``.
+        """
+        iter_coroutine(
+            self._execution.execute(
+                lambda session_id: self._service.symlink(
+                    session_id=session_id,
+                    target=_coerce_remote_path(target),
+                    link_path=_coerce_remote_path(link_path),
+                    cwd=None if cwd is None else _coerce_remote_path(cwd),
+                    collect_output=self._collect_output,
+                )
+            )
+        )
+
+    def truncate(self, path: RemotePath, size: int = 0, *, cwd: RemotePath | None = None) -> None:
+        """Resize a file to a non-negative byte size, creating it if missing.
+
+        Paths are relative to ``cwd``. Remote failures raise
+        ``SandboxFilesystemCommandError``.
+        """
+        iter_coroutine(
+            self._execution.execute(
+                lambda session_id: self._service.truncate(
+                    session_id=session_id,
+                    path=_coerce_remote_path(path),
+                    size=size,
+                    cwd=None if cwd is None else _coerce_remote_path(cwd),
+                    collect_output=self._collect_output,
+                )
+            )
+        )
+
+    def mkdtemp(
+        self, prefix: str = "tmp", dir: RemotePath = "/tmp", *, cwd: RemotePath | None = None
+    ) -> str:
+        """Create a unique private directory and return its path.
+
+        Paths are relative to ``cwd``. Remote failures raise
+        ``SandboxFilesystemCommandError``.
+        """
+        return iter_coroutine(
+            self._execution.execute(
+                lambda session_id: self._service.mkdtemp(
+                    session_id=session_id,
+                    dir=_coerce_remote_path(dir),
+                    prefix=prefix,
+                    cwd=None if cwd is None else _coerce_remote_path(cwd),
+                    collect_output=self._collect_output,
+                )
+            )
+        )
+
+    def copyfile(self, src: RemotePath, dst: RemotePath, *, cwd: RemotePath | None = None) -> None:
+        """Copy file contents, replacing the destination; directories are rejected.
+
+        Paths are relative to ``cwd``. Remote failures raise
+        ``SandboxFilesystemCommandError``.
+        """
+        iter_coroutine(
+            self._execution.execute(
+                lambda session_id: self._service.copyfile(
+                    session_id=session_id,
+                    src=_coerce_remote_path(src),
+                    dst=_coerce_remote_path(dst),
+                    cwd=None if cwd is None else _coerce_remote_path(cwd),
+                    collect_output=self._collect_output,
+                )
+            )
         )
 
     def exists(self, path: RemotePath, *, cwd: RemotePath | None = None) -> bool:
