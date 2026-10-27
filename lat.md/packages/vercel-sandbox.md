@@ -9,11 +9,21 @@ Lives in [[src/vercel-sandbox]] and is exposed as [[src/vercel-sandbox/vercel/sa
 All behavior lives in one async-only service that returns plain state, and thin sync and async handle layers wrap that state for users.
 
 - [[src/vercel-sandbox/vercel/sandbox/_internal/api_client.py#SandboxApiClient]] speaks the Sandbox HTTP API over the session's transport.
-- [[src/vercel-sandbox/vercel/sandbox/_internal/service.py#SandboxService]] orchestrates operations and returns neutral dataclasses from [[src/vercel-sandbox/vercel/sandbox/_internal/state.py]].
+- [[src/vercel-sandbox/vercel/sandbox/_internal/service.py#SandboxService]] orchestrates operations and returns neutral state records from [[src/vercel-sandbox/vercel/sandbox/_internal/state.py]].
 - [[src/vercel-sandbox/vercel/sandbox/_internal/async_runtime.py#Sandbox]] and [[src/vercel-sandbox/vercel/sandbox/_internal/sync_runtime.py#SyncSandbox]] wrap that state in user-facing handles. The sync handles drive the same service coroutines with `iter_coroutine` over a sync transport.
 - Logic that does not depend on the I/O mode, such as validation and handle bookkeeping, lives in [[src/vercel-sandbox/vercel/sandbox/_internal/runtime_common.py]].
 
 New features should follow this split: put the logic in the service, then expose it from both runtimes with matching names and arguments.
+
+## Public value models
+
+Public data objects are Pydantic v2 models, with frozen fields and validation on construction. Internal orchestration records remain dataclasses.
+
+[[src/vercel-sandbox/vercel/sandbox/_internal/value_model.py#SandboxValueModel]] supplies the shared configuration for formerly dataclass-based public values. These include network policies, process results, filesystem entries, mounts, snapshot expiration, credentials, and service options. [[src/vercel-sandbox/vercel/sandbox/_internal/state.py#SandboxRouteState|Routes]] and [[src/vercel-sandbox/vercel/sandbox/_internal/state.py#SnapshotRetentionState|snapshot-retention state]] also reach callers through sandbox properties and use the same model configuration.
+
+[[src/vercel-sandbox/vercel/sandbox/_internal/models.py#NetworkPolicy]] validates nested model dictionaries while preserving immutable, defensively copied mappings. Model dumps represent Python fields; the API client retains responsibility for wire names, policy shapes, and duration units. Convenience constructors for matchers, snapshot expiration, mounts, and credentials preserve positional calls. Other model construction uses keyword arguments, and invalid input or frozen-field assignment raises Pydantic validation errors.
+
+[[src/vercel-sandbox/vercel/sandbox/user.py#SandboxUser]] and [[src/vercel-sandbox/vercel/sandbox/sync/user.py#SyncSandboxUser]] keep runtime bindings private and serialize their current username and resolved home directory. Service options retain callable credential factories and the shared session registry key. [[src/vercel-sandbox/tests/test_public_models.py|Public model tests]] cover serialization roundtrips, nested validation, frozen fields and mappings, helper compatibility, and the absence of dataclass exports.
 
 ## Configuration and clients
 

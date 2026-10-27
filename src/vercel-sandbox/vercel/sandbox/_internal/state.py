@@ -10,10 +10,10 @@ from vercel.sandbox._internal.models import (
     SandboxMount,
     SandboxStatus,
 )
+from vercel.sandbox._internal.value_model import SandboxValueModel
 
 
-@dataclass(frozen=True, slots=True)
-class SandboxRouteState:
+class SandboxRouteState(SandboxValueModel):
     url: str
     port: int
     subdomain: str
@@ -62,8 +62,7 @@ class SandboxRuntimeSessionState:
     stopped_at: int | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class SnapshotRetentionState:
+class SnapshotRetentionState(SandboxValueModel):
     """Describe the snapshot retention policy returned by the service."""
 
     count: int

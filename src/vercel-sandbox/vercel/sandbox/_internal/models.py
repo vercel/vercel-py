@@ -7,18 +7,33 @@ from enum import IntEnum
 from pathlib import PurePosixPath
 from subprocess import CalledProcessError
 from types import MappingProxyType
-from typing import Any, Final, Literal, Protocol, TypeAlias, TypeVar, cast
+from typing import (
+    Annotated,
+    Any,
+    Final,
+    Literal,
+    Protocol,
+    TypeAlias,
+    TypeVar,
+    cast,
+    runtime_checkable,
+)
 
 from pydantic import (
+    AfterValidator,
     BaseModel,
     ConfigDict,
     Field,
     JsonValue as PydanticJsonValue,
+    WrapSerializer,
+    field_serializer,
     field_validator,
+    model_validator,
 )
 
-from vercel._internal.core.polyfills import StrEnum
+from vercel._internal.core.polyfills import Self, StrEnum
 from vercel._internal.core.time import SECOND, coerce_duration, to_ms_int
+from vercel.sandbox._internal.value_model import SandboxValueModel
 
 JSONValue: TypeAlias = PydanticJsonValue
 JSONObject: TypeAlias = dict[str, JSONValue]
@@ -54,13 +69,23 @@ def normalize_failover_regions(regions: FailoverRegionsInput) -> tuple[str, ...]
     return normalized
 
 
-@dataclass(frozen=True, slots=True)
-class NetworkPolicyMatcher:
+_MappingValueT = TypeVar("_MappingValueT")
+_FrozenMapping: TypeAlias = Annotated[
+    Mapping[str, _MappingValueT],
+    AfterValidator(lambda value: MappingProxyType(dict(value))),
+    WrapSerializer(lambda value, handler: handler(dict(value))),
+]
+
+
+class NetworkPolicyMatcher(SandboxValueModel):
     """Match one request value using one comparison strategy."""
 
     kind: Literal["exact", "starts_with", "regex"]
     value: str
     __hash__ = None  # type: ignore[assignment]
+
+    def __init__(self, kind: Literal["exact", "starts_with", "regex"], value: str) -> None:
+        super().__init__(kind=kind, value=value)
 
     @classmethod
     def exact(cls, value: str) -> "NetworkPolicyMatcher":
@@ -75,21 +100,21 @@ class NetworkPolicyMatcher:
         return cls("regex", value)
 
 
-@dataclass(frozen=True, slots=True)
-class NetworkPolicyKeyValueMatcher:
+class NetworkPolicyKeyValueMatcher(SandboxValueModel):
     """Match a request header or query-string key/value pair."""
 
     key: NetworkPolicyMatcher | None = None
     value: NetworkPolicyMatcher | None = None
     __hash__ = None  # type: ignore[assignment]
 
-    def __post_init__(self) -> None:
+    @model_validator(mode="after")
+    def _validate(self) -> Self:
         if self.key is None and self.value is None:
             raise ValueError("key-value matcher requires a key or value matcher")
+        return self
 
 
-@dataclass(frozen=True, slots=True)
-class NetworkPolicyRequestMatcher:
+class NetworkPolicyRequestMatcher(SandboxValueModel):
     """Match selected dimensions of an outbound HTTP request."""
 
     path: NetworkPolicyMatcher | None = None
@@ -98,95 +123,55 @@ class NetworkPolicyRequestMatcher:
     headers: tuple[NetworkPolicyKeyValueMatcher, ...] | None = None
     __hash__ = None  # type: ignore[assignment]
 
-    def __init__(
-        self,
-        *,
-        path: NetworkPolicyMatcher | None = None,
-        method: Iterable[str] | None = None,
-        query: Iterable[NetworkPolicyKeyValueMatcher] | None = None,
-        headers: Iterable[NetworkPolicyKeyValueMatcher] | None = None,
-    ) -> None:
-        normalized_method = None if method is None else tuple(method)
-        normalized_query = None if query is None else tuple(query)
-        normalized_headers = None if headers is None else tuple(headers)
-        if (
-            path is None
-            and normalized_method is None
-            and normalized_query is None
-            and normalized_headers is None
-        ):
+    @model_validator(mode="after")
+    def _validate(self) -> Self:
+        if all(value is None for value in (self.path, self.method, self.query, self.headers)):
             raise ValueError("request matcher requires at least one matching dimension")
-        if normalized_method == ():
-            raise ValueError("request matcher method must not be empty")
-        if normalized_query == ():
-            raise ValueError("request matcher query must not be empty")
-        if normalized_headers == ():
-            raise ValueError("request matcher headers must not be empty")
-        object.__setattr__(self, "path", path)
-        object.__setattr__(self, "method", normalized_method)
-        object.__setattr__(self, "query", normalized_query)
-        object.__setattr__(self, "headers", normalized_headers)
+        for name in ("method", "query", "headers"):
+            if getattr(self, name) == ():
+                raise ValueError(f"request matcher {name} must not be empty")
+        return self
 
 
-@dataclass(frozen=True, slots=True)
-class NetworkPolicyTransform:
+class NetworkPolicyTransform(SandboxValueModel):
     """Inject authored headers into matching requests."""
 
-    headers: Mapping[str, str] | None = None
+    headers: _FrozenMapping[str] | None = None
     __hash__ = None  # type: ignore[assignment]
 
-    def __init__(
-        self,
-        *,
-        headers: Mapping[str, str] | None = None,
-    ) -> None:
-        normalized_headers = None if headers is None else MappingProxyType(dict(headers))
-        object.__setattr__(self, "headers", normalized_headers)
 
-
-@dataclass(frozen=True, slots=True)
-class NetworkPolicyResponse:
+class NetworkPolicyResponse(SandboxValueModel):
     """Response returned by the network proxy without contacting the origin."""
 
     status_code: int
-    headers: Mapping[str, str] | None = None
+    headers: _FrozenMapping[str] | None = None
     body: str | None = None
     content_type: str | None = None
     __hash__ = None  # type: ignore[assignment]
 
-    def __post_init__(self) -> None:
-        if type(self.status_code) is not int or not 200 <= self.status_code <= 599:
+    @field_validator("status_code", mode="before")
+    @classmethod
+    def _validate_status_code(cls, value: object) -> int:
+        if type(value) is not int or not 200 <= value <= 599:
             raise ValueError("response status_code must be an integer between 200 and 599")
-        if self.body is not None and not isinstance(self.body, str):
-            raise TypeError("response body must be a string")
-        if self.content_type is not None and not isinstance(self.content_type, str):
-            raise TypeError("response content_type must be a string")
+        return value
+
+    @model_validator(mode="after")
+    def _validate(self) -> Self:
         if self.body is not None and self.status_code in {204, 205, 304}:
             raise ValueError("response body is not allowed for status codes 204, 205, and 304")
         if self.body is not None and self.content_type is None:
             raise ValueError("response content_type is required when body is set")
-
-        headers = None if self.headers is None else dict(self.headers)
-        if headers is not None and any(
-            not isinstance(name, str) or not isinstance(value, str)
-            for name, value in headers.items()
-        ):
-            raise TypeError("response headers must map strings to strings")
-        names = [name.lower() for name in headers or ()]
+        names = [name.lower() for name in self.headers or ()]
         if len(names) != len(set(names)):
             raise ValueError("response headers cannot contain duplicate names")
         proxy_managed = {"connection", "content-length", "transfer-encoding"}
         if any(name in proxy_managed for name in names):
             raise ValueError("response headers cannot set proxy-managed headers")
-        object.__setattr__(
-            self,
-            "headers",
-            None if headers is None else MappingProxyType(headers),
-        )
+        return self
 
 
-@dataclass(frozen=True, slots=True)
-class NetworkPolicyRule:
+class NetworkPolicyRule(SandboxValueModel):
     """Configure one matched request action for a domain."""
 
     transform: tuple[NetworkPolicyTransform, ...] = ()
@@ -195,31 +180,22 @@ class NetworkPolicyRule:
     response: NetworkPolicyResponse | None = None
     __hash__ = None  # type: ignore[assignment]
 
-    def __init__(
-        self,
-        *,
-        transform: Iterable[NetworkPolicyTransform] = (),
-        match: NetworkPolicyRequestMatcher | None = None,
-        forward_url: str | None = None,
-        response: NetworkPolicyResponse | None = None,
-    ) -> None:
-        normalized_transform = tuple(transform)
-        handlers = sum((bool(normalized_transform), forward_url is not None, response is not None))
+    @model_validator(mode="after")
+    def _validate(self) -> Self:
+        handlers = sum(
+            (bool(self.transform), self.forward_url is not None, self.response is not None)
+        )
         if handlers != 1:
             raise ValueError(
                 "network policy rule requires exactly one of transform, forward_url, or response"
             )
-        object.__setattr__(self, "transform", normalized_transform)
-        object.__setattr__(self, "match", match)
-        object.__setattr__(self, "forward_url", forward_url)
-        object.__setattr__(self, "response", response)
+        return self
 
 
 NetworkPolicyMatchDimension: TypeAlias = Literal["path", "method", "query", "headers"]
 
 
-@dataclass(frozen=True, slots=True)
-class NetworkPolicyInjectionRuleSummary:
+class NetworkPolicyInjectionRuleSummary(SandboxValueModel):
     """Redacted header-injection rule metadata returned by the Sandbox API."""
 
     domain: str
@@ -227,8 +203,7 @@ class NetworkPolicyInjectionRuleSummary:
     match_dimensions: tuple[NetworkPolicyMatchDimension, ...] = ()
 
 
-@dataclass(frozen=True, slots=True)
-class NetworkPolicyForwardRuleSummary:
+class NetworkPolicyForwardRuleSummary(SandboxValueModel):
     """Redacted forward rule metadata returned by the Sandbox API."""
 
     domain: str
@@ -236,43 +211,34 @@ class NetworkPolicyForwardRuleSummary:
     match_dimensions: tuple[NetworkPolicyMatchDimension, ...] = ()
 
 
-@dataclass(frozen=True, slots=True)
-class NetworkPolicyResponseRuleSummary:
+class NetworkPolicyResponseRuleSummary(SandboxValueModel):
     """Redacted direct-response rule metadata returned by the Sandbox API."""
 
     domain: str
     status_code: int
     match_dimensions: tuple[NetworkPolicyMatchDimension, ...] = ()
 
-    def __post_init__(self) -> None:
-        if type(self.status_code) is not int or not 200 <= self.status_code <= 599:
+    @field_validator("status_code", mode="before")
+    @classmethod
+    def _validate_status_code(cls, value: object) -> int:
+        if type(value) is not int or not 200 <= value <= 599:
             raise ValueError("response rule summary status_code must be between 200 and 599")
+        return value
 
 
-@dataclass(frozen=True, slots=True)
-class NetworkPolicySubnets:
+class NetworkPolicySubnets(SandboxValueModel):
     """Configure allowed and denied network ranges."""
 
     allow: tuple[str, ...] | None = None
     deny: tuple[str, ...] | None = None
     __hash__ = None  # type: ignore[assignment]
 
-    def __init__(
-        self,
-        *,
-        allow: Iterable[str] | None = None,
-        deny: Iterable[str] | None = None,
-    ) -> None:
-        object.__setattr__(self, "allow", None if allow is None else tuple(allow))
-        object.__setattr__(self, "deny", None if deny is None else tuple(deny))
 
-
-@dataclass(frozen=True, slots=True)
-class NetworkPolicy:
+class NetworkPolicy(SandboxValueModel):
     """Complete outbound policy authored for submission to the Sandbox API."""
 
     mode: Literal["allow-all", "deny-all", "custom"]
-    allow: Mapping[str, tuple[NetworkPolicyRule, ...]]
+    allow: _FrozenMapping[tuple[NetworkPolicyRule, ...]]
     subnets: NetworkPolicySubnets | None = None
     __hash__ = None  # type: ignore[assignment]
 
@@ -296,19 +262,14 @@ class NetworkPolicy:
         copied = MappingProxyType({domain: tuple(rules) for domain, rules in dict(allow).items()})
         return cls(mode="custom", allow=copied, subnets=subnets)
 
-    def __post_init__(self) -> None:
-        if not isinstance(self.allow, MappingProxyType):
-            object.__setattr__(
-                self,
-                "allow",
-                MappingProxyType({domain: tuple(rules) for domain, rules in self.allow.items()}),
-            )
+    @model_validator(mode="after")
+    def _validate(self) -> Self:
         if self.mode != "custom" and (self.allow or self.subnets is not None):
             raise ValueError("simple network policy modes cannot include custom rules")
+        return self
 
 
-@dataclass(frozen=True, slots=True)
-class NetworkPolicyReadback:
+class NetworkPolicyReadback(SandboxValueModel):
     """Incomplete policy metadata; cannot be submitted as a network policy."""
 
     mode: Literal["allow-all", "deny-all", "custom"]
@@ -661,8 +622,7 @@ def _optional_string_iterable(value: object, name: str) -> tuple[str, ...] | Non
     return None if value is None else _string_iterable(value, name)
 
 
-@dataclass(frozen=True, slots=True)
-class SnapshotExpiration:
+class SnapshotExpiration(SandboxValueModel):
     """Represent a platform-side snapshot lifetime.
 
     Args:
@@ -676,14 +636,25 @@ class SnapshotExpiration:
     value: timedelta
 
     def __init__(self, value: int | float | timedelta) -> None:
-        normalized = coerce_duration(value, SECOND)
-        if normalized != _ZERO_DELTA and not (
-            _MIN_SNAPSHOT_EXPIRATION <= normalized <= _MAX_SNAPSHOT_EXPIRATION
+        super().__init__(value=value)
+
+    @field_validator("value", mode="before")
+    @classmethod
+    def _coerce_value(cls, value: object) -> object:
+        if isinstance(value, (int, float, timedelta)):
+            return coerce_duration(value, SECOND)
+        return value
+
+    @field_validator("value")
+    @classmethod
+    def _validate_value(cls, value: timedelta) -> timedelta:
+        if value != _ZERO_DELTA and not (
+            _MIN_SNAPSHOT_EXPIRATION <= value <= _MAX_SNAPSHOT_EXPIRATION
         ):
             raise ValueError(
                 "Snapshot expiration must be 0 or between one day and ten years inclusive"
             )
-        object.__setattr__(self, "value", normalized)
+        return value
 
 
 SnapshotExpirationInput: TypeAlias = int | float | timedelta | SnapshotExpiration | None
@@ -715,8 +686,7 @@ class _WriteFile:
     mode: int | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class DirectoryEntry:
+class DirectoryEntry(SandboxValueModel):
     """Describe one entry returned by a sandbox directory listing.
 
     Attributes:
@@ -728,6 +698,7 @@ class DirectoryEntry:
     kind: Literal["file", "directory", "symlink", "other"]
 
 
+@runtime_checkable
 class DriveHandle(Protocol):
     @property
     def name(self) -> str: ...
@@ -745,24 +716,25 @@ DriveReference: TypeAlias = str | DriveHandle
 DriveMountMode: TypeAlias = Literal["snapshot", "read-write"]
 
 
-@dataclass(frozen=True, slots=True)
-class DriveMount:
+class DriveMount(SandboxValueModel):
     """Configure how a Drive is mounted in a sandbox."""
 
     drive: DriveReference
     mode: DriveMountMode = "read-write"
 
-    def __post_init__(self) -> None:
-        if self.mode not in {"snapshot", "read-write"}:
-            raise ValueError("Drive mount mode must be 'snapshot' or 'read-write'")
+    def __init__(self, drive: DriveReference, mode: DriveMountMode = "read-write") -> None:
+        super().__init__(drive=drive, mode=mode)
+
+    @field_serializer("drive")
+    def _serialize_drive(self, drive: DriveReference) -> str:
+        return drive if isinstance(drive, str) else drive.name
 
     def to_api_dict(self) -> JSONObject:
         name = self.drive if isinstance(self.drive, str) else self.drive.name
         return {"drive": name, "mode": self.mode}
 
 
-@dataclass(frozen=True, slots=True)
-class SandboxMount:
+class SandboxMount(SandboxValueModel):
     """Drive mount returned as part of a sandbox's actual configuration."""
 
     drive: str
@@ -903,8 +875,7 @@ class ProcessSignal(IntEnum):
     SIGSYS = 31
 
 
-@dataclass(frozen=True, slots=True)
-class CompletedProcess:
+class CompletedProcess(SandboxValueModel):
     """The captured result of one completed remote process."""
 
     id: str
@@ -999,11 +970,13 @@ class SnapshotRetention(_InputModel):
 
     count: int
     expiration: SnapshotExpirationInput = None
-    delete_evicted: bool = Field(default=True, serialization_alias="deleteEvicted")
+    delete_evicted: bool = Field(default=True, alias="deleteEvicted")
 
     @field_validator("expiration", mode="before")
     @classmethod
     def _coerce_expiration(cls, value: object) -> SnapshotExpiration | None:
+        if isinstance(value, Mapping):
+            return SnapshotExpiration.model_validate(value)
         return _parse_snapshot_expiration(value)
 
     def to_api_dict(self, *, exclude: set[str] | None = None) -> JSONObject:

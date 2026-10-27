@@ -1523,11 +1523,11 @@ async def test_network_policy_structural_validation(mock_env_clear: None) -> Non
         NetworkPolicyResponse(status_code=204, body="blocked", content_type="text/plain")
     with pytest.raises(ValueError, match="proxy-managed headers"):
         NetworkPolicyResponse(status_code=403, headers={"Content-Length": "0"})
-    with pytest.raises(TypeError, match="headers must map strings to strings"):
+    with pytest.raises(ValidationError, match="headers.X-Count"):
         NetworkPolicyResponse(status_code=403, headers={"X-Count": 1})  # type: ignore[dict-item]
-    with pytest.raises(TypeError, match="body must be a string"):
+    with pytest.raises(ValidationError, match="body"):
         NetworkPolicyResponse(status_code=403, body=1)  # type: ignore[arg-type]
-    with pytest.raises(TypeError, match="content_type must be a string"):
+    with pytest.raises(ValidationError, match="content_type"):
         NetworkPolicyResponse(status_code=403, content_type=1)  # type: ignore[arg-type]
 
     headers = {"X-Secret": "value"}

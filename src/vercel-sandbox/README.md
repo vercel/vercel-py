@@ -56,6 +56,48 @@ Trio. Synchronously it is a writable `io.RawIOBase`; wrap it in
 `io.TextIOWrapper` for text. For a long-running stdio server, see
 [`examples/sandbox_10_mcp_everything.py`](examples/sandbox_10_mcp_everything.py).
 
+## Public data models
+
+Sandbox value objects use Pydantic v2 `BaseModel`. This includes network
+policies and their readback summaries, `SnapshotExpiration`, `DriveMount`,
+`SandboxMount`, `DirectoryEntry`, `CompletedProcess`, `SandboxCredentials`,
+service options, routes, and snapshot-retention state. The sync API shares
+the same value types and has its own service-options and user-handle models.
+
+```python
+from vercel.sandbox import DirectoryEntry, NetworkPolicy
+
+entry = DirectoryEntry.model_validate({"path": "app.py", "kind": "file"})
+print(entry.model_dump())  # {"path": "app.py", "kind": "file"}
+print(entry.model_dump_json())
+
+policy = NetworkPolicy.model_validate(
+    {"mode": "custom", "allow": {"example.com": [{"response": {"status_code": 403}}]}}
+)
+```
+
+These models validate their fields, reject unknown fields, and preserve
+frozen-field behavior. Network-policy mappings are also defensively copied
+and immutable. Invalid values and field assignments raise
+`pydantic.ValidationError`. Existing helpers such as
+`NetworkPolicy.allow_all()`, `NetworkPolicy.custom()`,
+`NetworkPolicyMatcher.exact()`, and `CompletedProcess.check_returncode()`
+remain available. `SnapshotExpiration(value)`, `DriveMount(drive, mode)`,
+`NetworkPolicyMatcher(kind, value)`, and positional credentials construction
+are retained; use keyword arguments for other model constructors.
+
+Use `model_dump()` and `model_dump_json()` in place of `dataclasses.asdict()`.
+For replacement values, use `model_validate()` to validate a modified
+dictionary. A model's serialization describes its Python fields; SDK calls
+still perform the API-specific conversions, including duration units and
+network-policy field names.
+
+`SandboxUser` and `SyncSandboxUser` remain handles obtained from `as_user()`
+or `create_user()`. Their dumps contain `username` and the currently resolved
+`home_dir`; filesystem and service bindings stay private. Dumps do not
+recreate a live user handle. Service options retain their callable
+`credentials_factory`; exclude that field when exporting options as JSON.
+
 ## Standalone clients
 
 Applications that use dependency injection can create a service-specific

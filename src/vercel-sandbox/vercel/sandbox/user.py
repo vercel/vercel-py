@@ -2,9 +2,10 @@
 
 import subprocess
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import TextIO
+
+from pydantic import PrivateAttr, computed_field
 
 from vercel._internal.core.time import parse_duration_seconds
 from vercel.sandbox._internal.async_runtime import Process, SandboxFilesystem
@@ -19,10 +20,10 @@ from vercel.sandbox._internal.process_stdin import (
     _validate_stdin,
 )
 from vercel.sandbox._internal.user_core import UserContext
+from vercel.sandbox._internal.value_model import SandboxValueModel
 
 
-@dataclass(frozen=True, slots=True)
-class SandboxUser:
+class SandboxUser(SandboxValueModel):
     """Execute commands and read files as a selected Linux account.
 
     Obtain handles through ``create_user()`` or ``as_user()``. Existing account
@@ -32,13 +33,20 @@ class SandboxUser:
     permissions. Handles expose no sandbox lifecycle methods.
     """
 
-    _context: UserContext = field(repr=False)
-    _fs: SandboxFilesystem = field(repr=False)
+    _context: UserContext = PrivateAttr()
+    _fs: SandboxFilesystem = PrivateAttr()
 
+    def __init__(self, _context: UserContext, _fs: SandboxFilesystem) -> None:
+        super().__init__()
+        self._context = _context
+        self._fs = _fs
+
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def username(self) -> str:
         return self._context.username
 
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def home_dir(self) -> str | None:
         return self._context.home_dir
