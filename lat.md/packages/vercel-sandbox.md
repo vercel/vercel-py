@@ -19,6 +19,8 @@ New features should follow this split: put the logic in the service, then expose
 
 Sandbox configuration comes from the active SDK session, or from a standalone client that never touches the session.
 
+Public Sandbox functions and methods must not expose a `project_id` keyword argument: OAuth scopes access to a single team/project. Apply this rule to async and sync module functions, handles, and standalone clients; resolve project scope from the configured credentials.
+
 [[src/vercel-sandbox/vercel/sandbox/_internal/service.py#get_sandbox_service]] builds one service per session from [[src/vercel-sandbox/vercel/sandbox/_internal/options.py#SandboxServiceOptions]]: base URL, credentials factory, file-transfer timeout, and default region (falling back to `VERCEL_REGION`). The sync and async options classes share one registry key. Supplying options replaces the whole Sandbox configuration for that session scope. Default credentials come from [[vercel-oidc#Credentials]].
 
 [[src/vercel-sandbox/vercel/sandbox/client.py#SandboxClient]] and [[src/vercel-sandbox/vercel/sandbox/sync/client.py#SyncSandboxClient]] serve dependency-injected applications. Construction performs no I/O, and the owner must close the client.
@@ -32,6 +34,16 @@ Operations through a `Sandbox` handle that fail because the sandbox is stopped, 
 `box.session()` pins operations to one session identity, which never auto-resumes; its managed form stops exactly the session it yielded. Exiting a managed sandbox or session does not wait for concurrent operations.
 
 Sandboxes can be created from a runtime, image, Git repository, tarball, or snapshot. Forking copies a named sandbox's configuration and current snapshot, but never its drive mounts.
+
+## History queries
+
+Sandbox handles expose lazy session and snapshot iterators scoped to the credentials' project and the handle's name, following cursors until the API returns no cursor or an empty page.
+
+The async [[src/vercel-sandbox/vercel/sandbox/_internal/async_runtime.py#Sandbox#query_sessions|query_sessions]] and [[src/vercel-sandbox/vercel/sandbox/_internal/async_runtime.py#Sandbox#query_snapshots|query_snapshots]] methods delegate to the existing runtime iterators. Their [[src/vercel-sandbox/vercel/sandbox/_internal/sync_runtime.py#SyncSandbox#query_sessions|sync session]] and [[src/vercel-sandbox/vercel/sandbox/_internal/sync_runtime.py#SyncSandbox#query_snapshots|sync snapshot]] counterparts return regular iterators. All accept a page size, initial cursor, and creation-time sort order, matching the module-level query functions.
+
+The async [[src/vercel-sandbox/vercel/sandbox/_internal/async_runtime.py#Sandbox#list_sessions|list_sessions]] and [[src/vercel-sandbox/vercel/sandbox/_internal/async_runtime.py#Sandbox#list_snapshots|list_snapshots]] methods and their sync counterparts emit `DeprecationWarning` and retain their one-page list results for compatibility.
+
+[[src/vercel-sandbox/tests/test_sandbox_public_flow.py#test_async_sandbox_history_queries_paginate|Async pagination tests]] and [[src/vercel-sandbox/tests/test_sandbox_public_flow.py#test_sync_sandbox_history_queries_paginate|sync pagination tests]] verify lazy requests, credential-derived project scope even when handle metadata differs, name binding, option forwarding across several pages, and termination on a missing cursor or an empty page with a cursor. Deprecation tests cover warning emission and one-page compatibility in both modes.
 
 ## Sandbox updates
 

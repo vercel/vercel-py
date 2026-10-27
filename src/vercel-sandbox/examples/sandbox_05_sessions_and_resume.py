@@ -88,6 +88,10 @@ async def _main() -> None:
         await box.fs.write_text("workspace/after-session.txt", "replacement is active\n")
         assert box.current_session_id != exact_session_id
         print(f"sandbox resumed again as {box.current_session_id}")
+
+        # History queries fetch subsequent pages automatically.
+        async for historical in box.query_sessions(page_size=2, sort_order="asc"):
+            print(f"session {historical.id}: {historical.status}")
     finally:
         await box.destroy()
         print(f"destroyed sandbox {name}")

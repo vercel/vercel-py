@@ -179,6 +179,48 @@ with sandbox.fork_sandbox(source_sandbox="production-agent") as forked:
     result = forked.run_process("python", ["script.py"], capture_output=True)
 ```
 
+## Querying sessions and snapshots
+
+Use `Sandbox.query_sessions()` and `Sandbox.query_snapshots()` to iterate over
+a sandbox's history. Both methods fetch pages as needed and accept `page_size`,
+an initial `cursor`, and `sort_order` (`"asc"` or `"desc"` by creation time):
+
+```python
+from vercel import sandbox
+from vercel.api import session
+
+async with session():
+    box = await sandbox.get_sandbox(name="workspace")
+    async for runtime_session in box.query_sessions(page_size=100, sort_order="asc"):
+        print(runtime_session.id, runtime_session.status)
+    async for snapshot in box.query_snapshots(page_size=100):
+        print(snapshot.id)
+```
+
+The synchronous handles return regular iterators:
+
+```python
+from vercel.api import session
+from vercel.sandbox import sync as sandbox
+
+with session():
+    box = sandbox.get_sandbox(name="workspace")
+    for runtime_session in box.query_sessions(page_size=100, sort_order="asc"):
+        print(runtime_session.id, runtime_session.status)
+    for snapshot in box.query_snapshots(page_size=100):
+        print(snapshot.id)
+```
+
+The module-level `sandbox.query_sessions(name=...)` and
+`sandbox.query_snapshots(name=...)` functions support the same pagination
+options. The handle methods restrict results by sandbox name and use the project
+resolved by the configured Sandbox credentials. They do not accept a `project_id`
+override. `list_sessions()` and `list_snapshots()` are deprecated; they return only
+one page. Replace `await box.list_sessions()` with
+`[item async for item in box.query_sessions()]`, or synchronously replace
+`box.list_sessions()` with `list(box.query_sessions())`. Use the same pattern
+for snapshots.
+
 ## Sandbox Drives
 
 Sandbox Drives are named persistent filesystems. A Drive belongs to one project
