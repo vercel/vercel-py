@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 import httpx2 as httpx
 import pytest
 from hypothesis import given, strategies as st
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 from sandbox_fixtures import sandbox_service_options
 
 import vendor.respx as respx
@@ -278,7 +278,6 @@ def test_selection_is_lazy_and_handles_are_immutable(username: str) -> None:
             assert user.username == username
             assert user.home_dir == ("/root" if username == "root" else None)
             # Frozen handles cannot replace their identity or filesystem binding.
-            assert issubclass(type(user), BaseModel)
             assert user.model_dump() == {"username": username, "home_dir": user.home_dir}
             with pytest.raises(ValidationError, match="frozen"):
                 user.username = "another"

@@ -3259,8 +3259,10 @@ async def test_mutating_handles_reject_mismatched_response_identity(mock_env_cle
 
     async with session(service_options=_session_options()):
         handle = await sandbox.create_sandbox(name="preview")
-        with pytest.raises(SandboxResponseError):
+        with pytest.raises(SandboxResponseError) as raised:
             await handle.update(ports=[3001])
+        data = cast(SandboxState, raised.value.data)
+        assert json.loads(data.model_dump_json())["name"] == "other"
 
         command = await handle.create_process("python", ["--version"])
         with pytest.raises(SandboxResponseError):

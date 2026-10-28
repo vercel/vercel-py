@@ -23,7 +23,7 @@ Sandbox data objects use Pydantic v2 throughout. Public value fields remain froz
 
 [[src/vercel-sandbox/vercel/sandbox/_internal/models.py#NetworkPolicy]] validates nested model dictionaries while preserving immutable, defensively copied mappings. Model dumps represent Python fields; the API client retains responsibility for wire names, policy shapes, and duration units. Convenience constructors for matchers, snapshot expiration, mounts, and credentials preserve positional calls. Other model construction uses keyword arguments, and invalid input or frozen-field assignment raises Pydantic validation errors.
 
-[[src/vercel-sandbox/vercel/sandbox/user.py#SandboxUser]] and [[src/vercel-sandbox/vercel/sandbox/sync/user.py#SyncSandboxUser]] keep runtime bindings private and serialize their current username and resolved home directory. Service options retain callable credential factories and the shared session registry key. [[src/vercel-sandbox/tests/test_public_models.py|Public model tests]] cover serialization roundtrips, nested validation, frozen fields and mappings, helper compatibility, and the absence of dataclass exports.
+[[src/vercel-sandbox/vercel/sandbox/user.py#SandboxUser]] and [[src/vercel-sandbox/vercel/sandbox/sync/user.py#SyncSandboxUser]] keep runtime bindings private and serialize their current username and resolved home directory. Service options retain callable credential factories and the shared session registry key. [[src/vercel-sandbox/tests/test_public_models.py|Public model tests]] cover nested policy validation and serialization, Drive mount name serialization, and snapshot-retention roundtrips with API duration conversion. Existing user tests cover identity serialization and frozen-field errors.
 
 ### Internal data models
 
@@ -46,7 +46,7 @@ The internal dataclass migration covers 31 frozen records and three mutable coor
 
 Five internal state types can reach callers through [[src/vercel-sandbox/vercel/sandbox/_internal/errors.py#SandboxResponseError]] data: process, snapshot, Drive, runtime-session, and sandbox state. They now support model validation and serialization. API diagnostic `raw` dictionaries use JSON-mode dumps so tuple-backed response fields become valid JSON lists.
 
-[[src/vercel-sandbox/tests/test_internal_models.py|Internal model tests]] cover absence of production dataclasses, sync/async exception data, generic handle and stream identity, pagination validation, immutable defaults, recovery coordination, output sharing, and sparse attachment flag roundtrips. Existing lifecycle, streaming, and user-context tests exercise the trusted state-copy paths.
+Existing lifecycle, pagination, streaming, process-output, and user-context tests cover the internal refactor through runtime behavior. [[src/vercel-sandbox/tests/test_sandbox_public_flow.py#test_mutating_handles_reject_mismatched_response_identity|Mutation error tests]] also verify serialization of diagnostic state attached to a public response error.
 
 ## Configuration and clients
 
