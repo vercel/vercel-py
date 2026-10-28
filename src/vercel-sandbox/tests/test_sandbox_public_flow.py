@@ -2205,6 +2205,27 @@ async def test_public_api_error_propagates_status_code_code_and_data(mock_env_cl
 
 
 @respx.mock
+@pytest.mark.parametrize(
+    ("operation", "kwargs"),
+    [
+        ("create", {"name": 123}),
+        ("fork", {"source_sandbox": "source", "name": 123}),
+        ("fork", {"source_sandbox": 123}),
+    ],
+)
+async def test_deferred_sandbox_inputs_validate_on_construction(
+    mock_env_clear: None, operation: str, kwargs: dict[str, Any]
+) -> None:
+    route = respx.route().mock(return_value=httpx.Response(500))
+
+    async with session(service_options=_session_options()):
+        with pytest.raises(ValidationError):
+            getattr(sandbox, f"{operation}_sandbox")(**kwargs)
+
+    assert not route.called
+
+
+@respx.mock
 async def test_create_sandbox_operation_invariants(mock_env_clear: None) -> None:
     create_route = respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
@@ -5376,8 +5397,8 @@ def test_sync_drive_fork_errors_by_name(
 @pytest.mark.parametrize("operation", ["create", "fork"])
 @pytest.mark.parametrize(
     "network_policy",
-    [{"mode": "deny-all", "allow": {}}, "deny-all"],
-    ids=["dict", "str"],
+    [{"mode": "deny-all", "allow": {}}, "deny-all", NetworkPolicyReadback(mode="deny-all")],
+    ids=["dict", "str", "readback"],
 )
 async def test_create_and_fork_reject_non_network_policy(
     mock_env_clear: None,
@@ -5391,12 +5412,12 @@ async def test_create_and_fork_reject_non_network_policy(
     )
     kwargs["network_policy"] = network_policy
 
-    with pytest.raises(TypeError):
+    with pytest.raises(TypeError, match="network_policy must be a NetworkPolicy"):
         if sync:
             with session(service_options=_session_options(sync=True)):
                 getattr(sandbox_sync, f"{operation}_sandbox")(**kwargs)
         else:
             async with session(service_options=_session_options()):
-                await getattr(sandbox, f"{operation}_sandbox")(**kwargs)
+                getattr(sandbox, f"{operation}_sandbox")(**kwargs)
 
     assert route.call_count == 0
