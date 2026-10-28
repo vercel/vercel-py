@@ -51,6 +51,11 @@ async def _default_sandbox_credentials_factory() -> SandboxCredentials:
     return _resolve_default_sandbox_credentials()
 
 
+def _explicit_options(**options: Any) -> dict[str, Any]:
+    """Drop unset (None or empty-string) values so field defaults apply."""
+    return {key: value for key, value in options.items() if value is not None and value != ""}
+
+
 class _SandboxServiceOptionsKey(ServiceOptions):
     """Shared registry key for sync and async Sandbox service options."""
 
@@ -85,14 +90,12 @@ class SandboxServiceOptions(SandboxValueModel, _SandboxServiceOptionsKey):
         region: str | None = None,
     ) -> None:
         super().__init__(
-            base_url=base_url or DEFAULT_SANDBOX_API_BASE_URL,
-            credentials_factory=credentials_factory or _default_sandbox_credentials_factory,
-            file_transfer_timeout=(
-                file_transfer_timeout
-                if file_transfer_timeout is not None
-                else _DEFAULT_FILE_TRANSFER_TIMEOUT
-            ),
-            region=region or os.environ.get("VERCEL_REGION") or None,
+            **_explicit_options(
+                base_url=base_url,
+                credentials_factory=credentials_factory,
+                file_transfer_timeout=file_transfer_timeout,
+                region=region,
+            )
         )
 
 
@@ -113,12 +116,10 @@ class SyncSandboxServiceOptions(SandboxValueModel, _SandboxServiceOptionsKey):
         region: str | None = None,
     ) -> None:
         super().__init__(
-            base_url=base_url or DEFAULT_SANDBOX_API_BASE_URL,
-            credentials_factory=credentials_factory or _resolve_default_sandbox_credentials,
-            file_transfer_timeout=(
-                file_transfer_timeout
-                if file_transfer_timeout is not None
-                else _DEFAULT_FILE_TRANSFER_TIMEOUT
-            ),
-            region=region or os.environ.get("VERCEL_REGION") or None,
+            **_explicit_options(
+                base_url=base_url,
+                credentials_factory=credentials_factory,
+                file_transfer_timeout=file_transfer_timeout,
+                region=region,
+            )
         )

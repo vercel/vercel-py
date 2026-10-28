@@ -5,6 +5,7 @@ import subprocess
 import warnings
 from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from dataclasses import dataclass, field
 from datetime import timedelta
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Literal, TextIO, overload
@@ -1891,7 +1892,8 @@ class SandboxSessionOperation:
         )
 
 
-class _CreateSandboxParams(SandboxValueModel):
+@dataclass(frozen=True, slots=True)
+class _CreateSandboxParams:
     project_id: str | None = None
     name: str | None = None
     image: str | None = None
@@ -1909,7 +1911,7 @@ class _CreateSandboxParams(SandboxValueModel):
     snapshot_retention: SnapshotRetention | None = None
     region: str | None = None
     failover_regions: tuple[str, ...] | None = None
-    private_parameters: PrivateSandboxParameters = Field(
+    private_parameters: PrivateSandboxParameters = field(
         default_factory=lambda: NO_PRIVATE_PARAMETERS
     )
 
@@ -1994,7 +1996,8 @@ class CreateSandboxOperation:
         )
 
 
-class _ForkSandboxParams(SandboxValueModel):
+@dataclass(frozen=True, slots=True)
+class _ForkSandboxParams:
     source_sandbox: str
     project_id: str | None = None
     name: str | None = None
@@ -2012,7 +2015,7 @@ class _ForkSandboxParams(SandboxValueModel):
     snapshot_retention: SnapshotRetention | None = None
     region: str | None = None
     failover_regions: tuple[str, ...] | None = None
-    private_parameters: PrivateSandboxParameters = Field(
+    private_parameters: PrivateSandboxParameters = field(
         default_factory=lambda: NO_PRIVATE_PARAMETERS
     )
 

@@ -336,6 +336,30 @@ def _network_policy_matcher() -> NetworkPolicyRequestMatcher:
     )
 
 
+@pytest.mark.parametrize(
+    "build_allow",
+    [
+        lambda rule: {"a.example.com": [rule], "b.example.com": ()},
+        lambda rule: [("a.example.com", [rule]), ("b.example.com", ())],
+        lambda rule: iter([("a.example.com", iter([rule])), ("b.example.com", iter(()))]),
+        lambda rule: {
+            "a.example.com": (r for r in [rule]),
+            "b.example.com": (r for r in [rule][:0]),
+        },
+    ],
+    ids=["mapping", "pairs", "pair-iterator", "generator-rules"],
+)
+def test_network_policy_custom_accepts_iterable_shapes(build_allow) -> None:
+    rule = NetworkPolicyRule(transform=[NetworkPolicyTransform(headers={"X-A": "1"})])
+    policy = NetworkPolicy.custom(allow=build_allow(rule))
+
+    assert policy == NetworkPolicy.custom(allow={"a.example.com": (rule,), "b.example.com": ()})
+    assert policy.allow["a.example.com"] == (rule,)
+    assert policy.allow["b.example.com"] == ()
+    with pytest.raises(TypeError):
+        policy.allow["c.example.com"] = ()  # type: ignore[index]
+
+
 def _authored_network_policy() -> NetworkPolicy:
     matcher = _network_policy_matcher()
     return NetworkPolicy.custom(
@@ -1523,12 +1547,17 @@ async def test_network_policy_structural_validation(mock_env_clear: None) -> Non
         NetworkPolicyResponse(status_code=204, body="blocked", content_type="text/plain")
     with pytest.raises(ValueError, match="proxy-managed headers"):
         NetworkPolicyResponse(status_code=403, headers={"Content-Length": "0"})
-    with pytest.raises(ValidationError, match="headers.X-Count"):
-        NetworkPolicyResponse(status_code=403, headers={"X-Count": 1})  # type: ignore[dict-item]
-    with pytest.raises(ValidationError, match="body"):
-        NetworkPolicyResponse(status_code=403, body=1)  # type: ignore[arg-type]
-    with pytest.raises(ValidationError, match="content_type"):
-        NetworkPolicyResponse(status_code=403, content_type=1)  # type: ignore[arg-type]
+    for kwargs, message in (
+        ({"body": b"blocked", "content_type": "text/plain"}, "response body must be a string"),
+        ({"body": 1, "content_type": "text/plain"}, "response body must be a string"),
+        ({"body": "ok", "content_type": b"text/plain"}, "response content_type must be a string"),
+        ({"content_type": 1}, "response content_type must be a string"),
+        ({"headers": {"X-Count": 1}}, "response headers must map strings to strings"),
+        ({"headers": {"X-Count": b"1"}}, "response headers must map strings to strings"),
+        ({"headers": {1: "x"}}, "response headers must map strings to strings"),
+    ):
+        with pytest.raises(TypeError, match=message):
+            NetworkPolicyResponse(status_code=403, **kwargs)  # type: ignore[arg-type]
 
     headers = {"X-Secret": "value"}
     rules = [NetworkPolicyRule(transform=[NetworkPolicyTransform(headers=headers)])]
@@ -1575,7 +1604,7 @@ async def test_network_policy_structural_validation(mock_env_clear: None) -> Non
     )
 
     async with session(service_options=_session_options()):
-        with pytest.raises(ValidationError, match="network_policy"):
+        with pytest.raises(TypeError, match="must be a NetworkPolicy"):
             await sandbox.create_sandbox(
                 name="preview",
                 network_policy={"mode": "allow-all"},  # type: ignore[arg-type]
@@ -2142,6 +2171,23 @@ async def test_query_sandboxes_rejects_invalid_page_size(mock_env_clear: None) -
     async with session(service_options=_session_options()):
         with pytest.raises(ValueError, match="page_size"):
             [handle async for handle in sandbox.query_sandboxes(page_size=51)]
+
+
+@respx.mock
+@pytest.mark.parametrize("bad_page_size", ["5", 5.0, True])
+@pytest.mark.parametrize(
+    "query_name", ["query_sandboxes", "query_sessions", "query_snapshots", "query_drives"]
+)
+async def test_query_rejects_non_integer_page_size_before_any_request(
+    mock_env_clear: None, query_name: str, bad_page_size: Any
+) -> None:
+    route = respx.route().mock(return_value=httpx.Response(200, json={}))
+
+    async with session(service_options=_session_options()):
+        with pytest.raises(TypeError, match="page_size must be an integer"):
+            [item async for item in getattr(sandbox, query_name)(page_size=bad_page_size)]
+
+    assert not route.called
 
 
 @respx.mock
@@ -4788,6 +4834,19 @@ async def test_async_update_mounts_omit_clear_and_replace(
     assert box.mounts == {"/cache": SandboxMount(drive="cache", mode="snapshot")}
 
 
+def test_drive_mount_accepts_duck_typed_drive_reference_without_reading_other_attrs() -> None:
+    class NameOnly:
+        name = "duck-cache"
+
+        def __getattr__(self, attr: str) -> str:
+            raise AssertionError(f"unexpected attribute access: {attr}")
+
+    mount = DriveMount(cast(Any, NameOnly()), mode="snapshot")
+
+    assert mount.to_api_dict() == {"drive": "duck-cache", "mode": "snapshot"}
+    assert mount.model_dump() == {"drive": "duck-cache", "mode": "snapshot"}
+
+
 @pytest.mark.parametrize("mount_mode", ["snapshot", "read-write", None])
 @respx.mock
 async def test_async_get_or_create_projects_response_mount_modes_and_defensively_copies(
@@ -5310,3 +5369,34 @@ def test_sync_drive_fork_errors_by_name(
     assert request.headers["authorization"] == "Bearer token"
     assert json.loads(request.content) == {"name": "cache-fork"}
     assert len(respx.calls) == 1
+
+
+@respx.mock
+@pytest.mark.parametrize("sync", [False, True])
+@pytest.mark.parametrize("operation", ["create", "fork"])
+@pytest.mark.parametrize(
+    "network_policy",
+    [{"mode": "deny-all", "allow": {}}, "deny-all"],
+    ids=["dict", "str"],
+)
+async def test_create_and_fork_reject_non_network_policy(
+    mock_env_clear: None,
+    sync: bool,
+    operation: str,
+    network_policy: Any,
+) -> None:
+    route = respx.route().mock(return_value=httpx.Response(500))
+    kwargs: dict[str, Any] = (
+        {"name": "x"} if operation == "create" else {"source_sandbox": "source"}
+    )
+    kwargs["network_policy"] = network_policy
+
+    with pytest.raises(TypeError):
+        if sync:
+            with session(service_options=_session_options(sync=True)):
+                getattr(sandbox_sync, f"{operation}_sandbox")(**kwargs)
+        else:
+            async with session(service_options=_session_options()):
+                await getattr(sandbox, f"{operation}_sandbox")(**kwargs)
+
+    assert route.call_count == 0

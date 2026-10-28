@@ -3,6 +3,8 @@
 from datetime import timedelta
 from typing import Literal, TypeAlias
 
+from pydantic import SkipValidation
+
 from vercel.sandbox._internal.models import (
     JSONObject,
     NetworkPolicyReadback,
@@ -90,7 +92,7 @@ class SandboxState(SandboxValueModel):
     mounts: dict[str, SandboxMount] | None = None
     routes: tuple[SandboxRouteState, ...] = ()
     current_session: SandboxRuntimeSessionState | None = None
-    raw: JSONObject | None = None
+    raw: SkipValidation[JSONObject | None] = None
     mounts_attached: bool = True
     routes_attached: bool = True
     current_session_attached: bool = True

@@ -15,7 +15,6 @@ from typing import (
     TypeAlias,
     TypeVar,
     cast,
-    runtime_checkable,
 )
 
 from pydantic import (
@@ -24,6 +23,9 @@ from pydantic import (
     ConfigDict,
     Field,
     JsonValue as PydanticJsonValue,
+    SkipValidation,
+    StrictBytes,
+    ValidationInfo,
     WrapSerializer,
     field_serializer,
     field_validator,
@@ -71,7 +73,8 @@ def normalize_failover_regions(regions: FailoverRegionsInput) -> tuple[str, ...]
 _MappingValueT = TypeVar("_MappingValueT")
 _FrozenMapping: TypeAlias = Annotated[
     Mapping[str, _MappingValueT],
-    AfterValidator(lambda value: MappingProxyType(dict(value))),
+    # Pydantic's Mapping validation already yields a fresh dict; just freeze it.
+    AfterValidator(MappingProxyType),
     WrapSerializer(lambda value, handler: handler(dict(value))),
 ]
 
@@ -153,6 +156,25 @@ class NetworkPolicyResponse(SandboxValueModel):
     def _validate_status_code(cls, value: object) -> int:
         if type(value) is not int or not 200 <= value <= 599:
             raise ValueError("response status_code must be an integer between 200 and 599")
+        return value
+
+    # Pydantic lets TypeError propagate un-wrapped, preserving the pre-migration error type
+    # (and rejecting bytes that lax ``str`` validation would otherwise decode).
+    @field_validator("body", "content_type", mode="before")
+    @classmethod
+    def _require_str(cls, value: object, info: ValidationInfo) -> object:
+        if value is not None and not isinstance(value, str):
+            raise TypeError(f"response {info.field_name} must be a string")
+        return value
+
+    @field_validator("headers", mode="before")
+    @classmethod
+    def _require_str_headers(cls, value: object) -> object:
+        if value is not None and any(
+            not isinstance(name, str) or not isinstance(item, str)
+            for name, item in dict(value).items()  # type: ignore[call-overload]
+        ):
+            raise TypeError("response headers must map strings to strings")
         return value
 
     @model_validator(mode="after")
@@ -258,8 +280,9 @@ class NetworkPolicy(SandboxValueModel):
         ) = (),
         subnets: NetworkPolicySubnets | None = None,
     ) -> "NetworkPolicy":
-        copied = MappingProxyType({domain: tuple(rules) for domain, rules in dict(allow).items()})
-        return cls(mode="custom", allow=copied, subnets=subnets)
+        # The field validator copies and freezes; only pair iterables need converting.
+        mapping = allow if isinstance(allow, Mapping) else dict(allow)
+        return cls(mode="custom", allow=mapping, subnets=subnets)
 
     @model_validator(mode="after")
     def _validate(self) -> Self:
@@ -680,8 +703,10 @@ _OMITTED = _Omitted()
 
 class _WriteFile(SandboxValueModel):
     path: str
-    content: bytes
-    mode: int | None = None
+    # Strict so bytes-like buffers are kept as-is (no copy) and ``str`` is rejected.
+    content: StrictBytes | bytearray | memoryview
+    # Validated by ``_validate_file_mode`` so callers keep its TypeError/ValueError.
+    mode: SkipValidation[int | None] = None
 
 
 class DirectoryEntry(SandboxValueModel):
@@ -696,7 +721,6 @@ class DirectoryEntry(SandboxValueModel):
     kind: Literal["file", "directory", "symlink", "other"]
 
 
-@runtime_checkable
 class DriveHandle(Protocol):
     @property
     def name(self) -> str: ...
@@ -717,7 +741,7 @@ DriveMountMode: TypeAlias = Literal["snapshot", "read-write"]
 class DriveMount(SandboxValueModel):
     """Configure how a Drive is mounted in a sandbox."""
 
-    drive: DriveReference
+    drive: SkipValidation[DriveReference]
     mode: DriveMountMode = "read-write"
 
     def __init__(self, drive: DriveReference, mode: DriveMountMode = "read-write") -> None:
@@ -728,8 +752,7 @@ class DriveMount(SandboxValueModel):
         return drive if isinstance(drive, str) else drive.name
 
     def to_api_dict(self) -> JSONObject:
-        name = self.drive if isinstance(self.drive, str) else self.drive.name
-        return {"drive": name, "mode": self.mode}
+        return self.model_dump()
 
 
 class SandboxMount(SandboxValueModel):
