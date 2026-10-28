@@ -6,7 +6,6 @@ import subprocess
 import warnings
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager
-from dataclasses import dataclass
 from datetime import timedelta
 from threading import Condition
 from types import TracebackType
@@ -125,6 +124,7 @@ from vercel.sandbox._internal.sync_filesystem_handle import (
     SyncSandboxTextWriter,
 )
 from vercel.sandbox._internal.text_reader import SyncTextReader, _sync_text_readers
+from vercel.sandbox._internal.value_model import SandboxModel
 
 if TYPE_CHECKING:
     from _typeshed import ReadableBuffer, WriteableBuffer
@@ -1374,8 +1374,7 @@ def _cleanup_exact_sync_session(handle: SyncSandboxRuntimeSession) -> None:
         ) from error
 
 
-@dataclass(slots=True)
-class _SyncRecoveryAttempt:
+class _SyncRecoveryAttempt(SandboxModel):
     status: Literal["in_flight", "succeeded", "failed", "abandoned"] = "in_flight"
     error: BaseException | None = None
 
@@ -1860,7 +1859,7 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
                     return self
                 self._apply_current_session_payload(result.session)
                 if (
-                    result._sandbox_attached
+                    result.sandbox_attached
                     and result.sandbox is not None
                     and result.sandbox.current_session_id == result.session.id
                 ):

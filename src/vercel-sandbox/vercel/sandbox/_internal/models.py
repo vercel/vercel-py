@@ -1,7 +1,6 @@
 """Public value types for the Sandbox API."""
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
 from datetime import timedelta
 from enum import IntEnum
 from pathlib import PurePosixPath
@@ -679,8 +678,7 @@ class _Omitted:
 _OMITTED = _Omitted()
 
 
-@dataclass(frozen=True, slots=True)
-class _WriteFile:
+class _WriteFile(SandboxValueModel):
     path: str
     content: bytes
     mode: int | None = None

@@ -61,8 +61,10 @@ Trio. Synchronously it is a writable `io.RawIOBase`; wrap it in
 Sandbox value objects use Pydantic v2 `BaseModel`. This includes network
 policies and their readback summaries, `SnapshotExpiration`, `DriveMount`,
 `SandboxMount`, `DirectoryEntry`, `CompletedProcess`, `SandboxCredentials`,
-service options, routes, and snapshot-retention state. The sync API shares
-the same value types and has its own service-options and user-handle models.
+service options, routes, and snapshot-retention state. Internal data records
+also use Pydantic, including state attached to `SandboxResponseError.data`.
+The sync API shares the same value types and has its own service-options and
+user-handle models.
 
 ```python
 from vercel.sandbox import DirectoryEntry, NetworkPolicy
@@ -97,6 +99,12 @@ or `create_user()`. Their dumps contain `username` and the currently resolved
 `home_dir`; filesystem and service bindings stay private. Dumps do not
 recreate a live user handle. Service options retain their callable
 `credentials_factory`; exclude that field when exporting options as JSON.
+
+Internal state, pagination, deferred request parameters, upload metadata, and
+terminal frames follow the same model convention. Recovery attempts and process
+output targets use mutable models because they coordinate live operations.
+Models containing streams, SDK handles, events, or exceptions preserve those
+objects by reference; their dumps do not recreate live runtime resources.
 
 ## Standalone clients
 

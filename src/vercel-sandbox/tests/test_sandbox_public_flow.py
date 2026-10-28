@@ -1575,7 +1575,7 @@ async def test_network_policy_structural_validation(mock_env_clear: None) -> Non
     )
 
     async with session(service_options=_session_options()):
-        with pytest.raises(TypeError, match="must be a NetworkPolicy"):
+        with pytest.raises(ValidationError, match="network_policy"):
             await sandbox.create_sandbox(
                 name="preview",
                 network_policy={"mode": "allow-all"},  # type: ignore[arg-type]
@@ -1817,6 +1817,7 @@ async def test_service_returns_neutral_state_and_async_runtime_binds_handles(
             delete_evicted=False,
         )
         assert state.raw is not None
+        assert state.raw["failover_regions"] == ["sfo1", "cle1"]
         assert state.raw["timeout"] == 300000
         assert state.raw["snapshotExpiration"] == 0
         assert state.raw["keepLastSnapshots"] == {

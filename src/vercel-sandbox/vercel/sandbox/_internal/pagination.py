@@ -1,9 +1,11 @@
 """Pagination helpers for Sandbox APIs."""
 
-from dataclasses import dataclass
 from typing import Generic, TypeVar
 
+from pydantic import field_validator
+
 from vercel._internal.core.polyfills import Self
+from vercel.sandbox._internal.value_model import SandboxValueModel
 
 MAX_QUERY_SANDBOXES_PAGE_SIZE = 50
 MAX_QUERY_SESSIONS_PAGE_SIZE = 50
@@ -14,47 +16,38 @@ MAX_QUERY_DRIVES_PAGE_SIZE = 50
 PageItemT = TypeVar("PageItemT")
 
 
-@dataclass(frozen=True, slots=True)
-class QuerySandboxesPage(Generic[PageItemT]):
+class QuerySandboxesPage(SandboxValueModel, Generic[PageItemT]):
     sandboxes: list[PageItemT]
     next_cursor: str | None
 
 
-@dataclass(frozen=True, slots=True)
-class QuerySessionsPage(Generic[PageItemT]):
+class QuerySessionsPage(SandboxValueModel, Generic[PageItemT]):
     sessions: list[PageItemT]
     next_cursor: str | None
 
 
-@dataclass(frozen=True, slots=True)
-class QuerySnapshotsPage(Generic[PageItemT]):
+class QuerySnapshotsPage(SandboxValueModel, Generic[PageItemT]):
     snapshots: list[PageItemT]
     next_cursor: str | None
 
 
-@dataclass(frozen=True, slots=True)
-class QueryDrivesPage(Generic[PageItemT]):
+class QueryDrivesPage(SandboxValueModel, Generic[PageItemT]):
     drives: list[PageItemT]
     next_cursor: str | None
 
 
-@dataclass(frozen=True, slots=True)
-class QuerySandboxesParams:
+class QuerySandboxesParams(SandboxValueModel):
     page_size: int | None = None
     cursor: str | None = None
 
-    def __init__(
-        self,
-        *,
-        page_size: int | None = None,
-        cursor: str | None = None,
-    ) -> None:
+    @field_validator("page_size")
+    @classmethod
+    def _validate_page_size(cls, page_size: int | None) -> int | None:
         if page_size is not None and not 1 <= page_size <= MAX_QUERY_SANDBOXES_PAGE_SIZE:
             raise ValueError(
                 f"query_sandboxes page_size must be between 1 and {MAX_QUERY_SANDBOXES_PAGE_SIZE}"
             )
-        object.__setattr__(self, "page_size", page_size)
-        object.__setattr__(self, "cursor", cursor)
+        return page_size
 
     def with_cursor(self, cursor: str) -> Self:
         return type(self)(
@@ -63,23 +56,18 @@ class QuerySandboxesParams:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class QuerySessionsParams:
+class QuerySessionsParams(SandboxValueModel):
     page_size: int | None = None
     cursor: str | None = None
 
-    def __init__(
-        self,
-        *,
-        page_size: int | None = None,
-        cursor: str | None = None,
-    ) -> None:
+    @field_validator("page_size")
+    @classmethod
+    def _validate_page_size(cls, page_size: int | None) -> int | None:
         if page_size is not None and not 1 <= page_size <= MAX_QUERY_SESSIONS_PAGE_SIZE:
             raise ValueError(
                 f"query_sessions page_size must be between 1 and {MAX_QUERY_SESSIONS_PAGE_SIZE}"
             )
-        object.__setattr__(self, "page_size", page_size)
-        object.__setattr__(self, "cursor", cursor)
+        return page_size
 
     def with_cursor(self, cursor: str) -> Self:
         return type(self)(
@@ -88,23 +76,18 @@ class QuerySessionsParams:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class QuerySnapshotsParams:
+class QuerySnapshotsParams(SandboxValueModel):
     page_size: int | None = None
     cursor: str | None = None
 
-    def __init__(
-        self,
-        *,
-        page_size: int | None = None,
-        cursor: str | None = None,
-    ) -> None:
+    @field_validator("page_size")
+    @classmethod
+    def _validate_page_size(cls, page_size: int | None) -> int | None:
         if page_size is not None and not 1 <= page_size <= MAX_QUERY_SNAPSHOTS_PAGE_SIZE:
             raise ValueError(
                 f"query_snapshots page_size must be between 1 and {MAX_QUERY_SNAPSHOTS_PAGE_SIZE}"
             )
-        object.__setattr__(self, "page_size", page_size)
-        object.__setattr__(self, "cursor", cursor)
+        return page_size
 
     def with_cursor(self, cursor: str) -> Self:
         return type(self)(
@@ -113,23 +96,18 @@ class QuerySnapshotsParams:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class QueryDrivesParams:
+class QueryDrivesParams(SandboxValueModel):
     page_size: int | None = None
     cursor: str | None = None
 
-    def __init__(
-        self,
-        *,
-        page_size: int | None = None,
-        cursor: str | None = None,
-    ) -> None:
+    @field_validator("page_size")
+    @classmethod
+    def _validate_page_size(cls, page_size: int | None) -> int | None:
         if page_size is not None and not 1 <= page_size <= MAX_QUERY_DRIVES_PAGE_SIZE:
             raise ValueError(
                 f"query_drives page_size must be between 1 and {MAX_QUERY_DRIVES_PAGE_SIZE}"
             )
-        object.__setattr__(self, "page_size", page_size)
-        object.__setattr__(self, "cursor", cursor)
+        return page_size
 
     def with_cursor(self, cursor: str) -> Self:
         return type(self)(
