@@ -3,16 +3,18 @@
 import io
 import subprocess
 import sys
-from dataclasses import dataclass, field
 from typing import TextIO
 
+from pydantic import SkipValidation
+
 from vercel.sandbox._internal.models import ProcessLog, ProcessLogStream
+from vercel.sandbox._internal.value_model import SandboxModel
 
 
-@dataclass(slots=True)
-class _OutputTarget:
-    stream: TextIO | None = None
-    chunks: list[str] | None = field(default=None)
+class _OutputTarget(SandboxModel):
+    # _resolve_target checks the writable-stream protocol, including duck types.
+    stream: SkipValidation[TextIO | None] = None
+    chunks: list[str] | None = None
 
     def write(self, data: str) -> None:
         if self.chunks is not None:

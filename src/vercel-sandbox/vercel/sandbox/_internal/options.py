@@ -1,22 +1,27 @@
 """Sandbox service options."""
 
 import os
-from dataclasses import dataclass
+from collections.abc import Callable, Coroutine
 from datetime import timedelta
-from typing import Protocol
+from typing import Any, Protocol
+
+from pydantic import Field
 
 from vercel._internal.core.options import ServiceOptions
 from vercel.sandbox._internal.errors import SandboxCredentialsError
+from vercel.sandbox._internal.value_model import SandboxValueModel
 
 DEFAULT_SANDBOX_API_BASE_URL = "https://vercel.com/api"
 _DEFAULT_FILE_TRANSFER_TIMEOUT = timedelta(minutes=5)
 
 
-@dataclass(frozen=True, slots=True)
-class SandboxCredentials:
+class SandboxCredentials(SandboxValueModel):
     token: str
     team_id: str
     project_id: str
+
+    def __init__(self, token: str, team_id: str, project_id: str) -> None:
+        super().__init__(token=token, team_id=team_id, project_id=project_id)
 
 
 class SandboxCredentialsFactory(Protocol):
@@ -46,6 +51,11 @@ async def _default_sandbox_credentials_factory() -> SandboxCredentials:
     return _resolve_default_sandbox_credentials()
 
 
+def _explicit_options(**options: Any) -> dict[str, Any]:
+    """Drop unset (None or empty-string) values so field defaults apply."""
+    return {key: value for key, value in options.items() if value is not None and value != ""}
+
+
 class _SandboxServiceOptionsKey(ServiceOptions):
     """Shared registry key for sync and async Sandbox service options."""
 
@@ -56,8 +66,7 @@ class _SandboxServiceOptionsKey(ServiceOptions):
         return _SandboxServiceOptionsKey
 
 
-@dataclass(frozen=True, slots=True, init=False)
-class SandboxServiceOptions(_SandboxServiceOptionsKey):
+class SandboxServiceOptions(SandboxValueModel, _SandboxServiceOptionsKey):
     """Configuration for `vercel.sandbox` calls in an SDK session.
 
     A session that does not receive this option still constructs one with the
@@ -65,10 +74,12 @@ class SandboxServiceOptions(_SandboxServiceOptionsKey):
     overrides the whole service configuration for that session scope.
     """
 
-    base_url: str
-    credentials_factory: SandboxCredentialsFactory
-    file_transfer_timeout: timedelta
-    region: str | None
+    base_url: str = DEFAULT_SANDBOX_API_BASE_URL
+    credentials_factory: Callable[[], Coroutine[Any, Any, SandboxCredentials]] = (
+        _default_sandbox_credentials_factory
+    )
+    file_transfer_timeout: timedelta = _DEFAULT_FILE_TRANSFER_TIMEOUT
+    region: str | None = Field(default_factory=lambda: os.environ.get("VERCEL_REGION") or None)
 
     def __init__(
         self,
@@ -78,34 +89,23 @@ class SandboxServiceOptions(_SandboxServiceOptionsKey):
         file_transfer_timeout: timedelta | None = None,
         region: str | None = None,
     ) -> None:
-        object.__setattr__(
-            self,
-            "base_url",
-            base_url or DEFAULT_SANDBOX_API_BASE_URL,
+        super().__init__(
+            **_explicit_options(
+                base_url=base_url,
+                credentials_factory=credentials_factory,
+                file_transfer_timeout=file_transfer_timeout,
+                region=region,
+            )
         )
-        object.__setattr__(
-            self,
-            "credentials_factory",
-            credentials_factory or _default_sandbox_credentials_factory,
-        )
-        object.__setattr__(
-            self,
-            "file_transfer_timeout",
-            file_transfer_timeout
-            if file_transfer_timeout is not None
-            else _DEFAULT_FILE_TRANSFER_TIMEOUT,
-        )
-        object.__setattr__(self, "region", region or os.environ.get("VERCEL_REGION") or None)
 
 
-@dataclass(frozen=True, slots=True, init=False)
-class SyncSandboxServiceOptions(_SandboxServiceOptionsKey):
+class SyncSandboxServiceOptions(SandboxValueModel, _SandboxServiceOptionsKey):
     """Configuration for synchronous `vercel.sandbox` calls in an SDK session."""
 
-    base_url: str
-    credentials_factory: SyncSandboxCredentialsFactory
-    file_transfer_timeout: timedelta
-    region: str | None
+    base_url: str = DEFAULT_SANDBOX_API_BASE_URL
+    credentials_factory: Callable[[], SandboxCredentials] = _resolve_default_sandbox_credentials
+    file_transfer_timeout: timedelta = _DEFAULT_FILE_TRANSFER_TIMEOUT
+    region: str | None = Field(default_factory=lambda: os.environ.get("VERCEL_REGION") or None)
 
     def __init__(
         self,
@@ -115,21 +115,11 @@ class SyncSandboxServiceOptions(_SandboxServiceOptionsKey):
         file_transfer_timeout: timedelta | None = None,
         region: str | None = None,
     ) -> None:
-        object.__setattr__(
-            self,
-            "base_url",
-            base_url or DEFAULT_SANDBOX_API_BASE_URL,
+        super().__init__(
+            **_explicit_options(
+                base_url=base_url,
+                credentials_factory=credentials_factory,
+                file_transfer_timeout=file_transfer_timeout,
+                region=region,
+            )
         )
-        object.__setattr__(
-            self,
-            "credentials_factory",
-            credentials_factory or _resolve_default_sandbox_credentials,
-        )
-        object.__setattr__(
-            self,
-            "file_transfer_timeout",
-            file_transfer_timeout
-            if file_transfer_timeout is not None
-            else _DEFAULT_FILE_TRANSFER_TIMEOUT,
-        )
-        object.__setattr__(self, "region", region or os.environ.get("VERCEL_REGION") or None)

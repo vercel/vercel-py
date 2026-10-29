@@ -7,7 +7,6 @@ import platform
 import sys
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
-from dataclasses import dataclass
 from datetime import timedelta
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from typing import Literal, TypeVar, cast
@@ -98,6 +97,7 @@ from vercel.sandbox._internal.state import (
     SnapshotsPageState,
     SnapshotState,
 )
+from vercel.sandbox._internal.value_model import SandboxValueModel
 
 try:
     VERSION = _pkg_version("vercel-sandbox")
@@ -110,8 +110,7 @@ except PackageNotFoundError:
 PLATFORM = platform.uname()
 
 
-@dataclass(frozen=True, slots=True)
-class _SandboxUserAgent:
+class _SandboxUserAgent(SandboxValueModel):
     client_version: str
     python_version: str
     platform_system: str
@@ -684,6 +683,7 @@ class _RuntimeSessionResponse(_ApiModel):
                     raw=cast(
                         JSONObject,
                         sandbox.model_dump(
+                            mode="json",
                             by_alias=True,
                             exclude_none=True,
                             exclude={"routes", "current_session", "raw"},
@@ -695,7 +695,7 @@ class _RuntimeSessionResponse(_ApiModel):
                     current_session_attached=False,
                 )
             ),
-            _sandbox_attached="sandbox" in self.model_fields_set,
+            sandbox_attached="sandbox" in self.model_fields_set,
         )
 
 
@@ -721,7 +721,10 @@ class _SandboxResponse(_ApiModel):
         raw = cast(
             JSONObject,
             self.sandbox.model_dump(
-                by_alias=True, exclude_none=True, exclude={"routes", "current_session", "raw"}
+                mode="json",
+                by_alias=True,
+                exclude_none=True,
+                exclude={"routes", "current_session", "raw"},
             ),
         )
         payload = self.sandbox
@@ -907,9 +910,9 @@ def _sandbox_state(
         routes=routes,
         current_session=current_session,
         raw=raw,
-        _mounts_attached=mounts_attached,
-        _routes_attached=routes_attached,
-        _current_session_attached=current_session_attached,
+        mounts_attached=mounts_attached,
+        routes_attached=routes_attached,
+        current_session_attached=current_session_attached,
     )
 
 
@@ -1023,8 +1026,7 @@ def _completed_process_state(
     return CompletedProcessState(process=final, stdout=stdout, stderr=stderr)
 
 
-@dataclass(frozen=True, slots=True)
-class _PreparedSandboxCreation:
+class _PreparedSandboxCreation(SandboxValueModel):
     credentials: SandboxCredentials
     project_id: str
     body: bytes

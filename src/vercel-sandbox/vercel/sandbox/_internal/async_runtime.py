@@ -5,12 +5,12 @@ import subprocess
 import warnings
 from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from dataclasses import dataclass, field
 from datetime import timedelta
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Literal, TextIO, overload
 
 import anyio
+from pydantic import Field, SkipValidation, field_validator
 
 from vercel._internal.core.byte_stream import AsyncByteStreamRuntime
 from vercel._internal.core.polyfills import Self
@@ -126,6 +126,7 @@ from vercel.sandbox._internal.state import (
     SnapshotState,
 )
 from vercel.sandbox._internal.text_reader import TextReader, _text_readers
+from vercel.sandbox._internal.value_model import SandboxModel, SandboxValueModel
 
 if TYPE_CHECKING:
     from vercel.sandbox.user import SandboxUser
@@ -1281,8 +1282,7 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         return self
 
 
-@dataclass(slots=True)
-class _AsyncRecoveryAttempt:
+class _AsyncRecoveryAttempt(SandboxModel):
     completed: anyio.Event
     status: Literal["in_flight", "succeeded", "failed", "abandoned"] = "in_flight"
     error: BaseException | None = None
@@ -1717,7 +1717,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
                 return self
             self._apply_current_session_payload(result.session)
             if (
-                result._sandbox_attached
+                result.sandbox_attached
                 and result.sandbox is not None
                 and result.sandbox.current_session_id == result.session.id
             ):
@@ -1891,8 +1891,7 @@ class SandboxSessionOperation:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class _CreateSandboxParams:
+class _CreateSandboxParams(SandboxValueModel):
     project_id: str | None = None
     name: str | None = None
     image: str | None = None
@@ -1905,14 +1904,21 @@ class _CreateSandboxParams:
     network_id: str | None = None
     env: Mapping[str, str] | None = None
     tags: Mapping[str, str] | None = None
-    mounts: Mapping[Any, DriveMountInput] | None = None
+    mounts: Mapping[Any, SkipValidation[DriveMountInput]] | None = None
     snapshot_expiration: SnapshotExpiration | None = None
     snapshot_retention: SnapshotRetention | None = None
     region: str | None = None
     failover_regions: tuple[str, ...] | None = None
-    private_parameters: PrivateSandboxParameters = field(
+    private_parameters: PrivateSandboxParameters = Field(
         default_factory=lambda: NO_PRIVATE_PARAMETERS
     )
+
+    @field_validator("network_policy", mode="before")
+    @classmethod
+    def _validate_network_policy(cls, value: object) -> NetworkPolicy | None:
+        if value is None or isinstance(value, NetworkPolicy):
+            return value
+        raise TypeError("network_policy must be a NetworkPolicy")
 
 
 class CreateSandboxOperation:
@@ -1995,8 +2001,7 @@ class CreateSandboxOperation:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class _ForkSandboxParams:
+class _ForkSandboxParams(SandboxValueModel):
     source_sandbox: str
     project_id: str | None = None
     name: str | None = None
@@ -2009,14 +2014,21 @@ class _ForkSandboxParams:
     network_id: str | None = None
     env: Mapping[str, str] | None = None
     tags: Mapping[str, str] | None = None
-    mounts: Mapping[Any, DriveMountInput] | None = None
+    mounts: Mapping[Any, SkipValidation[DriveMountInput]] | None = None
     snapshot_expiration: SnapshotExpiration | None = None
     snapshot_retention: SnapshotRetention | None = None
     region: str | None = None
     failover_regions: tuple[str, ...] | None = None
-    private_parameters: PrivateSandboxParameters = field(
+    private_parameters: PrivateSandboxParameters = Field(
         default_factory=lambda: NO_PRIVATE_PARAMETERS
     )
+
+    @field_validator("network_policy", mode="before")
+    @classmethod
+    def _validate_network_policy(cls, value: object) -> NetworkPolicy | None:
+        if value is None or isinstance(value, NetworkPolicy):
+            return value
+        raise TypeError("network_policy must be a NetworkPolicy")
 
 
 class ForkSandboxOperation:
@@ -2098,12 +2110,11 @@ class ForkSandboxOperation:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class _ResumeSandboxParams:
+class _ResumeSandboxParams(SandboxValueModel):
     name: str
     project_id: str | None = None
     include_system_routes: bool | None = None
-    private_parameters: PrivateSandboxParameters = field(
+    private_parameters: PrivateSandboxParameters = Field(
         default_factory=lambda: NO_PRIVATE_PARAMETERS
     )
 

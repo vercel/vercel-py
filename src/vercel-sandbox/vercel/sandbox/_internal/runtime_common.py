@@ -7,11 +7,12 @@ import signal as signal_module
 import weakref
 from collections.abc import AsyncGenerator, Callable, Sequence
 from contextlib import aclosing
-from dataclasses import dataclass, replace
 from datetime import timedelta
 from enum import Enum, auto
 from pathlib import PurePosixPath
 from typing import Any, Generic, Literal, TypeAlias, TypeVar
+
+from pydantic import SkipValidation
 
 from vercel._internal.core.byte_stream import ReadableByteStream
 from vercel.sandbox._internal.errors import SandboxResponseError
@@ -36,18 +37,30 @@ from vercel.sandbox._internal.state import (
     SnapshotState,
     UpdateSandboxStep,
 )
+from vercel.sandbox._internal.value_model import SandboxValueModel
 
 RuntimeSessionHandleT = TypeVar("RuntimeSessionHandleT", bound="RuntimeSessionHandleBase")
 _SourceT = TypeVar("_SourceT")
 
 
-@dataclass(frozen=True, slots=True)
-class _UploadFileEntry(Generic[_SourceT]):
+class _UploadFileEntry(SandboxValueModel, Generic[_SourceT]):
     path: str
     size: int
-    source: _SourceT
+    # Sources are structural stream protocols; preserve the live object itself.
+    source: SkipValidation[_SourceT]
     mode: int | None = None
     archive_path: str | None = None
+
+    def __init__(
+        self,
+        *,
+        path: str,
+        size: int,
+        source: _SourceT,
+        mode: int | None = None,
+        archive_path: str | None = None,
+    ) -> None:
+        super().__init__(path=path, size=size, source=source, mode=mode, archive_path=archive_path)
 
 
 _StreamUploadFileEntry: TypeAlias = _UploadFileEntry[ReadableByteStream]
@@ -523,7 +536,9 @@ class RuntimeSessionHandleBase:
             parent._apply_session_stop_from_child(self, result)
 
     def _mark_stopped(self) -> None:
-        self._apply_payload_with_parent(replace(self._payload, status=SandboxStatus.STOPPED))
+        self._apply_payload_with_parent(
+            self._payload.model_copy(update={"status": SandboxStatus.STOPPED})
+        )
 
     def _write_files_cwd(self, cwd: RemotePath | None) -> str:
         return _resolve_write_files_cwd(cwd, default=self.cwd or "/vercel/sandbox")
@@ -673,7 +688,7 @@ class SandboxHandleBase(Generic[RuntimeSessionHandleT]):
                 "Sandbox response session does not match current session identity",
                 data=payload,
             )
-        if payload._current_session_attached and returned_session is not None:
+        if payload.current_session_attached and returned_session is not None:
             if (
                 self._current_session is not None
                 and self._current_session.id == returned_session.id
@@ -683,20 +698,21 @@ class SandboxHandleBase(Generic[RuntimeSessionHandleT]):
                 self._current_session = self._session_factory(returned_session)
                 self._current_session._set_parent(self)
         elif (
-            payload._current_session_attached
+            payload.current_session_attached
             or payload.current_session_id != self._payload.current_session_id
         ):
             self._current_session = None
-        self._payload = replace(
-            payload,
-            mounts=payload.mounts if payload._mounts_attached else self._payload.mounts,
-            routes=payload.routes if payload._routes_attached else self._payload.routes,
-            current_session=(
-                None if self._current_session is None else self._current_session._payload
-            ),
-            _mounts_attached=True,
-            _routes_attached=True,
-            _current_session_attached=True,
+        self._payload = payload.model_copy(
+            update={
+                "mounts": payload.mounts if payload.mounts_attached else self._payload.mounts,
+                "routes": payload.routes if payload.routes_attached else self._payload.routes,
+                "current_session": None
+                if self._current_session is None
+                else self._current_session._payload,
+                "mounts_attached": True,
+                "routes_attached": True,
+                "current_session_attached": True,
+            }
         )
 
     async def _apply_update_steps(self, steps: AsyncGenerator[UpdateSandboxStep, None]) -> None:
@@ -736,7 +752,7 @@ class SandboxHandleBase(Generic[RuntimeSessionHandleT]):
             self._current_session._set_parent(self)
         else:
             self._current_session._apply_payload(payload)
-        self._payload = replace(self._payload, current_session=payload)
+        self._payload = self._payload.model_copy(update={"current_session": payload})
         return self._current_session
 
     def _apply_session_payload_from_child(
@@ -746,7 +762,7 @@ class SandboxHandleBase(Generic[RuntimeSessionHandleT]):
     ) -> None:
         if self.current_session_id != child.id or self._current_session is not child:
             return
-        self._payload = replace(self._payload, current_session=payload)
+        self._payload = self._payload.model_copy(update={"current_session": payload})
 
     def _apply_session_stop_from_child(
         self,
@@ -755,10 +771,10 @@ class SandboxHandleBase(Generic[RuntimeSessionHandleT]):
     ) -> None:
         if self.current_session_id != child.id or self._current_session is not child:
             return
-        self._payload = replace(self._payload, current_session=result.session)
+        self._payload = self._payload.model_copy(update={"current_session": result.session})
         sandbox = result.sandbox
         if (
-            result._sandbox_attached
+            result.sandbox_attached
             and sandbox is not None
             and sandbox.current_session_id == child.id
         ):

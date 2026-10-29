@@ -9,6 +9,7 @@ from vercel import sandbox
 from vercel.sandbox._internal.options import (
     SandboxCredentials,
     SandboxServiceOptions,
+    SyncSandboxServiceOptions,
 )
 
 
@@ -27,6 +28,32 @@ def test_options_resolves_region_from_argument_or_environment(
     monkeypatch.setenv("VERCEL_REGION", "")
     assert SandboxServiceOptions().region is None
     assert sandbox.sync.SandboxServiceOptions().region is None
+
+
+@pytest.mark.parametrize("options_cls", [SandboxServiceOptions, SyncSandboxServiceOptions])
+@pytest.mark.parametrize("region_env", [None, "iad1", ""])
+def test_options_constructor_and_model_validate_share_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+    options_cls: type[SandboxServiceOptions] | type[SyncSandboxServiceOptions],
+    region_env: str | None,
+) -> None:
+    if region_env is None:
+        monkeypatch.delenv("VERCEL_REGION", raising=False)
+    else:
+        monkeypatch.setenv("VERCEL_REGION", region_env)
+
+    defaults = options_cls.model_validate({})
+    assert options_cls() == defaults
+    assert (
+        options_cls(
+            base_url=None,
+            credentials_factory=None,
+            file_transfer_timeout=None,
+            region=None,
+        )
+        == defaults
+    )
+    assert defaults.region == (region_env or None)
 
 
 def test_options_equality_preserves_custom_credential_factory_identity() -> None:

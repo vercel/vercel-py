@@ -2,7 +2,6 @@
 
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
 from contextlib import aclosing, asynccontextmanager
-from dataclasses import dataclass
 from datetime import timedelta
 from typing import TYPE_CHECKING, Literal, cast
 
@@ -85,6 +84,7 @@ from vercel.sandbox._internal.state import (
     UpdateSandboxStep,
 )
 from vercel.sandbox._internal.streaming_archive import ArchiveRequestWriter
+from vercel.sandbox._internal.value_model import SandboxValueModel
 
 if TYPE_CHECKING:
     from vercel._internal.core.session import SdkSession, SyncSdkSession
@@ -160,16 +160,14 @@ mv "$source" "$destination"
 """
 
 
-@dataclass(frozen=True, slots=True)
-class _SandboxQueryCriteria:
+class _SandboxQueryCriteria(SandboxValueModel):
     sort_by: str | None = None
     sort_order: str | None = None
     name_prefix: str | None = None
     tag: TagFilter | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class _DriveQueryCriteria:
+class _DriveQueryCriteria(SandboxValueModel):
     sort_by: str | None = None
     sort_order: str | None = None
     name_prefix: str | None = None

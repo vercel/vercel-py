@@ -56,6 +56,41 @@ Trio. Synchronously it is a writable `io.RawIOBase`; wrap it in
 `io.TextIOWrapper` for text. For a long-running stdio server, see
 [`examples/sandbox_10_mcp_everything.py`](examples/sandbox_10_mcp_everything.py).
 
+## Inputs and outputs
+
+The SDK uses Pydantic models for configuration and returned data. Pass
+configuration objects to SDK methods, then use the results directly in your
+application logic:
+
+```python
+from vercel import sandbox
+from vercel.sandbox import SandboxResources
+
+async with sandbox.create_sandbox(
+    resources=SandboxResources(vcpus=2, memory=4096),
+) as instance:
+    result = await instance.run_process(
+        "echo", ["hello"], capture_output=True,
+    )
+
+    if result.returncode == 0:
+        output = result.stdout
+
+    # Prepare the result for a JSON response.
+    response_data = result.model_dump(mode="json")
+```
+
+Returned data objects such as process results and directory entries are
+read-only. To change sandbox configuration, call `await instance.update(...)`.
+
+Sandbox, process, and user handles provide methods for further operations,
+such as running commands and accessing files. Keep the handle while working
+with the resource. To retrieve a sandbox in a later request, save its name
+and call `await sandbox.get_sandbox(name=...)`. Serialized data does not
+recreate a working handle.
+
+The synchronous API follows the same conventions.
+
 ## Standalone clients
 
 Applications that use dependency injection can create a service-specific
@@ -383,8 +418,8 @@ assert result.stdout == "alice\n"
 assert alice.home_dir == "/home/alice"
 ```
 
-`SandboxUser` and `SyncSandboxUser` are immutable handles exposing `username`,
-`home_dir`, `run_process()`, `create_process()`, and `.fs`. Their command and
+`SandboxUser` and `SyncSandboxUser` expose read-only `username`, `home_dir`,
+and `.fs` properties, plus `run_process()` and `create_process()`. Their command and
 filesystem options match the session APIs. Usernames must match
 `[a-z_][a-z0-9_-]*` and contain at most 32 characters; invalid names fail
 immediately. `create_user()` raises `SandboxUserAlreadyExistsError` if the account

@@ -5,7 +5,6 @@ import posixpath
 import re
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import replace
 from datetime import timedelta
 from typing import Literal, TypeVar
 
@@ -527,8 +526,12 @@ class UserService(SandboxService):
             kill_after=kill_after,
             attach_stdin=attach_stdin,
         )
-        state = replace(
-            state, name=command, args=tuple(args or ()), cwd=self._context.write_files_cwd(cwd)
+        state = state.model_copy(
+            update={
+                "name": command,
+                "args": tuple(args or ()),
+                "cwd": self._context.write_files_cwd(cwd),
+            }
         )
         self._process_metadata[(session_id, state.id)] = state
         return state
@@ -548,7 +551,9 @@ class UserService(SandboxService):
         return (
             state
             if metadata is None
-            else replace(state, name=metadata.name, args=metadata.args, cwd=metadata.cwd)
+            else state.model_copy(
+                update={"name": metadata.name, "args": metadata.args, "cwd": metadata.cwd}
+            )
         )
 
     async def send_process_signal(

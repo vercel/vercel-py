@@ -1,8 +1,7 @@
-"""Immutable asynchronous run-as-user handles."""
+"""Asynchronous run-as-user handles."""
 
 import subprocess
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import TextIO
 
@@ -21,7 +20,6 @@ from vercel.sandbox._internal.process_stdin import (
 from vercel.sandbox._internal.user_core import UserContext
 
 
-@dataclass(frozen=True, slots=True)
 class SandboxUser:
     """Execute commands and read files as a selected Linux account.
 
@@ -32,8 +30,11 @@ class SandboxUser:
     permissions. Handles expose no sandbox lifecycle methods.
     """
 
-    _context: UserContext = field(repr=False)
-    _fs: SandboxFilesystem = field(repr=False)
+    __slots__ = ("_context", "_fs")
+
+    def __init__(self, context: UserContext, fs: SandboxFilesystem) -> None:
+        self._context = context
+        self._fs = fs
 
     @property
     def username(self) -> str:
