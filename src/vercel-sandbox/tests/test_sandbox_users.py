@@ -1,4 +1,4 @@
-"""Public selection, immutability, and structural capability contracts."""
+"""Public selection, read-only properties, and structural capability contracts."""
 
 import base64
 import io
@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, Any
 import httpx2 as httpx
 import pytest
 from hypothesis import given, strategies as st
-from pydantic import ValidationError
 from sandbox_fixtures import sandbox_service_options
 
 import vendor.respx as respx
@@ -271,17 +270,23 @@ def test_invalid_names_fail_at_selection_without_io(username: str) -> None:
 
 
 @given(st.from_regex(r"[a-z_][a-z0-9_-]{0,31}", fullmatch=True))
-def test_selection_is_lazy_and_handles_are_immutable(username: str) -> None:
+def test_selection_is_lazy_and_handle_properties_are_read_only(username: str) -> None:
     with session(service_options=sandbox_service_options(sync=True)):
         for handle in _handles():
             user = handle.as_user(username)
             assert user.username == username
             assert user.home_dir == ("/root" if username == "root" else None)
-            # Frozen handles cannot replace their identity or filesystem binding.
-            assert user.model_dump() == {"username": username, "home_dir": user.home_dir}
-            with pytest.raises(ValidationError, match="frozen"):
-                user.username = "another"
+            filesystem = user.fs
+            for name, value in (
+                ("username", "another"),
+                ("home_dir", "/another"),
+                ("fs", object()),
+            ):
+                with pytest.raises(AttributeError):
+                    setattr(user, name, value)
             assert user.username == username
+            assert user.home_dir == ("/root" if username == "root" else None)
+            assert user.fs is filesystem
             assert not hasattr(user, "stop")
             assert not hasattr(user, "get_process")
             protocol = (

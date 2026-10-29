@@ -1,11 +1,9 @@
-"""Immutable synchronous run-as-user handles."""
+"""Synchronous run-as-user handles."""
 
 import subprocess
 from collections.abc import Mapping, Sequence
 from datetime import timedelta
 from typing import TextIO
-
-from pydantic import PrivateAttr, computed_field
 
 from vercel._internal.core.iter_coroutine import iter_coroutine
 from vercel._internal.core.time import parse_duration_seconds
@@ -21,10 +19,9 @@ from vercel.sandbox._internal.process_stdin import (
 )
 from vercel.sandbox._internal.sync_runtime import SyncProcess, SyncSandboxFilesystem
 from vercel.sandbox._internal.user_core import UserContext
-from vercel.sandbox._internal.value_model import SandboxValueModel
 
 
-class SyncSandboxUser(SandboxValueModel):
+class SyncSandboxUser:
     """Execute commands and read files as a selected Linux account.
 
     Obtain handles through ``create_user()`` or ``as_user()``. Existing account
@@ -34,20 +31,16 @@ class SyncSandboxUser(SandboxValueModel):
     permissions. Handles expose no sandbox lifecycle methods.
     """
 
-    _context: UserContext = PrivateAttr()
-    _fs: SyncSandboxFilesystem = PrivateAttr()
+    __slots__ = ("_context", "_fs")
 
-    def __init__(self, _context: UserContext, _fs: SyncSandboxFilesystem) -> None:
-        super().__init__()
-        self._context = _context
-        self._fs = _fs
+    def __init__(self, context: UserContext, fs: SyncSandboxFilesystem) -> None:
+        self._context = context
+        self._fs = fs
 
-    @computed_field  # type: ignore[prop-decorator]
     @property
     def username(self) -> str:
         return self._context.username
 
-    @computed_field  # type: ignore[prop-decorator]
     @property
     def home_dir(self) -> str | None:
         return self._context.home_dir

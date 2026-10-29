@@ -418,8 +418,8 @@ assert result.stdout == "alice\n"
 assert alice.home_dir == "/home/alice"
 ```
 
-`SandboxUser` and `SyncSandboxUser` are immutable handles exposing `username`,
-`home_dir`, `run_process()`, `create_process()`, and `.fs`. Their command and
+`SandboxUser` and `SyncSandboxUser` expose read-only `username`, `home_dir`,
+and `.fs` properties, plus `run_process()` and `create_process()`. Their command and
 filesystem options match the session APIs. Usernames must match
 `[a-z_][a-z0-9_-]*` and contain at most 32 characters; invalid names fail
 immediately. `create_user()` raises `SandboxUserAlreadyExistsError` if the account

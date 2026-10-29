@@ -5,6 +5,8 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict
 
 
+# Explicit **data constructors keep Pydantic's mypy plugin from synthesizing
+# empty base signatures for subclass constructors that call super().__init__.
 class SandboxModel(BaseModel):
     """Validate data while allowing live runtime state to change."""
 
