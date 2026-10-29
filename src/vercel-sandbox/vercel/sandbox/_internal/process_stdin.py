@@ -1,4 +1,4 @@
-"""Process standard input backed by one async-shaped write core.
+"""Command standard input backed by one async-shaped write core.
 
 Every write is a request to the service, sent with the number of bytes the
 service has confirmed so far. A resent request carries the same offset, so the
@@ -22,7 +22,7 @@ from vercel.sandbox._internal.errors import (
     SandboxResponseError,
     SandboxStdinError,
 )
-from vercel.sandbox._internal.models import ProcessSignal
+from vercel.sandbox._internal.models import CommandSignal
 from vercel.sandbox._internal.state import ProcessState
 
 if TYPE_CHECKING:
@@ -35,7 +35,7 @@ _MAX_RETRIES = 5
 _MAX_STALLED_TIMEOUTS = 2
 _MAX_RETRY_AFTER_SECONDS = 20.0
 
-ProcessInput = str | bytes | bytearray | memoryview
+CommandInput = str | bytes | bytearray | memoryview
 
 StdinMode: TypeAlias = Literal["attached", "fetched"] | None
 """How a process handle relates to its stdin.
@@ -76,7 +76,7 @@ def _coerce_bytes(data: object) -> bytes:
         raise TypeError(f"a bytes-like object is required, not {type(data).__name__}") from None
 
 
-def _coerce_input(input: ProcessInput) -> bytes:
+def _coerce_input(input: CommandInput) -> bytes:
     """Encode ``communicate`` and ``run_command`` input; text becomes UTF-8."""
     if isinstance(input, str):
         return input.encode("utf-8")
@@ -289,7 +289,7 @@ class StdinCore:
                 # Unlike a process that stops reading, input sent here may be
                 # lost, so ``communicate`` doesn't ignore it.
                 raise SandboxStdinError(
-                    "Process stdin is unavailable: the process was not started with "
+                    "Command stdin is unavailable: the process was not started with "
                     "stdin=subprocess.PIPE, or it has stopped reading stdin",
                     cause=failure.error,
                 ) from failure.error
@@ -404,13 +404,13 @@ async def feed_process_input(
             await service.send_process_signal(
                 session_id=process.session_id,
                 process_id=process.id,
-                signal=int(ProcessSignal.SIGKILL),
+                signal=int(CommandSignal.SIGKILL),
             )
         raise
 
 
-class ProcessStdin(anyio.abc.ByteSendStream):
-    """Standard input of an asynchronously running sandbox process.
+class CommandStdin(anyio.abc.ByteSendStream):
+    """Standard input of an asynchronously running sandbox command.
 
     Each ``send`` returns once the process has accepted the bytes, and
     concurrent sends reach the process in the order they were called.
@@ -451,8 +451,8 @@ class ProcessStdin(anyio.abc.ByteSendStream):
             raise anyio.BrokenResourceError(*error.args) from error.__cause__
 
 
-class SyncProcessStdin(io.RawIOBase):
-    """Standard input of a synchronously running sandbox process.
+class SyncCommandStdin(io.RawIOBase):
+    """Standard input of a synchronously running sandbox command.
 
     A raw binary stream: each ``write`` writes every byte and returns once the
     process has accepted them, and writes from several threads reach the
@@ -518,10 +518,10 @@ def _broken_pipe(error: _StdinUnavailable) -> BrokenPipeError:
 
 def _async_stdin(
     service: "SandboxService", process: ProcessState, mode: StdinMode
-) -> ProcessStdin | None:
+) -> CommandStdin | None:
     if mode is None:
         return None
-    return ProcessStdin(
+    return CommandStdin(
         StdinCore(
             service=service,
             session_id=process.session_id,
@@ -534,10 +534,10 @@ def _async_stdin(
 
 def _sync_stdin(
     service: "SandboxService", process: ProcessState, mode: StdinMode
-) -> SyncProcessStdin | None:
+) -> SyncCommandStdin | None:
     if mode is None:
         return None
-    return SyncProcessStdin(
+    return SyncCommandStdin(
         StdinCore(
             service=service,
             session_id=process.session_id,
@@ -546,3 +546,9 @@ def _sync_stdin(
             attached=mode == "attached",
         )
     )
+
+
+# Compatibility aliases for the former public process names.
+ProcessStdin = CommandStdin
+SyncProcessStdin = SyncCommandStdin
+ProcessInput = CommandInput

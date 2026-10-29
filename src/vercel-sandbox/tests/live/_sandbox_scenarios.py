@@ -323,7 +323,7 @@ class _ScenarioDriver:
     ) -> Any:
         raise NotImplementedError
 
-    async def get_process(self, box: Any, process_id: str) -> Any:
+    async def get_command(self, box: Any, process_id: str) -> Any:
         raise NotImplementedError
 
     async def write_stdin(self, process: Any, data: bytes) -> None:
@@ -346,7 +346,7 @@ class _ScenarioDriver:
 
     async def run_command_with_on_start(
         self, box: Any, command: str, args: list[str], on_start: Callable[[Any], None]
-    ) -> sandbox.CompletedProcess:
+    ) -> sandbox.CompletedCommand:
         raise NotImplementedError
 
     @asynccontextmanager
@@ -539,8 +539,8 @@ class AsyncDriver(_ScenarioDriver):
     ) -> Any:
         return await box.create_command(command, args, kill_after=kill_after, stdin=stdin)
 
-    async def get_process(self, box: Any, process_id: str) -> Any:
-        return await box.get_process(process_id)
+    async def get_command(self, box: Any, process_id: str) -> Any:
+        return await box.get_command(process_id)
 
     async def write_stdin(self, process: Any, data: bytes) -> None:
         await process.stdin.send(data)
@@ -567,7 +567,7 @@ class AsyncDriver(_ScenarioDriver):
 
     async def run_command_with_on_start(
         self, box: Any, command: str, args: list[str], on_start: Callable[[Any], None]
-    ) -> sandbox.CompletedProcess:
+    ) -> sandbox.CompletedCommand:
         return await box.run_command(command, args, capture_output=True, on_start=on_start)
 
     @asynccontextmanager
@@ -792,8 +792,8 @@ class SyncDriver(_ScenarioDriver):
     ) -> Any:
         return box.create_command(command, args, kill_after=kill_after, stdin=stdin)
 
-    async def get_process(self, box: Any, process_id: str) -> Any:
-        return box.get_process(process_id)
+    async def get_command(self, box: Any, process_id: str) -> Any:
+        return box.get_command(process_id)
 
     async def write_stdin(self, process: Any, data: bytes) -> None:
         process.stdin.write(data)
@@ -820,7 +820,7 @@ class SyncDriver(_ScenarioDriver):
 
     async def run_command_with_on_start(
         self, box: Any, command: str, args: list[str], on_start: Callable[[Any], None]
-    ) -> sandbox.CompletedProcess:
+    ) -> sandbox.CompletedCommand:
         return box.run_command(command, args, capture_output=True, on_start=on_start)
 
     @asynccontextmanager
@@ -1014,7 +1014,7 @@ async def process_filesystem_flow(
                 lambda process: started_ids.append(process.id),
             )
             on_start_process_found = started_ids == [observed.id] and (
-                (await driver.get_process(box, started_ids[0])).id == observed.id
+                (await driver.get_command(box, started_ids[0])).id == observed.id
             )
 
             text = await driver.read_text(box, "message.txt")
@@ -1288,7 +1288,7 @@ async def process_stdin_flow(driver: _ScenarioDriver, name: str) -> StdinObserva
                 responses.append((response["id"], response["result"]["echo"] == params))
                 # Later requests go through a looked-up handle, which resumes
                 # after the input the first handle wrote.
-                writer = await driver.get_process(box, server.id)
+                writer = await driver.get_command(box, server.id)
             await driver.close_stdin(writer)
             server_exit_code = await driver.wait(server)
 
@@ -1304,7 +1304,7 @@ async def process_stdin_flow(driver: _ScenarioDriver, name: str) -> StdinObserva
             broken_after_exit = await driver.write_after_exit_breaks(finished)
 
             without_stdin = await driver.create_command(box, "sleep", ["60"])
-            fetched = await driver.get_process(box, without_stdin.id)
+            fetched = await driver.get_command(box, without_stdin.id)
             try:
                 await driver.write_stdin(fetched, b"lost\n")
             except SandboxStdinError:

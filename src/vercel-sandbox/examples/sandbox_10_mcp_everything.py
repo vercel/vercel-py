@@ -31,7 +31,7 @@ SERVER = "@modelcontextprotocol/server-everything@1.0.0"
 
 @asynccontextmanager
 async def sandbox_stdio(
-    process: sandbox.Process,
+    process: sandbox.Command,
 ) -> AsyncIterator[
     tuple[
         MemoryObjectReceiveStream[SessionMessage | Exception],

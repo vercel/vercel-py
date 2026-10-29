@@ -1,4 +1,4 @@
-"""Process stdin through the public sync and async APIs.
+"""Command stdin through the public sync and async APIs.
 
 The fake service applies offsets the way the real one does: a request whose
 offset is behind the bytes already written only appends the new suffix, so a
@@ -245,13 +245,13 @@ class _Driver:
     def create_command(self, **kwargs: Any) -> _Handle:
         return _Handle(self._call(self.box.create_command, "cat", **kwargs), self.portal)
 
-    def get_process(self) -> _Handle:
-        return _Handle(self._call(self.box.get_process, "cmd_1"), self.portal)
+    def get_command(self) -> _Handle:
+        return _Handle(self._call(self.box.get_command, "cmd_1"), self.portal)
 
-    def query_processes(self) -> list[_Handle]:
-        return [_Handle(process, self.portal) for process in self._call(self.box.query_processes)]
+    def query_commands(self) -> list[_Handle]:
+        return [_Handle(process, self.portal) for process in self._call(self.box.query_commands)]
 
-    def run_command(self, **kwargs: Any) -> sandbox.CompletedProcess:
+    def run_command(self, **kwargs: Any) -> sandbox.CompletedCommand:
         return self._call(self.box.run_command, "cat", **kwargs)  # type: ignore[no-any-return]
 
 
@@ -319,17 +319,17 @@ def test_writes_reach_the_process_in_order_and_close_sends_eof(driver: _Driver) 
     assert process.communicate() == ("hello world\n", "")
 
 
-@pytest.mark.parametrize("lookup", ["get_process", "query_processes"])
+@pytest.mark.parametrize("lookup", ["get_command", "query_commands"])
 def test_a_looked_up_process_continues_after_input_already_written(
     driver: _Driver, lookup: str
 ) -> None:
     started = driver.create_command(stdin=subprocess.PIPE)
     started.write(b"first ")
 
-    if lookup == "get_process":
-        fetched = driver.get_process()
+    if lookup == "get_command":
+        fetched = driver.get_command()
     else:
-        (fetched,) = driver.query_processes()
+        (fetched,) = driver.query_commands()
     fetched.write(b"second\n")
     fetched.close()
 
@@ -351,7 +351,7 @@ def test_a_looked_up_process_continues_after_input_already_written(
 def test_communicate_closes_a_looked_up_process_stdin_only_when_it_owns_it(
     driver: _Driver, written: bytes, input: object, data: bytes, closed: bool
 ) -> None:
-    fetched = driver.get_process()
+    fetched = driver.get_command()
     if written:
         fetched.write(written)
 
@@ -365,13 +365,13 @@ def test_communicate_closes_a_looked_up_process_stdin_only_when_it_owns_it(
 
 def test_a_looked_up_process_without_stdin_refuses_input(driver: _Driver) -> None:
     driver.server.attached = False
-    fetched = driver.get_process()
+    fetched = driver.get_command()
 
     for _ in range(2):
         with pytest.raises(sandbox.SandboxStdinError, match="stdin=subprocess.PIPE"):
             fetched.write(b"data")
     with pytest.raises(sandbox.SandboxStdinError, match="stdin=subprocess.PIPE"):
-        driver.get_process().communicate("data")
+        driver.get_command().communicate("data")
 
     # Nothing was attached, so there's nothing to close.
     fetched.close()
@@ -381,7 +381,7 @@ def test_a_looked_up_process_without_stdin_refuses_input(driver: _Driver) -> Non
 def test_a_looked_up_process_that_stops_taking_input_breaks_the_pipe(
     driver: _Driver, stopped: str
 ) -> None:
-    fetched = driver.get_process()
+    fetched = driver.get_command()
     fetched.write(b"a")
     if stopped == "reading":
         driver.server.reading = False
@@ -637,7 +637,7 @@ def test_run_command_kills_the_process_when_input_fails(driver: _Driver) -> None
     with pytest.raises(sandbox.SandboxStdinError):
         driver.run_command(input=b"data", capture_output=True)
 
-    assert driver.api.signals == [sandbox.ProcessSignal.SIGKILL]
+    assert driver.api.signals == [sandbox.CommandSignal.SIGKILL]
     assert len(driver.api.created) == 1
 
 
@@ -678,7 +678,7 @@ def test_run_command_on_start_error_is_raised_when_input_also_fails(driver: _Dri
 
     assert raised.value is error
     assert raised.value.__context__ is None
-    assert driver.api.signals == [sandbox.ProcessSignal.SIGKILL]
+    assert driver.api.signals == [sandbox.CommandSignal.SIGKILL]
 
 
 @pytest.mark.parametrize("stdin", [subprocess.STDOUT, 42, True, io.BytesIO(), "pipe"])

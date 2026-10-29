@@ -8,17 +8,17 @@ from typing import TextIO
 
 from vercel._internal.core.iter_coroutine import iter_coroutine
 from vercel._internal.core.time import parse_duration_seconds
-from vercel.sandbox._internal.models import CompletedProcess
+from vercel.sandbox._internal.models import CompletedCommand
 from vercel.sandbox._internal.process_output import (
     ProcessOutputRouter,
     _validate_reader_destination,
 )
 from vercel.sandbox._internal.process_stdin import (
-    ProcessInput,
+    CommandInput,
     _coerce_input,
     _validate_stdin,
 )
-from vercel.sandbox._internal.sync_runtime import SyncProcess, SyncSandboxFilesystem
+from vercel.sandbox._internal.sync_runtime import SyncCommand, SyncSandboxFilesystem
 from vercel.sandbox._internal.user_core import UserContext
 
 
@@ -63,8 +63,8 @@ class SyncSandboxUser:
         stdout: TextIO | int | None = None,
         stderr: TextIO | int | None = None,
         capture_output: bool = False,
-        input: ProcessInput | None = None,
-    ) -> CompletedProcess:
+        input: CommandInput | None = None,
+    ) -> CompletedCommand:
         """Run to completion; defaults to this user and their home directory.
 
         Options match the session API. ``sudo=True`` runs just this command
@@ -98,8 +98,8 @@ class SyncSandboxUser:
         stdout: TextIO | int | None = None,
         stderr: TextIO | int | None = None,
         capture_output: bool = False,
-        input: ProcessInput | None = None,
-    ) -> CompletedProcess:
+        input: CommandInput | None = None,
+    ) -> CompletedCommand:
         """Deprecated alias for ``run_command()``.
 
         .. deprecated::
@@ -137,8 +137,8 @@ class SyncSandboxUser:
         stdin: int | None = None,
         stdout: int = subprocess.PIPE,
         stderr: int = subprocess.PIPE,
-    ) -> SyncProcess:
-        """Start a process as this user, with the session API's stream options.
+    ) -> SyncCommand:
+        """Start a command as this user, with the session API's stream options.
 
         The returned process rejects STOP, TSTP, TTIN, and TTOU with
         ``NotImplementedError`` because the launcher cannot safely pause
@@ -162,7 +162,7 @@ class SyncSandboxUser:
             )
         )
         state = iter_coroutine(operation)
-        return SyncProcess(
+        return SyncCommand(
             payload=state,
             service=self._context.service,
             stdin="attached" if attach_stdin else None,
@@ -182,7 +182,7 @@ class SyncSandboxUser:
         stdin: int | None = None,
         stdout: int = subprocess.PIPE,
         stderr: int = subprocess.PIPE,
-    ) -> SyncProcess:
+    ) -> SyncCommand:
         """Deprecated alias for ``create_command()``.
 
         .. deprecated::

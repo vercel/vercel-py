@@ -230,11 +230,11 @@ async def test_user_pause_rejection_preserves_process_without_api_call(
         for handle in _handles():
             user = handle.as_user("alice")
             process_type = (
-                sandbox.sync.SyncProcess
+                sandbox.sync.SyncCommand
                 if isinstance(
                     handle, (sandbox.sync.SyncSandbox, sandbox.sync.SyncSandboxRuntimeSession)
                 )
-                else sandbox.Process
+                else sandbox.Command
             )
             process = process_type(
                 payload=ProcessState(
@@ -248,7 +248,7 @@ async def test_user_pause_rejection_preserves_process_without_api_call(
                 ),
                 service=user._context.service,
             )
-            for signal in ("STOP", 20, sandbox.ProcessSignal.SIGTTIN, "SIGTTOU"):
+            for signal in ("STOP", 20, sandbox.CommandSignal.SIGTTIN, "SIGTTOU"):
                 with pytest.raises(NotImplementedError, match="cannot safely pause"):
                     result = process.send_signal(signal)
                     if isawaitable(result):
@@ -259,7 +259,7 @@ async def test_user_pause_rejection_preserves_process_without_api_call(
                     "/home/alice",
                 )
                 assert process.returncode is None
-                assert process.status is sandbox.ProcessStatus.RUNNING
+                assert process.status is sandbox.CommandStatus.RUNNING
     assert not respx.calls
 
 
@@ -290,7 +290,7 @@ def test_selection_is_lazy_and_handle_properties_are_read_only(username: str) ->
             assert user.home_dir == ("/root" if username == "root" else None)
             assert user.fs is filesystem
             assert not hasattr(user, "stop")
-            assert not hasattr(user, "get_process")
+            assert not hasattr(user, "get_command")
             protocol = (
                 SyncSandboxExecution
                 if isinstance(
@@ -357,6 +357,47 @@ async def test_deprecated_process_methods_preserve_command_contract(
                 assert len(warnings) == 1
                 assert warnings[0].filename == __file__
             delegate.assert_called_once_with("python", ("-V",), **kwargs)
+            if isinstance(delegate, AsyncMock):
+                delegate.assert_awaited_once()
+
+
+@pytest.mark.parametrize("legacy", ["get_process", "query_processes"])
+@pytest.mark.parametrize("fails", [False, True], ids=["returns", "raises"])
+async def test_deprecated_process_lookups_delegate_to_commands(
+    monkeypatch: pytest.MonkeyPatch, legacy: str, fails: bool
+) -> None:
+    promoted = {"get_process": "get_command", "query_processes": "query_commands"}[legacy]
+    with session(service_options=sandbox_service_options(sync=True)):
+        for handle in _handles():
+            old_method = getattr(handle, legacy)
+            new_method = getattr(handle, promoted)
+            result = object()
+            error = RuntimeError("lookup failed")
+            delegate = (AsyncMock if iscoroutinefunction(new_method) else Mock)(
+                return_value=result, side_effect=error if fails else None
+            )
+            # Keep the old keyword spelling available to callers during migration.
+            kwargs = {"process_id": "cmd_test", "wait": True} if legacy == "get_process" else {}
+            with monkeypatch.context() as patch:
+                patch.setattr(type(handle), promoted, delegate)
+                with pytest.warns(DeprecationWarning, match=rf"{legacy}.*{promoted}") as warnings:
+                    if fails:
+                        with pytest.raises(RuntimeError) as raised:
+                            value = old_method(**kwargs)
+                            if isawaitable(value):
+                                await value
+                        assert raised.value is error
+                    else:
+                        value = old_method(**kwargs)
+                        if isawaitable(value):
+                            value = await value
+                        assert value is result
+                assert len(warnings) == 1
+                assert warnings[0].filename == __file__
+            if legacy == "get_process":
+                delegate.assert_called_once_with("cmd_test", wait=True)
+            else:
+                delegate.assert_called_once_with()
             if isinstance(delegate, AsyncMock):
                 delegate.assert_awaited_once()
 

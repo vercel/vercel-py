@@ -1107,7 +1107,7 @@ def _mock_update_superseded_by_recovery(
         )
     )
     respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_new/cmd").mock(
-        return_value=_recovery_success_response("query_processes", session_id="sbx_new")
+        return_value=_recovery_success_response("query_commands", session_id="sbx_new")
     )
     patch_route = respx.patch("https://sandbox.test/v2/sandboxes/preview").mock(
         return_value=httpx.Response(200, json={"sandbox": _sandbox_response()["sandbox"]})
@@ -1150,7 +1150,7 @@ async def test_async_update_step_superseded_by_recovery_keeps_current_session(
         async with anyio.create_task_group() as tasks:
             tasks.start_soon(run_update)
             await extend_started.wait()
-            assert len(await handle.query_processes()) == 1
+            assert len(await handle.query_commands()) == 1
             allow_extend.set()
 
     assert len(errors) == 1
@@ -1184,7 +1184,7 @@ def test_sync_update_step_superseded_by_recovery_keeps_current_session(
                 network_policy=_authored_network_policy(),
             )
             assert extend_started.wait(timeout=5)
-            assert len(handle.query_processes()) == 1
+            assert len(handle.query_commands()) == 1
             allow_extend.set()
             with pytest.raises(SandboxApiError):
                 update.result(timeout=5)
@@ -1861,7 +1861,7 @@ async def test_service_returns_neutral_state_and_async_runtime_binds_handles(
         handle = await sandbox.get_sandbox(name="preview")
         assert isinstance(handle, sandbox.Sandbox)
         assert isinstance(handle.current_session, sandbox.SandboxRuntimeSession)
-        assert isinstance(await handle.create_command("python"), sandbox.Process)
+        assert isinstance(await handle.create_command("python"), sandbox.Command)
         updated_session = await handle.extend_execution_time_limit(2.5)
         assert isinstance(updated_session, sandbox.SandboxRuntimeSession)
         assert updated_session.execution_time_limit == timedelta(minutes=5)
@@ -1875,7 +1875,7 @@ async def test_service_returns_neutral_state_and_async_runtime_binds_handles(
 
 @respx.mock
 def test_sync_runtime_binds_only_sync_handles(mock_env_clear: None) -> None:
-    assert not hasattr(sandbox_sync, "Process")
+    assert not hasattr(sandbox_sync, "Command")
     update_requests: list[httpx.Request] = []
 
     def update_handler(request: httpx.Request) -> httpx.Response:
@@ -1903,7 +1903,7 @@ def test_sync_runtime_binds_only_sync_handles(mock_env_clear: None) -> None:
         handle = sandbox_sync.get_sandbox(name="preview")
         assert isinstance(handle, sandbox_sync.SyncSandbox)
         assert isinstance(handle.current_session, sandbox_sync.SyncSandboxRuntimeSession)
-        assert isinstance(handle.create_command("python"), sandbox_sync.SyncProcess)
+        assert isinstance(handle.create_command("python"), sandbox_sync.SyncCommand)
         assert isinstance(handle.snapshot(expiration=timedelta(days=1)), sandbox_sync.SyncSnapshot)
         handle.update(tags={})
         handle.update(snapshot_retention=None)
@@ -3018,13 +3018,13 @@ def test_stopped_sync_sandbox_recovers_one_public_operation(
 
 _RECOVERABLE_SANDBOX_OPERATIONS = (
     (
-        "get_process",
+        "get_command",
         "get",
         "v2/sandboxes/sessions/sbx_old/cmd/cmd_123",
         "v2/sandboxes/sessions/sbx_new/cmd/cmd_123",
     ),
     (
-        "query_processes",
+        "query_commands",
         "get",
         "v2/sandboxes/sessions/sbx_old/cmd",
         "v2/sandboxes/sessions/sbx_new/cmd",
@@ -3052,9 +3052,9 @@ _RECOVERABLE_SANDBOX_OPERATIONS = (
 
 def _recovery_success_response(operation: str, *, session_id: str) -> httpx.Response:
     session = _sandbox_response(session_id=session_id)["session"]
-    if operation in {"get_process", "query_processes"}:
+    if operation in {"get_command", "query_commands"}:
         command = _command_response(session_id=session_id)["command"]
-        if operation == "get_process":
+        if operation == "get_command":
             return httpx.Response(200, json={"command": command})
         return httpx.Response(200, json={"commands": [command]})
     if operation == "snapshot":
@@ -3069,10 +3069,10 @@ def _recovery_success_response(operation: str, *, session_id: str) -> httpx.Resp
 
 
 async def _run_async_recoverable_operation(handle: sandbox.Sandbox, operation: str) -> object:
-    if operation == "get_process":
-        return await handle.get_process("cmd_123")
-    if operation == "query_processes":
-        return await handle.query_processes()
+    if operation == "get_command":
+        return await handle.get_command("cmd_123")
+    if operation == "query_commands":
+        return await handle.query_commands()
     if operation == "extend_execution_time_limit":
         return await handle.extend_execution_time_limit(2)
     if operation == "update_network_policy":
@@ -3083,10 +3083,10 @@ async def _run_async_recoverable_operation(handle: sandbox.Sandbox, operation: s
 
 
 def _run_sync_recoverable_operation(handle: sandbox_sync.SyncSandbox, operation: str) -> object:
-    if operation == "get_process":
-        return handle.get_process("cmd_123")
-    if operation == "query_processes":
-        return handle.query_processes()
+    if operation == "get_command":
+        return handle.get_command("cmd_123")
+    if operation == "query_commands":
+        return handle.query_commands()
     if operation == "extend_execution_time_limit":
         return handle.extend_execution_time_limit(2)
     if operation == "update_network_policy":
@@ -3574,7 +3574,7 @@ async def test_async_managed_session_cleanup_never_rolls_back_replacement(
     async with session(service_options=_session_options()):
         box = await sandbox.get_sandbox(name="preview")
         async with box.session() as acquired:
-            assert await box.query_processes() == []
+            assert await box.query_commands() == []
             replacement = box.current_session
             assert replacement is not None and replacement.id == "sbx_new"
         assert acquired.status is SandboxStatus.STOPPED
@@ -3922,12 +3922,12 @@ async def test_async_session_acquisition_shares_implicit_resume(
 
     async with session(service_options=_session_options()):
         box = await sandbox.get_sandbox(name="preview")
-        processes: list[sandbox.Process] | None = None
+        processes: list[sandbox.Command] | None = None
         acquired: sandbox.SandboxRuntimeSession | None = None
 
         async def query() -> None:
             nonlocal processes
-            processes = await box.query_processes()
+            processes = await box.query_commands()
 
         async def acquire() -> None:
             nonlocal acquired
@@ -3983,7 +3983,7 @@ def test_sync_managed_session_cleanup_never_rolls_back_replacement(
     with session(service_options=_session_options()):
         box = sandbox_sync.get_sandbox(name="preview")
         with box.session() as acquired:
-            assert box.query_processes() == []
+            assert box.query_commands() == []
             replacement = box.current_session
             assert replacement is not None and replacement.id == "sbx_new"
 
@@ -4171,7 +4171,7 @@ def test_sync_session_acquisition_shares_implicit_resume(
         box = sandbox_sync.get_sandbox(name="preview")
         box._recovery_condition = ObservedCondition()
         with ThreadPoolExecutor(max_workers=2) as executor:
-            implicit = executor.submit(box.query_processes)
+            implicit = executor.submit(box.query_commands)
             assert resume_started.wait(timeout=5)
             explicit = executor.submit(box.session)
             assert acquire_joined.wait(timeout=5)
@@ -4215,7 +4215,7 @@ def test_sync_managed_resume_sandbox_stops_adopted_replacement(
 
     with session(service_options=_session_options()):
         with sandbox_sync.resume_sandbox(name="preview") as box:
-            assert box.query_processes() == []
+            assert box.query_commands() == []
             assert box.current_session_id == "sbx_new"
 
     assert old_stop.call_count == 0
@@ -4258,7 +4258,7 @@ async def test_managed_create_sandbox_stops_replacement_before_destroy(
 
     async with session(service_options=_session_options()):
         async with sandbox.create_sandbox(name="preview") as box:
-            assert await box.query_processes() == []
+            assert await box.query_commands() == []
 
     assert old_stop.call_count == 0
     assert new_stop.call_count == 1
@@ -4301,7 +4301,7 @@ async def test_async_managed_exit_does_not_wait_for_racing_recovery(
 
     async with session(service_options=_session_options()):
         async with sandbox.resume_sandbox(name="preview") as box:
-            operation = asyncio.create_task(box.query_processes())
+            operation = asyncio.create_task(box.query_commands())
             await resume_started.wait()
         assert old_stop.call_count == 1
         release_resume.set()
@@ -4360,7 +4360,7 @@ async def test_async_sparse_stop_ignores_concurrent_recovery(
     async with session(service_options=_session_options()):
         box = await sandbox.get_sandbox(name="preview")
         assert box.current_session is None
-        operation = asyncio.create_task(box.query_processes())
+        operation = asyncio.create_task(box.query_commands())
         await resume_started.wait()
         stopping = asyncio.create_task(box.stop())
         await stop_started.wait()
@@ -4411,7 +4411,7 @@ def test_sync_managed_exit_does_not_wait_for_racing_recovery(
     with session(service_options=_session_options()):
         with ThreadPoolExecutor(max_workers=1) as executor:
             with sandbox_sync.resume_sandbox(name="preview") as box:
-                operation = executor.submit(box.query_processes)
+                operation = executor.submit(box.query_commands)
                 assert resume_started.wait(timeout=5)
             assert old_stop.call_count == 1
             release_resume.set()

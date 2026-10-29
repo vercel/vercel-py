@@ -17,10 +17,10 @@ from pydantic import SkipValidation
 from vercel._internal.core.byte_stream import ReadableByteStream
 from vercel.sandbox._internal.errors import SandboxResponseError
 from vercel.sandbox._internal.models import (
+    CommandSignal,
+    CommandStatus,
     JSONObject,
     NetworkPolicyReadback,
-    ProcessSignal,
-    ProcessStatus,
     RemotePath,
     SandboxMount,
     SandboxStatus,
@@ -191,19 +191,19 @@ def _validate_file_mode(mode: object) -> int | None:
     return mode
 
 
-def _signal_number(value: int | str | signal_module.Signals | ProcessSignal | None) -> int:
+def _signal_number(value: int | str | signal_module.Signals | CommandSignal | None) -> int:
     if value is None:
-        return int(ProcessSignal.SIGTERM)
+        return int(CommandSignal.SIGTERM)
     if isinstance(value, str):
         normalized = value.upper()
         if not normalized.startswith("SIG"):
             normalized = f"SIG{normalized}"
         try:
-            return int(ProcessSignal[normalized])
+            return int(CommandSignal[normalized])
         except KeyError as exc:
             raise ValueError(f"Unknown signal: {value!r}") from exc
     try:
-        return int(ProcessSignal(value))
+        return int(CommandSignal(value))
     except (TypeError, ValueError) as exc:
         raise ValueError(f"Unknown signal: {value!r}") from exc
 
@@ -247,8 +247,8 @@ class _ProcessHandleState:
         return self._payload.started_at
 
     @property
-    def status(self) -> ProcessStatus:
-        return ProcessStatus.RUNNING if self.returncode is None else ProcessStatus.EXITED
+    def status(self) -> CommandStatus:
+        return CommandStatus.RUNNING if self.returncode is None else CommandStatus.EXITED
 
     def _apply_payload(self, payload: ProcessState) -> None:
         if payload.id != self._payload.id or payload.session_id != self._payload.session_id:

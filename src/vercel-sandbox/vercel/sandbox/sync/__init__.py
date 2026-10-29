@@ -24,7 +24,9 @@ from vercel.sandbox._internal.errors import (
     SandboxUserAlreadyExistsError,
 )
 from vercel.sandbox._internal.models import (
-    CompletedProcess,
+    CommandSignal,
+    CommandStatus,
+    CompletedCommand,
     DirectoryEntry,
     DriveHandle,
     DriveMount,
@@ -50,8 +52,6 @@ from vercel.sandbox._internal.models import (
     NetworkPolicyRule,
     NetworkPolicySubnets,
     NetworkPolicyTransform,
-    ProcessSignal,
-    ProcessStatus,
     SandboxMount,
     SandboxQuery,
     SandboxQueryByCreatedAt,
@@ -75,7 +75,7 @@ from vercel.sandbox._internal.options import (
     SyncSandboxCredentialsFactory,
     SyncSandboxServiceOptions as SandboxServiceOptions,
 )
-from vercel.sandbox._internal.process_stdin import SyncProcessStdin
+from vercel.sandbox._internal.process_stdin import SyncCommandStdin
 from vercel.sandbox._internal.service import SandboxService, get_sync_sandbox_service
 from vercel.sandbox._internal.state import SnapshotRetentionState
 from vercel.sandbox._internal.sync_filesystem_handle import (
@@ -85,11 +85,11 @@ from vercel.sandbox._internal.sync_filesystem_handle import (
     SyncSandboxTextWriter,
 )
 from vercel.sandbox._internal.sync_runtime import (
+    SyncCommand,
     SyncDrive,
     SyncInteractiveSession,
     SyncInteractiveSessionOperation,
     SyncInteractiveStream,
-    SyncProcess,
     SyncSandbox,
     SyncSandboxFilesystem,
     SyncSandboxFilesystemBatch,
@@ -611,6 +611,14 @@ def get_snapshot(*, snapshot_id: str) -> SyncSnapshot:
     return _get_snapshot(_service(), snapshot_id=snapshot_id)
 
 
+# Compatibility aliases for the former public process names.
+SyncProcess = SyncCommand
+CompletedProcess = CompletedCommand
+SyncProcessStdin = SyncCommandStdin
+ProcessStatus = CommandStatus
+ProcessSignal = CommandSignal
+
+
 __all__ = [
     "SyncSandboxUser",
     "SyncSandboxExecution",
@@ -625,8 +633,11 @@ __all__ = [
     "DriveQueryByUpdatedAt",
     "SandboxApiError",
     "SandboxCleanupError",
+    "CommandStatus",
     "ProcessStatus",
+    "CommandSignal",
     "ProcessSignal",
+    "CompletedCommand",
     "CompletedProcess",
     "SandboxCredentials",
     "SandboxCredentialsError",
@@ -679,7 +690,9 @@ __all__ = [
     "SyncInteractiveSession",
     "SyncInteractiveSessionOperation",
     "SyncInteractiveStream",
+    "SyncCommand",
     "SyncProcess",
+    "SyncCommandStdin",
     "SyncProcessStdin",
     "SyncSandboxFilesystem",
     "SyncSandboxFilesystemBatch",

@@ -167,21 +167,21 @@ def _session_options() -> list[ServiceOptions]:
 
 def test_public_process_exports() -> None:
     for name in (
-        "CompletedProcess",
-        "Process",
-        "ProcessSignal",
-        "ProcessStatus",
+        "CompletedCommand",
+        "Command",
+        "CommandSignal",
+        "CommandStatus",
         "SandboxCredentials",
         "SandboxCredentialsFactory",
         "TextReader",
     ):
         assert name in sandbox.__all__
     for name in (
-        "CompletedProcess",
-        "ProcessSignal",
-        "ProcessStatus",
+        "CompletedCommand",
+        "CommandSignal",
+        "CommandStatus",
         "SandboxCredentials",
-        "SyncProcess",
+        "SyncCommand",
         "SyncSandboxCredentialsFactory",
         "SyncTextReader",
     ):
@@ -196,7 +196,7 @@ async def test_async_process_readers_wait_and_signals(mock_env_clear: None) -> N
     respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
         return_value=httpx.Response(200, json=_process_response())
     )
-    get_process = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1").mock(
+    get_command = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1").mock(
         side_effect=[
             httpx.Response(200, json=_process_response()),
             httpx.Response(200, json=_process_response(7)),
@@ -223,7 +223,7 @@ async def test_async_process_readers_wait_and_signals(mock_env_clear: None) -> N
         assert process.cwd == "/vercel/sandbox"
         assert process.session_id == "sbx_1"
         assert process.started_at == 1
-        assert process.status is sandbox.ProcessStatus.RUNNING
+        assert process.status is sandbox.CommandStatus.RUNNING
         assert process.stdin is None
         assert process.returncode is None
         assert process.stdout is not None
@@ -234,25 +234,25 @@ async def test_async_process_readers_wait_and_signals(mock_env_clear: None) -> N
         assert await process.refresh() is process
         assert await process.wait() == 7
         assert process.returncode == 7
-        assert process.status is sandbox.ProcessStatus.EXITED
+        assert process.status is sandbox.CommandStatus.EXITED
         await process.terminate()
         await process.kill()
         await process.send_signal(signal.SIGINT)
-        await process.send_signal(sandbox.ProcessSignal.SIGUSR1)
+        await process.send_signal(sandbox.CommandSignal.SIGUSR1)
         await process.send_signal("USR1")
         with pytest.raises(ValueError, match="Unknown signal"):
             await process.send_signal(32)
 
-    assert get_process.calls[0].request.url.params["wait"] == "false"
-    assert get_process.calls[1].request.url.params["wait"] == "true"
+    assert get_command.calls[0].request.url.params["wait"] == "false"
+    assert get_command.calls[1].request.url.params["wait"] == "true"
     assert logs.call_count == 1
     assert all(call.request.headers["connection"] == "close" for call in logs.calls)
     assert signals == [
-        sandbox.ProcessSignal.SIGTERM,
-        sandbox.ProcessSignal.SIGKILL,
-        sandbox.ProcessSignal.SIGINT,
-        sandbox.ProcessSignal.SIGUSR1,
-        sandbox.ProcessSignal.SIGUSR1,
+        sandbox.CommandSignal.SIGTERM,
+        sandbox.CommandSignal.SIGKILL,
+        sandbox.CommandSignal.SIGINT,
+        sandbox.CommandSignal.SIGUSR1,
+        sandbox.CommandSignal.SIGUSR1,
     ]
 
 
@@ -288,7 +288,7 @@ def test_sync_process_readers_wait_and_signals(mock_env_clear: None) -> None:
         process.terminate()
         process.kill()
 
-    assert signals == [sandbox.ProcessSignal.SIGTERM, sandbox.ProcessSignal.SIGKILL]
+    assert signals == [sandbox.CommandSignal.SIGTERM, sandbox.CommandSignal.SIGKILL]
 
 
 @respx.mock
@@ -487,7 +487,7 @@ async def test_run_command_routes_output_checks_and_uses_one_request(
     async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview")
         result = await box.run_command("python", ("-c", "print('out')"))
-        assert isinstance(result, sandbox.CompletedProcess)
+        assert isinstance(result, sandbox.CompletedCommand)
         assert result.args == ("python", "-c", "print('out')")
         assert result.returncode == 0
         assert result.stdout is None
@@ -1044,10 +1044,10 @@ def _async_coordinated_box(
 async def test_async_recovery_shares_success(anyio_backend: str, error_code: str) -> None:
     service = _AsyncCoordinatedRecoveryService(error_code=error_code)
     box = _async_coordinated_box(service)
-    results: list[list[sandbox.Process]] = []
+    results: list[list[sandbox.Command]] = []
 
     async def query() -> None:
-        results.append(await box.query_processes())
+        results.append(await box.query_commands())
 
     async with anyio.create_task_group() as task_group:
         task_group.start_soon(query)
@@ -1070,18 +1070,18 @@ async def test_async_recovery_waiter_re_elects_after_owner_cancellation(
     box = _async_coordinated_box(service)
     owner_scope = anyio.CancelScope()
     owner_done = anyio.Event()
-    waiter_result: list[sandbox.Process] | None = None
+    waiter_result: list[sandbox.Command] | None = None
 
     async def own_recovery() -> None:
         with owner_scope:
             try:
-                await box.query_processes()
+                await box.query_commands()
             finally:
                 owner_done.set()
 
     async def wait_for_recovery() -> None:
         nonlocal waiter_result
-        waiter_result = await box.query_processes()
+        waiter_result = await box.query_commands()
 
     async with anyio.create_task_group() as task_group:
         task_group.start_soon(own_recovery)
@@ -1106,9 +1106,9 @@ async def test_async_recovery_is_abandoned_when_all_callers_cancel(
     box = _async_coordinated_box(service)
 
     async with anyio.create_task_group() as task_group:
-        task_group.start_soon(box.query_processes)
+        task_group.start_soon(box.query_commands)
         await service.resume_started.wait()
-        task_group.start_soon(box.query_processes)
+        task_group.start_soon(box.query_commands)
         await service.second_failure.wait()
         task_group.cancel_scope.cancel()
 
@@ -1131,7 +1131,7 @@ async def test_async_recovery_shares_failure_and_clears_slot_for_retry(
 
     async def query() -> None:
         try:
-            await box.query_processes()
+            await box.query_commands()
         except BaseException as error:
             results.append(error)
 
@@ -1145,7 +1145,7 @@ async def test_async_recovery_shares_failure_and_clears_slot_for_retry(
     assert results == [resume_error, resume_error]
     assert service.resume_count == 1
     service.resume_error = None
-    assert await box.query_processes() == []
+    assert await box.query_commands() == []
     assert service.resume_count == 2
 
 
@@ -1193,10 +1193,10 @@ async def test_delayed_async_lifecycle_failure_may_resume_again_after_slot_clear
         service=service,  # type: ignore[arg-type]
     )
 
-    results: list[list[sandbox.Process]] = []
+    results: list[list[sandbox.Command]] = []
 
     async def query() -> None:
-        results.append(await box.query_processes())
+        results.append(await box.query_commands())
 
     async with anyio.create_task_group() as task_group:
         task_group.start_soon(query)
@@ -1313,9 +1313,9 @@ def test_sync_recovery_shares_or_re_elects_after_initiator_interruption(
     box = _sync_coordinated_box(service)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        initiating = executor.submit(box.query_processes)
+        initiating = executor.submit(box.query_commands)
         assert service.resume_started.wait(timeout=5)
-        waiting = executor.submit(box.query_processes)
+        waiting = executor.submit(box.query_commands)
         assert _wait_for_join(box)
         service.allow_resume.set()
         if interrupt_initiator:
@@ -1340,9 +1340,9 @@ def test_sync_recovery_shares_failure_and_clears_slot_for_retry(error_code: str)
     box = _sync_coordinated_box(service)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        initiating = executor.submit(box.query_processes)
+        initiating = executor.submit(box.query_commands)
         assert service.resume_started.wait(timeout=5)
-        waiting = executor.submit(box.query_processes)
+        waiting = executor.submit(box.query_commands)
         assert _wait_for_join(box)
         service.allow_resume.set()
         for participant in (initiating, waiting):
@@ -1352,7 +1352,7 @@ def test_sync_recovery_shares_failure_and_clears_slot_for_retry(error_code: str)
 
     assert service.resume_count == 1
     service.first_resume_error = None
-    assert box.query_processes() == []
+    assert box.query_commands() == []
     assert service.resume_count == 2
 
 
@@ -1402,7 +1402,7 @@ def test_sync_mutation_reply_superseded_by_recovery_keeps_current_session() -> N
     with ThreadPoolExecutor(max_workers=1) as executor:
         mutation = executor.submit(box.extend_execution_time_limit, 2)
         assert service.mutation_started.wait(timeout=5)
-        assert box.query_processes() == []
+        assert box.query_commands() == []
         service.allow_mutation.set()
         result = mutation.result(timeout=5)
 
@@ -1769,7 +1769,7 @@ _ON_START_MODES = pytest.mark.parametrize(
 )
 
 
-async def _run_through(sync: bool, target: str, **kwargs: Any) -> sandbox.CompletedProcess:
+async def _run_through(sync: bool, target: str, **kwargs: Any) -> sandbox.CompletedCommand:
     """Create a sandbox and run ``python`` through the selected public handle."""
     options = sandbox_service_options(team_id="team_1", project_id="prj_1", sync=sync)
     if sync:
@@ -1828,7 +1828,7 @@ async def test_run_command_on_start_receives_running_handle_before_output(
     assert hooked == plain
     assert len(handles) == 1
     assert handles[0].returncode == 3
-    assert handles[0].status is sandbox.ProcessStatus.EXITED
+    assert handles[0].status is sandbox.CommandStatus.EXITED
 
 
 @given(
@@ -2064,15 +2064,15 @@ async def test_sync_run_command_on_start_can_kill_the_process(
     respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/kill").mock(
         side_effect=signal_handler
     )
-    handles: list[sandbox_sync.SyncProcess] = []
+    handles: list[sandbox_sync.SyncCommand] = []
 
-    def on_start(process: sandbox_sync.SyncProcess) -> None:
+    def on_start(process: sandbox_sync.SyncCommand) -> None:
         handles.append(process)
         process.kill()
 
     result = await _run_through(True, target, capture_output=True, on_start=on_start)
 
-    assert signals == [sandbox.ProcessSignal.SIGKILL]
+    assert signals == [sandbox.CommandSignal.SIGKILL]
     assert result.returncode == 137
     assert handles[0].returncode == 137
 
@@ -2099,13 +2099,13 @@ async def test_async_on_start_kill_response_after_exit_keeps_returncode(
     respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/kill").mock(
         side_effect=signal_handler
     )
-    handles: list[sandbox.Process] = []
+    handles: list[sandbox.Command] = []
 
     async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview")
         async with anyio.create_task_group() as tg:
 
-            def on_start(process: sandbox.Process) -> None:
+            def on_start(process: sandbox.Command) -> None:
                 handles.append(process)
                 tg.start_soon(process.kill)
 
@@ -2113,7 +2113,7 @@ async def test_async_on_start_kill_response_after_exit_keeps_returncode(
             assert handles[0].returncode == 137
             release_kill.set()
 
-    assert signals == [sandbox.ProcessSignal.SIGKILL]
+    assert signals == [sandbox.CommandSignal.SIGKILL]
     assert result.returncode == 137
     assert handles[0].returncode == 137
 

@@ -24,9 +24,18 @@ async with session():
 The package can be installed independently with `pip install vercel-sandbox`.
 
 Use `run_command()` to run a command to completion and `create_command()` to
-start one and return a `Process` handle. These names apply to sandbox, runtime
-session, and user handles in both APIs. `run_process()` and `create_process()`
-remain available as deprecated aliases and emit `DeprecationWarning`.
+start one and return a `Command` handle (`SyncCommand` synchronously).
+`run_command()` returns a `CompletedCommand`. Use `get_command(command_id)`
+or `query_commands()` on a sandbox or runtime session to retrieve commands.
+`CommandStatus`, `CommandSignal`, `CommandStdin`, and `SyncCommandStdin`
+describe their status, signals, and input streams.
+
+The execution names apply to sandbox, runtime session, and user handles in
+both APIs. The former `Process`, `SyncProcess`, `CompletedProcess`,
+`ProcessStatus`, `ProcessSignal`, `ProcessStdin`, and `SyncProcessStdin` names
+remain aliases of the corresponding command classes. `run_process()`,
+`create_process()`, `get_process()`, and `query_processes()` remain available
+as deprecated wrappers and emit `DeprecationWarning`.
 
 To attach a sandbox to a Secure Compute private network, pass its connect
 network ID at creation:
@@ -55,7 +64,7 @@ with session():
         print(process.stdout)
 ```
 
-Process APIs follow `subprocess`. Asynchronously, `process.stdin` is an
+Command APIs follow `subprocess`. Asynchronously, `process.stdin` is an
 `anyio.abc.ByteSendStream`, so it works with `TextSendStream` under asyncio or
 Trio. Synchronously it is a writable `io.RawIOBase`; wrap it in
 `io.TextIOWrapper` for text. For a long-running stdio server, see

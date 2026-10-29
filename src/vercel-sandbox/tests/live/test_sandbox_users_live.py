@@ -469,7 +469,7 @@ async def test_user_processes_read_stdin_through_the_launcher(driver: Any) -> No
             )
             await driver.write_stdin(process, b"first\n")
             assert await driver.readline(process) == "alice:first\n"
-            fetched = await _call(box.get_process, process.id)
+            fetched = await _call(box.get_command, process.id)
             await driver.write_stdin(fetched, b"second\n")
             assert await driver.readline(process) == "second\n"
             await driver.close_stdin(fetched)

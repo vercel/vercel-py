@@ -7,7 +7,7 @@ from collections.abc import Mapping, Sequence
 from datetime import timedelta
 from typing import TYPE_CHECKING, Literal, Protocol, TextIO, overload, runtime_checkable
 
-from vercel.sandbox._internal.models import CompletedProcess, DirectoryEntry, RemotePath
+from vercel.sandbox._internal.models import CompletedCommand, DirectoryEntry, RemotePath
 
 if TYPE_CHECKING:
     from vercel.sandbox._internal.async_filesystem_handle import (
@@ -16,14 +16,14 @@ if TYPE_CHECKING:
         SandboxTextReader,
         SandboxTextWriter,
     )
-    from vercel.sandbox._internal.async_runtime import Process, SandboxFilesystemBatch
+    from vercel.sandbox._internal.async_runtime import Command, SandboxFilesystemBatch
     from vercel.sandbox._internal.sync_filesystem_handle import (
         SyncSandboxBinaryReader,
         SyncSandboxBinaryWriter,
         SyncSandboxTextReader,
         SyncSandboxTextWriter,
     )
-    from vercel.sandbox._internal.sync_runtime import SyncProcess, SyncSandboxFilesystemBatch
+    from vercel.sandbox._internal.sync_runtime import SyncCommand, SyncSandboxFilesystemBatch
 
 
 @runtime_checkable
@@ -167,7 +167,7 @@ class SandboxExecution(Protocol):
         stdout: TextIO | int | None = None,
         stderr: TextIO | int | None = None,
         capture_output: bool = False,
-    ) -> CompletedProcess: ...
+    ) -> CompletedCommand: ...
 
     async def run_process(
         self,
@@ -182,7 +182,7 @@ class SandboxExecution(Protocol):
         stdout: TextIO | int | None = None,
         stderr: TextIO | int | None = None,
         capture_output: bool = False,
-    ) -> CompletedProcess:
+    ) -> CompletedCommand:
         """Deprecated alias for ``run_command()``."""
         ...
 
@@ -197,7 +197,7 @@ class SandboxExecution(Protocol):
         kill_after: float | timedelta | None = None,
         stdout: int = subprocess.PIPE,
         stderr: int = subprocess.PIPE,
-    ) -> Process: ...
+    ) -> Command: ...
 
     async def create_process(
         self,
@@ -210,7 +210,7 @@ class SandboxExecution(Protocol):
         kill_after: float | timedelta | None = None,
         stdout: int = subprocess.PIPE,
         stderr: int = subprocess.PIPE,
-    ) -> Process:
+    ) -> Command:
         """Deprecated alias for ``create_command()``."""
         ...
 
@@ -356,7 +356,7 @@ class SyncSandboxExecution(Protocol):
         stdout: TextIO | int | None = None,
         stderr: TextIO | int | None = None,
         capture_output: bool = False,
-    ) -> CompletedProcess: ...
+    ) -> CompletedCommand: ...
 
     def run_process(
         self,
@@ -371,7 +371,7 @@ class SyncSandboxExecution(Protocol):
         stdout: TextIO | int | None = None,
         stderr: TextIO | int | None = None,
         capture_output: bool = False,
-    ) -> CompletedProcess:
+    ) -> CompletedCommand:
         """Deprecated alias for ``run_command()``."""
         ...
 
@@ -386,7 +386,7 @@ class SyncSandboxExecution(Protocol):
         kill_after: float | timedelta | None = None,
         stdout: int = subprocess.PIPE,
         stderr: int = subprocess.PIPE,
-    ) -> SyncProcess: ...
+    ) -> SyncCommand: ...
 
     def create_process(
         self,
@@ -399,6 +399,6 @@ class SyncSandboxExecution(Protocol):
         kill_after: float | timedelta | None = None,
         stdout: int = subprocess.PIPE,
         stderr: int = subprocess.PIPE,
-    ) -> SyncProcess:
+    ) -> SyncCommand:
         """Deprecated alias for ``create_command()``."""
         ...
