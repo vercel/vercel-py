@@ -24,7 +24,7 @@ from vercel.passport._internal.models import (
     PassportVerificationError,
     TokenSource,
 )
-from vercel.passport._internal.payload import build_identity, decode_unverified
+from vercel.passport._internal.payload import decode_unverified
 
 PASSPORT_HEADER_NAME = "x-vercel-oidc-passport-token"
 PASSPORT_COOKIE_NAME = "_vercel_passport"
@@ -106,14 +106,14 @@ def resolve_identity(
                 "are not allowed outside local development; pass verify=True, use "
                 "verify_identity(), or pass allow_unverified=True"
             )
-        return build_identity(
-            decode_unverified(resolved), token=resolved, token_source=source, verified=False
+        return PassportIdentity(
+            payload=decode_unverified(resolved), token=resolved, token_source=source, verified=False
         )
 
     claims = local_claims()
     if claims is None:
         return None
-    return build_identity(claims, token=None, token_source="local", verified=False)
+    return PassportIdentity(payload=claims, token_source="local", verified=False)
 
 
 def resolve_token(
@@ -169,8 +169,8 @@ async def verify_async(pending: PendingVerification, expectations: Expectations)
 
 
 def verified_identity(pending: PendingVerification, claims: PassportClaims) -> PassportIdentity:
-    return build_identity(
-        claims, token=pending.token, token_source=pending.token_source, verified=True
+    return PassportIdentity(
+        payload=claims, token=pending.token, token_source=pending.token_source, verified=True
     )
 
 

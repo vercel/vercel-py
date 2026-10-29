@@ -24,9 +24,9 @@ from vercel.passport._internal.models import (
     PassportClaims,
     PassportDevelopmentIdentity,
     PassportDevelopmentIdentityWarning,
+    PassportIdentity,
     PassportIdentityError,
 )
-from vercel.passport._internal.payload import build_identity
 
 IDENTITY_ENV = "VERCEL_PASSPORT_IDENTITY"
 DEVELOPMENT_ENV = "VERCEL_PASSPORT_DEV"
@@ -77,7 +77,7 @@ def local_identity(identity: PassportDevelopmentIdentity | Mapping[str, Any]) ->
         )
     # Checked on entry, so a malformed identity fails where it is set rather
     # than at some later `get_identity`.
-    build_identity(claims, token=None, token_source="local", verified=False)
+    PassportIdentity(payload=claims, token_source="local", verified=False)
     token = _override.set(claims)
     try:
         yield

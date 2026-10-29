@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import copy
 import os
+import re
 from collections.abc import Mapping
-from typing import Any, Literal, TypeAlias, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias, TypeVar
 
 from pydantic import (
     BaseModel,
@@ -28,6 +30,10 @@ development identity).
 
 PassportClaims: TypeAlias = Mapping[str, Any]
 """Every claim on a Passport token. JSON, so its values stay dynamic."""
+
+# Matches the owner segment `vercel.oidc` accepts for verified tokens, so an
+# unverified identity is held to the same issuer shape as a verified one.
+_OWNER_SLUG = re.compile(r"[A-Za-z0-9_-]+")
 
 
 class PassportError(Exception):
@@ -237,8 +243,73 @@ class PassportProject(PassportModel):
     name: str | None = None
 
 
+def is_passport_issuer(value: object) -> bool:
+    """Whether `value` is Vercel Passport's issuer, root or owner-scoped."""
+    if value == VERCEL_PASSPORT_ISSUER:
+        return True
+    prefix = f"{VERCEL_PASSPORT_ISSUER}/"
+    return (
+        isinstance(value, str)
+        and value.startswith(prefix)
+        and _OWNER_SLUG.fullmatch(value[len(prefix) :]) is not None
+    )
+
+
+def _string(claims: Mapping[str, Any], name: str) -> str | None:
+    value = claims.get(name)
+    return value if isinstance(value, str) else None
+
+
+def _identity_fields(claims: Mapping[str, Any]) -> dict[str, Any]:
+    """Check that `claims` are Passport-shaped and derive the identity's fields.
+
+    The shape is required of verified tokens too, so a valid Vercel OIDC token
+    that is not a Passport identity is never accepted as one.
+    """
+    if claims.get("typ") != "passport":
+        raise PassportIdentityError('Passport identity token is missing typ "passport"')
+    subject = _string(claims, "sub")
+    if not subject:
+        raise PassportIdentityError('Passport identity is missing a "sub" claim')
+    issuer = claims.get("iss")
+    if not is_passport_issuer(issuer):
+        raise PassportIdentityError(
+            f"Passport identity issuer {issuer!r} is not {VERCEL_PASSPORT_ISSUER} "
+            "or an owner-scoped issuer under it"
+        )
+    owner = _string(claims, "owner")
+    if not owner:
+        raise PassportIdentityError('Passport identity is missing an "owner" claim')
+    connector_id = _string(claims, "connector_id")
+    if not connector_id:
+        raise PassportIdentityError('Passport identity is missing a "connector_id" claim')
+    external_subject = _string(claims, "external_sub")
+    if not external_subject:
+        raise PassportIdentityError('Passport identity is missing an "external_sub" claim')
+    project_id = _string(claims, "project_id")
+    return {
+        "subject": subject,
+        "external_subject": external_subject,
+        "connector_id": connector_id,
+        "owner": {"slug": owner, "id": _string(claims, "owner_id")},
+        "external_issuer": _string(claims, "external_iss"),
+        "email": _string(claims, "email"),
+        "name": _string(claims, "name"),
+        # Only a project ID identifies a project; every verified token has one.
+        "project": ({"id": project_id, "name": _string(claims, "project")} if project_id else None),
+        "environment": _string(claims, "environment"),
+    }
+
+
 class PassportIdentity(PassportModel):
     """A visitor identity established by Vercel Passport.
+
+    Built from a token's claims: pass `payload`, `token_source`, `verified`, and
+    optionally `token`, and the identity checks that the claims are
+    Passport-shaped and derives every other field from them, however it is
+    constructed, `model_validate` included. A field passed explicitly must
+    match its claim. A claims shape violation raises `PassportIdentityError`;
+    a contradicting field raises `PassportValidationError`.
 
     `token` and `payload` are omitted from the repr, and `token` from
     `model_dump`, so neither logging an identity nor returning one from an
@@ -272,8 +343,42 @@ class PassportIdentity(PassportModel):
     # identity returned from an endpoint ever carries the bearer credential.
     token: str | None = Field(default=None, repr=False, exclude=True)
     """The encoded token, or `None` for an identity supplied without one."""
-    payload: dict[str, Any] = Field(default_factory=dict, repr=False)
+    payload: dict[str, Any] = Field(repr=False)
     """Every claim on the token, including ones without a dedicated field."""
+
+    if TYPE_CHECKING:
+        # What a caller supplies; pydantic would otherwise require every derived
+        # field as well.
+        def __init__(
+            self,
+            *,
+            payload: Mapping[str, Any],
+            token_source: TokenSource,
+            verified: bool,
+            token: str | None = None,
+            **fields: Any,
+        ) -> None: ...
+
+    @model_validator(mode="before")
+    @classmethod
+    def _fields_from_claims(cls, data: Any) -> Any:
+        if not isinstance(data, Mapping):
+            return data
+        if "payload" not in data:
+            raise PassportValidationError(
+                "payload: Field required; an identity is built from its token's claims"
+            )
+        if not isinstance(data["payload"], Mapping):
+            return data
+        # A deep copy, so the identity and the caller's claims, nested values
+        # included, never change each other.
+        claims = copy.deepcopy(dict(data["payload"]))
+        derived = _identity_fields(claims)
+        for name, value in derived.items():
+            given = data.get(name, value)
+            if (given.model_dump() if isinstance(given, BaseModel) else given) != value:
+                raise PassportValidationError(f"{name} does not match the identity's claims")
+        return {**data, **derived, "payload": claims}
 
     def _key(self) -> tuple[Any, ...]:
         return (

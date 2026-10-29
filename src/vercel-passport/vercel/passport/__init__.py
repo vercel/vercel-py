@@ -128,15 +128,39 @@ async def require_identity(
 ) -> PassportIdentity:
     """Read the Passport identity of the current request, requiring a token.
 
-    Takes the same arguments as `get_identity`, but raises instead of returning
-    `None`, and also rejects an identity without a token, such as a local or
-    synthesized development identity. The returned identity's `token` is
-    always set.
+    Resolves the identity exactly as `get_identity` does, but raises instead of
+    returning `None`, and also rejects an identity without a token, such as a
+    local or synthesized development identity. The returned identity's `token`
+    is always set, so it can be forwarded to another backend.
+
+    Args:
+        request: Request headers, or any request object exposing a `headers`
+            mapping (Starlette, FastAPI, Django, Flask, httpx).
+        token: A Passport token to use instead of the request's, for local
+            debugging. It is verified only when `verify` is true.
+        cookies: Request cookies, such as `request.cookies`. Checked before the
+            `Cookie` header.
+        verify: Verify `token` or the `VERCEL_PASSPORT_TOKEN` token.
+        allow_unverified: Accept `token` or the `VERCEL_PASSPORT_TOKEN` token
+            unverified when `verify` is false. Defaults to accepting it only in
+            local development, so on a Vercel deployment other than
+            `VERCEL_ENV=development` an unverified token raises unless this is
+            true.
+        project_id: Expected project. Defaults to `VERCEL_PROJECT_ID`.
+        environment: Expected environment. Defaults to `VERCEL_TARGET_ENV`, then
+            `VERCEL_ENV`.
+        owner_id: Expected team owner. Checked only when supplied.
+        audience: Expected audience. Checked only when supplied.
+
+    Returns:
+        The identity, with its `token` set.
 
     Raises:
-        PassportIdentityError: If there is no identity or it has no token, or
-            for any reason `get_identity` raises it.
-        PassportVerificationError: For any reason `get_identity` raises it.
+        PassportIdentityError: If there is no identity or it has no token, or a
+            token, chunked cookie, or identity is malformed or not
+            Passport-shaped, or an unverified token is not allowed.
+        PassportVerificationError: If a token does not verify, a claim does not
+            match, or the expected project and environment cannot be resolved.
     """
     outcome = resolve_identity(
         request,
