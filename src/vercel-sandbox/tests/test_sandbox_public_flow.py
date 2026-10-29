@@ -1861,7 +1861,7 @@ async def test_service_returns_neutral_state_and_async_runtime_binds_handles(
         handle = await sandbox.get_sandbox(name="preview")
         assert isinstance(handle, sandbox.Sandbox)
         assert isinstance(handle.current_session, sandbox.SandboxRuntimeSession)
-        assert isinstance(await handle.create_process("python"), sandbox.Process)
+        assert isinstance(await handle.create_command("python"), sandbox.Process)
         updated_session = await handle.extend_execution_time_limit(2.5)
         assert isinstance(updated_session, sandbox.SandboxRuntimeSession)
         assert updated_session.execution_time_limit == timedelta(minutes=5)
@@ -1903,7 +1903,7 @@ def test_sync_runtime_binds_only_sync_handles(mock_env_clear: None) -> None:
         handle = sandbox_sync.get_sandbox(name="preview")
         assert isinstance(handle, sandbox_sync.SyncSandbox)
         assert isinstance(handle.current_session, sandbox_sync.SyncSandboxRuntimeSession)
-        assert isinstance(handle.create_process("python"), sandbox_sync.SyncProcess)
+        assert isinstance(handle.create_command("python"), sandbox_sync.SyncProcess)
         assert isinstance(handle.snapshot(expiration=timedelta(days=1)), sandbox_sync.SyncSnapshot)
         handle.update(tags={})
         handle.update(snapshot_retention=None)
@@ -1942,10 +1942,10 @@ async def test_async_command_kill_after_encodes_seconds_and_timedelta(
 
     async with session(service_options=_session_options()):
         handle = await sandbox.get_sandbox(name="preview")
-        await handle.run_process("sleep", ["60"], kill_after=2.5)
-        await handle.create_process("sleep", ["60"], kill_after=timedelta(seconds=3.25))
+        await handle.run_command("sleep", ["60"], kill_after=2.5)
+        await handle.create_command("sleep", ["60"], kill_after=timedelta(seconds=3.25))
         assert handle.current_session is not None
-        await handle.current_session.create_process("sleep", ["60"], kill_after=4)
+        await handle.current_session.create_command("sleep", ["60"], kill_after=4)
 
     assert [json.loads(request.content) for request in requests] == [
         {
@@ -1978,9 +1978,9 @@ def test_sync_command_kill_after_encodes_seconds_and_omits_none(mock_env_clear: 
 
     with session(service_options=_session_options()):
         handle = sandbox_sync.get_sandbox(name="preview")
-        handle.create_process("echo", ["hello"])
+        handle.create_command("echo", ["hello"])
         assert handle.current_session is not None
-        handle.current_session.create_process("sleep", ["60"], kill_after=1.5)
+        handle.current_session.create_command("sleep", ["60"], kill_after=1.5)
 
     assert [json.loads(request.content) for request in requests] == [
         {"command": "echo", "args": ["hello"], "sudo": False},
@@ -2653,15 +2653,15 @@ async def test_closed_session_rejects_handles_and_lazy_readers(mock_env_clear: N
         resumed = await sandbox.resume_sandbox(name="preview")
         assert resumed.current_session is not None
         runtime_session = resumed.current_session
-        command = await handle.create_process("sleep", ["30"])
+        command = await handle.create_command("sleep", ["30"])
         snapshot = await handle.snapshot()
         assert snapshot.region == "iad1"
         assert snapshot.regions == ("iad1", "sfo1", "cle1")
 
     with pytest.raises(VercelSessionClosedError):
-        await handle.create_process("true")
+        await handle.create_command("true")
     with pytest.raises(VercelSessionClosedError):
-        await runtime_session.create_process("true")
+        await runtime_session.create_command("true")
     with pytest.raises(VercelSessionClosedError):
         await command.refresh()
     assert command.stdout is not None
@@ -2996,7 +2996,7 @@ async def test_stopped_async_sandbox_recovers_one_public_operation(
 
     async with session(service_options=_session_options()):
         handle = await sandbox.get_sandbox(name="preview")
-        process = await handle.create_process("python", ["--version"])
+        process = await handle.create_command("python", ["--version"])
 
     assert process.session_id == handle.current_session_id == "sbx_new"
     assert events == ["lookup", "resume", "replay"]
@@ -3010,7 +3010,7 @@ def test_stopped_sync_sandbox_recovers_one_public_operation(
 
     with session(service_options=_session_options()):
         handle = sandbox_sync.get_sandbox(name="preview")
-        process = handle.create_process("python", ["--version"])
+        process = handle.create_command("python", ["--version"])
 
     assert process.session_id == handle.current_session_id == "sbx_new"
     assert events == ["lookup", "resume", "replay"]
@@ -3221,7 +3221,7 @@ async def test_async_sparse_sandbox_lookup_targets_current_session_without_resum
         handle = await sandbox.get_sandbox(name="preview")
         assert handle.current_session_id == "sbx_sparse"
         assert handle.current_session is None
-        process = await handle.create_process("python")
+        process = await handle.create_command("python")
 
     assert process.session_id == "sbx_sparse"
     assert lookup_route.call_count == operation_route.call_count == 1
@@ -3264,7 +3264,7 @@ async def test_async_sandbox_recovery_preserves_route_projection(
             name="preview",
             include_system_routes=include_system_routes,
         )
-        await handle.create_process("python")
+        await handle.create_command("python")
 
     assert [request.url.params["resume"] for request in requests] == ["false", "true"]
     for request in requests:
@@ -3331,7 +3331,7 @@ async def test_mutating_handles_reject_mismatched_response_identity(mock_env_cle
         data = cast(SandboxState, raised.value.data)
         assert json.loads(data.model_dump_json())["name"] == "other"
 
-        command = await handle.create_process("python", ["--version"])
+        command = await handle.create_command("python", ["--version"])
         with pytest.raises(SandboxResponseError):
             await command.refresh()
 

@@ -154,7 +154,7 @@ class SandboxExecution(Protocol):
     @property
     def fs(self) -> SandboxFilesystemOperations: ...
 
-    async def run_process(
+    async def run_command(
         self,
         command: str,
         args: Sequence[str] | None = None,
@@ -169,7 +169,24 @@ class SandboxExecution(Protocol):
         capture_output: bool = False,
     ) -> CompletedProcess: ...
 
-    async def create_process(
+    async def run_process(
+        self,
+        command: str,
+        args: Sequence[str] | None = None,
+        *,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        sudo: bool = False,
+        kill_after: float | timedelta | None = None,
+        check: bool = False,
+        stdout: TextIO | int | None = None,
+        stderr: TextIO | int | None = None,
+        capture_output: bool = False,
+    ) -> CompletedProcess:
+        """Deprecated alias for ``run_command()``."""
+        ...
+
+    async def create_command(
         self,
         command: str,
         args: Sequence[str] | None = None,
@@ -181,6 +198,21 @@ class SandboxExecution(Protocol):
         stdout: int = subprocess.PIPE,
         stderr: int = subprocess.PIPE,
     ) -> Process: ...
+
+    async def create_process(
+        self,
+        command: str,
+        args: Sequence[str] | None = None,
+        *,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        sudo: bool = False,
+        kill_after: float | timedelta | None = None,
+        stdout: int = subprocess.PIPE,
+        stderr: int = subprocess.PIPE,
+    ) -> Process:
+        """Deprecated alias for ``create_command()``."""
+        ...
 
 
 @runtime_checkable
@@ -311,7 +343,7 @@ class SyncSandboxExecution(Protocol):
     @property
     def fs(self) -> SyncSandboxFilesystemOperations: ...
 
-    def run_process(
+    def run_command(
         self,
         command: str,
         args: Sequence[str] | None = None,
@@ -326,7 +358,24 @@ class SyncSandboxExecution(Protocol):
         capture_output: bool = False,
     ) -> CompletedProcess: ...
 
-    def create_process(
+    def run_process(
+        self,
+        command: str,
+        args: Sequence[str] | None = None,
+        *,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        sudo: bool = False,
+        kill_after: float | timedelta | None = None,
+        check: bool = False,
+        stdout: TextIO | int | None = None,
+        stderr: TextIO | int | None = None,
+        capture_output: bool = False,
+    ) -> CompletedProcess:
+        """Deprecated alias for ``run_command()``."""
+        ...
+
+    def create_command(
         self,
         command: str,
         args: Sequence[str] | None = None,
@@ -338,3 +387,18 @@ class SyncSandboxExecution(Protocol):
         stdout: int = subprocess.PIPE,
         stderr: int = subprocess.PIPE,
     ) -> SyncProcess: ...
+
+    def create_process(
+        self,
+        command: str,
+        args: Sequence[str] | None = None,
+        *,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        sudo: bool = False,
+        kill_after: float | timedelta | None = None,
+        stdout: int = subprocess.PIPE,
+        stderr: int = subprocess.PIPE,
+    ) -> SyncProcess:
+        """Deprecated alias for ``create_command()``."""
+        ...

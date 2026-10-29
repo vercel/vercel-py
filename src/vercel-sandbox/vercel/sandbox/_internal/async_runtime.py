@@ -995,7 +995,7 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         await user._context.provision()
         return user
 
-    async def run_process(
+    async def run_command(
         self,
         command: str,
         args: Sequence[str] | None = None,
@@ -1105,7 +1105,49 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
             result.check_returncode()
         return result
 
-    async def create_process(
+    async def run_process(
+        self,
+        command: str,
+        args: Sequence[str] | None = None,
+        *,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        sudo: bool = False,
+        kill_after: float | timedelta | None = None,
+        check: bool = False,
+        stdout: TextIO | int | None = None,
+        stderr: TextIO | int | None = None,
+        capture_output: bool = False,
+        input: ProcessInput | None = None,
+        on_start: Callable[[Process], None] | None = None,
+    ) -> CompletedProcess:
+        """Deprecated alias for ``run_command()``.
+
+        .. deprecated::
+            Use ``run_command()`` instead.
+        """
+        warnings.warn(
+            "SandboxRuntimeSession.run_process() is deprecated; use "
+            "SandboxRuntimeSession.run_command() instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return await self.run_command(
+            command,
+            args,
+            cwd=cwd,
+            env=env,
+            sudo=sudo,
+            kill_after=kill_after,
+            check=check,
+            stdout=stdout,
+            stderr=stderr,
+            capture_output=capture_output,
+            input=input,
+            on_start=on_start,
+        )
+
+    async def create_command(
         self,
         command: str,
         args: Sequence[str] | None = None,
@@ -1156,6 +1198,42 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
             payload=state,
             service=self._service,
             stdin="attached" if attach_stdin else None,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+    async def create_process(
+        self,
+        command: str,
+        args: Sequence[str] | None = None,
+        *,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        sudo: bool = False,
+        kill_after: float | timedelta | None = None,
+        stdin: int | None = None,
+        stdout: int = subprocess.PIPE,
+        stderr: int = subprocess.PIPE,
+    ) -> Process:
+        """Deprecated alias for ``create_command()``.
+
+        .. deprecated::
+            Use ``create_command()`` instead.
+        """
+        warnings.warn(
+            "SandboxRuntimeSession.create_process() is deprecated; use "
+            "SandboxRuntimeSession.create_command() instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return await self.create_command(
+            command,
+            args,
+            cwd=cwd,
+            env=env,
+            sudo=sudo,
+            kill_after=kill_after,
+            stdin=stdin,
             stdout=stdout,
             stderr=stderr,
         )
@@ -1435,7 +1513,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         await user._context.provision()
         return user
 
-    async def run_process(
+    async def run_command(
         self,
         command: str,
         args: Sequence[str] | None = None,
@@ -1453,7 +1531,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
     ) -> CompletedProcess:
         """Run a process to completion in the current session.
 
-        See ``SandboxRuntimeSession.run_process`` for argument behavior.
+        See ``SandboxRuntimeSession.run_command`` for argument behavior.
 
         A stopped sandbox is resumed and the run replayed only if the process
         never started, so ``on_start`` runs at most once, against the session
@@ -1509,7 +1587,48 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
             result.check_returncode()
         return result
 
-    async def create_process(
+    async def run_process(
+        self,
+        command: str,
+        args: Sequence[str] | None = None,
+        *,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        sudo: bool = False,
+        kill_after: float | timedelta | None = None,
+        check: bool = False,
+        stdout: TextIO | int | None = None,
+        stderr: TextIO | int | None = None,
+        capture_output: bool = False,
+        input: ProcessInput | None = None,
+        on_start: Callable[[Process], None] | None = None,
+    ) -> CompletedProcess:
+        """Deprecated alias for ``run_command()``.
+
+        .. deprecated::
+            Use ``run_command()`` instead.
+        """
+        warnings.warn(
+            "Sandbox.run_process() is deprecated; use Sandbox.run_command() instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return await self.run_command(
+            command,
+            args,
+            cwd=cwd,
+            env=env,
+            sudo=sudo,
+            kill_after=kill_after,
+            check=check,
+            stdout=stdout,
+            stderr=stderr,
+            capture_output=capture_output,
+            input=input,
+            on_start=on_start,
+        )
+
+    async def create_command(
         self,
         command: str,
         args: Sequence[str] | None = None,
@@ -1524,7 +1643,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
     ) -> Process:
         """Start a process in the current session without waiting for it.
 
-        See ``SandboxRuntimeSession.create_process`` for argument behavior.
+        See ``SandboxRuntimeSession.create_command`` for argument behavior.
 
         Returns:
             A handle for monitoring and controlling the process.
@@ -1551,6 +1670,41 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
             payload=state,
             service=self._service,
             stdin="attached" if attach_stdin else None,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+    async def create_process(
+        self,
+        command: str,
+        args: Sequence[str] | None = None,
+        *,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        sudo: bool = False,
+        kill_after: float | timedelta | None = None,
+        stdin: int | None = None,
+        stdout: int = subprocess.PIPE,
+        stderr: int = subprocess.PIPE,
+    ) -> Process:
+        """Deprecated alias for ``create_command()``.
+
+        .. deprecated::
+            Use ``create_command()`` instead.
+        """
+        warnings.warn(
+            "Sandbox.create_process() is deprecated; use Sandbox.create_command() instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return await self.create_command(
+            command,
+            args,
+            cwd=cwd,
+            env=env,
+            sudo=sudo,
+            kill_after=kill_after,
+            stdin=stdin,
             stdout=stdout,
             stderr=stderr,
         )

@@ -7,8 +7,10 @@ import re
 import subprocess
 import sys
 import tarfile
-from inspect import isawaitable
+from datetime import timedelta
+from inspect import isawaitable, iscoroutinefunction, signature
 from typing import TYPE_CHECKING, Any
+from unittest.mock import AsyncMock, Mock
 
 import httpx2 as httpx
 import pytest
@@ -304,6 +306,59 @@ def test_selection_is_lazy_and_handle_properties_are_read_only(username: str) ->
             assert isinstance(handle, protocol)
             assert isinstance(user, protocol)
             assert isinstance(user.fs, fs_protocol)
+
+
+@pytest.mark.parametrize("legacy", ["run_process", "create_process"])
+@pytest.mark.parametrize("fails", [False, True], ids=["returns", "raises"])
+async def test_deprecated_process_methods_preserve_command_contract(
+    monkeypatch: pytest.MonkeyPatch, legacy: str, fails: bool
+) -> None:
+    promoted = legacy.replace("process", "command")
+    with session(service_options=sandbox_service_options(sync=True)):
+        handles = _handles()
+        for handle in (*handles, *(handle.as_user("alice") for handle in handles)):
+            old_method = getattr(handle, legacy)
+            new_method = getattr(handle, promoted)
+            assert signature(old_method) == signature(new_method)
+            kwargs: dict[str, Any] = {
+                "cwd": "workspace",
+                "env": {"CUSTOM": "value"},
+                "sudo": True,
+                "kill_after": timedelta(seconds=3),
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.STDOUT,
+            }
+            if legacy == "run_process":
+                kwargs.update(check=True, capture_output=False, input=b"payload")
+                if "on_start" in signature(old_method).parameters:
+                    kwargs["on_start"] = lambda process: None
+            else:
+                kwargs["stdin"] = subprocess.PIPE
+
+            result = object()
+            error = RuntimeError("command failed")
+            delegate = (AsyncMock if iscoroutinefunction(new_method) else Mock)(
+                return_value=result, side_effect=error if fails else None
+            )
+            with monkeypatch.context() as patch:
+                patch.setattr(type(handle), promoted, delegate)
+                with pytest.warns(DeprecationWarning, match=rf"{legacy}.*{promoted}") as warnings:
+                    if fails:
+                        with pytest.raises(RuntimeError) as raised:
+                            value = old_method("python", ("-V",), **kwargs)
+                            if isawaitable(value):
+                                await value
+                        assert raised.value is error
+                    else:
+                        value = old_method("python", ("-V",), **kwargs)
+                        if isawaitable(value):
+                            value = await value
+                        assert value is result
+                assert len(warnings) == 1
+                assert warnings[0].filename == __file__
+            delegate.assert_called_once_with("python", ("-V",), **kwargs)
+            if isinstance(delegate, AsyncMock):
+                delegate.assert_awaited_once()
 
 
 if TYPE_CHECKING:

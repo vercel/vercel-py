@@ -38,7 +38,7 @@ async def _scope(manager: Any) -> AsyncIterator[Any]:
 
 
 async def _run(handle: Any, command: str, args: list[str] | None = None, **kwargs: Any) -> Any:
-    return await _call(handle.run_process, command, args, capture_output=True, **kwargs)
+    return await _call(handle.run_command, command, args, capture_output=True, **kwargs)
 
 
 @requires_sandbox_credentials
@@ -97,7 +97,7 @@ async def test_user_upload_provisioning_and_process_regressions(driver: Any) -> 
                     f"trap 'printf \"HANDLED\\n\"; {cleanup}exit 0' {signal}\n"
                     'printf "READY\\n"\nwhile :; do /bin/sleep 0.1; done',
                 ]
-                process = await _call(alice.create_process, "/bin/bash", args, cwd="workspace")
+                process = await _call(alice.create_command, "/bin/bash", args, cwd="workspace")
                 metadata = ("/bin/bash", args, "/home/alice/workspace")
                 with anyio.fail_after(10):
                     assert await _call(process.stdout.readline) == "READY\n"
@@ -112,7 +112,7 @@ async def test_user_upload_provisioning_and_process_regressions(driver: Any) -> 
 
             # An unhandled signal must retain the actual signal exit status.
             process = await _call(
-                alice.create_process,
+                alice.create_command,
                 "/bin/bash",
                 ["-c", 'printf "READY\\n"; exec /bin/sleep 60'],
             )
@@ -127,7 +127,7 @@ async def test_user_upload_provisioning_and_process_regressions(driver: Any) -> 
             # launcher. Rejection must preserve a runnable target and all
             # handle metadata, rather than stopping only the monitor.
             args = ["-c", 'printf "%s\\n" "$$"; exec /bin/sleep 60']
-            process = await _call(alice.create_process, "/bin/bash", args, cwd="workspace")
+            process = await _call(alice.create_command, "/bin/bash", args, cwd="workspace")
             metadata = ("/bin/bash", args, "/home/alice/workspace")
             with anyio.fail_after(10):
                 pid = (await _call(process.stdout.readline)).strip()
@@ -154,7 +154,7 @@ async def test_user_upload_provisioning_and_process_regressions(driver: Any) -> 
                     'trap "" TERM USR1 ALRM; /bin/sleep 60 & printf "%s %s\\n" "$$" "$!"; wait',
                 ]
                 process = await _call(
-                    alice.create_process, "/bin/bash", args, cwd="workspace", sudo=sudo
+                    alice.create_command, "/bin/bash", args, cwd="workspace", sudo=sudo
                 )
                 pids = (await _call(process.stdout.readline)).strip().split()
                 assert len(pids) == 2
@@ -184,7 +184,7 @@ async def test_user_upload_provisioning_and_process_regressions(driver: Any) -> 
                 '#!/bin/sh\nprintf "%s\\n" "$PATH"; exec /bin/sleep 60\n',
                 mode=0o700,
             )
-            for api in ("run_process", "create_process"):
+            for api in ("run_command", "create_command"):
                 for command, args in (("/bin/sleep", ["60"]), ("custom-command", [])):
                     started = time.monotonic()
                     result = await _call(
@@ -193,10 +193,10 @@ async def test_user_upload_provisioning_and_process_regressions(driver: Any) -> 
                         args,
                         env={"PATH": custom_bin},
                         kill_after=0.3,
-                        **({"capture_output": True} if api == "run_process" else {}),
+                        **({"capture_output": True} if api == "run_command" else {}),
                     )
                     output = result.stdout
-                    if api == "create_process":
+                    if api == "create_command":
                         with anyio.fail_after(10):
                             output, _ = await _call(result.communicate)
                             await _call(result.wait)
@@ -221,7 +221,7 @@ async def test_user_rapid_term_handler_preserves_returncode(driver: Any, returnc
             ]
             # Repeated immediate completions exercise the interrupted-wait race.
             for _ in range(5):
-                process = await _call(alice.create_process, "/bin/bash", args)
+                process = await _call(alice.create_command, "/bin/bash", args)
                 with anyio.fail_after(10):
                     assert await _call(process.stdout.readline) == "READY\n"
                     await _call(process.terminate)
@@ -285,14 +285,14 @@ async def test_user_identity_and_permission_enforcement(driver: Any) -> None:
             assert root_command.stdout == "0\n"
             assert (await _run(alice, "whoami", check=True)).stdout == "alice\n"
 
-            process = await _call(bob.create_process, "whoami")
+            process = await _call(bob.create_command, "whoami")
             assert process.name == "whoami" and process.args == []
             assert process.cwd == "/home/bob"
             stdout, stderr = await _call(process.communicate)
             assert stdout == "bob\n" and stderr == ""
             assert process.returncode == 0
             assert process.cwd == "/home/bob" and process.name == "whoami"
-            sleeper = await _call(bob.create_process, "sleep", ["60"])
+            sleeper = await _call(bob.create_command, "sleep", ["60"])
             with anyio.fail_after(10):
                 await _call(sleeper.terminate)
                 assert await _call(sleeper.wait) != 0
@@ -465,7 +465,7 @@ async def test_user_processes_read_stdin_through_the_launcher(driver: Any) -> No
             assert result.stdout == "alice:hi\nrest\n"
 
             process = await _call(
-                alice.create_process, "/bin/bash", ["-c", script], stdin=subprocess.PIPE
+                alice.create_command, "/bin/bash", ["-c", script], stdin=subprocess.PIPE
             )
             await driver.write_stdin(process, b"first\n")
             assert await driver.readline(process) == "alice:first\n"
@@ -477,7 +477,7 @@ async def test_user_processes_read_stdin_through_the_launcher(driver: Any) -> No
                 assert await _call(process.wait) == 0
 
             # Without stdin=PIPE the command still reads an empty stdin.
-            empty = await _call(alice.create_process, "/bin/cat")
+            empty = await _call(alice.create_command, "/bin/cat")
             assert empty.stdin is None
             with anyio.fail_after(30):
                 assert await _call(empty.communicate) == ("", "")

@@ -312,7 +312,7 @@ class _ScenarioDriver:
     async def remove(self, box: Any, path: str) -> None:
         raise NotImplementedError
 
-    async def create_process(
+    async def create_command(
         self,
         box: Any,
         command: str,
@@ -344,7 +344,7 @@ class _ScenarioDriver:
     async def write_after_exit_breaks(self, process: Any) -> bool:
         raise NotImplementedError
 
-    async def run_process_with_on_start(
+    async def run_command_with_on_start(
         self, box: Any, command: str, args: list[str], on_start: Callable[[Any], None]
     ) -> sandbox.CompletedProcess:
         raise NotImplementedError
@@ -528,7 +528,7 @@ class AsyncDriver(_ScenarioDriver):
     async def remove(self, box: Any, path: str) -> None:
         await box.fs.remove(path)
 
-    async def create_process(
+    async def create_command(
         self,
         box: Any,
         command: str,
@@ -537,7 +537,7 @@ class AsyncDriver(_ScenarioDriver):
         kill_after: float | None = None,
         stdin: int | None = None,
     ) -> Any:
-        return await box.create_process(command, args, kill_after=kill_after, stdin=stdin)
+        return await box.create_command(command, args, kill_after=kill_after, stdin=stdin)
 
     async def get_process(self, box: Any, process_id: str) -> Any:
         return await box.get_process(process_id)
@@ -555,7 +555,7 @@ class AsyncDriver(_ScenarioDriver):
         return cast(tuple[str, str], await process.communicate(input))
 
     async def run_with_input(self, box: Any, command: str, args: list[str], input: bytes) -> str:
-        result = await box.run_process(command, args, input=input, capture_output=True, check=True)
+        result = await box.run_command(command, args, input=input, capture_output=True, check=True)
         return cast(str, result.stdout)
 
     async def write_after_exit_breaks(self, process: Any) -> bool:
@@ -565,10 +565,10 @@ class AsyncDriver(_ScenarioDriver):
             return True
         return False
 
-    async def run_process_with_on_start(
+    async def run_command_with_on_start(
         self, box: Any, command: str, args: list[str], on_start: Callable[[Any], None]
     ) -> sandbox.CompletedProcess:
-        return await box.run_process(command, args, capture_output=True, on_start=on_start)
+        return await box.run_command(command, args, capture_output=True, on_start=on_start)
 
     @asynccontextmanager
     async def open_interactive(self, box: Any) -> AsyncIterator[Any]:
@@ -622,7 +622,7 @@ class AsyncDriver(_ScenarioDriver):
 
     async def missing_executable_failed(self, box: Any) -> bool:
         try:
-            await box.create_process("vercel-py-missing-executable")
+            await box.create_command("vercel-py-missing-executable")
         except SandboxApiError as error:
             return error.code == "executable_not_found"
         return False
@@ -632,7 +632,7 @@ class AsyncDriver(_ScenarioDriver):
 
     async def run_independent_session(self, box: Any) -> tuple[str, int | None, bool]:
         async with sandbox.resume_sandbox(name=box.name) as resumed:
-            command = await resumed.run_process(
+            command = await resumed.run_command(
                 "printf", ["session follow-up\n"], stdout=subprocess.PIPE
             )
             assert command.stdout is not None
@@ -781,7 +781,7 @@ class SyncDriver(_ScenarioDriver):
     async def remove(self, box: Any, path: str) -> None:
         box.fs.remove(path)
 
-    async def create_process(
+    async def create_command(
         self,
         box: Any,
         command: str,
@@ -790,7 +790,7 @@ class SyncDriver(_ScenarioDriver):
         kill_after: float | None = None,
         stdin: int | None = None,
     ) -> Any:
-        return box.create_process(command, args, kill_after=kill_after, stdin=stdin)
+        return box.create_command(command, args, kill_after=kill_after, stdin=stdin)
 
     async def get_process(self, box: Any, process_id: str) -> Any:
         return box.get_process(process_id)
@@ -808,7 +808,7 @@ class SyncDriver(_ScenarioDriver):
         return cast(tuple[str, str], process.communicate(input))
 
     async def run_with_input(self, box: Any, command: str, args: list[str], input: bytes) -> str:
-        result = box.run_process(command, args, input=input, capture_output=True, check=True)
+        result = box.run_command(command, args, input=input, capture_output=True, check=True)
         return cast(str, result.stdout)
 
     async def write_after_exit_breaks(self, process: Any) -> bool:
@@ -818,10 +818,10 @@ class SyncDriver(_ScenarioDriver):
             return True
         return False
 
-    async def run_process_with_on_start(
+    async def run_command_with_on_start(
         self, box: Any, command: str, args: list[str], on_start: Callable[[Any], None]
     ) -> sandbox.CompletedProcess:
-        return box.run_process(command, args, capture_output=True, on_start=on_start)
+        return box.run_command(command, args, capture_output=True, on_start=on_start)
 
     @asynccontextmanager
     async def open_interactive(self, box: Any) -> AsyncIterator[Any]:
@@ -873,7 +873,7 @@ class SyncDriver(_ScenarioDriver):
 
     async def missing_executable_failed(self, box: Any) -> bool:
         try:
-            box.create_process("vercel-py-missing-executable")
+            box.create_command("vercel-py-missing-executable")
         except SandboxApiError as error:
             return error.code == "executable_not_found"
         return False
@@ -883,7 +883,7 @@ class SyncDriver(_ScenarioDriver):
 
     async def run_independent_session(self, box: Any) -> tuple[str, int | None, bool]:
         with sandbox_sync.resume_sandbox(name=box.name) as resumed:
-            command = resumed.run_process("printf", ["session follow-up\n"], stdout=subprocess.PIPE)
+            command = resumed.run_command("printf", ["session follow-up\n"], stdout=subprocess.PIPE)
             assert command.stdout is not None
             output = command.stdout
             exit_code = command.returncode
@@ -961,7 +961,7 @@ async def workspace_command_flow(driver: _ScenarioDriver, name: str) -> Workspac
             assert await driver.exists(box, "workspace/renamed.txt")
             await driver.remove(box, "workspace/renamed.txt")
             assert not await driver.exists(box, "workspace/renamed.txt")
-            command = await driver.create_process(box, "python", ["workspace/tool.py"])
+            command = await driver.create_command(box, "python", ["workspace/tool.py"])
             stdout, stderr = await driver.read_process_streams(command)
             exit_code = await driver.wait(command)
             output = await driver.read_text(box, "workspace/output.txt")
@@ -987,7 +987,7 @@ async def process_filesystem_flow(
             await driver.write_text(box, "message.txt", "hello\n")
             await driver.write_bytes(box, "data.bin", b"\x00\xff")
 
-            process = await driver.create_process(
+            process = await driver.create_command(
                 box,
                 "python",
                 [
@@ -999,15 +999,15 @@ async def process_filesystem_flow(
             stdout, stderr = await driver.read_process_streams(process)
             returncode = await driver.wait(process)
 
-            sleeper = await driver.create_process(box, "sleep", ["60"])
+            sleeper = await driver.create_command(box, "sleep", ["60"])
             await driver.terminate(sleeper)
             terminated_returncode = await driver.wait(sleeper)
 
-            timed = await driver.create_process(box, "sleep", ["60"], kill_after=2.5)
+            timed = await driver.create_command(box, "sleep", ["60"], kill_after=2.5)
             timed_out_returncode = await driver.wait(timed)
 
             started_ids: list[str] = []
-            observed = await driver.run_process_with_on_start(
+            observed = await driver.run_command_with_on_start(
                 box,
                 "sh",
                 ["-c", "sleep 1; echo hi"],
@@ -1066,7 +1066,7 @@ async def streaming_transfer_flow(
                     copied = await driver.read_path(box, remote_paths[0], target)
                     empty_copied = await driver.read_path(box, remote_paths[1], empty_target)
 
-                    command = await driver.create_process(
+                    command = await driver.create_command(
                         box,
                         "python",
                         [
@@ -1276,7 +1276,7 @@ for line in sys.stdin:
 async def process_stdin_flow(driver: _ScenarioDriver, name: str) -> StdinObservation:
     async with driver.session():
         async with driver.ephemeral_sandbox(name) as box:
-            server = await driver.create_process(
+            server = await driver.create_command(
                 box, "python", ["-u", "-c", _STDIO_SERVER], stdin=subprocess.PIPE
             )
             responses: list[object] = []
@@ -1296,14 +1296,14 @@ async def process_stdin_flow(driver: _ScenarioDriver, name: str) -> StdinObserva
             data = bytes(range(256)) * 6000
             digest = await driver.run_with_input(box, "sha256sum", [], data)
 
-            counter = await driver.create_process(box, "wc", ["-c"], stdin=subprocess.PIPE)
+            counter = await driver.create_command(box, "wc", ["-c"], stdin=subprocess.PIPE)
             communicated, _ = await driver.communicate(counter, b"counted\n")
 
-            finished = await driver.create_process(box, "true", [], stdin=subprocess.PIPE)
+            finished = await driver.create_command(box, "true", [], stdin=subprocess.PIPE)
             await driver.wait(finished)
             broken_after_exit = await driver.write_after_exit_breaks(finished)
 
-            without_stdin = await driver.create_process(box, "sleep", ["60"])
+            without_stdin = await driver.create_command(box, "sleep", ["60"])
             fetched = await driver.get_process(box, without_stdin.id)
             try:
                 await driver.write_stdin(fetched, b"lost\n")

@@ -1,0 +1,1 @@
+Add `create_command()` and `run_command()` on sandbox, runtime session, and user handles in both async and sync APIs, aligning with product and TypeScript SDK naming. Preserve `create_process()` and `run_process()` as deprecated aliases with the same arguments, results, and errors.

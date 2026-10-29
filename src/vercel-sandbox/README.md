@@ -10,18 +10,23 @@ from vercel.api import session
 
 async with session():
     async with sandbox.create_sandbox() as instance:
-        process = await instance.run_process("echo", ["hello"], capture_output=True)
+        process = await instance.run_command("echo", ["hello"], capture_output=True)
         print(process.stdout)
 
-        # Pass input to run_process, or keep stdin open with stdin=subprocess.PIPE.
-        result = await instance.run_process("sort", input="b\na\n", capture_output=True)
-        server = await instance.create_process("cat", stdin=subprocess.PIPE)
+        # Pass input to run_command, or keep stdin open with stdin=subprocess.PIPE.
+        result = await instance.run_command("sort", input="b\na\n", capture_output=True)
+        server = await instance.create_command("cat", stdin=subprocess.PIPE)
         await server.stdin.send(b"ping\n")
         print(await server.stdout.readline())
         print(await server.communicate())  # Close stdin, read the rest, and wait.
 ```
 
 The package can be installed independently with `pip install vercel-sandbox`.
+
+Use `run_command()` to run a command to completion and `create_command()` to
+start one and return a `Process` handle. These names apply to sandbox, runtime
+session, and user handles in both APIs. `run_process()` and `create_process()`
+remain available as deprecated aliases and emit `DeprecationWarning`.
 
 To attach a sandbox to a Secure Compute private network, pass its connect
 network ID at creation:
@@ -46,7 +51,7 @@ from vercel.sandbox import sync as sandbox
 
 with session():
     with sandbox.create_sandbox() as instance:
-        process = instance.run_process("echo", ["hello"], capture_output=True)
+        process = instance.run_command("echo", ["hello"], capture_output=True)
         print(process.stdout)
 ```
 
@@ -69,7 +74,7 @@ from vercel.sandbox import SandboxResources
 async with sandbox.create_sandbox(
     resources=SandboxResources(vcpus=2, memory=4096),
 ) as instance:
-    result = await instance.run_process(
+    result = await instance.run_command(
         "echo", ["hello"], capture_output=True,
     )
 
@@ -142,7 +147,7 @@ from vercel.api import session
 
 async with session():
     async with sandbox.create_sandbox(image="my-repository:latest") as instance:
-        result = await instance.run_process("my-command", capture_output=True)
+        result = await instance.run_command("my-command", capture_output=True)
         print(result.stdout)
         print(instance.image)  # The resolved digest-pinned image reference
 ```
@@ -155,7 +160,7 @@ from vercel.sandbox import sync as sandbox
 
 with session():
     with sandbox.create_sandbox(image="my-repository:latest") as instance:
-        result = instance.run_process("my-command", capture_output=True)
+        result = instance.run_command("my-command", capture_output=True)
         print(result.stdout)
         print(instance.image)  # The resolved digest-pinned image reference
 ```
@@ -211,7 +216,7 @@ automatic stop and destroy. The synchronous mirror uses the same arguments:
 from vercel.sandbox import sync as sandbox
 
 with sandbox.fork_sandbox(source_sandbox="production-agent") as forked:
-    result = forked.run_process("python", ["script.py"], capture_output=True)
+    result = forked.run_command("python", ["script.py"], capture_output=True)
 ```
 
 ## Sandbox Drives
@@ -379,7 +384,7 @@ lazily. The original sandbox handle adopts the replacement current session:
 
 ```python
 box = await sandbox.get_sandbox(name="workspace")
-result = await box.run_process("python", ["script.py"])
+result = await box.run_command("python", ["script.py"])
 ```
 
 Use `box.session()` when the session boundary should be explicit. Direct
@@ -390,7 +395,7 @@ stops exactly the session it yielded:
 active = await box.session()
 
 async with box.session() as exact_session:
-    await exact_session.run_process("python", ["script.py"])
+    await exact_session.run_command("python", ["script.py"])
 ```
 
 The synchronous forms are `active = box.session()` and
@@ -413,13 +418,13 @@ alice = await instance.create_user("alice")
 bob = instance.as_user("bob")  # Synchronous selection, including on the async API
 
 await alice.fs.write_text("secret.txt", "private", mode=0o600)
-result = await alice.run_process("whoami", capture_output=True, check=True)
+result = await alice.run_command("whoami", capture_output=True, check=True)
 assert result.stdout == "alice\n"
 assert alice.home_dir == "/home/alice"
 ```
 
 `SandboxUser` and `SyncSandboxUser` expose read-only `username`, `home_dir`,
-and `.fs` properties, plus `run_process()` and `create_process()`. Their command and
+and `.fs` properties, plus `run_command()` and `create_command()`. Their command and
 filesystem options match the session APIs. Usernames must match
 `[a-z_][a-z0-9_-]*` and contain at most 32 characters; invalid names fail
 immediately. `create_user()` raises `SandboxUserAlreadyExistsError` if the account
@@ -485,7 +490,7 @@ from vercel.sandbox import SandboxExecution
 
 async def run_agent(executor: SandboxExecution) -> str:
     await executor.fs.write_text("input.txt", "hello")
-    result = await executor.run_process("cat", ["input.txt"], capture_output=True, check=True)
+    result = await executor.run_command("cat", ["input.txt"], capture_output=True, check=True)
     return result.stdout or ""
 
 await run_agent(instance)

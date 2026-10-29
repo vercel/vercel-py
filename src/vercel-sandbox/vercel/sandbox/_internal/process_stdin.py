@@ -77,7 +77,7 @@ def _coerce_bytes(data: object) -> bytes:
 
 
 def _coerce_input(input: ProcessInput) -> bytes:
-    """Encode ``communicate`` and ``run_process`` input; text becomes UTF-8."""
+    """Encode ``communicate`` and ``run_command`` input; text becomes UTF-8."""
     if isinstance(input, str):
         return input.encode("utf-8")
     return _coerce_bytes(input)

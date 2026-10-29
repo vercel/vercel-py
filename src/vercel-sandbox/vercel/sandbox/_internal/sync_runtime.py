@@ -1057,7 +1057,7 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         iter_coroutine(user._context.provision())
         return user
 
-    def run_process(
+    def run_command(
         self,
         command: str,
         args: Sequence[str] | None = None,
@@ -1167,7 +1167,49 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
             result.check_returncode()
         return result
 
-    def create_process(
+    def run_process(
+        self,
+        command: str,
+        args: Sequence[str] | None = None,
+        *,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        sudo: bool = False,
+        kill_after: float | timedelta | None = None,
+        check: bool = False,
+        stdout: TextIO | int | None = None,
+        stderr: TextIO | int | None = None,
+        capture_output: bool = False,
+        input: ProcessInput | None = None,
+        on_start: Callable[[SyncProcess], None] | None = None,
+    ) -> CompletedProcess:
+        """Deprecated alias for ``run_command()``.
+
+        .. deprecated::
+            Use ``run_command()`` instead.
+        """
+        warnings.warn(
+            "SyncSandboxRuntimeSession.run_process() is deprecated; use "
+            "SyncSandboxRuntimeSession.run_command() instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.run_command(
+            command,
+            args,
+            cwd=cwd,
+            env=env,
+            sudo=sudo,
+            kill_after=kill_after,
+            check=check,
+            stdout=stdout,
+            stderr=stderr,
+            capture_output=capture_output,
+            input=input,
+            on_start=on_start,
+        )
+
+    def create_command(
         self,
         command: str,
         args: Sequence[str] | None = None,
@@ -1220,6 +1262,42 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
             payload=state,
             service=self._service,
             stdin="attached" if attach_stdin else None,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+    def create_process(
+        self,
+        command: str,
+        args: Sequence[str] | None = None,
+        *,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        sudo: bool = False,
+        kill_after: float | timedelta | None = None,
+        stdin: int | None = None,
+        stdout: int = subprocess.PIPE,
+        stderr: int = subprocess.PIPE,
+    ) -> SyncProcess:
+        """Deprecated alias for ``create_command()``.
+
+        .. deprecated::
+            Use ``create_command()`` instead.
+        """
+        warnings.warn(
+            "SyncSandboxRuntimeSession.create_process() is deprecated; use "
+            "SyncSandboxRuntimeSession.create_command() instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.create_command(
+            command,
+            args,
+            cwd=cwd,
+            env=env,
+            sudo=sudo,
+            kill_after=kill_after,
+            stdin=stdin,
             stdout=stdout,
             stderr=stderr,
         )
@@ -1559,7 +1637,7 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         iter_coroutine(user._context.provision())
         return user
 
-    def run_process(
+    def run_command(
         self,
         command: str,
         args: Sequence[str] | None = None,
@@ -1577,7 +1655,7 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
     ) -> CompletedProcess:
         """Run a process to completion in the current session.
 
-        See ``SyncSandboxRuntimeSession.run_process`` for argument behavior.
+        See ``SyncSandboxRuntimeSession.run_command`` for argument behavior.
 
         A stopped sandbox is resumed and the run replayed only if the process
         never started, so ``on_start`` runs at most once, against the session
@@ -1634,7 +1712,48 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
             result.check_returncode()
         return result
 
-    def create_process(
+    def run_process(
+        self,
+        command: str,
+        args: Sequence[str] | None = None,
+        *,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        sudo: bool = False,
+        kill_after: float | timedelta | None = None,
+        check: bool = False,
+        stdout: TextIO | int | None = None,
+        stderr: TextIO | int | None = None,
+        capture_output: bool = False,
+        input: ProcessInput | None = None,
+        on_start: Callable[[SyncProcess], None] | None = None,
+    ) -> CompletedProcess:
+        """Deprecated alias for ``run_command()``.
+
+        .. deprecated::
+            Use ``run_command()`` instead.
+        """
+        warnings.warn(
+            "SyncSandbox.run_process() is deprecated; use SyncSandbox.run_command() instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.run_command(
+            command,
+            args,
+            cwd=cwd,
+            env=env,
+            sudo=sudo,
+            kill_after=kill_after,
+            check=check,
+            stdout=stdout,
+            stderr=stderr,
+            capture_output=capture_output,
+            input=input,
+            on_start=on_start,
+        )
+
+    def create_command(
         self,
         command: str,
         args: Sequence[str] | None = None,
@@ -1649,7 +1768,7 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
     ) -> SyncProcess:
         """Start a process in the current session without waiting for it.
 
-        See ``SyncSandboxRuntimeSession.create_process`` for argument behavior.
+        See ``SyncSandboxRuntimeSession.create_command`` for argument behavior.
 
         Returns:
             A handle for monitoring and controlling the process.
@@ -1678,6 +1797,41 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
             payload=state,
             service=self._service,
             stdin="attached" if attach_stdin else None,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+    def create_process(
+        self,
+        command: str,
+        args: Sequence[str] | None = None,
+        *,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        sudo: bool = False,
+        kill_after: float | timedelta | None = None,
+        stdin: int | None = None,
+        stdout: int = subprocess.PIPE,
+        stderr: int = subprocess.PIPE,
+    ) -> SyncProcess:
+        """Deprecated alias for ``create_command()``.
+
+        .. deprecated::
+            Use ``create_command()`` instead.
+        """
+        warnings.warn(
+            "SyncSandbox.create_process() is deprecated; use SyncSandbox.create_command() instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.create_command(
+            command,
+            args,
+            cwd=cwd,
+            env=env,
+            sudo=sudo,
+            kill_after=kill_after,
+            stdin=stdin,
             stdout=stdout,
             stderr=stderr,
         )

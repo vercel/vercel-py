@@ -151,7 +151,7 @@ def marker_payload(
 
 
 async def run_shell(box: Sandbox, command: str, *, cwd: str) -> None:
-    await box.run_process("sh", ["-lc", command], cwd=cwd, check=True)
+    await box.run_command("sh", ["-lc", command], cwd=cwd, check=True)
 
 
 async def install_dependencies(
@@ -216,7 +216,7 @@ async def run_entrypoint(
         print("prepared sandbox; pass --entrypoint to start a dev server")
         return
 
-    command = await box.create_process(
+    command = await box.create_command(
         "sh",
         ["-lc", entrypoint],
         cwd=cwd,
