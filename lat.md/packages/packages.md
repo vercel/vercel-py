@@ -22,6 +22,7 @@ Each wraps one Vercel product.
 - [[vercel-sandbox]] — Vercel Sandbox lifecycle, processes, filesystems, drives, and PTYs.
 - [[vercel-workflow]] — durable workflows replayed from an event log.
 - [[vercel-connect]] — short-lived third-party credentials brokered by Vercel Connect.
+- [[vercel-passport]] — Vercel Passport visitor identities, read from the request and verified.
 - [[vercel-proxy]] — Python routing middleware that runs in front of the app.
 
 ## Framework integrations
