@@ -155,6 +155,8 @@ def create_sandbox(
 ) -> CreateSandboxOperation:
     """Prepare an asynchronous sandbox creation operation.
 
+    Region selection is resolved immediately and captured by the operation.
+
     Awaiting the returned operation performs no automatic cleanup. Using it as
     an async context manager stops the sandbox on exit, then destroys it and
     any snapshots that no other sandbox uses by default.
@@ -244,6 +246,8 @@ def fork_sandbox(
 
     Awaiting the returned operation performs no automatic cleanup. Using it as
     an async context manager stops the fork on exit and destroys it by default.
+
+    Region selection is resolved immediately and captured by the operation.
 
     Args:
         source_sandbox: Name of the sandbox to fork.

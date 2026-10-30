@@ -855,7 +855,7 @@ async def test_region_placement_is_explicit(
     expected_region: str | None,
 ) -> None:
     # Construct options before setting the runtime environment: CURRENT_REGION
-    # must be resolved when the request is made, not when options are created.
+    # must be resolved when the operation is called, not when options are created.
     options = _session_options(sync=sync, region=service_region)
     if env_region is not None:
         monkeypatch.setenv("VERCEL_REGION", env_region)
@@ -909,6 +909,90 @@ async def test_region_placement_is_explicit(
         assert "region" not in body
     else:
         assert body["region"] == expected_region
+
+
+@respx.mock
+@pytest.mark.parametrize("sync", [False, True])
+@pytest.mark.parametrize("operation", ["create", "fork", "get_or_create", "drive"])
+@pytest.mark.parametrize("region_source", ["call", "options"])
+@pytest.mark.parametrize("env_region", [None, "", "cle1"])
+async def test_region_is_captured_before_service_io(
+    mock_env_clear: None,
+    monkeypatch: pytest.MonkeyPatch,
+    sync: bool,
+    operation: str,
+    region_source: str,
+    env_region: str | None,
+) -> None:
+    credentials = sandbox.SandboxCredentials("token", "team_123", "prj_123")
+
+    def credentials_factory() -> sandbox.SandboxCredentials:
+        # Resolving credentials happens inside the service. Changing the
+        # environment here must not change the region already passed to it.
+        monkeypatch.setenv("VERCEL_REGION", "sfo1")
+        return credentials
+
+    async def async_credentials_factory() -> sandbox.SandboxCredentials:
+        return credentials_factory()
+
+    service_region = CURRENT_REGION if region_source == "options" else "iad1"
+    options = (
+        sandbox_sync.SandboxServiceOptions(
+            base_url="https://sandbox.test",
+            credentials_factory=credentials_factory,
+            region=service_region,
+        )
+        if sync
+        else sandbox.SandboxServiceOptions(
+            base_url="https://sandbox.test",
+            credentials_factory=async_credentials_factory,
+            region=service_region,
+        )
+    )
+    if env_region is not None:
+        monkeypatch.setenv("VERCEL_REGION", env_region)
+    create_route = respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    fork_route = respx.post("https://sandbox.test/v2/sandboxes/source/fork").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    drive_route = respx.post("https://sandbox.test/v2/sandboxes/drives/cache").mock(
+        return_value=httpx.Response(201, json=_drive_response())
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(404, json={"error": {"code": "not_found"}})
+    )
+    call_kwargs = {"region": CURRENT_REGION} if region_source == "call" else {}
+
+    def invoke(api: Any) -> Any:
+        if operation == "create":
+            return api.create_sandbox(**call_kwargs)
+        if operation == "fork":
+            return api.fork_sandbox(source_sandbox="source", **call_kwargs)
+        if operation == "get_or_create":
+            return api.get_or_create_sandbox(name="preview", **call_kwargs)
+        return api.get_or_create_drive(name="cache", **call_kwargs)
+
+    if sync:
+        with session(service_options=[options]):
+            invoke(sandbox_sync)
+    else:
+        async with session(service_options=[options]):
+            pending = invoke(sandbox)
+            if operation in {"create", "fork"}:
+                # Deferred operations also capture the region before awaiting.
+                monkeypatch.setenv("VERCEL_REGION", "sfo1")
+            await pending
+
+    route = (
+        drive_route if operation == "drive" else fork_route if operation == "fork" else create_route
+    )
+    body = json.loads(route.calls.last.request.content)
+    if env_region is None:
+        assert "region" not in body
+    else:
+        assert body["region"] == env_region
 
 
 @respx.mock

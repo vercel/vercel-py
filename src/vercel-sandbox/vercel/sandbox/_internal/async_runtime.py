@@ -101,7 +101,7 @@ from vercel.sandbox._internal.recovery import (
     classify_sandbox_lifecycle_error,
     execute_with_sandbox_recovery,
 )
-from vercel.sandbox._internal.region import RegionInput
+from vercel.sandbox._internal.region import RegionInput, resolve_region
 from vercel.sandbox._internal.runtime_common import (
     DriveHandleBase,
     RuntimeSessionHandleBase,
@@ -1992,7 +1992,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
                 snapshot_expiration=_parse_snapshot_expiration(snapshot_expiration),
                 snapshot_retention=snapshot_retention,
                 current_snapshot_id=current_snapshot_id,
-                region=region,
+                region=resolve_region(region),
                 failover_regions=normalize_failover_regions(failover_regions),
             )
         )
@@ -2102,7 +2102,7 @@ class _CreateSandboxParams(SandboxValueModel):
     mounts: Mapping[Any, SkipValidation[DriveMountInput]] | None = None
     snapshot_expiration: SnapshotExpiration | None = None
     snapshot_retention: SnapshotRetention | None = None
-    region: RegionInput = None
+    region: str | None = None
     failover_regions: tuple[str, ...] | None = None
     private_parameters: PrivateSandboxParameters = Field(
         default_factory=lambda: NO_PRIVATE_PARAMETERS
@@ -2212,7 +2212,7 @@ class _ForkSandboxParams(SandboxValueModel):
     mounts: Mapping[Any, SkipValidation[DriveMountInput]] | None = None
     snapshot_expiration: SnapshotExpiration | None = None
     snapshot_retention: SnapshotRetention | None = None
-    region: RegionInput = None
+    region: str | None = None
     failover_regions: tuple[str, ...] | None = None
     private_parameters: PrivateSandboxParameters = Field(
         default_factory=lambda: NO_PRIVATE_PARAMETERS
@@ -2451,7 +2451,7 @@ def create_sandbox_operation(
             mounts=mounts,
             snapshot_expiration=_parse_snapshot_expiration(snapshot_expiration),
             snapshot_retention=snapshot_retention,
-            region=region,
+            region=resolve_region(region, fallback=service.options.region),
             failover_regions=normalize_failover_regions(failover_regions),
             private_parameters=private_parameters,
         ),
@@ -2500,7 +2500,7 @@ def fork_sandbox_operation(
             mounts=mounts,
             snapshot_expiration=_parse_snapshot_expiration(snapshot_expiration),
             snapshot_retention=snapshot_retention,
-            region=region,
+            region=resolve_region(region, fallback=service.options.region),
             failover_regions=normalize_failover_regions(failover_regions),
             private_parameters=private_parameters,
         ),
@@ -2573,7 +2573,7 @@ async def get_or_create_sandbox(
             mounts=mounts,
             snapshot_expiration=_parse_snapshot_expiration(snapshot_expiration),
             snapshot_retention=snapshot_retention,
-            region=region,
+            region=resolve_region(region, fallback=service.options.region),
             failover_regions=normalize_failover_regions(failover_regions),
             private_parameters=private_parameters,
         )
@@ -2659,7 +2659,7 @@ async def get_or_create_drive(
     state, created = await service.get_or_create_drive(
         name=name,
         max_size_bytes=max_size_bytes,
-        region=region,
+        region=resolve_region(region, fallback=service.options.region),
     )
     return Drive(payload=state, service=service), created
 

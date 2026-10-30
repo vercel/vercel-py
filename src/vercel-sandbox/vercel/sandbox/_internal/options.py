@@ -72,7 +72,7 @@ class SandboxServiceOptions(SandboxValueModel, _SandboxServiceOptionsKey):
     overrides the whole service configuration for that session scope.
 
     ``region`` defaults to ``None``, leaving placement to the API. Pass
-    ``CURRENT_REGION`` to use ``VERCEL_REGION`` at request time when available.
+    ``CURRENT_REGION`` to use ``VERCEL_REGION`` when an operation is called.
     """
 
     base_url: str = DEFAULT_SANDBOX_API_BASE_URL
@@ -104,7 +104,7 @@ class SyncSandboxServiceOptions(SandboxValueModel, _SandboxServiceOptionsKey):
     """Configuration for synchronous `vercel.sandbox` calls in an SDK session.
 
     ``region`` defaults to ``None``. Pass ``CURRENT_REGION`` to use the current
-    function's ``VERCEL_REGION`` at request time when available.
+    function's ``VERCEL_REGION`` when an operation is called.
     """
 
     base_url: str = DEFAULT_SANDBOX_API_BASE_URL

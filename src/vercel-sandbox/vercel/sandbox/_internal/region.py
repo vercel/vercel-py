@@ -15,8 +15,10 @@ CURRENT_REGION: Final = CurrentRegion()
 RegionInput: TypeAlias = str | CurrentRegion | None
 
 
-def resolve_region(region: RegionInput) -> str | None:
-    """Resolve the opt-in at request time without changing explicit strings."""
+def resolve_region(region: RegionInput, *, fallback: RegionInput = None) -> str | None:
+    """Select and resolve public inputs before passing them to the service."""
+    if region is None:
+        region = fallback
     if isinstance(region, CurrentRegion):
         return os.environ.get("VERCEL_REGION")
     return region

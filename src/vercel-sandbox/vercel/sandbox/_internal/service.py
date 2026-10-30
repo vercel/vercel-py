@@ -64,7 +64,6 @@ from vercel.sandbox._internal.options import (
 from vercel.sandbox._internal.process_output import ProcessOutputRouter
 from vercel.sandbox._internal.process_stdin import feed_process_input
 from vercel.sandbox._internal.recovery import _lifecycle_stream_error
-from vercel.sandbox._internal.region import RegionInput
 from vercel.sandbox._internal.runtime_common import (
     _StreamUploadFileEntry,
 )
@@ -337,7 +336,7 @@ class SandboxService:
         mounts: DriveMountsInput[_RemotePathT] | None = None,
         snapshot_expiration: SnapshotExpiration | None = None,
         snapshot_retention: SnapshotRetention | None = None,
-        region: RegionInput = None,
+        region: str | None = None,
         failover_regions: tuple[str, ...] | None = None,
         private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
     ) -> SandboxState:
@@ -359,7 +358,6 @@ class SandboxService:
             snapshot_expiration=snapshot_expiration,
             snapshot_retention=snapshot_retention,
             region=region,
-            fallback_region=self._options.region,
             failover_regions=failover_regions,
             private_parameters=private_parameters,
         )
@@ -383,7 +381,7 @@ class SandboxService:
         mounts: DriveMountsInput[_RemotePathT] | None = None,
         snapshot_expiration: SnapshotExpiration | None = None,
         snapshot_retention: SnapshotRetention | None = None,
-        region: RegionInput = None,
+        region: str | None = None,
         failover_regions: tuple[str, ...] | None = None,
         private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
     ) -> SandboxState:
@@ -405,7 +403,6 @@ class SandboxService:
             snapshot_expiration=snapshot_expiration,
             snapshot_retention=snapshot_retention,
             region=region,
-            fallback_region=self._options.region,
             failover_regions=failover_regions,
             private_parameters=private_parameters,
         )
@@ -449,7 +446,7 @@ class SandboxService:
         mounts: DriveMountsInput[_RemotePathT] | None = None,
         snapshot_expiration: SnapshotExpiration | None = None,
         snapshot_retention: SnapshotRetention | None = None,
-        region: RegionInput = None,
+        region: str | None = None,
         failover_regions: tuple[str, ...] | None = None,
         private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
     ) -> tuple[SandboxState, bool]:
@@ -490,7 +487,6 @@ class SandboxService:
             snapshot_expiration=snapshot_expiration,
             snapshot_retention=snapshot_retention,
             region=region,
-            fallback_region=self._options.region,
             failover_regions=failover_regions,
             private_parameters=private_parameters,
         )
@@ -558,7 +554,7 @@ class SandboxService:
         snapshot_expiration: SnapshotExpiration | None = None,
         snapshot_retention: SnapshotRetentionUpdate = _OMITTED,
         current_snapshot_id: str | None = None,
-        region: RegionInput = None,
+        region: str | None = None,
         failover_regions: tuple[str, ...] | None = None,
     ) -> AsyncGenerator[UpdateSandboxStep, None]:
         """Apply live session changes, then save the sandbox configuration.
@@ -713,13 +709,13 @@ class SandboxService:
         *,
         name: str,
         max_size_bytes: int | None = None,
-        region: RegionInput = None,
+        region: str | None = None,
     ) -> tuple[DriveState, bool]:
         self._ensure_open()
         return await self._api_client.get_or_create_drive(
             name=name,
             max_size_bytes=max_size_bytes,
-            region=region if region is not None else self._options.region,
+            region=region,
         )
 
     async def query_drives_page(

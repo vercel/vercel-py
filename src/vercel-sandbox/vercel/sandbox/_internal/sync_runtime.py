@@ -92,7 +92,7 @@ from vercel.sandbox._internal.recovery import (
     classify_sandbox_lifecycle_error,
     execute_with_sandbox_recovery,
 )
-from vercel.sandbox._internal.region import RegionInput
+from vercel.sandbox._internal.region import RegionInput, resolve_region
 from vercel.sandbox._internal.runtime_common import (
     DriveHandleBase,
     RuntimeSessionHandleBase,
@@ -2136,7 +2136,7 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
                     snapshot_expiration=_parse_snapshot_expiration(snapshot_expiration),
                     snapshot_retention=snapshot_retention,
                     current_snapshot_id=current_snapshot_id,
-                    region=region,
+                    region=resolve_region(region),
                     failover_regions=normalize_failover_regions(failover_regions),
                 )
             )
@@ -2238,7 +2238,7 @@ def create_sandbox(
                 mounts=mounts,
                 snapshot_expiration=_parse_snapshot_expiration(snapshot_expiration),
                 snapshot_retention=snapshot_retention,
-                region=region,
+                region=resolve_region(region, fallback=service.options.region),
                 failover_regions=normalize_failover_regions(failover_regions),
                 private_parameters=private_parameters,
             )
@@ -2293,7 +2293,7 @@ def fork_sandbox(
                 mounts=mounts,
                 snapshot_expiration=_parse_snapshot_expiration(snapshot_expiration),
                 snapshot_retention=snapshot_retention,
-                region=region,
+                region=resolve_region(region, fallback=service.options.region),
                 failover_regions=normalize_failover_regions(failover_regions),
                 private_parameters=private_parameters,
             )
@@ -2375,7 +2375,7 @@ def get_or_create_sandbox(
                 mounts=mounts,
                 snapshot_expiration=_parse_snapshot_expiration(snapshot_expiration),
                 snapshot_retention=snapshot_retention,
-                region=region,
+                region=resolve_region(region, fallback=service.options.region),
                 failover_regions=normalize_failover_regions(failover_regions),
                 private_parameters=private_parameters,
             )
@@ -2447,7 +2447,7 @@ def get_or_create_drive(
         service.get_or_create_drive(
             name=name,
             max_size_bytes=max_size_bytes,
-            region=region,
+            region=resolve_region(region, fallback=service.options.region),
         )
     )
     return SyncDrive(payload=state, service=service), created
