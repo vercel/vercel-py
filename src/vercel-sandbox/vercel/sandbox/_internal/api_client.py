@@ -79,6 +79,7 @@ from vercel.sandbox._internal.options import (
     SandboxCredentialsFactory,
 )
 from vercel.sandbox._internal.process_output import ProcessOutputRouter
+from vercel.sandbox._internal.region import ResolvedRegion
 from vercel.sandbox._internal.state import (
     CompletedProcessState,
     DrivesPageState,
@@ -1183,18 +1184,16 @@ class SandboxApiClient:
         mounts: DriveMountsInput[_RemotePathT] | None = None,
         snapshot_expiration: SnapshotExpiration | None = None,
         snapshot_retention: SnapshotRetention | None = None,
-        region: str | None = None,
-        fallback_region: str | None = None,
+        region: ResolvedRegion | None = None,
         failover_regions: tuple[str, ...] | None = None,
         private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
     ) -> _PreparedSandboxCreation:
         credentials = await self._credentials_factory()
         resolved_project_id = project_id or credentials.project_id
-        resolved_region = region or fallback_region
         serialized_mounts = _serialize_drive_mounts(
             mounts,
             project_id=resolved_project_id,
-            region=resolved_region,
+            region=region,
             failover_regions=failover_regions,
         )
         if not serialized_mounts:
@@ -1215,7 +1214,7 @@ class SandboxApiClient:
             mounts=serialized_mounts,
             snapshot_expiration=snapshot_expiration,
             keep_last_snapshots=snapshot_retention,
-            region=resolved_region,
+            region=region,
             failover_regions=None if failover_regions is None else list(failover_regions),
         )
         body = request.to_api_dict()
@@ -1278,8 +1277,7 @@ class SandboxApiClient:
         mounts: DriveMountsInput[_RemotePathT] | None = None,
         snapshot_expiration: SnapshotExpiration | None = None,
         snapshot_retention: SnapshotRetention | None = None,
-        region: str | None = None,
-        fallback_region: str | None = None,
+        region: ResolvedRegion | None = None,
         failover_regions: tuple[str, ...] | None = None,
         private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
     ) -> SandboxState:
@@ -1300,7 +1298,6 @@ class SandboxApiClient:
             snapshot_expiration=snapshot_expiration,
             snapshot_retention=snapshot_retention,
             region=region,
-            fallback_region=fallback_region,
             failover_regions=failover_regions,
             private_parameters=private_parameters,
         )
@@ -1324,18 +1321,16 @@ class SandboxApiClient:
         mounts: DriveMountsInput[_RemotePathT] | None = None,
         snapshot_expiration: SnapshotExpiration | None = None,
         snapshot_retention: SnapshotRetention | None = None,
-        region: str | None = None,
-        fallback_region: str | None = None,
+        region: ResolvedRegion | None = None,
         failover_regions: tuple[str, ...] | None = None,
         private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
     ) -> SandboxState:
         credentials = await self._credentials_factory()
         effective_project_id = project_id or credentials.project_id
-        resolved_region = region or fallback_region
         serialized_mounts = _serialize_drive_mounts(
             {} if mounts is None else mounts,
             project_id=effective_project_id,
-            region=resolved_region,
+            region=region,
             failover_regions=failover_regions,
         )
         request = _ForkSandboxRequest(
@@ -1352,7 +1347,7 @@ class SandboxApiClient:
             mounts=serialized_mounts,
             snapshot_expiration=snapshot_expiration,
             keep_last_snapshots=snapshot_retention,
-            region=resolved_region,
+            region=region,
             failover_regions=None if failover_regions is None else list(failover_regions),
         )
         data = await self._request_json(
@@ -1460,7 +1455,7 @@ class SandboxApiClient:
         snapshot_expiration: SnapshotExpiration | None = None,
         snapshot_retention: SnapshotRetentionUpdate = _OMITTED,
         current_snapshot_id: str | None = None,
-        region: str | None = None,
+        region: ResolvedRegion | None = None,
         failover_regions: tuple[str, ...] | None = None,
     ) -> SandboxState:
         credentials = await self._credentials_factory()
@@ -1676,7 +1671,7 @@ class SandboxApiClient:
         *,
         name: str,
         max_size_bytes: int | None = None,
-        region: str | None = None,
+        region: ResolvedRegion | None = None,
     ) -> tuple[DriveState, bool]:
         credentials = await self._credentials_factory()
         request = _GetOrCreateDriveRequest(

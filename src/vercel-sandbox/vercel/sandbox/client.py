@@ -44,6 +44,7 @@ from vercel.sandbox._internal.models import (
     normalize_private_parameters as _normalize_private_parameters,
 )
 from vercel.sandbox._internal.options import SandboxServiceOptions
+from vercel.sandbox._internal.region import RegionInput
 from vercel.sandbox._internal.service import SandboxService, get_sandbox_service
 
 
@@ -97,7 +98,7 @@ class SandboxClient:
         mounts: DriveMountsInput[_RemotePathT] | None = None,
         snapshot_expiration: SnapshotExpirationInput = None,
         snapshot_retention: SnapshotRetention | None = None,
-        region: str | None = None,
+        region: RegionInput = None,
         failover_regions: FailoverRegionsInput = None,
         destroy: bool = True,
         **private_parameters: _JSONValue,
@@ -141,7 +142,7 @@ class SandboxClient:
         mounts: DriveMountsInput[_RemotePathT] | None = None,
         snapshot_expiration: SnapshotExpirationInput = None,
         snapshot_retention: SnapshotRetention | None = None,
-        region: str | None = None,
+        region: RegionInput = None,
         failover_regions: FailoverRegionsInput = None,
         destroy: bool = True,
         **private_parameters: _JSONValue,
@@ -187,7 +188,7 @@ class SandboxClient:
         mounts: DriveMountsInput[_RemotePathT] | None = None,
         snapshot_expiration: SnapshotExpirationInput = None,
         snapshot_retention: SnapshotRetention | None = None,
-        region: str | None = None,
+        region: RegionInput = None,
         failover_regions: FailoverRegionsInput = None,
         **private_parameters: _JSONValue,
     ) -> tuple[Sandbox, bool]:
@@ -268,7 +269,7 @@ class SandboxClient:
         *,
         name: str,
         max_size_bytes: int | None = None,
-        region: str | None = None,
+        region: RegionInput = None,
     ) -> tuple[Drive, bool]:
         return await _get_or_create_drive(
             self._service,

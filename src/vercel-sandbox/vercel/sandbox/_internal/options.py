@@ -1,14 +1,12 @@
 """Sandbox service options."""
 
-import os
 from collections.abc import Callable, Coroutine
 from datetime import timedelta
 from typing import Any, Protocol
 
-from pydantic import Field
-
 from vercel._internal.core.options import ServiceOptions
 from vercel.sandbox._internal.errors import SandboxCredentialsError
+from vercel.sandbox._internal.region import RegionInput
 from vercel.sandbox._internal.value_model import SandboxValueModel
 
 DEFAULT_SANDBOX_API_BASE_URL = "https://vercel.com/api"
@@ -72,6 +70,9 @@ class SandboxServiceOptions(SandboxValueModel, _SandboxServiceOptionsKey):
     A session that does not receive this option still constructs one with the
     default Sandbox API base URL and credential resolver. Supplying the option
     overrides the whole service configuration for that session scope.
+
+    ``region`` defaults to ``None``, leaving placement to the API. Pass
+    ``CURRENT_REGION`` to use ``VERCEL_REGION`` when an operation is called.
     """
 
     base_url: str = DEFAULT_SANDBOX_API_BASE_URL
@@ -79,7 +80,7 @@ class SandboxServiceOptions(SandboxValueModel, _SandboxServiceOptionsKey):
         _default_sandbox_credentials_factory
     )
     file_transfer_timeout: timedelta = _DEFAULT_FILE_TRANSFER_TIMEOUT
-    region: str | None = Field(default_factory=lambda: os.environ.get("VERCEL_REGION") or None)
+    region: RegionInput = None
 
     def __init__(
         self,
@@ -87,25 +88,29 @@ class SandboxServiceOptions(SandboxValueModel, _SandboxServiceOptionsKey):
         base_url: str | None = None,
         credentials_factory: SandboxCredentialsFactory | None = None,
         file_transfer_timeout: timedelta | None = None,
-        region: str | None = None,
+        region: RegionInput = None,
     ) -> None:
         super().__init__(
             **_explicit_options(
                 base_url=base_url,
                 credentials_factory=credentials_factory,
                 file_transfer_timeout=file_transfer_timeout,
-                region=region,
-            )
+            ),
+            region=region,
         )
 
 
 class SyncSandboxServiceOptions(SandboxValueModel, _SandboxServiceOptionsKey):
-    """Configuration for synchronous `vercel.sandbox` calls in an SDK session."""
+    """Configuration for synchronous `vercel.sandbox` calls in an SDK session.
+
+    ``region`` defaults to ``None``. Pass ``CURRENT_REGION`` to use the current
+    function's ``VERCEL_REGION`` when an operation is called.
+    """
 
     base_url: str = DEFAULT_SANDBOX_API_BASE_URL
     credentials_factory: Callable[[], SandboxCredentials] = _resolve_default_sandbox_credentials
     file_transfer_timeout: timedelta = _DEFAULT_FILE_TRANSFER_TIMEOUT
-    region: str | None = Field(default_factory=lambda: os.environ.get("VERCEL_REGION") or None)
+    region: RegionInput = None
 
     def __init__(
         self,
@@ -113,13 +118,13 @@ class SyncSandboxServiceOptions(SandboxValueModel, _SandboxServiceOptionsKey):
         base_url: str | None = None,
         credentials_factory: SyncSandboxCredentialsFactory | None = None,
         file_transfer_timeout: timedelta | None = None,
-        region: str | None = None,
+        region: RegionInput = None,
     ) -> None:
         super().__init__(
             **_explicit_options(
                 base_url=base_url,
                 credentials_factory=credentials_factory,
                 file_transfer_timeout=file_transfer_timeout,
-                region=region,
-            )
+            ),
+            region=region,
         )

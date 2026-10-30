@@ -76,6 +76,7 @@ from vercel.sandbox._internal.options import (
     SyncSandboxServiceOptions as SandboxServiceOptions,
 )
 from vercel.sandbox._internal.process_stdin import SyncCommandStdin
+from vercel.sandbox._internal.region import CURRENT_REGION, CurrentRegion, RegionInput
 from vercel.sandbox._internal.service import SandboxService, get_sync_sandbox_service
 from vercel.sandbox._internal.state import SnapshotRetentionState
 from vercel.sandbox._internal.sync_filesystem_handle import (
@@ -138,7 +139,7 @@ def create_sandbox(
     mounts: DriveMountsInput[_RemotePathT] | None = None,
     snapshot_expiration: SnapshotExpirationInput = None,
     snapshot_retention: SnapshotRetention | None = None,
-    region: str | None = None,
+    region: RegionInput = None,
     failover_regions: FailoverRegionsInput = None,
     destroy: bool = True,
     **private_parameters: _JSONValue,
@@ -168,7 +169,8 @@ def create_sandbox(
         snapshot_expiration: Default lifetime for snapshots created from this
             sandbox.
         snapshot_retention: Automatic snapshot retention policy.
-        region: Preferred region for the sandbox.
+        region: Preferred region for the sandbox. Uses the service option when omitted.
+            Pass ``CURRENT_REGION`` to use the current function's region if available.
         failover_regions: Regions available if creation in ``region`` fails.
         destroy: Whether context-manager exit destroys the sandbox and its
             orphaned snapshots after stopping it.
@@ -218,7 +220,7 @@ def fork_sandbox(
     mounts: DriveMountsInput[_RemotePathT] | None = None,
     snapshot_expiration: SnapshotExpirationInput = None,
     snapshot_retention: SnapshotRetention | None = None,
-    region: str | None = None,
+    region: RegionInput = None,
     failover_regions: FailoverRegionsInput = None,
     destroy: bool = True,
     **private_parameters: _JSONValue,
@@ -252,7 +254,8 @@ def fork_sandbox(
             unmounted fork.
         snapshot_expiration: Default snapshot lifetime override.
         snapshot_retention: Automatic snapshot retention override.
-        region: Preferred region override.
+        region: Preferred region override. Uses the service option when omitted.
+            Pass ``CURRENT_REGION`` to use the current function's region if available.
         failover_regions: Failover region override.
         destroy: Whether context-manager exit destroys the fork after stopping
             it.
@@ -304,7 +307,7 @@ def get_or_create_sandbox(
     mounts: DriveMountsInput[_RemotePathT] | None = None,
     snapshot_expiration: SnapshotExpirationInput = None,
     snapshot_retention: SnapshotRetention | None = None,
-    region: str | None = None,
+    region: RegionInput = None,
     failover_regions: FailoverRegionsInput = None,
     **private_parameters: _JSONValue,
 ) -> tuple[SyncSandbox, bool]:
@@ -335,7 +338,8 @@ def get_or_create_sandbox(
         snapshot_expiration: Default lifetime for snapshots created from this
             sandbox.
         snapshot_retention: Automatic snapshot retention policy.
-        region: Preferred region for a newly created sandbox.
+        region: Preferred region for a newly created sandbox. Uses the service option when omitted.
+            Pass ``CURRENT_REGION`` to use the current function's region if available.
         failover_regions: Failover regions for a newly created sandbox.
 
     Returns:
@@ -454,7 +458,7 @@ def get_or_create_drive(
     *,
     name: str,
     max_size_bytes: int | None = None,
-    region: str | None = None,
+    region: RegionInput = None,
 ) -> tuple[SyncDrive, bool]:
     """Return a named Drive, creating it when necessary.
 
@@ -463,7 +467,8 @@ def get_or_create_drive(
         max_size_bytes: Maximum size for a new Drive. Uses the project's default
             when omitted.
         region: Storage region for a new Drive. Uses ``SyncSandboxServiceOptions.region``
-            when omitted. An existing Drive must already use the requested region.
+            when omitted. Pass ``CURRENT_REGION`` to use the current function's
+            region if available. An existing Drive must use the requested region.
 
     Returns:
         A ``(drive, created)`` tuple. ``created`` is true when this call created
@@ -620,6 +625,9 @@ ProcessSignal = CommandSignal
 
 
 __all__ = [
+    "CURRENT_REGION",
+    "CurrentRegion",
+    "RegionInput",
     "SyncSandboxUser",
     "SyncSandboxExecution",
     "SyncSandboxFilesystemOperations",
