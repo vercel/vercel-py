@@ -70,6 +70,10 @@ from vercel.sandbox._internal.models import (
     _RemotePathT,
     normalize_private_parameters as _normalize_private_parameters,
 )
+from vercel.sandbox._internal.network_policy import (
+    NetworkPolicyParseError,
+    parse_network_policy,
+)
 from vercel.sandbox._internal.options import (
     SandboxCredentials,
     SyncSandboxCredentialsFactory,
@@ -656,6 +660,7 @@ __all__ = [
     "NetworkPolicyInjectionRuleSummary",
     "NetworkPolicyKeyValueMatcher",
     "NetworkPolicyMatcher",
+    "NetworkPolicyParseError",
     "NetworkPolicyRequestMatcher",
     "NetworkPolicyReadback",
     "NetworkPolicyResponse",
@@ -713,6 +718,7 @@ __all__ = [
     "get_drive",
     "get_or_create_drive",
     "get_snapshot",
+    "parse_network_policy",
     "query_sandboxes",
     "query_drives",
     "query_sessions",

@@ -9,6 +9,7 @@ from types import MappingProxyType
 from typing import (
     Annotated,
     Any,
+    ClassVar,
     Final,
     Literal,
     Protocol,
@@ -19,12 +20,16 @@ from typing import (
 
 from pydantic import (
     AfterValidator,
+    AliasChoices,
     BaseModel,
     ConfigDict,
     Field,
     JsonValue as PydanticJsonValue,
+    ModelWrapValidatorHandler,
     SkipValidation,
     StrictBytes,
+    TypeAdapter,
+    ValidationError,
     ValidationInfo,
     WrapSerializer,
     field_serializer,
@@ -89,6 +94,10 @@ class NetworkPolicyMatcher(SandboxValueModel):
     def __init__(self, kind: Literal["exact", "starts_with", "regex"], value: str) -> None:
         super().__init__(kind=kind, value=value)
 
+    def to_api_dict(self) -> JSONObject:
+        key = "startsWith" if self.kind == "starts_with" else self.kind
+        return {key: self.value}
+
     @classmethod
     def exact(cls, value: str) -> "NetworkPolicyMatcher":
         return cls("exact", value)
@@ -109,11 +118,13 @@ class NetworkPolicyKeyValueMatcher(SandboxValueModel):
     value: NetworkPolicyMatcher | None = None
     __hash__ = None  # type: ignore[assignment]
 
-    @model_validator(mode="after")
-    def _validate(self) -> Self:
-        if self.key is None and self.value is None:
-            raise ValueError("key-value matcher requires a key or value matcher")
-        return self
+    def to_api_dict(self) -> JSONObject:
+        result: JSONObject = {}
+        if self.key is not None:
+            result["key"] = self.key.to_api_dict()
+        if self.value is not None:
+            result["value"] = self.value.to_api_dict()
+        return result
 
 
 class NetworkPolicyRequestMatcher(SandboxValueModel):
@@ -125,14 +136,17 @@ class NetworkPolicyRequestMatcher(SandboxValueModel):
     headers: tuple[NetworkPolicyKeyValueMatcher, ...] | None = None
     __hash__ = None  # type: ignore[assignment]
 
-    @model_validator(mode="after")
-    def _validate(self) -> Self:
-        if all(value is None for value in (self.path, self.method, self.query, self.headers)):
-            raise ValueError("request matcher requires at least one matching dimension")
-        for name in ("method", "query", "headers"):
-            if getattr(self, name) == ():
-                raise ValueError(f"request matcher {name} must not be empty")
-        return self
+    def to_api_dict(self) -> JSONObject:
+        result: JSONObject = {}
+        if self.path is not None:
+            result["path"] = self.path.to_api_dict()
+        if self.method is not None:
+            result["method"] = list(self.method)
+        if self.query is not None:
+            result["queryString"] = [item.to_api_dict() for item in self.query]
+        if self.headers is not None:
+            result["headers"] = [item.to_api_dict() for item in self.headers]
+        return result
 
 
 class NetworkPolicyTransform(SandboxValueModel):
@@ -140,6 +154,9 @@ class NetworkPolicyTransform(SandboxValueModel):
 
     headers: _FrozenMapping[str] | None = None
     __hash__ = None  # type: ignore[assignment]
+
+    def to_api_dict(self) -> JSONObject:
+        return {} if self.headers is None else {"headers": dict(self.headers)}
 
 
 class NetworkPolicyResponse(SandboxValueModel):
@@ -191,6 +208,16 @@ class NetworkPolicyResponse(SandboxValueModel):
             raise ValueError("response headers cannot set proxy-managed headers")
         return self
 
+    def to_api_dict(self) -> JSONObject:
+        result: JSONObject = {"statusCode": self.status_code}
+        if self.headers is not None:
+            result["headers"] = dict(self.headers)
+        if self.body is not None:
+            result["body"] = self.body
+        if self.content_type is not None:
+            result["contentType"] = self.content_type
+        return result
+
 
 class NetworkPolicyRule(SandboxValueModel):
     """Configure one matched request action for a domain."""
@@ -204,7 +231,16 @@ class NetworkPolicyRule(SandboxValueModel):
     @model_validator(mode="after")
     def _validate(self) -> Self:
         handlers = sum(
-            (bool(self.transform), self.forward_url is not None, self.response is not None)
+            (
+                bool(self.transform)
+                or (
+                    "transform" in self.model_fields_set
+                    and self.forward_url is None
+                    and self.response is None
+                ),
+                self.forward_url is not None,
+                self.response is not None,
+            )
         )
         if handlers != 1:
             raise ValueError(
@@ -212,32 +248,74 @@ class NetworkPolicyRule(SandboxValueModel):
             )
         return self
 
+    def to_api_dict(self) -> JSONObject:
+        result: JSONObject = {}
+        if self.match is not None:
+            result["match"] = self.match.to_api_dict()
+        if self.transform or (self.forward_url is None and self.response is None):
+            result["transform"] = [item.to_api_dict() for item in self.transform]
+        if self.forward_url is not None:
+            result["forwardURL"] = self.forward_url
+        if self.response is not None:
+            result["response"] = self.response.to_api_dict()
+        return result
+
 
 NetworkPolicyMatchDimension: TypeAlias = Literal["path", "method", "query", "headers"]
 
 
-class NetworkPolicyInjectionRuleSummary(SandboxValueModel):
+class _NetworkPolicyRuleSummary(SandboxValueModel):
+    """Common redacted response metadata, including API field aliases."""
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    domain: str
+    match_dimensions: tuple[NetworkPolicyMatchDimension, ...] = Field(
+        default=(), alias="matchDimensions"
+    )
+
+    @field_validator("match_dimensions", mode="before")
+    @classmethod
+    def _normalize_dimensions(cls, value: object) -> object:
+        if value is None:
+            return ()
+        if not isinstance(value, (list, tuple)):
+            raise ValueError("matchDimensions must be an array")
+        dimensions = tuple("query" if item == "queryString" else item for item in value)
+        if len(dimensions) != len(set(dimensions)):
+            raise ValueError("matchDimensions must not contain duplicates")
+        return dimensions
+
+
+class NetworkPolicyInjectionRuleSummary(_NetworkPolicyRuleSummary):
     """Redacted header-injection rule metadata returned by the Sandbox API."""
 
-    domain: str
-    header_names: tuple[str, ...] = ()
-    match_dimensions: tuple[NetworkPolicyMatchDimension, ...] = ()
+    header_names: tuple[str, ...] = Field(default=(), alias="headerNames")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _redact_headers(cls, value: Any) -> Any:
+        if not isinstance(value, Mapping) or "headers" not in value:
+            return value
+        if "headerNames" in value or "header_names" in value:
+            raise ValueError("injection rule cannot set headers and headerNames")
+        if not isinstance(value["headers"], Mapping):
+            raise ValueError("injection rule headers must be an object")
+        return {**value, "headerNames": tuple(value["headers"])}
 
 
-class NetworkPolicyForwardRuleSummary(SandboxValueModel):
+class NetworkPolicyForwardRuleSummary(_NetworkPolicyRuleSummary):
     """Redacted forward rule metadata returned by the Sandbox API."""
 
-    domain: str
-    forward_url: str
-    match_dimensions: tuple[NetworkPolicyMatchDimension, ...] = ()
+    forward_url: str = Field(
+        validation_alias=AliasChoices("forward_url", "forwardURL", "forwardUrl")
+    )
 
 
-class NetworkPolicyResponseRuleSummary(SandboxValueModel):
+class NetworkPolicyResponseRuleSummary(_NetworkPolicyRuleSummary):
     """Redacted direct-response rule metadata returned by the Sandbox API."""
 
-    domain: str
-    status_code: int
-    match_dimensions: tuple[NetworkPolicyMatchDimension, ...] = ()
+    status_code: int = Field(alias="statusCode")
 
     @field_validator("status_code", mode="before")
     @classmethod
@@ -253,6 +331,14 @@ class NetworkPolicySubnets(SandboxValueModel):
     allow: tuple[str, ...] | None = None
     deny: tuple[str, ...] | None = None
     __hash__ = None  # type: ignore[assignment]
+
+    def to_api_dict(self) -> JSONObject:
+        result: JSONObject = {}
+        if self.allow is not None:
+            result["allow"] = list(self.allow)
+        if self.deny is not None:
+            result["deny"] = list(self.deny)
+        return result
 
 
 class NetworkPolicy(SandboxValueModel):
@@ -290,6 +376,37 @@ class NetworkPolicy(SandboxValueModel):
             raise ValueError("simple network policy modes cannot include custom rules")
         return self
 
+    @classmethod
+    def from_json_value(cls, value: object) -> "NetworkPolicy":
+        """Validate decoded SDK/CLI policy JSON, rejecting unknown keys recursively.
+
+        Unlike model_validate(), this consumes the shared JSON format rather
+        than Python field names. Validation errors may retain input values;
+        use parse_network_policy() for credential-safe diagnostics.
+        """
+        if isinstance(value, str):
+            if value == "allow-all":
+                return cls.allow_all()
+            if value == "deny-all":
+                return cls.deny_all()
+        return _NetworkPolicyObject.model_validate(
+            value, context={"network_policy_request": True}
+        ).to_value()
+
+    def to_api_dict(self) -> JSONObject:
+        """Serialize an authored policy for Sandbox API requests."""
+        if self.mode != "custom":
+            return {"mode": self.mode}
+        result: JSONObject = {
+            "allow": {
+                domain: [rule.to_api_dict() for rule in rules]
+                for domain, rules in self.allow.items()
+            }
+        }
+        if self.subnets is not None:
+            result["subnets"] = self.subnets.to_api_dict()
+        return result
+
 
 class NetworkPolicyReadback(SandboxValueModel):
     """Incomplete policy metadata; cannot be submitted as a network policy."""
@@ -301,347 +418,253 @@ class NetworkPolicyReadback(SandboxValueModel):
     forward_rules: tuple[NetworkPolicyForwardRuleSummary, ...] = ()
     response_rules: tuple[NetworkPolicyResponseRuleSummary, ...] = ()
 
+    @classmethod
+    def from_api_dict(cls, value: object) -> "NetworkPolicyReadback":
+        """Parse API response metadata, tolerating additional response fields.
 
-def _serialize_network_policy(network_policy: NetworkPolicy) -> JSONObject:
-    if not isinstance(network_policy, NetworkPolicy):
-        raise TypeError("network_policy must be a NetworkPolicy")
-    if network_policy.mode != "custom":
-        return {"mode": network_policy.mode}
-
-    allow: dict[str, JSONValue] = {}
-    for domain, rules in network_policy.allow.items():
-        allow[domain] = [_serialize_network_policy_rule(rule) for rule in rules]
-    result: JSONObject = {"allow": allow}
-    if network_policy.subnets is not None:
-        subnets: JSONObject = {}
-        if network_policy.subnets.allow is not None:
-            subnets["allow"] = list(network_policy.subnets.allow)
-        if network_policy.subnets.deny is not None:
-            subnets["deny"] = list(network_policy.subnets.deny)
-        result["subnets"] = subnets
-    return result
-
-
-def _serialize_network_policy_rule(rule: NetworkPolicyRule) -> JSONObject:
-    result: JSONObject = {}
-    if rule.match is not None:
-        result["match"] = _serialize_request_matcher(rule.match)
-    if rule.transform:
-        transforms: list[JSONValue] = []
-        for transform in rule.transform:
-            transform_data: JSONObject = {}
-            if transform.headers is not None:
-                transform_data["headers"] = dict(transform.headers)
-            transforms.append(transform_data)
-        result["transform"] = transforms
-    if rule.forward_url is not None:
-        result["forwardURL"] = rule.forward_url
-    if rule.response is not None:
-        response: JSONObject = {"statusCode": rule.response.status_code}
-        if rule.response.headers is not None:
-            response["headers"] = dict(rule.response.headers)
-        if rule.response.body is not None:
-            response["body"] = rule.response.body
-        if rule.response.content_type is not None:
-            response["contentType"] = rule.response.content_type
-        result["response"] = response
-    return result
+        Readbacks intentionally contain neither credential values nor enough
+        information to recreate an authored request policy.
+        """
+        if isinstance(value, cls):
+            return value
+        if isinstance(value, Mapping):
+            if "allow" in value or "subnets" in value:
+                policy = _NetworkPolicyObject.model_validate(value).to_value()
+                return cls(
+                    mode="custom", allowed_domains=tuple(policy.allow), subnets=policy.subnets
+                )
+            if value.get("mode") == "allow-all":
+                return cls(mode="allow-all")
+            if value.get("mode") == "deny-all":
+                return cls(mode="deny-all")
+        return _NormalizedNetworkPolicyReadback.model_validate(value).to_value()
 
 
-def _serialize_request_matcher(matcher: NetworkPolicyRequestMatcher) -> JSONObject:
-    result: JSONObject = {}
-    if matcher.path is not None:
-        result["path"] = _serialize_matcher(matcher.path)
-    if matcher.method is not None:
-        result["method"] = list(matcher.method)
-    if matcher.query is not None:
-        result["queryString"] = [_serialize_key_value_matcher(item) for item in matcher.query]
-    if matcher.headers is not None:
-        result["headers"] = [_serialize_key_value_matcher(item) for item in matcher.headers]
-    return result
+class _NetworkPolicyInput(BaseModel):
+    # Requests and domain-map readbacks share this schema. Response parsing
+    # accepts additional fields; requests reject them, including legacy aliases.
+    _response_nullable_fields: ClassVar[frozenset[str]] = frozenset()
+    model_config = ConfigDict(extra="ignore", strict=True, hide_input_in_errors=True)
 
-
-def _serialize_key_value_matcher(matcher: NetworkPolicyKeyValueMatcher) -> JSONObject:
-    result: JSONObject = {}
-    if matcher.key is not None:
-        result["key"] = _serialize_matcher(matcher.key)
-    if matcher.value is not None:
-        result["value"] = _serialize_matcher(matcher.value)
-    return result
-
-
-def _serialize_matcher(matcher: NetworkPolicyMatcher) -> JSONObject:
-    key = "startsWith" if matcher.kind == "starts_with" else matcher.kind
-    return {key: matcher.value}
-
-
-def _parse_network_policy(value: object) -> NetworkPolicyReadback | None:
-    if value is None or isinstance(value, NetworkPolicyReadback):
-        return value
-    data = _mapping(value, "network policy")
-    if "allow" in data or "subnets" in data:
-        return _parse_domain_map_network_policy(data)
-
-    mode = data.get("mode")
-    if mode == "allow-all":
-        return NetworkPolicyReadback(mode="allow-all")
-    if mode == "deny-all":
-        return NetworkPolicyReadback(mode="deny-all")
-    if mode != "custom":
-        raise ValueError("network policy mode must be allow-all, deny-all, or custom")
-    return _parse_normalized_network_policy(data)
-
-
-def _parse_domain_map_network_policy(data: Mapping[str, Any]) -> NetworkPolicyReadback:
-    raw_allow = data.get("allow", {})
-    if isinstance(raw_allow, Mapping):
-        domains: list[str] = []
-        for domain, raw_rules in raw_allow.items():
-            domains.append(_string(domain, "network policy domain"))
-            for item in _iterable(raw_rules, f"network policy rules for {domain!r}"):
-                _parse_network_policy_rule(item)
-    else:
-        domains = [
-            _string(domain, "network policy domain")
-            for domain in _iterable(raw_allow, "network policy allow")
-        ]
-
-    subnets = None
-    if "subnets" in data:
-        raw_subnets = _mapping(data["subnets"], "network policy subnets")
-        subnets = NetworkPolicySubnets(
-            allow=_optional_string_iterable(raw_subnets.get("allow"), "subnet allow"),
-            deny=_optional_string_iterable(raw_subnets.get("deny"), "subnet deny"),
-        )
-    return NetworkPolicyReadback(mode="custom", allowed_domains=tuple(domains), subnets=subnets)
-
-
-def _parse_normalized_network_policy(data: Mapping[str, Any]) -> NetworkPolicyReadback:
-    domains: dict[str, None] = {}
-    for domain in _optional_string_iterable(data.get("allowedDomains"), "allowedDomains") or ():
-        domains.setdefault(domain, None)
-
-    injection_rules = tuple(
-        _parse_injection_rule_summary(raw_rule)
-        for raw_rule in _iterable(data.get("injectionRules", ()), "injectionRules")
-    )
-    for rule in injection_rules:
-        domains.setdefault(rule.domain, None)
-
-    forward_rules = tuple(
-        _parse_forward_rule_summary(raw_rule)
-        for raw_rule in _iterable(
-            data.get("forwardRules", data.get("forwardingRules", ())),
-            "forwardRules",
-        )
-    )
-    response_rules = tuple(
-        _parse_response_rule_summary(raw_rule)
-        for raw_rule in _iterable(data.get("responseRules", ()), "responseRules")
-    )
-    for forward_rule in forward_rules:
-        domains.setdefault(forward_rule.domain, None)
-    for response_rule in response_rules:
-        domains.setdefault(response_rule.domain, None)
-
-    allowed_cidrs = _optional_string_iterable(data.get("allowedCIDRs"), "allowedCIDRs")
-    denied_cidrs = _optional_string_iterable(data.get("deniedCIDRs"), "deniedCIDRs")
-    subnets = (
-        None
-        if allowed_cidrs is None and denied_cidrs is None
-        else NetworkPolicySubnets(allow=allowed_cidrs, deny=denied_cidrs)
-    )
-    return NetworkPolicyReadback(
-        mode="custom",
-        allowed_domains=tuple(domains),
-        subnets=subnets,
-        injection_rules=injection_rules,
-        forward_rules=forward_rules,
-        response_rules=response_rules,
-    )
-
-
-def _parse_injection_rule_summary(value: object) -> NetworkPolicyInjectionRuleSummary:
-    data = _mapping(value, "injection rule")
-    if "headers" in data and "headerNames" in data:
-        raise ValueError("injection rule cannot set headers and headerNames")
-    if "headerNames" in data:
-        names = _string_iterable(data["headerNames"], "headerNames")
-    else:
-        names = tuple(
-            _string(key, "header name")
-            for key in _mapping(data.get("headers", {}), "injection rule headers")
-        )
-    return NetworkPolicyInjectionRuleSummary(
-        domain=_string(data.get("domain"), "injection rule domain"),
-        header_names=names,
-        match_dimensions=_parse_match_dimensions(data.get("matchDimensions")),
-    )
-
-
-def _parse_forward_rule_summary(value: object) -> NetworkPolicyForwardRuleSummary:
-    data = _mapping(value, "forward rule")
-    return NetworkPolicyForwardRuleSummary(
-        domain=_string(data.get("domain"), "forward rule domain"),
-        forward_url=_string(
-            data.get("forwardURL", data.get("forwardUrl")),
-            "forward rule forwardURL",
-        ),
-        match_dimensions=_parse_match_dimensions(data.get("matchDimensions")),
-    )
-
-
-def _parse_response_rule_summary(value: object) -> NetworkPolicyResponseRuleSummary:
-    data = _mapping(value, "response rule")
-    status_code = data.get("statusCode")
-    if type(status_code) is not int:
-        raise TypeError("response rule statusCode must be an integer")
-    return NetworkPolicyResponseRuleSummary(
-        domain=_string(data.get("domain"), "response rule domain"),
-        status_code=status_code,
-        match_dimensions=_parse_match_dimensions(data.get("matchDimensions")),
-    )
-
-
-def _parse_match_dimensions(value: object) -> tuple[NetworkPolicyMatchDimension, ...]:
-    dimensions = _optional_string_iterable(value, "network policy matchDimensions") or ()
-    normalized: list[NetworkPolicyMatchDimension] = []
-    for dimension in dimensions:
-        python_name = "query" if dimension in {"query", "queryString"} else dimension
-        if python_name not in {"path", "method", "query", "headers"}:
-            raise ValueError(f"unknown network policy match dimension {dimension!r}")
-        normalized.append(cast(NetworkPolicyMatchDimension, python_name))
-    if len(normalized) != len(set(normalized)):
-        raise ValueError("network policy matchDimensions must not contain duplicates")
-    return tuple(normalized)
-
-
-def _parse_network_policy_rule(value: object) -> NetworkPolicyRule:
-    data = _mapping(value, "network policy rule")
-    transforms: list[NetworkPolicyTransform] = []
-    for raw_transform in _iterable(data.get("transform", ()), "network policy transforms"):
-        transform_data = _mapping(raw_transform, "network policy transform")
-        if "headers" in transform_data and "headerNames" in transform_data:
-            raise ValueError("network policy transform cannot set headers and headerNames")
-        headers = _mapping(transform_data.get("headers", {}), "transform headers")
-        transforms.append(
-            NetworkPolicyTransform(
-                headers={
-                    _string(key, "header name"): _string(value, "header value")
-                    for key, value in headers.items()
-                }
+    @model_validator(mode="wrap")
+    @classmethod
+    def _validate_keys(
+        cls, value: Any, handler: ModelWrapValidatorHandler[Self], info: ValidationInfo
+    ) -> Self:
+        if not (info.context or {}).get("network_policy_request"):
+            return handler(value)
+        errors: list[Any] = []
+        result = None
+        try:
+            result = handler(value)
+        except ValidationError as exc:
+            errors.extend(exc.errors(include_url=False))
+        if isinstance(value, Mapping):
+            names = {field.alias or name for name, field in cls.model_fields.items()}
+            errors.extend(
+                {"type": "extra_forbidden", "loc": (key,), "input": None}
+                for key in value
+                if key not in names
             )
+        if errors:
+            raise ValidationError.from_exception_data(cls.__name__, errors)
+        assert result is not None
+        return result
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _reject_null(cls, value: object, info: ValidationInfo) -> object:
+        # Requests distinguish omission from null. Responses retain the API's
+        # historical nullable fields without weakening validation elsewhere.
+        request = (info.context or {}).get("network_policy_request")
+        if value is None and (request or info.field_name not in cls._response_nullable_fields):
+            raise ValueError("must not be null")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_value(self) -> Self:
+        # Reuse authored-model invariants; Pydantic preserves the nested wire path.
+        self.to_value()
+        return self
+
+    def to_value(self) -> object:
+        raise NotImplementedError
+
+
+class _NetworkPolicyMatcherInput(_NetworkPolicyInput):
+    exact: str | None = None
+    starts_with: str | None = Field(default=None, alias="startsWith")
+    regex: str | None = None
+
+    def to_value(self) -> NetworkPolicyMatcher:
+        if sum(v is not None for v in (self.exact, self.starts_with, self.regex)) != 1:
+            raise ValueError("matcher requires exactly one of exact, startsWith, or regex")
+        if self.exact is not None:
+            return NetworkPolicyMatcher.exact(self.exact)
+        if self.starts_with is not None:
+            return NetworkPolicyMatcher.starts_with(self.starts_with)
+        assert self.regex is not None
+        return NetworkPolicyMatcher.regex(self.regex)
+
+
+class _NetworkPolicyPairInput(_NetworkPolicyInput):
+    key: _NetworkPolicyMatcherInput | None = None
+    value: _NetworkPolicyMatcherInput | None = None
+
+    def to_value(self) -> NetworkPolicyKeyValueMatcher:
+        return NetworkPolicyKeyValueMatcher(
+            key=None if self.key is None else self.key.to_value(),
+            value=None if self.value is None else self.value.to_value(),
         )
-    forward_url = data.get("forwardURL", data.get("forwardUrl"))
-    response = data.get("response")
-    return NetworkPolicyRule(
-        transform=transforms,
-        match=_parse_optional_request_matcher(data.get("match")),
-        forward_url=None if forward_url is None else _string(forward_url, "forwardURL"),
-        response=None if response is None else _parse_network_policy_response(response),
+
+
+class _NetworkPolicyMatchInput(_NetworkPolicyInput):
+    _response_nullable_fields = frozenset({"method", "query", "headers"})
+
+    path: _NetworkPolicyMatcherInput | None = None
+    method: list[str] | None = None
+    query: list[_NetworkPolicyPairInput] | None = Field(
+        default=None, alias="queryString", validation_alias=AliasChoices("queryString", "query")
     )
+    headers: list[_NetworkPolicyPairInput] | None = None
 
-
-def _parse_network_policy_response(value: object) -> NetworkPolicyResponse:
-    data = _mapping(value, "network policy response")
-    status_code = data.get("statusCode")
-    if type(status_code) is not int:
-        raise TypeError("network policy response statusCode must be an integer")
-    headers = data.get("headers")
-    return NetworkPolicyResponse(
-        status_code=status_code,
-        headers=(
-            None
-            if headers is None
-            else {
-                _string(key, "response header name"): _string(value, "response header value")
-                for key, value in _mapping(headers, "response headers").items()
-            }
-        ),
-        body=None if "body" not in data else _string(data["body"], "response body"),
-        content_type=(
-            None
-            if "contentType" not in data
-            else _string(data["contentType"], "response contentType")
-        ),
-    )
-
-
-def _parse_optional_request_matcher(value: object) -> NetworkPolicyRequestMatcher | None:
-    if value is None:
-        return None
-    data = _mapping(value, "request matcher")
-    return NetworkPolicyRequestMatcher(
-        path=None if "path" not in data else _parse_matcher(data["path"]),
-        method=_optional_string_iterable(data.get("method"), "request matcher method"),
-        query=_parse_optional_key_value_matchers(
-            data.get("queryString", data.get("query")), "request matcher queryString"
-        ),
-        headers=_parse_optional_key_value_matchers(data.get("headers"), "request matcher headers"),
-    )
-
-
-def _parse_optional_key_value_matchers(
-    value: object, name: str
-) -> tuple[NetworkPolicyKeyValueMatcher, ...] | None:
-    if value is None:
-        return None
-    return tuple(
-        NetworkPolicyKeyValueMatcher(
-            key=None if "key" not in data else _parse_matcher(data["key"]),
-            value=None if "value" not in data else _parse_matcher(data["value"]),
+    def to_value(self) -> NetworkPolicyRequestMatcher:
+        return NetworkPolicyRequestMatcher(
+            path=None if self.path is None else self.path.to_value(),
+            method=None if self.method is None else tuple(self.method),
+            query=None if self.query is None else tuple(pair.to_value() for pair in self.query),
+            headers=(
+                None if self.headers is None else tuple(pair.to_value() for pair in self.headers)
+            ),
         )
-        for item in _iterable(value, name)
-        for data in (_mapping(item, name),)
+
+
+class _NetworkPolicyTransformInput(_NetworkPolicyInput):
+    headers: dict[str, str] | None = None
+
+    def to_value(self) -> NetworkPolicyTransform:
+        return NetworkPolicyTransform(headers=self.headers)
+
+
+class _NetworkPolicyResponseInput(_NetworkPolicyInput):
+    _response_nullable_fields = frozenset({"headers"})
+
+    status_code: int = Field(alias="statusCode", ge=200, le=599)
+    headers: dict[str, str] | None = None
+    body: str | None = None
+    content_type: str | None = Field(default=None, alias="contentType")
+
+    @field_validator("status_code", mode="before")
+    @classmethod
+    def _normalize_integer(cls, value: object) -> object:
+        # JSON numbers such as 403.0 are integers to the JS SDK's validator.
+        if isinstance(value, float) and value.is_integer():
+            return int(value)
+        return value
+
+    def to_value(self) -> NetworkPolicyResponse:
+        return NetworkPolicyResponse(
+            status_code=self.status_code,
+            headers=self.headers,
+            body=self.body,
+            content_type=self.content_type,
+        )
+
+
+class _NetworkPolicyRuleInput(_NetworkPolicyInput):
+    _response_nullable_fields = frozenset({"match", "forward_url", "response"})
+
+    match: _NetworkPolicyMatchInput | None = None
+    transform: list[_NetworkPolicyTransformInput] | None = None
+    forward_url: str | None = Field(
+        default=None, alias="forwardURL", validation_alias=AliasChoices("forwardURL", "forwardUrl")
+    )
+    response: _NetworkPolicyResponseInput | None = None
+
+    def to_value(self) -> NetworkPolicyRule:
+        if sum(v is not None for v in (self.transform, self.forward_url, self.response)) != 1:
+            raise ValueError("rule requires exactly one of transform, forwardURL, or response")
+        return NetworkPolicyRule(
+            match=None if self.match is None else self.match.to_value(),
+            forward_url=self.forward_url,
+            response=None if self.response is None else self.response.to_value(),
+            **(
+                {}
+                if self.transform is None
+                else {"transform": tuple(t.to_value() for t in self.transform)}
+            ),
+        )
+
+
+class _NetworkPolicySubnetsInput(_NetworkPolicyInput):
+    _response_nullable_fields = frozenset({"allow", "deny"})
+
+    allow: list[str] | None = None
+    deny: list[str] | None = None
+
+    def to_value(self) -> NetworkPolicySubnets:
+        return NetworkPolicySubnets(
+            allow=None if self.allow is None else tuple(self.allow),
+            deny=None if self.deny is None else tuple(self.deny),
+        )
+
+
+class _NetworkPolicyObject(_NetworkPolicyInput):
+    allow: dict[str, list[_NetworkPolicyRuleInput]] | None = None
+    subnets: _NetworkPolicySubnetsInput | None = None
+
+    @field_validator("allow", mode="before")
+    @classmethod
+    def _normalize_domains(cls, value: object) -> object:
+        if isinstance(value, list):
+            domains = TypeAdapter(list[str]).validate_python(value, strict=True)
+            return {domain: [] for domain in domains}
+        return value
+
+    def to_value(self) -> NetworkPolicy:
+        return NetworkPolicy.custom(
+            allow={
+                domain: tuple(rule.to_value() for rule in rules)
+                for domain, rules in (self.allow or {}).items()
+            },
+            subnets=None if self.subnets is None else self.subnets.to_value(),
+        )
+
+
+class _NormalizedNetworkPolicyReadback(BaseModel):
+    """Normalized API response fields, whose rules are redacted summaries."""
+
+    model_config = ConfigDict(extra="ignore", strict=True)
+
+    mode: Literal["custom"]
+    allowed_domains: list[str] | None = Field(default=None, alias="allowedDomains")
+    allowed_cidrs: list[str] | None = Field(default=None, alias="allowedCIDRs")
+    denied_cidrs: list[str] | None = Field(default=None, alias="deniedCIDRs")
+    injection_rules: list[NetworkPolicyInjectionRuleSummary] = Field(
+        default_factory=list, alias="injectionRules"
+    )
+    forward_rules: list[NetworkPolicyForwardRuleSummary] = Field(
+        default_factory=list, validation_alias=AliasChoices("forwardRules", "forwardingRules")
+    )
+    response_rules: list[NetworkPolicyResponseRuleSummary] = Field(
+        default_factory=list, alias="responseRules"
     )
 
-
-def _parse_matcher(value: object) -> NetworkPolicyMatcher:
-    data = _mapping(value, "network policy matcher")
-    variants = [
-        (kind, data[key])
-        for kind, key in (
-            ("exact", "exact"),
-            ("starts_with", "startsWith"),
-            ("regex", "regex"),
+    def to_value(self) -> NetworkPolicyReadback:
+        domains = dict.fromkeys(self.allowed_domains or ())
+        for rule in (*self.injection_rules, *self.forward_rules, *self.response_rules):
+            domains.setdefault(rule.domain, None)
+        subnets = None
+        if self.allowed_cidrs is not None or self.denied_cidrs is not None:
+            subnets = NetworkPolicySubnets(allow=self.allowed_cidrs, deny=self.denied_cidrs)
+        return NetworkPolicyReadback(
+            mode=self.mode,
+            allowed_domains=tuple(domains),
+            subnets=subnets,
+            injection_rules=tuple(self.injection_rules),
+            forward_rules=tuple(self.forward_rules),
+            response_rules=tuple(self.response_rules),
         )
-        if key in data
-    ]
-    if len(variants) != 1:
-        raise ValueError(
-            "network policy matcher requires exactly one of exact, startsWith, or regex"
-        )
-    kind, matcher_value = variants[0]
-    return NetworkPolicyMatcher(
-        cast(Literal["exact", "starts_with", "regex"], kind),
-        _string(matcher_value, "network policy matcher value"),
-    )
-
-
-def _mapping(value: object, name: str) -> Mapping[str, Any]:
-    if not isinstance(value, Mapping):
-        raise TypeError(f"{name} must be a mapping")
-    return cast(Mapping[str, Any], value)
-
-
-def _iterable(value: object, name: str) -> Iterable[object]:
-    if isinstance(value, (str, bytes, Mapping)) or not isinstance(value, Iterable):
-        raise TypeError(f"{name} must be an iterable")
-    return cast(Iterable[object], value)
-
-
-def _string(value: object, name: str) -> str:
-    if not isinstance(value, str):
-        raise TypeError(f"{name} must be a string")
-    return value
-
-
-def _string_iterable(value: object, name: str) -> tuple[str, ...]:
-    return tuple(_string(item, name) for item in _iterable(value, name))
-
-
-def _optional_string_iterable(value: object, name: str) -> tuple[str, ...] | None:
-    return None if value is None else _string_iterable(value, name)
 
 
 class SnapshotExpiration(SandboxValueModel):

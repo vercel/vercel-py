@@ -143,6 +143,62 @@ finally:
 Standalone clients expose the same service operations as their module-level
 counterparts. They do not read or modify the active SDK session.
 
+## Network policy files
+
+Use `parse_network_policy()` to load the JSON format accepted by the JavaScript
+SDK and the CLI's `--network-policy-file`. Decode the JSON with `json.load()` or
+`json.loads()`, then pass the resulting `NetworkPolicy` to creation, forking,
+or update calls:
+
+```python
+import json
+
+from vercel import sandbox
+from vercel.api import session
+
+with open("network-policy.json") as policy_file:
+    policy = sandbox.parse_network_policy(json.load(policy_file))
+
+async with session():
+    async with sandbox.create_sandbox(network_policy=policy) as instance:
+        ...
+```
+
+For example, this file injects a credential only on reads from the npm registry:
+
+```json
+{
+  "allow": {
+    "registry.npmjs.org": [
+      {
+        "match": {"method": ["GET", "HEAD"]},
+        "transform": [{"headers": {"authorization": "Bearer ..."}}]
+      }
+    ]
+  }
+}
+```
+
+The file can also contain `"allow-all"`, `"deny-all"`, a domain list such as
+`{"allow": ["*.npmjs.org", "github.com"]}`, or a rule map with request matchers,
+forwarding, direct responses, and subnet allow/deny lists. JSON uses SDK names
+such as `startsWith`, `queryString`, `forwardURL`, `statusCode`, and `contentType`;
+`NetworkPolicy.model_dump()` uses Python model fields and is a separate format.
+Matchers specify exactly one of `exact`, `startsWith`, or `regex`.
+
+The models own these conversions: `NetworkPolicy.from_json_value()` validates
+authored JSON, and `policy.to_api_dict()` produces an API request value.
+`NetworkPolicyReadback.from_api_dict()` parses API response metadata, which
+contains redacted summaries and cannot recreate the original authored policy.
+The public parsing helper wraps model validation errors in the credential-safe
+error described below.
+
+The parser rejects unknown keys at every level and raises
+`NetworkPolicyParseError`, whose `issues` tuple and message describe each
+problem's JSON path without including input values. Parsed policies defensively
+copy their input and are immutable. Both `parse_network_policy` and
+`NetworkPolicyParseError` are also exported from `vercel.sandbox.sync`.
+
 ## Custom images
 
 Create a sandbox from a Vercel Container Registry (VCR) image with the
