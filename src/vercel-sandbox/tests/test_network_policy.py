@@ -6,15 +6,19 @@ from typing import Any
 
 import pytest
 from hypothesis import given, strategies as st
+from pydantic import ValidationError
 
 from vercel.sandbox import (
     NetworkPolicy,
+    NetworkPolicyForwardRuleSummary,
+    NetworkPolicyInjectionRuleSummary,
     NetworkPolicyParseError,
+    NetworkPolicyReadback,
+    NetworkPolicyResponseRuleSummary,
     NetworkPolicySubnets,
     parse_network_policy,
     sync,
 )
-from vercel.sandbox._internal.models import _serialize_network_policy
 
 
 @pytest.mark.parametrize(
@@ -42,6 +46,7 @@ def test_parse_network_policy_accepts_modes_and_custom_shapes(
     data: object, expected: NetworkPolicy
 ) -> None:
     assert parse_network_policy(data) == expected
+    assert NetworkPolicy.from_json_value(data) == expected
     assert sync.parse_network_policy is parse_network_policy
     assert sync.NetworkPolicyParseError is NetworkPolicyParseError
     assert "parse_network_policy" in sync.__all__
@@ -85,7 +90,7 @@ def _policy() -> dict[str, Any]:
         ("allow", "registry.npmjs.org", 2, "response"),
     ],
 )
-def test_parse_network_policy_rejects_unknown_keys_at_every_level(
+def test_policy_models_choose_strict_requests_or_compatible_readbacks(
     path: tuple[str | int, ...],
 ) -> None:
     data = _policy()
@@ -102,6 +107,12 @@ def test_parse_network_policy_rejects_unknown_keys_at_every_level(
     assert len(caught.value.issues) == 1
     assert caught.value.issues[0].endswith("typo: unknown key")
     assert "ZZSECRETZZ" not in "".join(traceback.format_exception(caught.value))
+
+    assert NetworkPolicyReadback.from_api_dict(data) == NetworkPolicyReadback(
+        mode="custom",
+        allowed_domains=("registry.npmjs.org", "*"),
+        subnets=NetworkPolicySubnets(allow=["10.0.0.0/8"], deny=["10.1.0.0/16"]),
+    )
 
 
 @pytest.mark.parametrize(
@@ -193,10 +204,10 @@ def test_parse_network_policy_collects_precise_wire_paths() -> None:
         {"match": {"queryString": [{}], "headers": [{}]}, "response": {"statusCode": 403}},
     ],
 )
-def test_parse_network_policy_preserves_explicit_empty_fields(rule: dict[str, Any]) -> None:
+def test_network_policy_model_preserves_wire_semantics(rule: dict[str, Any]) -> None:
     data = {"allow": {"example.com": [rule]}}
-    policy = parse_network_policy(data)
-    assert _serialize_network_policy(policy) == data
+    policy = NetworkPolicy.from_json_value(data)
+    assert policy.to_api_dict() == data
     assert NetworkPolicy.model_validate_json(policy.model_dump_json()) == policy
 
 
@@ -207,8 +218,107 @@ def test_parse_network_policy_copies_headers_and_preserves_wire_values(
     data = _policy()
     data["allow"]["registry.npmjs.org"][0]["transform"][0]["headers"] = headers
     expected = deepcopy(data)
-    policy = parse_network_policy(data)
+    policy = NetworkPolicy.from_json_value(data)
     headers.clear()
     data.clear()
-    assert _serialize_network_policy(policy) == expected
+    assert policy.to_api_dict() == expected
     assert NetworkPolicy.model_validate_json(policy.model_dump_json()) == policy
+
+
+@pytest.mark.parametrize(
+    ("forward_key", "url_key", "header_key", "headers"),
+    [
+        ("forwardRules", "forwardURL", "headerNames", ["Authorization"]),
+        ("forwardingRules", "forwardUrl", "headers", {"Authorization": "ZZSECRETZZ"}),
+    ],
+)
+def test_network_policy_readback_model_normalizes_and_redacts_api_metadata(
+    forward_key: str,
+    url_key: str,
+    header_key: str,
+    headers: object,
+) -> None:
+    data = {
+        "mode": "custom",
+        "allowedDomains": ["a.com", "a.com"],
+        "allowedCIDRs": [],
+        "deniedCIDRs": ["10.0.0.0/8"],
+        "injectionRules": [
+            {
+                "domain": "b.com",
+                header_key: headers,
+                "matchDimensions": ["path", "method", "queryString", "headers"],
+                "futureField": "ignored",
+            }
+        ],
+        forward_key: [{"domain": "c.com", url_key: "https://proxy.example.com"}],
+        "responseRules": [{"domain": "d.com", "statusCode": 403}],
+        "futureField": "ignored",
+    }
+    before = deepcopy(data)
+    readback = NetworkPolicyReadback.from_api_dict(data)
+    assert data == before
+    assert readback == NetworkPolicyReadback(
+        mode="custom",
+        allowed_domains=("a.com", "b.com", "c.com", "d.com"),
+        subnets=NetworkPolicySubnets(allow=[], deny=["10.0.0.0/8"]),
+        injection_rules=[
+            NetworkPolicyInjectionRuleSummary(
+                domain="b.com",
+                header_names=["Authorization"],
+                match_dimensions=["path", "method", "query", "headers"],
+            )
+        ],
+        forward_rules=[
+            NetworkPolicyForwardRuleSummary(
+                domain="c.com",
+                forward_url="https://proxy.example.com",
+            )
+        ],
+        response_rules=[NetworkPolicyResponseRuleSummary(domain="d.com", status_code=403)],
+    )
+    assert "ZZSECRETZZ" not in readback.model_dump_json()
+    assert NetworkPolicyReadback.model_validate_json(readback.model_dump_json()) == readback
+    with pytest.raises(NetworkPolicyParseError):
+        parse_network_policy(readback)
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"mode": "custom", "injectionRules": [{"domain": "a.com", "headerNames": "X-A"}]},
+        {"mode": "custom", "injectionRules": [{"domain": "a.com", "matchDimensions": ["other"]}]},
+        {
+            "mode": "custom",
+            "injectionRules": [{"domain": "a.com", "matchDimensions": ["query", "queryString"]}],
+        },
+        {"mode": "custom", "responseRules": [{"domain": "a.com", "statusCode": "403"}]},
+        {"mode": "custom", "forwardRules": [{"domain": "a.com"}]},
+        {"allow": None},
+        {"subnets": None},
+        {"allow": {"a.com": [{"transform": None}]}},
+    ],
+)
+def test_readback_model_still_validates_known_fields(data: object) -> None:
+    with pytest.raises(ValidationError):
+        NetworkPolicyReadback.from_api_dict(data)
+
+
+def test_readback_legacy_aliases_do_not_widen_request_json_format() -> None:
+    data = {
+        "allow": {
+            "a.com": [
+                {
+                    "forwardUrl": "https://proxy.example.com",
+                    "match": {"query": [{"key": {"exact": "q"}}]},
+                }
+            ]
+        }
+    }
+    assert NetworkPolicyReadback.from_api_dict(data).allowed_domains == ("a.com",)
+    with pytest.raises(NetworkPolicyParseError) as caught:
+        parse_network_policy(data)
+    assert caught.value.issues == (
+        'allow["a.com"][0].match.query: unknown key',
+        'allow["a.com"][0].forwardUrl: unknown key',
+    )

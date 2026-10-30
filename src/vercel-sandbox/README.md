@@ -186,6 +186,13 @@ such as `startsWith`, `queryString`, `forwardURL`, `statusCode`, and `contentTyp
 `NetworkPolicy.model_dump()` uses Python model fields and is a separate format.
 Matchers specify exactly one of `exact`, `startsWith`, or `regex`.
 
+The models own these conversions: `NetworkPolicy.from_json_value()` validates
+authored JSON, and `policy.to_api_dict()` produces an API request value.
+`NetworkPolicyReadback.from_api_dict()` parses API response metadata, which
+contains redacted summaries and cannot recreate the original authored policy.
+The public parsing helper wraps model validation errors in the credential-safe
+error described below.
+
 The parser rejects unknown keys at every level and raises
 `NetworkPolicyParseError`, whose `issues` tuple and message describe each
 problem's JSON path without including input values. Parsed policies defensively

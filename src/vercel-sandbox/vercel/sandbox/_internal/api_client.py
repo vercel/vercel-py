@@ -69,10 +69,8 @@ from vercel.sandbox._internal.models import (
     SnapshotRetentionUpdate,
     TagFilter,
     _Omitted,
-    _parse_network_policy,
     _RemotePathT,
     _serialize_drive_mounts,
-    _serialize_network_policy,
 )
 from vercel.sandbox._internal.options import (
     SandboxCredentials,
@@ -222,7 +220,7 @@ class _SandboxCreationOverridesRequest(_ApiRequestModel):
 
     @field_serializer("network_policy")
     def _serialize_network_policy(self, value: NetworkPolicy | None) -> JSONObject | None:
-        return None if value is None else _serialize_network_policy(value)
+        return None if value is None else value.to_api_dict()
 
     @field_validator("network_policy", mode="before")
     @classmethod
@@ -269,7 +267,7 @@ class _UpdateSandboxRequest(_ApiRequestModel):
 
     @field_serializer("network_policy")
     def _serialize_network_policy(self, value: NetworkPolicy | None) -> JSONObject | None:
-        return None if value is None else _serialize_network_policy(value)
+        return None if value is None else value.to_api_dict()
 
     @field_validator("network_policy", mode="before")
     @classmethod
@@ -918,7 +916,7 @@ def _sandbox_state(
 
 def _parse_response_network_policy(value: object) -> NetworkPolicyReadback | None:
     try:
-        return _parse_network_policy(value)
+        return None if value is None else NetworkPolicyReadback.from_api_dict(value)
     except (TypeError, ValueError) as exc:
         raise SandboxResponseError(
             "Sandbox API response included a malformed network policy",
@@ -1619,6 +1617,8 @@ class SandboxApiClient:
         session_id: str,
         network_policy: NetworkPolicy,
     ) -> SandboxRuntimeSessionState:
+        if not isinstance(network_policy, NetworkPolicy):
+            raise TypeError("network_policy must be a NetworkPolicy")
         credentials = await self._credentials_factory()
         data = await self._request_json(
             "POST",
@@ -1627,7 +1627,7 @@ class SandboxApiClient:
                 session_id=session_id,
             ),
             credentials=credentials,
-            body=_serialize_network_policy(network_policy),
+            body=network_policy.to_api_dict(),
         )
         return _validate_response(_RuntimeSessionResponse, data).to_runtime_session()
 
