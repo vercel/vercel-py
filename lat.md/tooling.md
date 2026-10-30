@@ -48,6 +48,8 @@ Merged release PRs are published by GitHub Actions through PyPI trusted publishi
 
 Most packages also publish a `-bundle` variant with their third-party dependencies vendored, assembled by [[scripts/bundle_release.py#build_bundle_package]]. The common HTTP stack is vendored once into a shared `vercel-internal-shared-vendored-deps` distribution so bundles do not each carry a copy. AnyIO and the integrated frameworks stay ordinary peer dependencies because they share state with application code.
 
+[[.github/scripts/test_installed_wheel.sh]] detects vendored HTTP clients in the package and its local bundle dependency wheels. It adapts test imports and excludes respx-dependent tests because respx patches only unvendored transports; workspace tests retain that coverage.
+
 ## Knowledge graph checks
 
 This `lat.md/` graph is validated in CI so links into source code and between sections cannot silently rot.

@@ -14,12 +14,51 @@ shape the scanner cannot see fails here instead of failing the publish workflow.
 """
 
 import ast
+import subprocess
+import sys
 from pathlib import Path
+from zipfile import ZipFile
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / ".github" / "scripts" / "test_installed_wheel.sh"
+
+
+@pytest.mark.parametrize("http_source", ["package", "dependency", "unvendored"])
+def test_vendored_http_detection_includes_bundle_dependencies(
+    tmp_path: Path, http_source: str
+) -> None:
+    test_root = tmp_path / "installed"
+    package_root = test_root / "vercel" / "passport"
+    package_root.mkdir(parents=True)
+    tests = test_root / "tests"
+    tests.mkdir()
+    test_file = tests / "test_client.py"
+    test_file.write_text("import httpx2 as httpx\n", encoding="utf-8")
+    source = "from vercel.internal._vendor import httpx2 as httpx\n"
+    (package_root / "__init__.py").write_text(
+        source if http_source == "package" else "", encoding="utf-8"
+    )
+    wheel_dir = tmp_path / "wheels"
+    wheel_dir.mkdir()
+    with ZipFile(wheel_dir / "vercel_oidc_bundle-0.11.0-py3-none-any.whl", "w") as archive:
+        archive.writestr(
+            "vercel/oidc/verify.py",
+            source if http_source == "dependency" else "import httpx2 as httpx\n",
+        )
+    script = SCRIPT.read_text(encoding="utf-8")
+    detection = script.split('python - "$test_root" "$wheel_dir" <<\'PY\'\n', 1)[1]
+    detection = detection.split("\nPY\n", 1)[0]
+    subprocess.run(
+        [sys.executable, "-", str(test_root), str(wheel_dir)],
+        input=detection,
+        text=True,
+        check=True,
+    )
+    vendored = http_source != "unvendored"
+    assert (test_root / ".vendored-libraries").read_text().strip() == ("httpx2" if vendored else "")
+    assert test_file.read_text() == (source if vendored else "import httpx2 as httpx\n")
 
 
 def _load_scanner() -> dict[str, object]:

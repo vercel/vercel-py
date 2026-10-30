@@ -102,20 +102,42 @@ with zipfile.ZipFile(wheel) as archive:
             archive.extract(member, test_root)
 PY
 
-python - "$test_root" <<'PY'
+python - "$test_root" "$wheel_dir" <<'PY'
 import re
 import sys
 from pathlib import Path
+from zipfile import ZipFile
 
 test_root = Path(sys.argv[1])
+wheel_dir = Path(sys.argv[2])
+
+
+def uses_vendored_library(library: str) -> bool:
+    markers = (
+        f"vercel.internal._vendor.{library}",
+        f"from vercel.internal._vendor import {library}",
+    )
+    if any(
+        any(marker in path.read_text(encoding="utf-8") for marker in markers)
+        for path in (test_root / "vercel").rglob("*.py")
+    ):
+        return True
+    # A package such as Passport reaches HTTP through its OIDC bundle dependency.
+    for wheel in wheel_dir.glob("vercel_*_bundle-*.whl"):
+        with ZipFile(wheel) as archive:
+            if any(
+                any(marker in archive.read(name).decode("utf-8") for marker in markers)
+                for name in archive.namelist()
+                if name.startswith("vercel/") and name.endswith(".py")
+            ):
+                return True
+    return False
+
+
 vendored_libraries = tuple(
     library
     for library in ("httpx2",)
-    if any(
-        f"vercel.internal._vendor.{library}" in path.read_text(encoding="utf-8")
-        or f"from vercel.internal._vendor import {library}" in path.read_text(encoding="utf-8")
-        for path in (test_root / "vercel").rglob("*.py")
-    )
+    if uses_vendored_library(library)
 )
 (test_root / ".vendored-libraries").write_text(
     "\n".join(vendored_libraries) + "\n",
