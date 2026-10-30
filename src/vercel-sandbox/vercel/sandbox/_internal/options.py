@@ -71,13 +71,18 @@ class SandboxServiceOptions(SandboxValueModel, _SandboxServiceOptionsKey):
     default Sandbox API base URL and credential resolver. Supplying the option
     overrides the whole service configuration for that session scope.
 
-    ``request_timeout`` bounds each HTTP I/O phase of ordinary requests; by
-    default reads are unlimited. File transfers use ``file_transfer_timeout``
-    instead, and process waits and logs remain unlimited. These limits apply
-    per attempt; use an AnyIO cancellation scope for a total async deadline.
-
     ``region`` defaults to ``None``, leaving placement to the API. Pass
     ``CURRENT_REGION`` to use ``VERCEL_REGION`` when an operation is called.
+
+    Ordinary requests retry network failures, HTTP 429, and HTTP 5xx twice.
+
+    Args:
+        request_timeout: HTTP I/O limit per attempt for ordinary requests.
+            Defaults to no read timeout, retaining the HTTP client's other
+            limits. Command waits and logs remain unlimited. Use
+            ``anyio.fail_after()`` for a total async operation deadline.
+        file_transfer_timeout: HTTP I/O limit for file reads and uploads;
+            defaults to five minutes per attempt.
     """
 
     base_url: str = DEFAULT_SANDBOX_API_BASE_URL

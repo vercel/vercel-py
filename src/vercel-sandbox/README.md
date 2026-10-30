@@ -70,62 +70,6 @@ Trio. Synchronously it is a writable `io.RawIOBase`; wrap it in
 `io.TextIOWrapper` for text. For a long-running stdio server, see
 [`examples/sandbox_10_mcp_everything.py`](examples/sandbox_10_mcp_everything.py).
 
-## Retries and timeouts
-
-Retries and timeouts follow the same Sandbox contract as the
-[TypeScript SDK](https://github.com/vercel/sandbox/tree/main/packages/vercel-sandbox).
-Both Python APIs use the same policy:
-
-| Operation or failure | Behavior |
-| --- | --- |
-| Ordinary requests, including create, fork, and mutations | Retry network failures, HTTP 429, and HTTP 500–599 twice (three attempts total). Other HTTP errors return immediately. |
-| Retry timing | Randomized exponential backoff: 400–800 ms, then 800–1600 ms. |
-| HTTP 429 | A positive numeric `Retry-After` up to 20 seconds adds that wait before backoff. Larger values return immediately. Missing, invalid, HTTP-date, and nonpositive values use backoff alone. The final attempt never waits. |
-| Streaming command start (`run_process`) | One attempt. Once started, interrupted output is recovered by following the existing process rather than running it again. |
-| Process wait and logs | Two retries per interruption; logs reconnect after 200/400 ms, skip delivered output, and reset the budget after new output. These retries do not nest inside ordinary request retries. |
-| Process stdin | Its own offset-aware policy: up to five retries for network failures, 429, 502, and 503, with special handling for progressing 504 responses. |
-| Streaming archive upload | One attempt. Python preserves bounded-memory uploads without buffering or replaying consumed input. |
-
-Automatic retries of mutations can repeat an operation whose response was lost,
-as in TypeScript. A successful response with invalid JSON or an invalid schema
-is reported as a response error without retrying. Exhausted requests retain the
-last API response or transport error.
-
-Ordinary Sandbox requests have no read timeout by default, so provisioning and
-response bodies can outlast the session's usual 60-second HTTP timeout, as they
-can in TypeScript. Python retains the HTTP client's connection, write, and pool
-limits. File transfers keep Python's configurable five-minute inactivity
-timeout, a bound on stalled transfers. Process waits and logs have no HTTP
-timeout. `execution_time_limit` controls the sandbox's lifetime and `kill_after`
-controls a remote process; neither is a client-side deadline.
-
-Python additionally supports `SandboxServiceOptions(request_timeout=...)` to
-bound ordinary requests and `file_transfer_timeout` to tune transfers. Both are
-`datetime.timedelta` values and apply to each HTTP I/O phase on each attempt,
-not to the total operation including retries. Process waits and logs retain
-their unlimited HTTP timeout. The synchronous options expose the same fields.
-
-```python
-from datetime import timedelta
-from vercel.sandbox import SandboxClient, SandboxServiceOptions
-
-client = SandboxClient.create(options=SandboxServiceOptions(
-    request_timeout=timedelta(minutes=2),
-    file_transfer_timeout=timedelta(minutes=10),
-))
-try:
-    snapshot = await client.get_snapshot(snapshot_id="snap_...")
-finally:
-    await client.aclose()
-```
-
-For a total async operation deadline, use `anyio.fail_after(...)`, the Python
-counterpart of a TypeScript abort signal. Cancellation interrupts in-flight
-requests and retry waits, including `Retry-After`, without another attempt.
-Python also preserves recovery from truncated output and Sandbox stream-closed
-errors, and offset verification before stdin writes, so retries cannot silently
-duplicate output or input.
-
 ## Inputs and outputs
 
 The SDK uses Pydantic models for configuration and returned data. Pass
@@ -198,6 +142,10 @@ finally:
 
 Standalone clients expose the same service operations as their module-level
 counterparts. They do not read or modify the active SDK session.
+
+Transient request failures are retried automatically. See the
+[standalone-client example](examples/sandbox_08_standalone_client.py) for
+request timeouts and an overall deadline for a command.
 
 ## Region placement
 
