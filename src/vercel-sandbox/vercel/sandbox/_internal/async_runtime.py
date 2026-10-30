@@ -101,6 +101,7 @@ from vercel.sandbox._internal.recovery import (
     classify_sandbox_lifecycle_error,
     execute_with_sandbox_recovery,
 )
+from vercel.sandbox._internal.region import RegionInput
 from vercel.sandbox._internal.runtime_common import (
     DriveHandleBase,
     RuntimeSessionHandleBase,
@@ -1948,7 +1949,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         snapshot_expiration: SnapshotExpirationInput = None,
         snapshot_retention: SnapshotRetentionUpdate = _OMITTED,
         current_snapshot_id: str | None = None,
-        region: str | None = None,
+        region: RegionInput = None,
         failover_regions: FailoverRegionsInput = None,
     ) -> Self:
         """Update mutable sandbox configuration.
@@ -1965,6 +1966,8 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
             mounts: Complete Drive mount replacement for the next session.
                 Pass ``None`` to leave mounts unchanged or ``{}`` to remove all
                 mounts.
+            region: Region override. Pass ``CURRENT_REGION`` to use the current
+                function's region when available; no service default is applied.
             current_snapshot_id: Snapshot the sandbox restores from on its
                 next resume.
 
@@ -2099,7 +2102,7 @@ class _CreateSandboxParams(SandboxValueModel):
     mounts: Mapping[Any, SkipValidation[DriveMountInput]] | None = None
     snapshot_expiration: SnapshotExpiration | None = None
     snapshot_retention: SnapshotRetention | None = None
-    region: str | None = None
+    region: RegionInput = None
     failover_regions: tuple[str, ...] | None = None
     private_parameters: PrivateSandboxParameters = Field(
         default_factory=lambda: NO_PRIVATE_PARAMETERS
@@ -2209,7 +2212,7 @@ class _ForkSandboxParams(SandboxValueModel):
     mounts: Mapping[Any, SkipValidation[DriveMountInput]] | None = None
     snapshot_expiration: SnapshotExpiration | None = None
     snapshot_retention: SnapshotRetention | None = None
-    region: str | None = None
+    region: RegionInput = None
     failover_regions: tuple[str, ...] | None = None
     private_parameters: PrivateSandboxParameters = Field(
         default_factory=lambda: NO_PRIVATE_PARAMETERS
@@ -2425,7 +2428,7 @@ def create_sandbox_operation(
     mounts: DriveMountsInput[_RemotePathT] | None = None,
     snapshot_expiration: SnapshotExpirationInput = None,
     snapshot_retention: SnapshotRetention | None = None,
-    region: str | None = None,
+    region: RegionInput = None,
     failover_regions: FailoverRegionsInput = None,
     destroy: bool = True,
     private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
@@ -2474,7 +2477,7 @@ def fork_sandbox_operation(
     mounts: DriveMountsInput[_RemotePathT] | None = None,
     snapshot_expiration: SnapshotExpirationInput = None,
     snapshot_retention: SnapshotRetention | None = None,
-    region: str | None = None,
+    region: RegionInput = None,
     failover_regions: FailoverRegionsInput = None,
     destroy: bool = True,
     private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
@@ -2547,7 +2550,7 @@ async def get_or_create_sandbox(
     mounts: DriveMountsInput[_RemotePathT] | None = None,
     snapshot_expiration: SnapshotExpirationInput = None,
     snapshot_retention: SnapshotRetention | None = None,
-    region: str | None = None,
+    region: RegionInput = None,
     failover_regions: FailoverRegionsInput = None,
     private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
 ) -> tuple[Sandbox, bool]:
@@ -2651,7 +2654,7 @@ async def get_or_create_drive(
     *,
     name: str,
     max_size_bytes: int | None = None,
-    region: str | None = None,
+    region: RegionInput = None,
 ) -> tuple[Drive, bool]:
     state, created = await service.get_or_create_drive(
         name=name,

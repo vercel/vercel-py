@@ -3,7 +3,12 @@
 import sniffio
 
 from vercel._internal.core.options import ServiceOptions
-from vercel.sandbox import SandboxCredentials, SandboxServiceOptions, sync as sandbox_sync
+from vercel.sandbox import (
+    RegionInput,
+    SandboxCredentials,
+    SandboxServiceOptions,
+    sync as sandbox_sync,
+)
 
 
 def sandbox_service_options(
@@ -12,7 +17,7 @@ def sandbox_service_options(
     token: str = "token",
     team_id: str = "team_123",
     project_id: str = "prj_123",
-    region: str | None = None,
+    region: RegionInput = None,
     sync: bool | None = None,
 ) -> list[ServiceOptions]:
     """Build Sandbox options for the test's current session mode."""

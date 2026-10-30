@@ -21,6 +21,7 @@ from vercel.sandbox._internal.models import (
     normalize_private_parameters as _normalize_private_parameters,
 )
 from vercel.sandbox._internal.options import SyncSandboxServiceOptions
+from vercel.sandbox._internal.region import RegionInput
 from vercel.sandbox._internal.service import SandboxService, get_sync_sandbox_service
 from vercel.sandbox._internal.sync_runtime import (
     SyncDrive,
@@ -95,7 +96,7 @@ class SyncSandboxClient:
         mounts: DriveMountsInput[_RemotePathT] | None = None,
         snapshot_expiration: SnapshotExpirationInput = None,
         snapshot_retention: SnapshotRetention | None = None,
-        region: str | None = None,
+        region: RegionInput = None,
         failover_regions: FailoverRegionsInput = None,
         destroy: bool = True,
         **private_parameters: _JSONValue,
@@ -139,7 +140,7 @@ class SyncSandboxClient:
         mounts: DriveMountsInput[_RemotePathT] | None = None,
         snapshot_expiration: SnapshotExpirationInput = None,
         snapshot_retention: SnapshotRetention | None = None,
-        region: str | None = None,
+        region: RegionInput = None,
         failover_regions: FailoverRegionsInput = None,
         destroy: bool = True,
         **private_parameters: _JSONValue,
@@ -185,7 +186,7 @@ class SyncSandboxClient:
         mounts: DriveMountsInput[_RemotePathT] | None = None,
         snapshot_expiration: SnapshotExpirationInput = None,
         snapshot_retention: SnapshotRetention | None = None,
-        region: str | None = None,
+        region: RegionInput = None,
         failover_regions: FailoverRegionsInput = None,
         **private_parameters: _JSONValue,
     ) -> tuple[SyncSandbox, bool]:
@@ -266,7 +267,7 @@ class SyncSandboxClient:
         *,
         name: str,
         max_size_bytes: int | None = None,
-        region: str | None = None,
+        region: RegionInput = None,
     ) -> tuple[SyncDrive, bool]:
         return _get_or_create_sync_drive(
             self._service,

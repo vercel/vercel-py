@@ -143,6 +143,43 @@ finally:
 Standalone clients expose the same service operations as their module-level
 counterparts. They do not read or modify the active SDK session.
 
+## Region placement
+
+Sandbox and Drive creation omit `region` by default, leaving placement to the
+API, as in the TypeScript SDK. Setting `VERCEL_REGION` alone does not change
+this behavior. Pass a region string such as `"iad1"` to choose a region.
+
+To place resources in the same region as the current Vercel Function, pass
+`CURRENT_REGION` explicitly:
+
+```python
+from vercel import sandbox
+from vercel.api import session
+from vercel.sandbox import CURRENT_REGION, SandboxServiceOptions
+
+async with session():
+    instance = await sandbox.create_sandbox(region=CURRENT_REGION)
+    cache, created = await sandbox.get_or_create_drive(name="cache", region=CURRENT_REGION)
+
+# Opt in for all creation calls in a session or standalone client instead.
+async with session(service_options=[SandboxServiceOptions(region=CURRENT_REGION)]):
+    instance = await sandbox.create_sandbox()
+```
+
+`CURRENT_REGION` is a sentinel object, distinct from region strings. It reads
+`VERCEL_REGION` when the request is made. Outside a Vercel Function, where that
+variable is unset or empty, it omits `region` and leaves placement to the API.
+This replaces the previous automatic environment fallback; use the sentinel
+to retain that placement behavior.
+
+The same sentinel and `RegionInput` type are exported from
+`vercel.sandbox.sync`. Both APIs and standalone clients accept it for
+`create_sandbox`, `get_or_create_sandbox`, `fork_sandbox`,
+`get_or_create_drive`, and explicit `Sandbox.update(region=...)` calls.
+Call-level regions override `SandboxServiceOptions.region`; passing `None`
+uses the service option for creation. Updates only send an explicitly supplied
+region and do not use the service option.
+
 ## Custom images
 
 Create a sandbox from a Vercel Container Registry (VCR) image with the
@@ -325,8 +362,8 @@ The SDK canonicalizes repeated slashes, trailing slashes, and `.` components.
 Paths must be absolute and non-overlapping. They cannot contain `..` or NUL
 characters, target `/`, or exceed 256 characters after canonicalization. Each
 Drive name may appear only once. Mounted sandboxes cannot use failover regions,
-and each Drive must use the sandbox region. Drives default to `iad1` when
-`region` is omitted.
+and each Drive must use the sandbox region. The API defaults new Drives to
+`iad1` when no region is requested by the call or service options.
 
 ## Interactive PTY sessions
 

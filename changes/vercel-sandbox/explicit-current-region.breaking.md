@@ -1,0 +1,1 @@
+Omit region by default for Sandbox and Drive creation, matching the TypeScript SDK. Pass `region=CURRENT_REGION` on calls or service options to opt into the current Vercel Function's `VERCEL_REGION`; when unset or empty, no region is sent. Explicit region strings keep their existing behavior in sync and async APIs and standalone clients.

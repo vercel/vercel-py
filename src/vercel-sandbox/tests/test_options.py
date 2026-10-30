@@ -13,21 +13,31 @@ from vercel.sandbox._internal.options import (
 )
 
 
-def test_options_resolves_region_from_argument_or_environment(
+@pytest.mark.parametrize(
+    "options_type", [SandboxServiceOptions, sandbox.sync.SandboxServiceOptions]
+)
+@pytest.mark.parametrize("env_region", [None, "", "iad1"])
+def test_options_region_is_explicit(
     monkeypatch: pytest.MonkeyPatch,
+    options_type: type[SandboxServiceOptions] | type[sandbox.sync.SandboxServiceOptions],
+    env_region: str | None,
 ) -> None:
-    monkeypatch.delenv("VERCEL_REGION", raising=False)
-    assert SandboxServiceOptions().region is None
+    if env_region is None:
+        monkeypatch.delenv("VERCEL_REGION", raising=False)
+    else:
+        monkeypatch.setenv("VERCEL_REGION", env_region)
+    assert options_type().region is None
+    assert options_type(region=None).region is None
+    assert options_type(region="sfo1").region == "sfo1"
+    assert options_type(region=sandbox.CURRENT_REGION).region is sandbox.CURRENT_REGION
 
-    monkeypatch.setenv("VERCEL_REGION", "iad1")
-    assert SandboxServiceOptions().region == "iad1"
-    assert SandboxServiceOptions(region="sfo1").region == "sfo1"
-    assert sandbox.sync.SandboxServiceOptions().region == "iad1"
-    assert sandbox.sync.SandboxServiceOptions(region="cle1").region == "cle1"
 
-    monkeypatch.setenv("VERCEL_REGION", "")
-    assert SandboxServiceOptions().region is None
-    assert sandbox.sync.SandboxServiceOptions().region is None
+def test_current_region_is_public_and_distinct_from_strings() -> None:
+    assert sandbox.sync.CURRENT_REGION is sandbox.CURRENT_REGION
+    assert sandbox.sync.CurrentRegion is sandbox.CurrentRegion
+    assert sandbox.sync.RegionInput is sandbox.RegionInput
+    assert isinstance(sandbox.CURRENT_REGION, sandbox.CurrentRegion)
+    assert not isinstance(sandbox.CURRENT_REGION, str)
 
 
 @pytest.mark.parametrize("options_cls", [SandboxServiceOptions, SyncSandboxServiceOptions])
@@ -53,7 +63,7 @@ def test_options_constructor_and_model_validate_share_defaults(
         )
         == defaults
     )
-    assert defaults.region == (region_env or None)
+    assert defaults.region is None
 
 
 def test_options_equality_preserves_custom_credential_factory_identity() -> None:
