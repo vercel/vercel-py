@@ -18,5 +18,5 @@ RegionInput: TypeAlias = str | CurrentRegion | None
 def resolve_region(region: RegionInput) -> str | None:
     """Resolve the opt-in at request time without changing explicit strings."""
     if isinstance(region, CurrentRegion):
-        return os.environ.get("VERCEL_REGION") or None
+        return os.environ.get("VERCEL_REGION")
     return region

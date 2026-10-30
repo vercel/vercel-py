@@ -816,14 +816,15 @@ async def test_service_region_defaults_placement_operations_and_allows_call_over
         (None, {"region": "sfo1"}, "cle1", "sfo1"),
         (None, {"region": CURRENT_REGION}, "cle1", "cle1"),
         (None, {"region": CURRENT_REGION}, None, None),
-        (None, {"region": CURRENT_REGION}, "", None),
+        (None, {"region": CURRENT_REGION}, "", ""),
         ("iad1", {}, "cle1", "iad1"),
         (CURRENT_REGION, {}, "cle1", "cle1"),
         (CURRENT_REGION, {}, None, None),
-        (CURRENT_REGION, {}, "", None),
+        (CURRENT_REGION, {}, "", ""),
         (CURRENT_REGION, {"region": "sfo1"}, "cle1", "sfo1"),
         ("iad1", {"region": CURRENT_REGION}, "cle1", "cle1"),
         ("iad1", {"region": CURRENT_REGION}, None, None),
+        ("iad1", {"region": CURRENT_REGION}, "", ""),
     ],
     ids=[
         "default",
@@ -839,6 +840,7 @@ async def test_service_region_defaults_placement_operations_and_allows_call_over
         "override-current-option",
         "override-explicit-option",
         "override-option-unset",
+        "override-option-empty",
     ],
 )
 async def test_region_placement_is_explicit(

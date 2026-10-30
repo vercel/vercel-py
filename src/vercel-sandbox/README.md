@@ -168,7 +168,8 @@ async with session(service_options=[SandboxServiceOptions(region=CURRENT_REGION)
 
 `CURRENT_REGION` is a sentinel object, distinct from region strings. It reads
 `VERCEL_REGION` when the request is made. Outside a Vercel Function, where that
-variable is unset or empty, it omits `region` and leaves placement to the API.
+variable is unset, it omits `region` and leaves placement to the API. Environment
+values are passed through unchanged, including an empty string.
 This replaces the previous automatic environment fallback; use the sentinel
 to retain that placement behavior.
 
