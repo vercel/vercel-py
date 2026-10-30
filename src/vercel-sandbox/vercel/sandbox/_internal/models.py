@@ -34,6 +34,7 @@ from pydantic import (
 
 from vercel._internal.core.polyfills import Self, StrEnum
 from vercel._internal.core.time import SECOND, coerce_duration, to_ms_int
+from vercel.sandbox._internal.region import ResolvedRegion
 from vercel.sandbox._internal.value_model import SandboxValueModel
 
 JSONValue: TypeAlias = PydanticJsonValue
@@ -794,7 +795,7 @@ def _serialize_drive_mounts(
     mounts: DriveMountsInput[_RemotePathT] | None,
     *,
     project_id: str,
-    region: str | None,
+    region: ResolvedRegion | None,
     failover_regions: tuple[str, ...] | None,
 ) -> dict[str, JSONObject] | None:
     if mounts is None:

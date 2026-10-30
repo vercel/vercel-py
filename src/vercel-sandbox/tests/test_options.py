@@ -42,10 +42,12 @@ def test_current_region_is_public_and_distinct_from_strings() -> None:
 
 @pytest.mark.parametrize("options_cls", [SandboxServiceOptions, SyncSandboxServiceOptions])
 @pytest.mark.parametrize("region_env", [None, "iad1", ""])
+@pytest.mark.parametrize("explicit_region", [None, "", "sfo1", sandbox.CURRENT_REGION])
 def test_options_constructor_and_model_validate_share_defaults(
     monkeypatch: pytest.MonkeyPatch,
     options_cls: type[SandboxServiceOptions] | type[SyncSandboxServiceOptions],
     region_env: str | None,
+    explicit_region: sandbox.RegionInput,
 ) -> None:
     if region_env is None:
         monkeypatch.delenv("VERCEL_REGION", raising=False)
@@ -64,6 +66,10 @@ def test_options_constructor_and_model_validate_share_defaults(
         == defaults
     )
     assert defaults.region is None
+
+    configured = options_cls.model_validate({"region": explicit_region})
+    assert configured == options_cls(region=explicit_region)
+    assert configured.region == explicit_region
 
 
 def test_options_equality_preserves_custom_credential_factory_identity() -> None:

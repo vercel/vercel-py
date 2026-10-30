@@ -79,6 +79,7 @@ from vercel.sandbox._internal.options import (
     SandboxCredentialsFactory,
 )
 from vercel.sandbox._internal.process_output import ProcessOutputRouter
+from vercel.sandbox._internal.region import ResolvedRegion
 from vercel.sandbox._internal.state import (
     CompletedProcessState,
     DrivesPageState,
@@ -1183,7 +1184,7 @@ class SandboxApiClient:
         mounts: DriveMountsInput[_RemotePathT] | None = None,
         snapshot_expiration: SnapshotExpiration | None = None,
         snapshot_retention: SnapshotRetention | None = None,
-        region: str | None = None,
+        region: ResolvedRegion | None = None,
         failover_regions: tuple[str, ...] | None = None,
         private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
     ) -> _PreparedSandboxCreation:
@@ -1276,7 +1277,7 @@ class SandboxApiClient:
         mounts: DriveMountsInput[_RemotePathT] | None = None,
         snapshot_expiration: SnapshotExpiration | None = None,
         snapshot_retention: SnapshotRetention | None = None,
-        region: str | None = None,
+        region: ResolvedRegion | None = None,
         failover_regions: tuple[str, ...] | None = None,
         private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
     ) -> SandboxState:
@@ -1320,7 +1321,7 @@ class SandboxApiClient:
         mounts: DriveMountsInput[_RemotePathT] | None = None,
         snapshot_expiration: SnapshotExpiration | None = None,
         snapshot_retention: SnapshotRetention | None = None,
-        region: str | None = None,
+        region: ResolvedRegion | None = None,
         failover_regions: tuple[str, ...] | None = None,
         private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
     ) -> SandboxState:
@@ -1454,7 +1455,7 @@ class SandboxApiClient:
         snapshot_expiration: SnapshotExpiration | None = None,
         snapshot_retention: SnapshotRetentionUpdate = _OMITTED,
         current_snapshot_id: str | None = None,
-        region: str | None = None,
+        region: ResolvedRegion | None = None,
         failover_regions: tuple[str, ...] | None = None,
     ) -> SandboxState:
         credentials = await self._credentials_factory()
@@ -1670,7 +1671,7 @@ class SandboxApiClient:
         *,
         name: str,
         max_size_bytes: int | None = None,
-        region: str | None = None,
+        region: ResolvedRegion | None = None,
     ) -> tuple[DriveState, bool]:
         credentials = await self._credentials_factory()
         request = _GetOrCreateDriveRequest(

@@ -101,7 +101,7 @@ from vercel.sandbox._internal.recovery import (
     classify_sandbox_lifecycle_error,
     execute_with_sandbox_recovery,
 )
-from vercel.sandbox._internal.region import RegionInput, resolve_region
+from vercel.sandbox._internal.region import RegionInput, ResolvedRegion, resolve_region
 from vercel.sandbox._internal.runtime_common import (
     DriveHandleBase,
     RuntimeSessionHandleBase,
@@ -2102,7 +2102,7 @@ class _CreateSandboxParams(SandboxValueModel):
     mounts: Mapping[Any, SkipValidation[DriveMountInput]] | None = None
     snapshot_expiration: SnapshotExpiration | None = None
     snapshot_retention: SnapshotRetention | None = None
-    region: str | None = None
+    region: ResolvedRegion | None = Field(default=None, strict=True)
     failover_regions: tuple[str, ...] | None = None
     private_parameters: PrivateSandboxParameters = Field(
         default_factory=lambda: NO_PRIVATE_PARAMETERS
@@ -2212,7 +2212,7 @@ class _ForkSandboxParams(SandboxValueModel):
     mounts: Mapping[Any, SkipValidation[DriveMountInput]] | None = None
     snapshot_expiration: SnapshotExpiration | None = None
     snapshot_retention: SnapshotRetention | None = None
-    region: str | None = None
+    region: ResolvedRegion | None = Field(default=None, strict=True)
     failover_regions: tuple[str, ...] | None = None
     private_parameters: PrivateSandboxParameters = Field(
         default_factory=lambda: NO_PRIVATE_PARAMETERS
