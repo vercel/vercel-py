@@ -10,13 +10,13 @@ from vercel.sandbox._internal.async_filesystem_handle import (
     SandboxTextWriter,
 )
 from vercel.sandbox._internal.async_runtime import (
+    Command,
     CreateSandboxOperation,
     Drive,
     ForkSandboxOperation,
     InteractiveSession,
     InteractiveSessionOperation,
     InteractiveStream,
-    Process,
     ResumeSandboxOperation,
     Sandbox,
     SandboxFilesystem,
@@ -60,7 +60,9 @@ from vercel.sandbox._internal.errors import (
     SandboxUserAlreadyExistsError,
 )
 from vercel.sandbox._internal.models import (
-    CompletedProcess,
+    CommandSignal,
+    CommandStatus,
+    CompletedCommand,
     DirectoryEntry,
     DriveHandle,
     DriveMount,
@@ -86,8 +88,6 @@ from vercel.sandbox._internal.models import (
     NetworkPolicyRule,
     NetworkPolicySubnets,
     NetworkPolicyTransform,
-    ProcessSignal,
-    ProcessStatus,
     SandboxMount,
     SandboxQuery,
     SandboxQueryByCreatedAt,
@@ -111,7 +111,7 @@ from vercel.sandbox._internal.options import (
     SandboxCredentialsFactory,
     SandboxServiceOptions,
 )
-from vercel.sandbox._internal.process_stdin import ProcessStdin
+from vercel.sandbox._internal.process_stdin import CommandStdin
 from vercel.sandbox._internal.service import SandboxService, get_sandbox_service
 from vercel.sandbox._internal.state import SnapshotRetentionState
 from vercel.sandbox._internal.text_reader import TextReader
@@ -620,6 +620,14 @@ async def get_snapshot(*, snapshot_id: str) -> Snapshot:
     return await _get_snapshot(_service(), snapshot_id=snapshot_id)
 
 
+# Compatibility aliases for the former public process names.
+Process = Command
+CompletedProcess = CompletedCommand
+ProcessStdin = CommandStdin
+ProcessStatus = CommandStatus
+ProcessSignal = CommandSignal
+
+
 __all__ = [
     "SandboxUser",
     "SandboxExecution",
@@ -645,13 +653,18 @@ __all__ = [
     "ForkSandboxOperation",
     "SandboxApiError",
     "SandboxCleanupError",
+    "CommandStatus",
     "ProcessStatus",
+    "CommandSignal",
     "ProcessSignal",
     "InteractiveSession",
     "InteractiveSessionOperation",
     "InteractiveStream",
+    "Command",
     "Process",
+    "CommandStdin",
     "ProcessStdin",
+    "CompletedCommand",
     "CompletedProcess",
     "SandboxCredentials",
     "SandboxCredentialsError",

@@ -7,6 +7,59 @@ from types import SimpleNamespace
 from vercel import sandbox
 
 
+def test_command_types_preserve_process_import_compatibility() -> None:
+    from vercel.sandbox import sync
+
+    for module, pairs in (
+        (
+            sandbox,
+            (
+                ("Command", "Process"),
+                ("CompletedCommand", "CompletedProcess"),
+                ("CommandStatus", "ProcessStatus"),
+                ("CommandSignal", "ProcessSignal"),
+                ("CommandStdin", "ProcessStdin"),
+            ),
+        ),
+        (
+            sync,
+            (
+                ("SyncCommand", "SyncProcess"),
+                ("CompletedCommand", "CompletedProcess"),
+                ("CommandStatus", "ProcessStatus"),
+                ("CommandSignal", "ProcessSignal"),
+                ("SyncCommandStdin", "SyncProcessStdin"),
+            ),
+        ),
+    ):
+        for canonical, legacy in pairs:
+            cls = getattr(module, canonical)
+            assert cls.__name__ == canonical
+            assert cls is getattr(module, legacy)
+            assert canonical in module.__all__
+            assert legacy in module.__all__
+
+    result = sandbox.CompletedCommand(
+        id="cmd_test",
+        name="echo",
+        args=("echo", "hello"),
+        cwd="/vercel/sandbox",
+        session_id="sbx_test",
+        started_at=1,
+        returncode=0,
+        stdout="hello\n",
+        stderr="",
+    )
+    assert isinstance(result, sandbox.CompletedProcess)
+    assert sync.CompletedCommand is sandbox.CompletedCommand
+    assert sandbox.CompletedProcess.model_validate_json(result.model_dump_json()) == result
+    assert sandbox.CompletedCommand.model_json_schema()["title"] == "CompletedCommand"
+    assert sandbox.CommandStatus.RUNNING.value == "running"
+    assert sandbox.CommandSignal.SIGTERM == 15
+    assert sync.CommandStatus is sandbox.CommandStatus
+    assert sync.CommandSignal is sandbox.CommandSignal
+
+
 def test_network_policy_validates_and_roundtrips_nested_data() -> None:
     data = {
         "mode": "custom",

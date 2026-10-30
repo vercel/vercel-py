@@ -1,23 +1,24 @@
 """Synchronous run-as-user handles."""
 
 import subprocess
+import warnings
 from collections.abc import Mapping, Sequence
 from datetime import timedelta
 from typing import TextIO
 
 from vercel._internal.core.iter_coroutine import iter_coroutine
 from vercel._internal.core.time import parse_duration_seconds
-from vercel.sandbox._internal.models import CompletedProcess
+from vercel.sandbox._internal.models import CompletedCommand
 from vercel.sandbox._internal.process_output import (
     ProcessOutputRouter,
     _validate_reader_destination,
 )
 from vercel.sandbox._internal.process_stdin import (
-    ProcessInput,
+    CommandInput,
     _coerce_input,
     _validate_stdin,
 )
-from vercel.sandbox._internal.sync_runtime import SyncProcess, SyncSandboxFilesystem
+from vercel.sandbox._internal.sync_runtime import SyncCommand, SyncSandboxFilesystem
 from vercel.sandbox._internal.user_core import UserContext
 
 
@@ -49,7 +50,7 @@ class SyncSandboxUser:
     def fs(self) -> SyncSandboxFilesystem:
         return self._fs
 
-    def run_process(
+    def run_command(
         self,
         command: str,
         args: Sequence[str] | None = None,
@@ -62,8 +63,8 @@ class SyncSandboxUser:
         stdout: TextIO | int | None = None,
         stderr: TextIO | int | None = None,
         capture_output: bool = False,
-        input: ProcessInput | None = None,
-    ) -> CompletedProcess:
+        input: CommandInput | None = None,
+    ) -> CompletedCommand:
         """Run to completion; defaults to this user and their home directory.
 
         Options match the session API. ``sudo=True`` runs just this command
@@ -84,7 +85,47 @@ class SyncSandboxUser:
         )
         return iter_coroutine(operation)
 
-    def create_process(
+    def run_process(
+        self,
+        command: str,
+        args: Sequence[str] | None = None,
+        *,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        sudo: bool = False,
+        kill_after: float | timedelta | None = None,
+        check: bool = False,
+        stdout: TextIO | int | None = None,
+        stderr: TextIO | int | None = None,
+        capture_output: bool = False,
+        input: CommandInput | None = None,
+    ) -> CompletedCommand:
+        """Deprecated alias for ``run_command()``.
+
+        .. deprecated::
+            Use ``run_command()`` instead.
+        """
+        warnings.warn(
+            "SyncSandboxUser.run_process() is deprecated; use "
+            "SyncSandboxUser.run_command() instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.run_command(
+            command,
+            args,
+            cwd=cwd,
+            env=env,
+            sudo=sudo,
+            kill_after=kill_after,
+            check=check,
+            stdout=stdout,
+            stderr=stderr,
+            capture_output=capture_output,
+            input=input,
+        )
+
+    def create_command(
         self,
         command: str,
         args: Sequence[str] | None = None,
@@ -96,8 +137,8 @@ class SyncSandboxUser:
         stdin: int | None = None,
         stdout: int = subprocess.PIPE,
         stderr: int = subprocess.PIPE,
-    ) -> SyncProcess:
-        """Start a process as this user, with the session API's stream options.
+    ) -> SyncCommand:
+        """Start a command as this user, with the session API's stream options.
 
         The returned process rejects STOP, TSTP, TTIN, and TTOU with
         ``NotImplementedError`` because the launcher cannot safely pause
@@ -121,10 +162,46 @@ class SyncSandboxUser:
             )
         )
         state = iter_coroutine(operation)
-        return SyncProcess(
+        return SyncCommand(
             payload=state,
             service=self._context.service,
             stdin="attached" if attach_stdin else None,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+    def create_process(
+        self,
+        command: str,
+        args: Sequence[str] | None = None,
+        *,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        sudo: bool = False,
+        kill_after: float | timedelta | None = None,
+        stdin: int | None = None,
+        stdout: int = subprocess.PIPE,
+        stderr: int = subprocess.PIPE,
+    ) -> SyncCommand:
+        """Deprecated alias for ``create_command()``.
+
+        .. deprecated::
+            Use ``create_command()`` instead.
+        """
+        warnings.warn(
+            "SyncSandboxUser.create_process() is deprecated; use "
+            "SyncSandboxUser.create_command() instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.create_command(
+            command,
+            args,
+            cwd=cwd,
+            env=env,
+            sudo=sudo,
+            kill_after=kill_after,
+            stdin=stdin,
             stdout=stdout,
             stderr=stderr,
         )

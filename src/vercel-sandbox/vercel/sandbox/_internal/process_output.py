@@ -70,7 +70,7 @@ def _validate_reader_destination(
 
     Live readers support only the ``subprocess`` sentinels: ``PIPE``,
     ``DEVNULL``, and (for stderr) ``STDOUT``. Inherit and file-sink modes
-    exist only on ``run_process``, which routes completed output.
+    exist only on ``run_command``, which routes completed output.
     """
     if isinstance(destination, int):
         if destination == subprocess.STDOUT:

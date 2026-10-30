@@ -17,7 +17,7 @@ class ScriptRunner:
 
     async def run(self, script: str) -> str:
         async with self._client.create_sandbox(execution_time_limit=timedelta(minutes=1)) as box:
-            result = await box.run_process(
+            result = await box.run_command(
                 "python",
                 ["-c", script],
                 capture_output=True,

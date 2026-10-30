@@ -48,7 +48,7 @@ async def _main() -> None:
         # same box object adopts the replacement session before replaying this
         # command. Use resume_sandbox(name=...) instead when startup should be
         # explicit before the first operation.
-        result = await box.run_process(
+        result = await box.run_command(
             "python",
             [
                 "-c",
@@ -71,7 +71,7 @@ async def _main() -> None:
         async with box.session() as exact_session:
             assert exact_session is box.current_session
             exact_session_id = exact_session.id
-            exact_result = await exact_session.run_process(
+            exact_result = await exact_session.run_command(
                 "python",
                 ["-c", "print('running through an identity-bound session')"],
                 capture_output=True,

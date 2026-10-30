@@ -850,15 +850,15 @@ class SandboxStatus(StrEnum):
     SNAPSHOTTING = "snapshotting"
 
 
-class ProcessStatus(StrEnum):
-    """Lifecycle status derived for a sandbox process."""
+class CommandStatus(StrEnum):
+    """Lifecycle status derived for a sandbox command."""
 
     RUNNING = "running"
     EXITED = "exited"
 
 
-class ProcessSignal(IntEnum):
-    """Signals supported by remote Linux sandbox processes."""
+class CommandSignal(IntEnum):
+    """Signals supported by remote Linux sandbox commands."""
 
     SIGHUP = 1
     SIGINT = 2
@@ -896,8 +896,8 @@ class ProcessSignal(IntEnum):
     SIGSYS = 31
 
 
-class CompletedProcess(SandboxValueModel):
-    """The captured result of one completed remote process."""
+class CompletedCommand(SandboxValueModel):
+    """The captured result of one completed remote command."""
 
     id: str
     name: str
@@ -1093,3 +1093,9 @@ class ProcessLog(BaseModel):
 
     data: str
     stream: ProcessLogStream
+
+
+# Compatibility aliases for the former public process names.
+CompletedProcess = CompletedCommand
+ProcessStatus = CommandStatus
+ProcessSignal = CommandSignal

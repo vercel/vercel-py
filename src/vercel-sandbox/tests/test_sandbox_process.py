@@ -167,21 +167,21 @@ def _session_options() -> list[ServiceOptions]:
 
 def test_public_process_exports() -> None:
     for name in (
-        "CompletedProcess",
-        "Process",
-        "ProcessSignal",
-        "ProcessStatus",
+        "CompletedCommand",
+        "Command",
+        "CommandSignal",
+        "CommandStatus",
         "SandboxCredentials",
         "SandboxCredentialsFactory",
         "TextReader",
     ):
         assert name in sandbox.__all__
     for name in (
-        "CompletedProcess",
-        "ProcessSignal",
-        "ProcessStatus",
+        "CompletedCommand",
+        "CommandSignal",
+        "CommandStatus",
         "SandboxCredentials",
-        "SyncProcess",
+        "SyncCommand",
         "SyncSandboxCredentialsFactory",
         "SyncTextReader",
     ):
@@ -196,7 +196,7 @@ async def test_async_process_readers_wait_and_signals(mock_env_clear: None) -> N
     respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
         return_value=httpx.Response(200, json=_process_response())
     )
-    get_process = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1").mock(
+    get_command = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1").mock(
         side_effect=[
             httpx.Response(200, json=_process_response()),
             httpx.Response(200, json=_process_response(7)),
@@ -217,13 +217,13 @@ async def test_async_process_readers_wait_and_signals(mock_env_clear: None) -> N
 
     async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview")
-        process = await box.create_process("python")
+        process = await box.create_command("python")
         assert process.name == "python"
         assert process.args == []
         assert process.cwd == "/vercel/sandbox"
         assert process.session_id == "sbx_1"
         assert process.started_at == 1
-        assert process.status is sandbox.ProcessStatus.RUNNING
+        assert process.status is sandbox.CommandStatus.RUNNING
         assert process.stdin is None
         assert process.returncode is None
         assert process.stdout is not None
@@ -234,25 +234,25 @@ async def test_async_process_readers_wait_and_signals(mock_env_clear: None) -> N
         assert await process.refresh() is process
         assert await process.wait() == 7
         assert process.returncode == 7
-        assert process.status is sandbox.ProcessStatus.EXITED
+        assert process.status is sandbox.CommandStatus.EXITED
         await process.terminate()
         await process.kill()
         await process.send_signal(signal.SIGINT)
-        await process.send_signal(sandbox.ProcessSignal.SIGUSR1)
+        await process.send_signal(sandbox.CommandSignal.SIGUSR1)
         await process.send_signal("USR1")
         with pytest.raises(ValueError, match="Unknown signal"):
             await process.send_signal(32)
 
-    assert get_process.calls[0].request.url.params["wait"] == "false"
-    assert get_process.calls[1].request.url.params["wait"] == "true"
+    assert get_command.calls[0].request.url.params["wait"] == "false"
+    assert get_command.calls[1].request.url.params["wait"] == "true"
     assert logs.call_count == 1
     assert all(call.request.headers["connection"] == "close" for call in logs.calls)
     assert signals == [
-        sandbox.ProcessSignal.SIGTERM,
-        sandbox.ProcessSignal.SIGKILL,
-        sandbox.ProcessSignal.SIGINT,
-        sandbox.ProcessSignal.SIGUSR1,
-        sandbox.ProcessSignal.SIGUSR1,
+        sandbox.CommandSignal.SIGTERM,
+        sandbox.CommandSignal.SIGKILL,
+        sandbox.CommandSignal.SIGINT,
+        sandbox.CommandSignal.SIGUSR1,
+        sandbox.CommandSignal.SIGUSR1,
     ]
 
 
@@ -282,17 +282,17 @@ def test_sync_process_readers_wait_and_signals(mock_env_clear: None) -> None:
 
     with session(service_options=_session_options()):
         box = sandbox_sync.create_sandbox(name="preview")
-        process = box.create_process("python")
+        process = box.create_command("python")
         assert process.communicate() == ("out-1\nout-2", "err\n")
         assert process.returncode == 0
         process.terminate()
         process.kill()
 
-    assert signals == [sandbox.ProcessSignal.SIGTERM, sandbox.ProcessSignal.SIGKILL]
+    assert signals == [sandbox.CommandSignal.SIGTERM, sandbox.CommandSignal.SIGKILL]
 
 
 @respx.mock
-async def test_async_create_process_merges_stderr_into_stdout_reader(
+async def test_async_create_command_merges_stderr_into_stdout_reader(
     mock_env_clear: None,
 ) -> None:
     respx.post("https://sandbox.test/v3/sandboxes").mock(
@@ -310,7 +310,7 @@ async def test_async_create_process_merges_stderr_into_stdout_reader(
 
     async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview")
-        process = await box.create_process("python", stderr=subprocess.STDOUT)
+        process = await box.create_command("python", stderr=subprocess.STDOUT)
         assert process.stderr is None
         assert process.stdout is not None
         assert await process.communicate() == ("out-1\nout-2err\n", None)
@@ -320,7 +320,7 @@ async def test_async_create_process_merges_stderr_into_stdout_reader(
 
 
 @respx.mock
-async def test_async_create_process_devnull_drops_reader(mock_env_clear: None) -> None:
+async def test_async_create_command_devnull_drops_reader(mock_env_clear: None) -> None:
     respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
@@ -336,14 +336,14 @@ async def test_async_create_process_devnull_drops_reader(mock_env_clear: None) -
 
     async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview")
-        process = await box.create_process("python", stderr=subprocess.DEVNULL)
+        process = await box.create_command("python", stderr=subprocess.DEVNULL)
         assert process.stderr is None
         assert await process.communicate() == ("out-1\nout-2", None)
 
 
 @pytest.mark.parametrize("stderr", [subprocess.DEVNULL, subprocess.STDOUT])
 @respx.mock
-async def test_async_create_process_with_no_readers_never_requests_logs(
+async def test_async_create_command_with_no_readers_never_requests_logs(
     mock_env_clear: None, stderr: int
 ) -> None:
     respx.post("https://sandbox.test/v3/sandboxes").mock(
@@ -359,7 +359,7 @@ async def test_async_create_process_with_no_readers_never_requests_logs(
 
     async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview")
-        process = await box.create_process("python", stdout=subprocess.DEVNULL, stderr=stderr)
+        process = await box.create_command("python", stdout=subprocess.DEVNULL, stderr=stderr)
         assert process.stdout is None
         assert process.stderr is None
         assert await process.communicate() == (None, None)
@@ -381,7 +381,7 @@ async def test_async_create_process_with_no_readers_never_requests_logs(
     ],
 )
 @respx.mock
-async def test_create_process_rejects_output_options_before_request(
+async def test_create_command_rejects_output_options_before_request(
     mock_env_clear: None, kwargs: dict[str, object]
 ) -> None:
     respx.post("https://sandbox.test/v3/sandboxes").mock(
@@ -392,13 +392,13 @@ async def test_create_process_rejects_output_options_before_request(
     async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview")
         with pytest.raises((TypeError, ValueError)):
-            await box.create_process("python", **kwargs)  # type: ignore[arg-type]
+            await box.create_command("python", **kwargs)  # type: ignore[arg-type]
 
     assert create.call_count == 0
 
 
 @respx.mock
-def test_sync_create_process_merges_stderr_into_stdout_reader(mock_env_clear: None) -> None:
+def test_sync_create_command_merges_stderr_into_stdout_reader(mock_env_clear: None) -> None:
     respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
@@ -414,7 +414,7 @@ def test_sync_create_process_merges_stderr_into_stdout_reader(mock_env_clear: No
 
     with session(service_options=_session_options()):
         box = sandbox_sync.create_sandbox(name="preview")
-        process = box.create_process("python", stderr=subprocess.STDOUT)
+        process = box.create_command("python", stderr=subprocess.STDOUT)
         assert process.stderr is None
         assert process.stdout is not None
         assert process.communicate() == ("out-1\nout-2err\n", None)
@@ -425,7 +425,7 @@ def test_sync_create_process_merges_stderr_into_stdout_reader(mock_env_clear: No
 
 @pytest.mark.parametrize("stderr", [subprocess.DEVNULL, subprocess.STDOUT])
 @respx.mock
-def test_sync_create_process_with_no_readers_never_requests_logs(
+def test_sync_create_command_with_no_readers_never_requests_logs(
     mock_env_clear: None, stderr: int
 ) -> None:
     respx.post("https://sandbox.test/v3/sandboxes").mock(
@@ -441,7 +441,7 @@ def test_sync_create_process_with_no_readers_never_requests_logs(
 
     with session(service_options=_session_options()):
         box = sandbox_sync.create_sandbox(name="preview")
-        process = box.create_process("python", stdout=subprocess.DEVNULL, stderr=stderr)
+        process = box.create_command("python", stdout=subprocess.DEVNULL, stderr=stderr)
         assert process.stdout is None
         assert process.stderr is None
         assert process.communicate() == (None, None)
@@ -451,7 +451,7 @@ def test_sync_create_process_with_no_readers_never_requests_logs(
 
 
 @respx.mock
-def test_sync_create_process_rejects_output_options_before_request(
+def test_sync_create_command_rejects_output_options_before_request(
     mock_env_clear: None,
 ) -> None:
     respx.post("https://sandbox.test/v3/sandboxes").mock(
@@ -462,13 +462,13 @@ def test_sync_create_process_rejects_output_options_before_request(
     with session(service_options=_session_options()):
         box = sandbox_sync.create_sandbox(name="preview")
         with pytest.raises(ValueError, match="STDOUT is only supported for stderr"):
-            box.create_process("python", stdout=subprocess.STDOUT)
+            box.create_command("python", stdout=subprocess.STDOUT)
 
     assert create.call_count == 0
 
 
 @respx.mock
-async def test_run_process_routes_output_checks_and_uses_one_request(
+async def test_run_command_routes_output_checks_and_uses_one_request(
     mock_env_clear: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
     respx.post("https://sandbox.test/v3/sandboxes").mock(
@@ -486,30 +486,30 @@ async def test_run_process_routes_output_checks_and_uses_one_request(
 
     async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview")
-        result = await box.run_process("python", ("-c", "print('out')"))
-        assert isinstance(result, sandbox.CompletedProcess)
+        result = await box.run_command("python", ("-c", "print('out')"))
+        assert isinstance(result, sandbox.CompletedCommand)
         assert result.args == ("python", "-c", "print('out')")
         assert result.returncode == 0
         assert result.stdout is None
         assert result.stderr is None
         assert capsys.readouterr() == ("out\n", "err\n")
 
-        captured = await box.run_process("python", capture_output=True)
+        captured = await box.run_command("python", capture_output=True)
         assert captured.stdout == "out\n"
         assert captured.stderr == "err\n"
 
-        merged = await box.run_process("python", stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        merged = await box.run_command("python", stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         assert merged.stdout == "out-1\nerr\nout-2\n"
         assert merged.stderr is None
 
         with pytest.raises(subprocess.CalledProcessError) as exc_info:
-            await box.run_process("python", check=True)
+            await box.run_command("python", check=True)
         assert exc_info.value.returncode == 9
         assert exc_info.value.stdout is None
         assert exc_info.value.stderr is None
 
         with pytest.raises(subprocess.CalledProcessError) as captured_error:
-            await box.run_process("python", check=True, capture_output=True)
+            await box.run_command("python", check=True, capture_output=True)
         assert captured_error.value.stdout == "out\n"
         assert captured_error.value.stderr == "err\n"
 
@@ -519,7 +519,7 @@ async def test_run_process_routes_output_checks_and_uses_one_request(
 
 
 @respx.mock
-async def test_async_run_process_explicit_and_discarded_destinations(
+async def test_async_run_command_explicit_and_discarded_destinations(
     mock_env_clear: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
     respx.post("https://sandbox.test/v3/sandboxes").mock(
@@ -537,24 +537,24 @@ async def test_async_run_process_explicit_and_discarded_destinations(
 
     async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview")
-        result = await box.run_process("python", stdout=sink, stderr=subprocess.STDOUT)
+        result = await box.run_command("python", stdout=sink, stderr=subprocess.STDOUT)
         assert result.stdout is None
         assert result.stderr is None
         assert sink.getvalue() == "out-1\nerr\nout-2\n"
         assert sink.flush_count == 3
 
-        discarded = await box.run_process(
+        discarded = await box.run_command(
             "python", stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT
         )
         assert discarded.stdout is None
         assert discarded.stderr is None
 
-        inherited = await box.run_process("python", stderr=subprocess.STDOUT)
+        inherited = await box.run_command("python", stderr=subprocess.STDOUT)
         assert inherited.stdout is None
         assert inherited.stderr is None
         assert capsys.readouterr() == ("out-1\nerr\nout-2\n", "")
 
-        stdout_only = await box.run_process(
+        stdout_only = await box.run_command(
             "python", stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
         )
         assert stdout_only.stdout == "out\n"
@@ -564,7 +564,7 @@ async def test_async_run_process_explicit_and_discarded_destinations(
 
 
 @respx.mock
-def test_sync_run_process_routes_and_captures(
+def test_sync_run_command_routes_and_captures(
     mock_env_clear: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
     respx.post("https://sandbox.test/v3/sandboxes").mock(
@@ -576,12 +576,12 @@ def test_sync_run_process_routes_and_captures(
 
     with session(service_options=_session_options()):
         box = sandbox_sync.create_sandbox(name="preview")
-        inherited = box.run_process("python")
+        inherited = box.run_command("python")
         assert inherited.stdout is None
         assert inherited.stderr is None
         assert capsys.readouterr() == ("out\n", "err\n")
 
-        captured = box.run_process("python", stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        captured = box.run_command("python", stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         assert captured.stdout == "out-1\nerr\nout-2\n"
         assert captured.stderr is None
 
@@ -589,7 +589,7 @@ def test_sync_run_process_routes_and_captures(
 
 
 @respx.mock
-async def test_async_run_process_reads_chunked_ndjson(mock_env_clear: None) -> None:
+async def test_async_run_command_reads_chunked_ndjson(mock_env_clear: None) -> None:
     respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
@@ -607,7 +607,7 @@ async def test_async_run_process_reads_chunked_ndjson(mock_env_clear: None) -> N
 
     async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview")
-        result = await box.run_process("python", capture_output=True)
+        result = await box.run_command("python", capture_output=True)
 
     assert result.stdout == "café\n"
     assert result.stderr == "雪\n"
@@ -615,7 +615,7 @@ async def test_async_run_process_reads_chunked_ndjson(mock_env_clear: None) -> N
 
 
 @respx.mock
-async def test_async_run_process_replays_pre_stream_stopped_session_error(
+async def test_async_run_command_replays_pre_stream_stopped_session_error(
     mock_env_clear: None,
 ) -> None:
     events: list[str] = []
@@ -650,7 +650,7 @@ async def test_async_run_process_replays_pre_stream_stopped_session_error(
 
     async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview")
-        result = await box.run_process("python", capture_output=True)
+        result = await box.run_command("python", capture_output=True)
 
     assert result.session_id == "sbx_new"
     assert result.stdout == "out\n"
@@ -658,7 +658,7 @@ async def test_async_run_process_replays_pre_stream_stopped_session_error(
 
 
 @respx.mock
-def test_sync_run_process_replays_pre_stream_stopped_session_error(
+def test_sync_run_command_replays_pre_stream_stopped_session_error(
     mock_env_clear: None,
 ) -> None:
     events: list[str] = []
@@ -693,7 +693,7 @@ def test_sync_run_process_replays_pre_stream_stopped_session_error(
 
     with session(service_options=_session_options()):
         box = sandbox_sync.create_sandbox(name="preview")
-        result = box.run_process("python", capture_output=True)
+        result = box.run_command("python", capture_output=True)
 
     assert result.session_id == "sbx_new"
     assert result.stdout == "out\n"
@@ -701,7 +701,7 @@ def test_sync_run_process_replays_pre_stream_stopped_session_error(
 
 
 @respx.mock
-def test_sync_run_process_reads_chunked_ndjson(mock_env_clear: None) -> None:
+def test_sync_run_command_reads_chunked_ndjson(mock_env_clear: None) -> None:
     respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
@@ -719,7 +719,7 @@ def test_sync_run_process_reads_chunked_ndjson(mock_env_clear: None) -> None:
 
     with session(service_options=_session_options()):
         box = sandbox_sync.create_sandbox(name="preview")
-        result = box.run_process("python", capture_output=True)
+        result = box.run_command("python", capture_output=True)
 
     assert result.stdout == "café\n"
     assert result.stderr == "雪\n"
@@ -749,7 +749,7 @@ async def test_async_process_readers_read_chunked_ndjson(mock_env_clear: None) -
 
     async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview")
-        process = await box.create_process("python")
+        process = await box.create_command("python")
         output = await process.communicate()
 
     assert output == ("café\n", "雪\n")
@@ -779,7 +779,7 @@ def test_sync_process_readers_read_chunked_ndjson(mock_env_clear: None) -> None:
 
     with session(service_options=_session_options()):
         box = sandbox_sync.create_sandbox(name="preview")
-        process = box.create_process("python")
+        process = box.create_command("python")
         output = process.communicate()
 
     assert output == ("café\n", "雪\n")
@@ -799,7 +799,7 @@ def test_sync_process_readers_read_chunked_ndjson(mock_env_clear: None) -> None:
     ],
 )
 @respx.mock
-async def test_run_process_rejects_output_options_before_request(
+async def test_run_command_rejects_output_options_before_request(
     mock_env_clear: None, kwargs: dict[str, object]
 ) -> None:
     respx.post("https://sandbox.test/v3/sandboxes").mock(
@@ -810,13 +810,13 @@ async def test_run_process_rejects_output_options_before_request(
     async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview")
         with pytest.raises((TypeError, ValueError)):
-            await box.run_process("python", **kwargs)  # type: ignore[arg-type]
+            await box.run_command("python", **kwargs)  # type: ignore[arg-type]
 
     assert run.call_count == 0
 
 
 @respx.mock
-async def test_async_run_process_closes_response_when_sink_write_fails(
+async def test_async_run_command_closes_response_when_sink_write_fails(
     mock_env_clear: None,
 ) -> None:
     respx.post("https://sandbox.test/v3/sandboxes").mock(
@@ -830,13 +830,13 @@ async def test_async_run_process_closes_response_when_sink_write_fails(
     async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview")
         with pytest.raises(OSError, match="sink write failed"):
-            await box.run_process("python", stdout=_FailingTextIO(fail_on="write"))
+            await box.run_command("python", stdout=_FailingTextIO(fail_on="write"))
 
     assert stream.closed
 
 
 @respx.mock
-def test_sync_run_process_closes_response_when_sink_flush_fails(
+def test_sync_run_command_closes_response_when_sink_flush_fails(
     mock_env_clear: None,
 ) -> None:
     respx.post("https://sandbox.test/v3/sandboxes").mock(
@@ -850,7 +850,7 @@ def test_sync_run_process_closes_response_when_sink_flush_fails(
     with session(service_options=_session_options()):
         box = sandbox_sync.create_sandbox(name="preview")
         with pytest.raises(OSError, match="sink flush failed"):
-            box.run_process("python", stdout=_FailingTextIO(fail_on="flush"))
+            box.run_command("python", stdout=_FailingTextIO(fail_on="flush"))
 
     assert stream.closed
 
@@ -875,7 +875,7 @@ def test_sync_run_process_closes_response_when_sink_flush_fails(
     ],
 )
 @respx.mock
-async def test_run_process_rejects_invalid_streams(
+async def test_run_command_rejects_invalid_streams(
     mock_env_clear: None,
     records: list[object],
     error: type[Exception],
@@ -897,11 +897,11 @@ async def test_run_process_rejects_invalid_streams(
     async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview")
         with pytest.raises(error, match=match):
-            await box.run_process("python")
+            await box.run_command("python")
 
 
 @respx.mock
-async def test_async_run_process_does_not_replay_lifecycle_stream_errors(
+async def test_async_run_command_does_not_replay_lifecycle_stream_errors(
     mock_env_clear: None,
 ) -> None:
     respx.post("https://sandbox.test/v3/sandboxes").mock(
@@ -929,14 +929,14 @@ async def test_async_run_process_does_not_replay_lifecycle_stream_errors(
     async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview")
         with pytest.raises(sandbox.SandboxStreamError, match="stream stopped") as exc_info:
-            await box.run_process("python")
+            await box.run_command("python")
 
     assert exc_info.value.code == "sandbox_stopped"
     assert not resume_route.called
 
 
 @respx.mock
-def test_sync_run_process_does_not_replay_lifecycle_stream_errors(
+def test_sync_run_command_does_not_replay_lifecycle_stream_errors(
     mock_env_clear: None,
 ) -> None:
     respx.post("https://sandbox.test/v3/sandboxes").mock(
@@ -964,7 +964,7 @@ def test_sync_run_process_does_not_replay_lifecycle_stream_errors(
     with session(service_options=_session_options()):
         box = sandbox_sync.create_sandbox(name="preview")
         with pytest.raises(sandbox.SandboxStreamError, match="stream stopped") as exc_info:
-            box.run_process("python")
+            box.run_command("python")
 
     assert exc_info.value.code == "sandbox_stopped"
     assert not resume_route.called
@@ -1044,10 +1044,10 @@ def _async_coordinated_box(
 async def test_async_recovery_shares_success(anyio_backend: str, error_code: str) -> None:
     service = _AsyncCoordinatedRecoveryService(error_code=error_code)
     box = _async_coordinated_box(service)
-    results: list[list[sandbox.Process]] = []
+    results: list[list[sandbox.Command]] = []
 
     async def query() -> None:
-        results.append(await box.query_processes())
+        results.append(await box.query_commands())
 
     async with anyio.create_task_group() as task_group:
         task_group.start_soon(query)
@@ -1070,18 +1070,18 @@ async def test_async_recovery_waiter_re_elects_after_owner_cancellation(
     box = _async_coordinated_box(service)
     owner_scope = anyio.CancelScope()
     owner_done = anyio.Event()
-    waiter_result: list[sandbox.Process] | None = None
+    waiter_result: list[sandbox.Command] | None = None
 
     async def own_recovery() -> None:
         with owner_scope:
             try:
-                await box.query_processes()
+                await box.query_commands()
             finally:
                 owner_done.set()
 
     async def wait_for_recovery() -> None:
         nonlocal waiter_result
-        waiter_result = await box.query_processes()
+        waiter_result = await box.query_commands()
 
     async with anyio.create_task_group() as task_group:
         task_group.start_soon(own_recovery)
@@ -1106,9 +1106,9 @@ async def test_async_recovery_is_abandoned_when_all_callers_cancel(
     box = _async_coordinated_box(service)
 
     async with anyio.create_task_group() as task_group:
-        task_group.start_soon(box.query_processes)
+        task_group.start_soon(box.query_commands)
         await service.resume_started.wait()
-        task_group.start_soon(box.query_processes)
+        task_group.start_soon(box.query_commands)
         await service.second_failure.wait()
         task_group.cancel_scope.cancel()
 
@@ -1131,7 +1131,7 @@ async def test_async_recovery_shares_failure_and_clears_slot_for_retry(
 
     async def query() -> None:
         try:
-            await box.query_processes()
+            await box.query_commands()
         except BaseException as error:
             results.append(error)
 
@@ -1145,7 +1145,7 @@ async def test_async_recovery_shares_failure_and_clears_slot_for_retry(
     assert results == [resume_error, resume_error]
     assert service.resume_count == 1
     service.resume_error = None
-    assert await box.query_processes() == []
+    assert await box.query_commands() == []
     assert service.resume_count == 2
 
 
@@ -1193,10 +1193,10 @@ async def test_delayed_async_lifecycle_failure_may_resume_again_after_slot_clear
         service=service,  # type: ignore[arg-type]
     )
 
-    results: list[list[sandbox.Process]] = []
+    results: list[list[sandbox.Command]] = []
 
     async def query() -> None:
-        results.append(await box.query_processes())
+        results.append(await box.query_commands())
 
     async with anyio.create_task_group() as task_group:
         task_group.start_soon(query)
@@ -1313,9 +1313,9 @@ def test_sync_recovery_shares_or_re_elects_after_initiator_interruption(
     box = _sync_coordinated_box(service)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        initiating = executor.submit(box.query_processes)
+        initiating = executor.submit(box.query_commands)
         assert service.resume_started.wait(timeout=5)
-        waiting = executor.submit(box.query_processes)
+        waiting = executor.submit(box.query_commands)
         assert _wait_for_join(box)
         service.allow_resume.set()
         if interrupt_initiator:
@@ -1340,9 +1340,9 @@ def test_sync_recovery_shares_failure_and_clears_slot_for_retry(error_code: str)
     box = _sync_coordinated_box(service)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        initiating = executor.submit(box.query_processes)
+        initiating = executor.submit(box.query_commands)
         assert service.resume_started.wait(timeout=5)
-        waiting = executor.submit(box.query_processes)
+        waiting = executor.submit(box.query_commands)
         assert _wait_for_join(box)
         service.allow_resume.set()
         for participant in (initiating, waiting):
@@ -1352,7 +1352,7 @@ def test_sync_recovery_shares_failure_and_clears_slot_for_retry(error_code: str)
 
     assert service.resume_count == 1
     service.first_resume_error = None
-    assert box.query_processes() == []
+    assert box.query_commands() == []
     assert service.resume_count == 2
 
 
@@ -1402,7 +1402,7 @@ def test_sync_mutation_reply_superseded_by_recovery_keeps_current_session() -> N
     with ThreadPoolExecutor(max_workers=1) as executor:
         mutation = executor.submit(box.extend_execution_time_limit, 2)
         assert service.mutation_started.wait(timeout=5)
-        assert box.query_processes() == []
+        assert box.query_commands() == []
         service.allow_mutation.set()
         result = mutation.result(timeout=5)
 
@@ -1489,14 +1489,14 @@ _LOG_INTERRUPTIONS = ["reset", "peer-closed", "truncated", "stream-closed", "str
 
 @pytest.mark.parametrize("interruption", _RUN_INTERRUPTIONS)
 @respx.mock
-async def test_async_run_process_resumes_interrupted_stream_without_rerunning(
+async def test_async_run_command_resumes_interrupted_stream_without_rerunning(
     mock_env_clear: None, no_retry_backoff: None, interruption: str
 ) -> None:
     run, logs, wait = _mock_interrupted_run(interruption)
 
     async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview")
-        result = await box.run_process("python", capture_output=True)
+        result = await box.run_command("python", capture_output=True)
 
     assert (result.returncode, result.stdout, result.stderr) == (3, "hé😀 world", "warning")
     assert (run.call_count, logs.call_count, wait.call_count) == (1, 1, 1)
@@ -1505,14 +1505,14 @@ async def test_async_run_process_resumes_interrupted_stream_without_rerunning(
 
 @pytest.mark.parametrize("interruption", _RUN_INTERRUPTIONS)
 @respx.mock
-def test_sync_run_process_resumes_interrupted_stream_without_rerunning(
+def test_sync_run_command_resumes_interrupted_stream_without_rerunning(
     mock_env_clear: None, no_retry_backoff: None, interruption: str
 ) -> None:
     run, logs, wait = _mock_interrupted_run(interruption)
 
     with session(service_options=_session_options()):
         box = sandbox_sync.create_sandbox(name="preview")
-        result = box.run_process("python", stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        result = box.run_command("python", stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
     assert (result.returncode, result.stdout, result.stderr) == (3, "hé😀warning world", None)
     assert (run.call_count, logs.call_count, wait.call_count) == (1, 1, 1)
@@ -1524,7 +1524,7 @@ def test_sync_run_process_resumes_interrupted_stream_without_rerunning(
     ids=["connect", "stream"],
 )
 @respx.mock
-async def test_run_process_is_not_rerun_when_interrupted_before_it_starts(
+async def test_run_command_is_not_rerun_when_interrupted_before_it_starts(
     mock_env_clear: None, no_retry_backoff: None, failure: object
 ) -> None:
     respx.post("https://sandbox.test/v3/sandboxes").mock(
@@ -1537,7 +1537,7 @@ async def test_run_process_is_not_rerun_when_interrupted_before_it_starts(
     async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview")
         with pytest.raises(httpx.TransportError):
-            await box.run_process("python")
+            await box.run_command("python")
 
     assert run.call_count == 1
 
@@ -1584,7 +1584,7 @@ async def test_async_process_readers_reconnect_without_duplicating_output(
 
     async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview")
-        process = await box.create_process("python")
+        process = await box.create_command("python")
         output = await process.communicate()
 
     assert output == ("one two three", "é😀")
@@ -1600,7 +1600,7 @@ def test_sync_process_readers_reconnect_without_duplicating_output(
 
     with session(service_options=_session_options()):
         box = sandbox_sync.create_sandbox(name="preview")
-        process = box.create_process("python")
+        process = box.create_command("python")
         output = process.communicate()
 
     assert output == ("one two three", "é😀")
@@ -1643,7 +1643,7 @@ async def test_process_log_reconnects_are_bounded_without_progress(
 
     async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview")
-        process = await box.create_process("python")
+        process = await box.create_command("python")
         assert process.stdout is not None
         with pytest.raises(error):
             await process.stdout.read()
@@ -1681,7 +1681,7 @@ async def test_process_wait_retries_transient_failures(
 
     async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview")
-        process = await box.create_process("python", stdout=subprocess.DEVNULL)
+        process = await box.create_command("python", stdout=subprocess.DEVNULL)
         if error is None:
             assert await process.wait() == 5
         else:
@@ -1726,7 +1726,7 @@ def _mock_lifecycle_failure_after_start(
 @pytest.mark.parametrize("failing", ["logs", "wait"])
 @pytest.mark.parametrize("interruption", ["reset", "stream-closed"])
 @respx.mock
-async def test_async_run_process_is_not_replayed_after_lifecycle_failure_once_started(
+async def test_async_run_command_is_not_replayed_after_lifecycle_failure_once_started(
     mock_env_clear: None,
     no_retry_backoff: None,
     interruption: str,
@@ -1739,7 +1739,7 @@ async def test_async_run_process_is_not_replayed_after_lifecycle_failure_once_st
     async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview")
         with pytest.raises(sandbox.SandboxStreamError) as exc_info:
-            await box.run_process("python", capture_output=True)
+            await box.run_command("python", capture_output=True)
 
     assert exc_info.value.code == code
     assert isinstance(exc_info.value.__cause__, sandbox.SandboxApiError)
@@ -1748,7 +1748,7 @@ async def test_async_run_process_is_not_replayed_after_lifecycle_failure_once_st
 
 @pytest.mark.parametrize("failing", ["logs", "wait"])
 @respx.mock
-def test_sync_run_process_is_not_replayed_after_lifecycle_failure_once_started(
+def test_sync_run_command_is_not_replayed_after_lifecycle_failure_once_started(
     mock_env_clear: None, no_retry_backoff: None, failing: str
 ) -> None:
     run, resume = _mock_lifecycle_failure_after_start("reset", failing, 410, "sandbox_stopped")
@@ -1756,7 +1756,7 @@ def test_sync_run_process_is_not_replayed_after_lifecycle_failure_once_started(
     with session(service_options=_session_options()):
         box = sandbox_sync.create_sandbox(name="preview")
         with pytest.raises(sandbox.SandboxStreamError) as exc_info:
-            box.run_process("python", capture_output=True)
+            box.run_command("python", capture_output=True)
 
     assert exc_info.value.code == "sandbox_stopped"
     assert (run.call_count, resume.call_count) == (1, 0)
@@ -1769,7 +1769,7 @@ _ON_START_MODES = pytest.mark.parametrize(
 )
 
 
-async def _run_through(sync: bool, target: str, **kwargs: Any) -> sandbox.CompletedProcess:
+async def _run_through(sync: bool, target: str, **kwargs: Any) -> sandbox.CompletedCommand:
     """Create a sandbox and run ``python`` through the selected public handle."""
     options = sandbox_service_options(team_id="team_1", project_id="prj_1", sync=sync)
     if sync:
@@ -1777,12 +1777,12 @@ async def _run_through(sync: bool, target: str, **kwargs: Any) -> sandbox.Comple
             sync_box = sandbox_sync.create_sandbox(name="preview")
             sync_handle = sync_box if target == "sandbox" else sync_box.current_session
             assert sync_handle is not None
-            return sync_handle.run_process("python", **kwargs)
+            return sync_handle.run_command("python", **kwargs)
     async with session(service_options=options):
         box = await sandbox.create_sandbox(name="preview")
         handle = box if target == "sandbox" else box.current_session
         assert handle is not None
-        return await handle.run_process("python", **kwargs)
+        return await handle.run_command("python", **kwargs)
 
 
 class _EventSink(io.StringIO):
@@ -1797,7 +1797,7 @@ class _EventSink(io.StringIO):
 
 @_ON_START_MODES
 @respx.mock
-async def test_run_process_on_start_receives_running_handle_before_output(
+async def test_run_command_on_start_receives_running_handle_before_output(
     mock_env_clear: None, sync: bool, target: str
 ) -> None:
     respx.post("https://sandbox.test/v3/sandboxes").mock(
@@ -1828,7 +1828,7 @@ async def test_run_process_on_start_receives_running_handle_before_output(
     assert hooked == plain
     assert len(handles) == 1
     assert handles[0].returncode == 3
-    assert handles[0].status is sandbox.ProcessStatus.EXITED
+    assert handles[0].status is sandbox.CommandStatus.EXITED
 
 
 @given(
@@ -1842,7 +1842,7 @@ async def test_run_process_on_start_receives_running_handle_before_output(
 @settings(
     max_examples=50, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture]
 )
-async def test_run_process_on_start_does_not_change_output_or_result(
+async def test_run_command_on_start_does_not_change_output_or_result(
     mock_env_clear: None,
     sync: bool,
     records: list[tuple[str, str]],
@@ -1895,7 +1895,7 @@ async def test_run_process_on_start_does_not_change_output_or_result(
 )
 @_ON_START_MODES
 @respx.mock
-async def test_run_process_on_start_error_propagates_without_kill_or_replay(
+async def test_run_command_on_start_error_propagates_without_kill_or_replay(
     mock_env_clear: None, sync: bool, target: str, make_error: Callable[[], Exception]
 ) -> None:
     respx.post("https://sandbox.test/v3/sandboxes").mock(
@@ -1937,7 +1937,7 @@ async def test_run_process_on_start_error_propagates_without_kill_or_replay(
 
 @pytest.mark.parametrize("sync", [False, True], ids=["async", "sync"])
 @respx.mock
-async def test_run_process_on_start_runs_once_after_pre_start_replay(
+async def test_run_command_on_start_runs_once_after_pre_start_replay(
     mock_env_clear: None, sync: bool
 ) -> None:
     respx.post("https://sandbox.test/v3/sandboxes").mock(
@@ -1978,7 +1978,7 @@ async def test_run_process_on_start_runs_once_after_pre_start_replay(
 )
 @pytest.mark.parametrize("sync", [False, True], ids=["async", "sync"])
 @respx.mock
-async def test_run_process_on_start_is_not_called_when_process_never_starts(
+async def test_run_command_on_start_is_not_called_when_process_never_starts(
     mock_env_clear: None,
     sync: bool,
     make_response: Callable[[], httpx.Response],
@@ -2012,7 +2012,7 @@ class _AsyncCallOnStart:
 )
 @_ON_START_MODES
 @respx.mock
-async def test_run_process_rejects_non_synchronous_on_start(
+async def test_run_command_rejects_non_synchronous_on_start(
     mock_env_clear: None, sync: bool, target: str, kind: str
 ) -> None:
     respx.post("https://sandbox.test/v3/sandboxes").mock(
@@ -2046,7 +2046,7 @@ async def test_run_process_rejects_non_synchronous_on_start(
 
 @pytest.mark.parametrize("target", ["sandbox", "session"])
 @respx.mock
-async def test_sync_run_process_on_start_can_kill_the_process(
+async def test_sync_run_command_on_start_can_kill_the_process(
     mock_env_clear: None, target: str
 ) -> None:
     respx.post("https://sandbox.test/v3/sandboxes").mock(
@@ -2064,15 +2064,15 @@ async def test_sync_run_process_on_start_can_kill_the_process(
     respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/kill").mock(
         side_effect=signal_handler
     )
-    handles: list[sandbox_sync.SyncProcess] = []
+    handles: list[sandbox_sync.SyncCommand] = []
 
-    def on_start(process: sandbox_sync.SyncProcess) -> None:
+    def on_start(process: sandbox_sync.SyncCommand) -> None:
         handles.append(process)
         process.kill()
 
     result = await _run_through(True, target, capture_output=True, on_start=on_start)
 
-    assert signals == [sandbox.ProcessSignal.SIGKILL]
+    assert signals == [sandbox.CommandSignal.SIGKILL]
     assert result.returncode == 137
     assert handles[0].returncode == 137
 
@@ -2099,28 +2099,28 @@ async def test_async_on_start_kill_response_after_exit_keeps_returncode(
     respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/kill").mock(
         side_effect=signal_handler
     )
-    handles: list[sandbox.Process] = []
+    handles: list[sandbox.Command] = []
 
     async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview")
         async with anyio.create_task_group() as tg:
 
-            def on_start(process: sandbox.Process) -> None:
+            def on_start(process: sandbox.Command) -> None:
                 handles.append(process)
                 tg.start_soon(process.kill)
 
-            result = await box.run_process("python", capture_output=True, on_start=on_start)
+            result = await box.run_command("python", capture_output=True, on_start=on_start)
             assert handles[0].returncode == 137
             release_kill.set()
 
-    assert signals == [sandbox.ProcessSignal.SIGKILL]
+    assert signals == [sandbox.CommandSignal.SIGKILL]
     assert result.returncode == 137
     assert handles[0].returncode == 137
 
 
 @pytest.mark.parametrize("sync", [False, True], ids=["async", "sync"])
 @respx.mock
-async def test_run_process_on_start_runs_before_check_fails(
+async def test_run_command_on_start_runs_before_check_fails(
     mock_env_clear: None, sync: bool
 ) -> None:
     respx.post("https://sandbox.test/v3/sandboxes").mock(

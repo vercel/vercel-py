@@ -19,10 +19,10 @@ from vercel.sandbox._internal.errors import (
 )
 from vercel.sandbox._internal.filesystem_handle_core import FilesystemOperationBinding
 from vercel.sandbox._internal.models import (
-    CompletedProcess,
+    CommandSignal,
+    CompletedCommand,
     DirectoryEntry,
     ProcessLog,
-    ProcessSignal,
     RemotePath,
 )
 from vercel.sandbox._internal.process_output import ProcessOutputRouter
@@ -289,7 +289,7 @@ class UserContext:
         output_router: ProcessOutputRouter,
         check: bool,
         input: bytes | None = None,
-    ) -> CompletedProcess:
+    ) -> CompletedCommand:
         state = await self.execute(
             lambda session_id: self.service.run_process(
                 session_id=session_id,
@@ -304,7 +304,7 @@ class UserContext:
             )
         )
         assert state.process.returncode is not None
-        result = CompletedProcess(
+        result = CompletedCommand(
             id=state.process.id,
             name=command,
             args=(command, *(args or ())),
@@ -560,13 +560,13 @@ class UserService(SandboxService):
         self, *, session_id: str, process_id: str, signal: int
     ) -> ProcessState:
         if signal in (
-            ProcessSignal.SIGSTOP,
-            ProcessSignal.SIGTSTP,
-            ProcessSignal.SIGTTIN,
-            ProcessSignal.SIGTTOU,
+            CommandSignal.SIGSTOP,
+            CommandSignal.SIGTSTP,
+            CommandSignal.SIGTTIN,
+            CommandSignal.SIGTTOU,
         ):
             raise NotImplementedError(
-                f"{ProcessSignal(signal).name} is not supported for user processes: "
+                f"{CommandSignal(signal).name} is not supported for user processes: "
                 "the launcher cannot safely pause the command's process group"
             )
         state = await super().send_process_signal(

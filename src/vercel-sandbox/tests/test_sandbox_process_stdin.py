@@ -1,4 +1,4 @@
-"""Process stdin through the public sync and async APIs.
+"""Command stdin through the public sync and async APIs.
 
 The fake service applies offsets the way the real one does: a request whose
 offset is behind the bytes already written only appends the new suffix, so a
@@ -242,17 +242,17 @@ class _Driver:
             return function(*args, **kwargs)
         return self.portal.call(lambda: function(*args, **kwargs))
 
-    def create_process(self, **kwargs: Any) -> _Handle:
-        return _Handle(self._call(self.box.create_process, "cat", **kwargs), self.portal)
+    def create_command(self, **kwargs: Any) -> _Handle:
+        return _Handle(self._call(self.box.create_command, "cat", **kwargs), self.portal)
 
-    def get_process(self) -> _Handle:
-        return _Handle(self._call(self.box.get_process, "cmd_1"), self.portal)
+    def get_command(self) -> _Handle:
+        return _Handle(self._call(self.box.get_command, "cmd_1"), self.portal)
 
-    def query_processes(self) -> list[_Handle]:
-        return [_Handle(process, self.portal) for process in self._call(self.box.query_processes)]
+    def query_commands(self) -> list[_Handle]:
+        return [_Handle(process, self.portal) for process in self._call(self.box.query_commands)]
 
-    def run_process(self, **kwargs: Any) -> sandbox.CompletedProcess:
-        return self._call(self.box.run_process, "cat", **kwargs)  # type: ignore[no-any-return]
+    def run_command(self, **kwargs: Any) -> sandbox.CompletedCommand:
+        return self._call(self.box.run_command, "cat", **kwargs)  # type: ignore[no-any-return]
 
 
 @pytest.fixture
@@ -301,7 +301,7 @@ def driver(
 
 
 def test_writes_reach_the_process_in_order_and_close_sends_eof(driver: _Driver) -> None:
-    process = driver.create_process(stdin=subprocess.PIPE)
+    process = driver.create_command(stdin=subprocess.PIPE)
 
     process.write(b"hello ")
     process.write(bytearray(b"wor"))
@@ -319,17 +319,17 @@ def test_writes_reach_the_process_in_order_and_close_sends_eof(driver: _Driver) 
     assert process.communicate() == ("hello world\n", "")
 
 
-@pytest.mark.parametrize("lookup", ["get_process", "query_processes"])
+@pytest.mark.parametrize("lookup", ["get_command", "query_commands"])
 def test_a_looked_up_process_continues_after_input_already_written(
     driver: _Driver, lookup: str
 ) -> None:
-    started = driver.create_process(stdin=subprocess.PIPE)
+    started = driver.create_command(stdin=subprocess.PIPE)
     started.write(b"first ")
 
-    if lookup == "get_process":
-        fetched = driver.get_process()
+    if lookup == "get_command":
+        fetched = driver.get_command()
     else:
-        (fetched,) = driver.query_processes()
+        (fetched,) = driver.query_commands()
     fetched.write(b"second\n")
     fetched.close()
 
@@ -351,7 +351,7 @@ def test_a_looked_up_process_continues_after_input_already_written(
 def test_communicate_closes_a_looked_up_process_stdin_only_when_it_owns_it(
     driver: _Driver, written: bytes, input: object, data: bytes, closed: bool
 ) -> None:
-    fetched = driver.get_process()
+    fetched = driver.get_command()
     if written:
         fetched.write(written)
 
@@ -365,13 +365,13 @@ def test_communicate_closes_a_looked_up_process_stdin_only_when_it_owns_it(
 
 def test_a_looked_up_process_without_stdin_refuses_input(driver: _Driver) -> None:
     driver.server.attached = False
-    fetched = driver.get_process()
+    fetched = driver.get_command()
 
     for _ in range(2):
         with pytest.raises(sandbox.SandboxStdinError, match="stdin=subprocess.PIPE"):
             fetched.write(b"data")
     with pytest.raises(sandbox.SandboxStdinError, match="stdin=subprocess.PIPE"):
-        driver.get_process().communicate("data")
+        driver.get_command().communicate("data")
 
     # Nothing was attached, so there's nothing to close.
     fetched.close()
@@ -381,7 +381,7 @@ def test_a_looked_up_process_without_stdin_refuses_input(driver: _Driver) -> Non
 def test_a_looked_up_process_that_stops_taking_input_breaks_the_pipe(
     driver: _Driver, stopped: str
 ) -> None:
-    fetched = driver.get_process()
+    fetched = driver.get_command()
     fetched.write(b"a")
     if stopped == "reading":
         driver.server.reading = False
@@ -395,7 +395,7 @@ def test_a_looked_up_process_that_stops_taking_input_breaks_the_pipe(
 
 def test_stdin_is_not_attached_unless_requested(driver: _Driver) -> None:
     for stdin in (None, subprocess.DEVNULL):
-        process = driver.create_process(stdin=stdin)
+        process = driver.create_command(stdin=stdin)
         assert process.process.stdin is None
         with pytest.raises(ValueError, match="stdin=subprocess.PIPE"):
             process.communicate("input")
@@ -411,7 +411,7 @@ def test_stdin_is_not_attached_unless_requested(driver: _Driver) -> None:
 def test_communicate_writes_input_and_closes_stdin(
     driver: _Driver, input: object, expected: bytes
 ) -> None:
-    process = driver.create_process(stdin=subprocess.PIPE)
+    process = driver.create_command(stdin=subprocess.PIPE)
 
     stdout, _ = process.communicate(input)
 
@@ -421,7 +421,7 @@ def test_communicate_writes_input_and_closes_stdin(
 
 
 def test_large_writes_are_split_into_bounded_requests(driver: _Driver) -> None:
-    process = driver.create_process(stdin=subprocess.PIPE)
+    process = driver.create_command(stdin=subprocess.PIPE)
     data = bytes(range(256)) * (2 * STDIN_CHUNK_SIZE // 256) + b"!"
 
     process.write(data)
@@ -439,7 +439,7 @@ def test_large_writes_are_split_into_bounded_requests(driver: _Driver) -> None:
 def test_transient_failures_resend_the_same_request(
     driver: _Driver, sleeps: list[float], fault: Fault
 ) -> None:
-    process = driver.create_process(stdin=subprocess.PIPE)
+    process = driver.create_command(stdin=subprocess.PIPE)
     process.write(b"a")
     driver.server.faults.append(fault)
 
@@ -455,7 +455,7 @@ def test_transient_failures_resend_the_same_request(
 def test_a_write_that_may_have_landed_breaks_the_stream_until_closed(
     driver: _Driver, sleeps: list[float]
 ) -> None:
-    process = driver.create_process(stdin=subprocess.PIPE)
+    process = driver.create_command(stdin=subprocess.PIPE)
     process.write(b"a")
     driver.server.faults.extend([_applied_then(503)] * 6)
 
@@ -478,7 +478,7 @@ def test_a_write_that_may_have_landed_breaks_the_stream_until_closed(
 
 @pytest.mark.parametrize("status", [400, 401, 409, 500])
 def test_rejected_requests_are_not_resent(driver: _Driver, status: int) -> None:
-    process = driver.create_process(stdin=subprocess.PIPE)
+    process = driver.create_command(stdin=subprocess.PIPE)
     process.write(b"a")
     driver.server.faults.append(_rejected(status))
 
@@ -496,7 +496,7 @@ def test_rejected_requests_are_not_resent(driver: _Driver, status: int) -> None:
 
 
 def test_exited_process_breaks_the_pipe_but_not_communicate_or_close(driver: _Driver) -> None:
-    process = driver.create_process(stdin=subprocess.PIPE)
+    process = driver.create_command(stdin=subprocess.PIPE)
     process.write(b"a")
     driver.server.exited = True
 
@@ -508,7 +508,7 @@ def test_exited_process_breaks_the_pipe_but_not_communicate_or_close(driver: _Dr
 
 
 def test_timeouts_are_resent_while_the_process_keeps_reading(driver: _Driver) -> None:
-    process = driver.create_process(stdin=subprocess.PIPE)
+    process = driver.create_command(stdin=subprocess.PIPE)
     process.write(b"a")
 
     def slow_reader(written: int) -> Fault:
@@ -533,7 +533,7 @@ def test_timeouts_are_resent_while_the_process_keeps_reading(driver: _Driver) ->
     # A timeout that reports no progress, or no bytes written at all, is
     # stalled, and the request is given up after a second one.
     for fault in (stalled, _rejected(504)):
-        process = driver.create_process(stdin=subprocess.PIPE)
+        process = driver.create_command(stdin=subprocess.PIPE)
         process.write(b"g")
         sent, offset = len(driver.server.bodies), len(driver.server.data)
         driver.server.faults.extend([fault, fault])
@@ -547,7 +547,7 @@ def test_timeouts_are_resent_while_the_process_keeps_reading(driver: _Driver) ->
 
 @pytest.mark.parametrize("exits", [False, True], ids=["still-running", "exited"])
 def test_a_close_whose_response_is_lost_is_resent(driver: _Driver, exits: bool) -> None:
-    process = driver.create_process(stdin=subprocess.PIPE)
+    process = driver.create_command(stdin=subprocess.PIPE)
     process.write(b"a")
 
     def close_then_disconnect(
@@ -565,7 +565,7 @@ def test_a_close_whose_response_is_lost_is_resent(driver: _Driver, exits: bool) 
 
 
 def test_a_failed_close_can_be_retried(driver: _Driver) -> None:
-    process = driver.create_process(stdin=subprocess.PIPE)
+    process = driver.create_command(stdin=subprocess.PIPE)
     process.write(b"a")
     driver.server.faults.append(_rejected(500))
 
@@ -586,7 +586,7 @@ def test_a_failed_close_can_be_retried(driver: _Driver) -> None:
 
 
 def test_writes_fail_before_writing_when_the_offset_is_unknown(driver: _Driver) -> None:
-    process = driver.create_process(stdin=subprocess.PIPE)
+    process = driver.create_command(stdin=subprocess.PIPE)
     driver.server.faults.append(lambda server, request, body: _json({"command": _COMMAND}))
 
     with pytest.raises(sandbox.SandboxStdinError) as failure:
@@ -599,8 +599,8 @@ def test_writes_fail_before_writing_when_the_offset_is_unknown(driver: _Driver) 
     assert driver.server.data == b"b"
 
 
-def test_run_process_feeds_input_while_streaming_output(driver: _Driver) -> None:
-    result = driver.run_process(input="hello\n", capture_output=True)
+def test_run_command_feeds_input_while_streaming_output(driver: _Driver) -> None:
+    result = driver.run_command(input="hello\n", capture_output=True)
 
     assert result.stdout == "hello\n"
     assert result.returncode == 0
@@ -609,10 +609,10 @@ def test_run_process_feeds_input_while_streaming_output(driver: _Driver) -> None
     assert driver.server.closed
 
 
-def test_run_process_feeds_input_once_when_its_output_stream_drops(driver: _Driver) -> None:
+def test_run_command_feeds_input_once_when_its_output_stream_drops(driver: _Driver) -> None:
     driver.api.interrupt_run = True
 
-    result = driver.run_process(input="hello\n", capture_output=True)
+    result = driver.run_command(input="hello\n", capture_output=True)
 
     # The command keeps running, so its output is followed from the logs
     # endpoint instead of starting it, and writing its input, again.
@@ -624,25 +624,25 @@ def test_run_process_feeds_input_once_when_its_output_stream_drops(driver: _Driv
     ]
 
 
-def test_run_process_without_input_does_not_attach_stdin(driver: _Driver) -> None:
-    driver.run_process(capture_output=True)
+def test_run_command_without_input_does_not_attach_stdin(driver: _Driver) -> None:
+    driver.run_command(capture_output=True)
 
     assert "attachStdin" not in driver.api.created[0]
     assert driver.server.bodies == []
 
 
-def test_run_process_kills_the_process_when_input_fails(driver: _Driver) -> None:
+def test_run_command_kills_the_process_when_input_fails(driver: _Driver) -> None:
     driver.server.faults.extend([lambda server, _, body: server.apply(body), _rejected(500)])
 
     with pytest.raises(sandbox.SandboxStdinError):
-        driver.run_process(input=b"data", capture_output=True)
+        driver.run_command(input=b"data", capture_output=True)
 
-    assert driver.api.signals == [sandbox.ProcessSignal.SIGKILL]
+    assert driver.api.signals == [sandbox.CommandSignal.SIGKILL]
     assert len(driver.api.created) == 1
 
 
 @pytest.mark.parametrize("raises", [False, True], ids=["returns", "raises"])
-def test_run_process_on_start_runs_before_input_is_written(driver: _Driver, raises: bool) -> None:
+def test_run_command_on_start_runs_before_input_is_written(driver: _Driver, raises: bool) -> None:
     error = RuntimeError("hook failed")
     seen: list[tuple[str, bytes, bool]] = []
 
@@ -653,10 +653,10 @@ def test_run_process_on_start_runs_before_input_is_written(driver: _Driver, rais
 
     if raises:
         with pytest.raises(RuntimeError) as raised:
-            driver.run_process(input="hello\n", capture_output=True, on_start=on_start)
+            driver.run_command(input="hello\n", capture_output=True, on_start=on_start)
         assert raised.value is error
     else:
-        result = driver.run_process(input="hello\n", capture_output=True, on_start=on_start)
+        result = driver.run_command(input="hello\n", capture_output=True, on_start=on_start)
         assert result.stdout == "hello\n"
 
     assert seen == [("cmd_1", b"", False)]
@@ -666,7 +666,7 @@ def test_run_process_on_start_runs_before_input_is_written(driver: _Driver, rais
     assert driver.api.signals == []
 
 
-def test_run_process_on_start_error_is_raised_when_input_also_fails(driver: _Driver) -> None:
+def test_run_command_on_start_error_is_raised_when_input_also_fails(driver: _Driver) -> None:
     driver.server.faults.extend([lambda server, _, body: server.apply(body), _rejected(500)])
     error = RuntimeError("hook failed")
 
@@ -674,25 +674,25 @@ def test_run_process_on_start_error_is_raised_when_input_also_fails(driver: _Dri
         raise error
 
     with pytest.raises(RuntimeError) as raised:
-        driver.run_process(input=b"data", capture_output=True, on_start=on_start)
+        driver.run_command(input=b"data", capture_output=True, on_start=on_start)
 
     assert raised.value is error
     assert raised.value.__context__ is None
-    assert driver.api.signals == [sandbox.ProcessSignal.SIGKILL]
+    assert driver.api.signals == [sandbox.CommandSignal.SIGKILL]
 
 
 @pytest.mark.parametrize("stdin", [subprocess.STDOUT, 42, True, io.BytesIO(), "pipe"])
-def test_create_process_rejects_stdin_options_before_request(
+def test_create_command_rejects_stdin_options_before_request(
     driver: _Driver, stdin: object
 ) -> None:
     with pytest.raises((TypeError, ValueError)):
-        driver.create_process(stdin=stdin)
+        driver.create_command(stdin=stdin)
 
     assert driver.api.created == []
 
 
 def test_stdin_takes_bytes_not_text(driver: _Driver) -> None:
-    process = driver.create_process(stdin=subprocess.PIPE)
+    process = driver.create_command(stdin=subprocess.PIPE)
 
     with pytest.raises(TypeError, match="bytes"):
         process.write("text")  # type: ignore[arg-type]
@@ -702,7 +702,7 @@ def test_stdin_takes_bytes_not_text(driver: _Driver) -> None:
 
 def test_sync_stdin_composes_with_text_wrappers(mock_env_clear: None) -> None:
     with _open_driver("sync", _StdinServer()) as driver:
-        process = driver.box.create_process("cat", stdin=subprocess.PIPE)
+        process = driver.box.create_command("cat", stdin=subprocess.PIPE)
         with io.TextIOWrapper(
             process.stdin, encoding="utf-8", newline="\n", write_through=True
         ) as text:
@@ -712,7 +712,7 @@ def test_sync_stdin_composes_with_text_wrappers(mock_env_clear: None) -> None:
         assert driver.server.data == "héllo\nwörld\n".encode()
         assert driver.server.closed
 
-        process = driver.box.create_process("cat", stdin=subprocess.PIPE)
+        process = driver.box.create_command("cat", stdin=subprocess.PIPE)
         process.stdin.close()
         with pytest.raises(ValueError, match="closed"):
             process.stdin.write(b"late")
@@ -735,7 +735,7 @@ async def test_async_stdin_orders_concurrent_sends_and_composes_with_anyio(
         options = sandbox_service_options(team_id="team_1", sync=False)
         async with session(service_options=options):
             box = await sandbox.create_sandbox(name="box")
-            process = await box.create_process("cat", stdin=subprocess.PIPE)
+            process = await box.create_command("cat", stdin=subprocess.PIPE)
             assert isinstance(process.stdin, anyio.abc.ByteSendStream)
             # The first send backs off after a failure and holds the stream
             # until released, so every later send queues up behind it.
@@ -772,7 +772,7 @@ def test_sync_stdin_keeps_writes_from_threads_whole(
     monkeypatch.setattr("vercel.sandbox._internal.process_stdin.STDIN_CHUNK_SIZE", 2)
     payloads = [f"{index}" * 6 + ";" for index in range(5)]
     with _open_driver("sync", server) as driver:
-        process = driver.box.create_process("cat", stdin=subprocess.PIPE)
+        process = driver.box.create_command("cat", stdin=subprocess.PIPE)
         # The first write backs off after a failure and holds the stream until
         # released, while the other threads queue up behind it.
         server.faults.append(_applied_then(503))
