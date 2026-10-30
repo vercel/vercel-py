@@ -10,6 +10,7 @@ from vercel._internal.core.http.retry import (
     SleepFn,
 )
 from vercel._internal.core.http.transport import (
+    NO_READ_TIMEOUT,
     NO_TIMEOUT,
     AsyncTransport,
     BaseTransport,
@@ -36,6 +37,7 @@ __all__ = [
     "JSONBody",
     "BytesBody",
     "NO_TIMEOUT",
+    "NO_READ_TIMEOUT",
     "RawBody",
     "ReadResponsePolicy",
     "RequestBody",

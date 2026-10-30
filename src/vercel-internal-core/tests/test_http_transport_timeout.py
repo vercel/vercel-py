@@ -9,7 +9,7 @@ import pytest
 from httpx2 import Response
 
 import vendor.respx as respx
-from vercel._internal.core.http import NO_TIMEOUT, AsyncTransport, SyncTransport
+from vercel._internal.core.http import NO_READ_TIMEOUT, NO_TIMEOUT, AsyncTransport, SyncTransport
 from vercel._internal.core.iter_coroutine import iter_coroutine
 
 CLIENT_TIMEOUT = {
@@ -132,3 +132,26 @@ async def test_async_request_can_disable_client_timeout() -> None:
         await transport.aclose()
 
     assert route.calls.last.request.extensions["timeout"] == DISABLED_TIMEOUT
+
+
+@pytest.mark.parametrize("sync", [False, True])
+@respx.mock
+async def test_disabling_read_timeout_preserves_other_client_limits(sync: bool) -> None:
+    route = respx.get("https://api.example.com/ping").respond(200, json={"ok": True})
+    if sync:
+        with httpx.Client(timeout=_client_timeout()) as client:
+            transport = SyncTransport(client)
+            iter_coroutine(
+                transport.send("GET", "https://api.example.com/ping", timeout=NO_READ_TIMEOUT)
+            )
+            iter_coroutine(transport.send("GET", "https://api.example.com/ping"))
+    else:
+        async with httpx.AsyncClient(timeout=_client_timeout()) as async_client:
+            async_transport = AsyncTransport(async_client)
+            await async_transport.send(
+                "GET", "https://api.example.com/ping", timeout=NO_READ_TIMEOUT
+            )
+            await async_transport.send("GET", "https://api.example.com/ping")
+
+    assert route.calls[0].request.extensions["timeout"] == {**CLIENT_TIMEOUT, "read": None}
+    assert route.calls[1].request.extensions["timeout"] == CLIENT_TIMEOUT

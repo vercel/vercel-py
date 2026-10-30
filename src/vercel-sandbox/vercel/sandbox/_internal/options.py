@@ -73,6 +73,16 @@ class SandboxServiceOptions(SandboxValueModel, _SandboxServiceOptionsKey):
 
     ``region`` defaults to ``None``, leaving placement to the API. Pass
     ``CURRENT_REGION`` to use ``VERCEL_REGION`` when an operation is called.
+
+    Ordinary requests retry network failures, HTTP 429, and HTTP 5xx twice.
+
+    Args:
+        request_timeout: HTTP I/O limit per attempt for ordinary requests.
+            Defaults to no read timeout, retaining the HTTP client's other
+            limits. Command waits and logs remain unlimited. Use
+            ``anyio.fail_after()`` for a total async operation deadline.
+        file_transfer_timeout: HTTP I/O limit for file reads and uploads;
+            defaults to five minutes per attempt.
     """
 
     base_url: str = DEFAULT_SANDBOX_API_BASE_URL
@@ -80,6 +90,7 @@ class SandboxServiceOptions(SandboxValueModel, _SandboxServiceOptionsKey):
         _default_sandbox_credentials_factory
     )
     file_transfer_timeout: timedelta = _DEFAULT_FILE_TRANSFER_TIMEOUT
+    request_timeout: timedelta | None = None
     region: RegionInput = None
 
     def __init__(
@@ -88,6 +99,7 @@ class SandboxServiceOptions(SandboxValueModel, _SandboxServiceOptionsKey):
         base_url: str | None = None,
         credentials_factory: SandboxCredentialsFactory | None = None,
         file_transfer_timeout: timedelta | None = None,
+        request_timeout: timedelta | None = None,
         region: RegionInput = None,
     ) -> None:
         super().__init__(
@@ -95,6 +107,7 @@ class SandboxServiceOptions(SandboxValueModel, _SandboxServiceOptionsKey):
                 base_url=base_url,
                 credentials_factory=credentials_factory,
                 file_transfer_timeout=file_transfer_timeout,
+                request_timeout=request_timeout,
             ),
             region=region,
         )
@@ -103,6 +116,8 @@ class SandboxServiceOptions(SandboxValueModel, _SandboxServiceOptionsKey):
 class SyncSandboxServiceOptions(SandboxValueModel, _SandboxServiceOptionsKey):
     """Configuration for synchronous `vercel.sandbox` calls in an SDK session.
 
+    Timeouts have the same per-attempt semantics as ``SandboxServiceOptions``.
+
     ``region`` defaults to ``None``. Pass ``CURRENT_REGION`` to use the current
     function's ``VERCEL_REGION`` when an operation is called.
     """
@@ -110,6 +125,7 @@ class SyncSandboxServiceOptions(SandboxValueModel, _SandboxServiceOptionsKey):
     base_url: str = DEFAULT_SANDBOX_API_BASE_URL
     credentials_factory: Callable[[], SandboxCredentials] = _resolve_default_sandbox_credentials
     file_transfer_timeout: timedelta = _DEFAULT_FILE_TRANSFER_TIMEOUT
+    request_timeout: timedelta | None = None
     region: RegionInput = None
 
     def __init__(
@@ -118,6 +134,7 @@ class SyncSandboxServiceOptions(SandboxValueModel, _SandboxServiceOptionsKey):
         base_url: str | None = None,
         credentials_factory: SyncSandboxCredentialsFactory | None = None,
         file_transfer_timeout: timedelta | None = None,
+        request_timeout: timedelta | None = None,
         region: RegionInput = None,
     ) -> None:
         super().__init__(
@@ -125,6 +142,7 @@ class SyncSandboxServiceOptions(SandboxValueModel, _SandboxServiceOptionsKey):
                 base_url=base_url,
                 credentials_factory=credentials_factory,
                 file_transfer_timeout=file_transfer_timeout,
+                request_timeout=request_timeout,
             ),
             region=region,
         )

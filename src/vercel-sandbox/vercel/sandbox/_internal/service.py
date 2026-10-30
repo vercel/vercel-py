@@ -1362,6 +1362,8 @@ def get_sandbox_service(session: "SdkSession") -> SandboxService:
                 credentials_factory=options.credentials_factory,
                 transport=session.get_transport(),
                 file_transfer_timeout=options.file_transfer_timeout,
+                request_timeout=options.request_timeout,
+                sleep=session.sleep,
             ),
             options=options,
             ensure_open=session.check_open,
@@ -1381,6 +1383,7 @@ def get_sync_sandbox_service(session: "SyncSdkSession") -> SandboxService:
             base_url=sync_options.base_url,
             credentials_factory=_adapt_sync_credentials_factory(sync_options.credentials_factory),
             file_transfer_timeout=sync_options.file_transfer_timeout,
+            request_timeout=sync_options.request_timeout,
             region=sync_options.region,
         )
         return SandboxService(
@@ -1389,6 +1392,8 @@ def get_sync_sandbox_service(session: "SyncSdkSession") -> SandboxService:
                 credentials_factory=options.credentials_factory,
                 transport=session.get_transport(),
                 file_transfer_timeout=options.file_transfer_timeout,
+                request_timeout=options.request_timeout,
+                sleep=session.sleep,
             ),
             options=options,
             ensure_open=session.check_open,

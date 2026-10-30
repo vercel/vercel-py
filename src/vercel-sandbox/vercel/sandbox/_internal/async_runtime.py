@@ -175,6 +175,7 @@ class Command(_ProcessHandleState):
             lambda: service.process_logs_response(session_id=self._session_id, process_id=self.id),
             stdout=stdout,
             stderr=stderr,
+            sleep=service.sleep,
         )
 
     async def refresh(self) -> Self:
