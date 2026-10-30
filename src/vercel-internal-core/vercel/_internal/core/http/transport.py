@@ -72,7 +72,17 @@ class _NoTimeout:
 
 
 NO_TIMEOUT: Final = _NoTimeout()
-RequestTimeout: TypeAlias = timedelta | _NoTimeout | None
+
+
+@final
+class _NoReadTimeout:
+    """Disable read timeouts while retaining the client's other limits."""
+
+    __slots__ = ()
+
+
+NO_READ_TIMEOUT: Final = _NoReadTimeout()
+RequestTimeout: TypeAlias = timedelta | _NoTimeout | _NoReadTimeout | None
 
 
 class ReadResponsePolicy(StrEnum):
@@ -166,6 +176,18 @@ class BaseTransport(abc.ABC):
                 headers.setdefault("content-type", body.content_type)
             case RawBody():
                 content = body.data
+
+        if timeout is NO_READ_TIMEOUT:
+            request = client.build_request(
+                method,
+                _normalize_path(path),
+                params=params,
+                headers=headers,
+                json=json,
+                content=content,
+            )
+            request.extensions["timeout"] = {**request.extensions["timeout"], "read": None}
+            return request
 
         if timeout is NO_TIMEOUT:
             return client.build_request(

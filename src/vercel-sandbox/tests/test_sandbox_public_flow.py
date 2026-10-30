@@ -1191,8 +1191,8 @@ async def test_update_live_policy_failure_skips_configuration(
             tags={"env": "updated"},
         )
 
-    assert order == ["policy"]
-    assert policy_route.call_count == 1
+    assert order == ["policy"] * 3
+    assert policy_route.call_count == 3
     assert patch_route.call_count == 0
 
 
@@ -1230,7 +1230,7 @@ async def test_update_keeps_live_changes_before_a_failed_step(
                     execution_time_limit=360, network_policy=_authored_network_policy()
                 )
 
-    assert order == ["extend", "policy"]
+    assert order == ["extend", "policy", "policy", "policy"]
     assert patch_route.call_count == 0
     assert handle.current_session is original_session
     assert handle.current_session.execution_time_limit == timedelta(minutes=6)
@@ -1354,7 +1354,7 @@ async def test_async_update_step_superseded_by_recovery_keeps_current_session(
             allow_extend.set()
 
     assert len(errors) == 1
-    assert policy_route.call_count == 1
+    assert policy_route.call_count == 3
     assert patch_route.call_count == 0
     assert handle.current_session_id == "sbx_new"
     assert handle.current_session is not None
@@ -1389,7 +1389,7 @@ def test_sync_update_step_superseded_by_recovery_keeps_current_session(
             with pytest.raises(SandboxApiError):
                 update.result(timeout=5)
 
-    assert policy_route.call_count == 1
+    assert policy_route.call_count == 3
     assert patch_route.call_count == 0
     assert handle.current_session_id == "sbx_new"
     assert handle.current_session is not None
@@ -1473,7 +1473,7 @@ async def test_update_extend_timeout_ignores_only_session_gone_errors(
     if raises:
         with pytest.raises(SandboxApiError):
             await _run_sandbox_update(sync, execution_time_limit=360)
-        assert order == ["extend"]
+        assert order == ["extend"] * (3 if status_code >= 500 else 1)
         assert patch_route.call_count == 0
     else:
         await _run_sandbox_update(sync, execution_time_limit=360)
