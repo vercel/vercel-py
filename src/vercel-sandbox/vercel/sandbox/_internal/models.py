@@ -109,12 +109,6 @@ class NetworkPolicyKeyValueMatcher(SandboxValueModel):
     value: NetworkPolicyMatcher | None = None
     __hash__ = None  # type: ignore[assignment]
 
-    @model_validator(mode="after")
-    def _validate(self) -> Self:
-        if self.key is None and self.value is None:
-            raise ValueError("key-value matcher requires a key or value matcher")
-        return self
-
 
 class NetworkPolicyRequestMatcher(SandboxValueModel):
     """Match selected dimensions of an outbound HTTP request."""
@@ -124,15 +118,6 @@ class NetworkPolicyRequestMatcher(SandboxValueModel):
     query: tuple[NetworkPolicyKeyValueMatcher, ...] | None = None
     headers: tuple[NetworkPolicyKeyValueMatcher, ...] | None = None
     __hash__ = None  # type: ignore[assignment]
-
-    @model_validator(mode="after")
-    def _validate(self) -> Self:
-        if all(value is None for value in (self.path, self.method, self.query, self.headers)):
-            raise ValueError("request matcher requires at least one matching dimension")
-        for name in ("method", "query", "headers"):
-            if getattr(self, name) == ():
-                raise ValueError(f"request matcher {name} must not be empty")
-        return self
 
 
 class NetworkPolicyTransform(SandboxValueModel):
@@ -204,7 +189,16 @@ class NetworkPolicyRule(SandboxValueModel):
     @model_validator(mode="after")
     def _validate(self) -> Self:
         handlers = sum(
-            (bool(self.transform), self.forward_url is not None, self.response is not None)
+            (
+                bool(self.transform)
+                or (
+                    "transform" in self.model_fields_set
+                    and self.forward_url is None
+                    and self.response is None
+                ),
+                self.forward_url is not None,
+                self.response is not None,
+            )
         )
         if handlers != 1:
             raise ValueError(
@@ -326,7 +320,7 @@ def _serialize_network_policy_rule(rule: NetworkPolicyRule) -> JSONObject:
     result: JSONObject = {}
     if rule.match is not None:
         result["match"] = _serialize_request_matcher(rule.match)
-    if rule.transform:
+    if rule.transform or (rule.forward_url is None and rule.response is None):
         transforms: list[JSONValue] = []
         for transform in rule.transform:
             transform_data: JSONObject = {}
@@ -535,10 +529,10 @@ def _parse_network_policy_rule(value: object) -> NetworkPolicyRule:
     forward_url = data.get("forwardURL", data.get("forwardUrl"))
     response = data.get("response")
     return NetworkPolicyRule(
-        transform=transforms,
         match=_parse_optional_request_matcher(data.get("match")),
         forward_url=None if forward_url is None else _string(forward_url, "forwardURL"),
         response=None if response is None else _parse_network_policy_response(response),
+        **({"transform": transforms} if "transform" in data else {}),
     )
 
 

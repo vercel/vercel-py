@@ -1,0 +1,1 @@
+Add `parse_network_policy()` and `NetworkPolicyParseError` to both SDK APIs for loading the JSON network policy format shared with the JavaScript SDK and CLI. Reject nested unknown keys and invalid rules with paths and secret-safe diagnostics, and preserve explicit empty transforms and match collections.

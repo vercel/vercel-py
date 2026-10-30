@@ -1362,6 +1362,70 @@ def test_sync_service_region_defaults_fork_from_environment(
 
 
 @respx.mock
+@pytest.mark.parametrize("sync", [False, True])
+@pytest.mark.parametrize("operation", ["create", "fork", "update"])
+async def test_network_policy_file_public_flow(
+    mock_env_clear: None,
+    sync: bool,
+    operation: str,
+) -> None:
+    # Exercise every documented JSON field through the public request boundary.
+    match = {
+        "path": {"startsWith": "/v1/"},
+        "method": ["GET", "HEAD"],
+        "queryString": [{"key": {"exact": "stream"}, "value": {"regex": "^true$"}}],
+        "headers": [{"key": {"exact": "authorization"}, "value": {"startsWith": "Bearer "}}],
+    }
+    data = {
+        "allow": {
+            "*": [],
+            "api.example.com": [
+                {"match": match, "transform": [{"headers": {"Authorization": "Bearer secret"}}]},
+                {"match": match, "forwardURL": "https://proxy.example.com"},
+                {
+                    "response": {
+                        "statusCode": 403,
+                        "headers": {"X-Policy": "blocked"},
+                        "body": "blocked",
+                        "contentType": "text/plain",
+                    }
+                },
+                {"transform": []},
+            ],
+        },
+        "subnets": {"allow": ["10.0.0.0/8"], "deny": ["10.1.0.0/16"]},
+    }
+    if operation == "update":
+        _, live_route, route = _mock_update_routes([])
+    else:
+        path = "v3/sandboxes" if operation == "create" else "v2/sandboxes/source/fork"
+        route = respx.post(f"https://sandbox.test/{path}").mock(
+            return_value=httpx.Response(200, json=_sandbox_response())
+        )
+    policy = sandbox.parse_network_policy(json.loads(json.dumps(data)))
+    if sync:
+        with session(service_options=_session_options(sync=True)):
+            if operation == "create":
+                sandbox_sync.create_sandbox(name="preview", network_policy=policy)
+            elif operation == "fork":
+                sandbox_sync.fork_sandbox(source_sandbox="source", network_policy=policy)
+            else:
+                sandbox_sync.get_sandbox(name="preview").update(network_policy=policy)
+    else:
+        async with session(service_options=_session_options()):
+            if operation == "create":
+                await sandbox.create_sandbox(name="preview", network_policy=policy)
+            elif operation == "fork":
+                await sandbox.fork_sandbox(source_sandbox="source", network_policy=policy)
+            else:
+                box = await sandbox.get_sandbox(name="preview")
+                await box.update(network_policy=policy)
+    assert json.loads(route.calls.last.request.content)["networkPolicy"] == data
+    if operation == "update":
+        assert json.loads(live_route.calls.last.request.content) == data
+
+
+@respx.mock
 async def test_network_policy_async_public_flow(mock_env_clear: None) -> None:
     create_route = respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(
@@ -1528,10 +1592,6 @@ def test_network_policy_sync_readback_is_not_writable(mock_env_clear: None) -> N
 
 @respx.mock
 async def test_network_policy_structural_validation(mock_env_clear: None) -> None:
-    with pytest.raises(ValueError, match="requires a key or value"):
-        NetworkPolicyKeyValueMatcher()
-    with pytest.raises(ValueError, match="at least one matching dimension"):
-        NetworkPolicyRequestMatcher()
     with pytest.raises(ValueError, match="exactly one"):
         NetworkPolicyRule()
     with pytest.raises(ValueError, match="exactly one"):

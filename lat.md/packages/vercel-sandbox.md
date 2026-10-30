@@ -25,6 +25,16 @@ Sandbox data objects use Pydantic v2 throughout. Public value fields remain froz
 
 [[src/vercel-sandbox/vercel/sandbox/user.py#SandboxUser]] and [[src/vercel-sandbox/vercel/sandbox/sync/user.py#SyncSandboxUser]] are ordinary runtime handles with private context and filesystem bindings and read-only public properties. Like other live handles, they do not expose model validation or serialization. Service options retain callable credential factories and the shared session registry key. [[src/vercel-sandbox/tests/test_public_models.py|Public model tests]] cover nested policy validation and serialization, Drive mount name serialization, and snapshot-retention roundtrips with API duration conversion. [[src/vercel-sandbox/tests/test_sandbox_users.py#test_selection_is_lazy_and_handle_properties_are_read_only|User handle tests]] cover lazy identity resolution, read-only properties, and structural capabilities.
 
+### Network policy JSON
+
+Decoded policy files shared with the JS SDK and CLI become immutable authored Python policies before any API operation.
+
+[[src/vercel-sandbox/vercel/sandbox/_internal/network_policy.py#parse_network_policy]] is exported from both public APIs. It accepts the two string modes or an object with optional domain lists/rule maps and subnet lists. Private strict Pydantic input models translate wire names and reject unknown keys and explicit nulls recursively, then reuse the authored models' response and action validation. Matchers select exactly one comparison strategy. [[src/vercel-sandbox/vercel/sandbox/_internal/network_policy.py#NetworkPolicyParseError]] retains only path-bearing issue strings; the underlying validation exception and input values are excluded from exception chaining.
+
+[[src/vercel-sandbox/vercel/sandbox/_internal/models.py#NetworkPolicyRequestMatcher]] and [[src/vercel-sandbox/vercel/sandbox/_internal/models.py#NetworkPolicyKeyValueMatcher]] preserve empty match objects and collections supported by the JSON format. [[src/vercel-sandbox/vercel/sandbox/_internal/models.py#NetworkPolicyRule]] distinguishes an explicitly empty transform action from a missing action. [[src/vercel-sandbox/vercel/sandbox/_internal/models.py#_serialize_network_policy_rule]] preserves it as an empty array rather than dropping the action.
+
+[[src/vercel-sandbox/tests/test_network_policy.py]] covers modes, domain-list normalization, nested typo rejection, strict types, response constraints, explicit empty fields, secret-safe diagnostics, and defensive copying with Hypothesis. [[src/vercel-sandbox/tests/test_sandbox_public_flow.py#test_network_policy_file_public_flow]] checks every documented field and rule order through synchronous and asynchronous create, fork, and live/configuration update requests.
+
 ### Internal data models
 
 The internal dataclass migration covers 31 frozen records and three mutable coordination helpers. Behavioral handles, clients, transports, and services remain plain classes.
