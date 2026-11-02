@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.11.0 - 2026-10-30
+
+### Breaking Changes
+
+- Omit region by default for Sandbox and Drive creation, matching the TypeScript SDK. Pass `region=CURRENT_REGION` on calls or service options to opt into the current Vercel Function's `VERCEL_REGION`; when unset, no region is sent. Environment values are passed through unchanged, including an empty string. Explicit region strings keep their existing behavior in sync and async APIs and standalone clients. Regions are resolved once at the public API boundary, including when deferred creation and fork operations are constructed. (#488)
+
+- Replace all Sandbox dataclass records with Pydantic v2 models, including network policies, process results, directory entries, mounts, snapshot expiration and retention state, routes, credentials, and service options. Use Pydantic validation and serialization methods instead of dataclass utilities; invalid fields and frozen-field assignments now raise `pydantic.ValidationError`. Most model constructors now require keyword arguments; positional snapshot expiration, mount, matcher, and credentials constructors remain supported. Sandbox user handles become ordinary classes with read-only properties, matching other SDK handles. (#489)
+
+  Internal state, pagination records, deferred request parameters, upload metadata, terminal frames, recovery attempts, and output targets also use Pydantic. State attached to `SandboxResponseError.data` is now a model. Recovery and output models remain mutable and retain live runtime references. Deferred asynchronous create, fork, and resume parameters validate when the operation is constructed. Network policies still require a `NetworkPolicy` instance.
+
+### Features
+
+- Align command execution with product and TypeScript SDK naming: expose `create_command()` and `run_command()` on async and sync sandbox, runtime session, and user handles; add `get_command()` and `query_commands()` lookups; and rename the public types to `Command`, `SyncCommand`, `CompletedCommand`, `CommandStatus`, `CommandSignal`, `CommandStdin`, and `SyncCommandStdin`. Preserve the former process class names as compatibility aliases and process method names as deprecated wrappers with the same arguments, results, and errors. (#491)
+
+### Bug Fixes
+
+- Only send an explicitly supplied region when updating a sandbox, rather than falling back to the service options or VERCEL_REGION. (#483)
+
 ## 0.10.0 - 2026-10-23
 
 ### Features
