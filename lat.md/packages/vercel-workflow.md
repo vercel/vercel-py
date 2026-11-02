@@ -10,6 +10,14 @@ A `Workflows` registry owns the workflows and steps it serves and exposes the HT
 
 [[src/vercel-workflow/vercel/workflow/_internal/core.py#Workflows]] registers async workflow bodies and steps, and can isolate its messages under a queue `namespace`. Steps can only be called from inside a workflow. [[src/vercel-workflow/vercel/workflow/_internal/run.py#start]] creates a run and returns a [[src/vercel-workflow/vercel/workflow/_internal/run.py#Run]] handle for status, return value, attributes, and streams. `python -m vercel.workflow` emits a manifest of registered workflows for external tooling ([[src/vercel-workflow/vercel/workflow/_internal/cli.py]]).
 
+## Configurable workflow starts
+
+Workflow starts return lazy, single-use coroutine objects while argument binding validates the call synchronously.
+
+[[src/vercel-workflow/vercel/workflow/_internal/run.py#start]] checks workflow parameter types and binds arguments synchronously, so invalid call shapes raise immediately. It returns [[src/vercel-workflow/vercel/workflow/_internal/run.py#StartRequest]], parameterized by the result type. The request stores the workflow and bound argument values as opaque objects; awaiting or scheduling the request executes [[src/vercel-workflow/vercel/workflow/_internal/run.py#StartRequest#_start|its startup method]] once. Serialization and external operations remain lazy. Coroutine methods forward cancellation, exceptions, and closure. [[src/vercel-workflow/vercel/workflow/_internal/run.py#StartRequest#__await__]] checks the underlying coroutine’s active await before returning its native iterator, rejecting duplicate waiting without introducing a separate iterator lifecycle. [[src/vercel-workflow/vercel/workflow/_internal/run.py#StartRequest#close]] creates the underlying coroutine if needed and delegates its return value and closed state, so a failed close does not prevent subsequent recovery. Creating the coroutine during close does not execute startup logic.
+
+[[src/vercel-workflow/tests/unit/test_workflow_run.py]] verifies synchronous argument rejection, argument forwarding, direct await, task scheduling, single-use execution, coroutine lifecycle propagation, and native-equivalent rejection of duplicate waiting after Task startup, for both bare yields and pending futures. Native coroutine comparisons also cover closing or throwing into an unstarted await iterator, close return values, and resuming after failed closure.
+
 ## Execution model
 
 Each queue delivery either executes one step or replays the workflow body against the run's recorded events until it next suspends.

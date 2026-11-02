@@ -4,7 +4,7 @@ import asyncio
 import contextlib
 import functools
 import logging
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Coroutine, Generator
 from dataclasses import dataclass
 from typing import Any, Generic, Literal, ParamSpec, TypeVar, cast, overload
 
@@ -264,53 +264,94 @@ async def _failure(run: w.WorkflowRun, *, world: w.World) -> Exception:
         return RuntimeError(f"cannot read {what}: {error}")
 
 
-async def start(wf: core.Workflow[P, T], *args: P.args, **kwargs: P.kwargs) -> Run[T]:
+def start(wf: core.Workflow[P, T], *args: P.args, **kwargs: P.kwargs) -> StartRequest[T]:
     # Bound before anything is written, so an arity mistake raises here instead
     # of leaving a run behind that fails when its body is invoked.
     bound_args, bound_kwargs = wf.bind_arguments(args, kwargs)
-    dumped_args, dumped_kwargs = wf.codec.dump_arguments(bound_args, bound_kwargs)
-    world = w.get_world()
-    deployment_id = await world.get_deployment_id()
-    namespace = wf._resolve_queue_namespace()
-    # TODO: add and prefer world.create_run_id()
-    run_id = f"wrun_{_generate_run_ulid()}"
-    run_key = await world.run_key(run_id, deployment_id=deployment_id)
-    encryption_public_key = (
-        encryption.derive_run_public_key(run_key) if run_key is not None else None
-    )
-    input_data = ser.PayloadEncoder(compression=True, encryption_key=run_key).encode(
-        ser.argument_array(dumped_args, dumped_kwargs)
-    )
-    execution_context: dict[str, Any] = {
-        "workflowCoreVersion": w.WORKFLOW_CORE_COMPAT_VERSION,
-        "hookResumeInputVersion": w.HOOK_RESUME_INPUT_VERSION,
-        "features": {"encryption": run_key is not None},
-    }
-    if namespace is not None:
-        execution_context["queueNamespace"] = namespace
-    data = w.RunCreatedEventData(
-        deployment_id=deployment_id,
-        workflow_name=wf.workflow_id,
-        input=input_data,
-        execution_context=execution_context,
-        encryption_public_key=encryption_public_key,
-    )
-    await world.events_create(run_id, data.into_event())
-    await world.queue(
-        w.get_queue_name(wf.workflow_id, namespace),
-        w.WorkflowInvokePayload(
-            run_id=run_id,
-            run_input=w.RunInput(
-                input=input_data,
-                deployment_id=deployment_id,
-                workflow_name=wf.workflow_id,
-                spec_version=w.SPEC_VERSION_CURRENT,
-                execution_context=execution_context,
-                encryption_public_key=encryption_public_key,
-                environment=world.get_environment(),
-            ),
-        ),
-        deployment_id=deployment_id,
-    )
+    return StartRequest(wf, bound_args, bound_kwargs)
 
-    return Run(run_id, output_validator=wf.codec.validate_return)
+
+class StartRequest(Coroutine[Any, Any, Run[T]]):
+    def __init__(
+        self,
+        wf: core.Workflow[..., T],
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> None:
+        self._workflow = wf
+        self._args = args
+        self._kwargs = kwargs
+        self._coroutine: Coroutine[Any, Any, Run[T]] | None = None
+
+    def _get_coroutine(self) -> Coroutine[Any, Any, Run[T]]:
+        if self._coroutine is None:
+            self._coroutine = self._start()
+        return self._coroutine
+
+    def __await__(self) -> Generator[Any, None, Run[T]]:
+        coroutine = self._get_coroutine()
+        # Mirror native await's guard before exposing the underlying iterator.
+        if getattr(coroutine, "cr_await", None) is not None:
+            raise RuntimeError("coroutine is being awaited already")
+        return coroutine.__await__()
+
+    def send(self, value: Any) -> Any:
+        return self._get_coroutine().send(value)
+
+    def throw(self, typ: Any, val: Any = None, tb: Any = None) -> Any:
+        coroutine = self._get_coroutine()
+        if val is None and tb is None:
+            return coroutine.throw(typ)
+        return coroutine.throw(typ, val, tb)
+
+    def close(self) -> Any:
+        return self._get_coroutine().close()
+
+    async def _start(self) -> Run[T]:
+        wf = self._workflow
+        dumped_args, dumped_kwargs = wf.codec.dump_arguments(self._args, self._kwargs)
+        world = w.get_world()
+        deployment_id = await world.get_deployment_id()
+        namespace = wf._resolve_queue_namespace()
+        # TODO: add and prefer world.create_run_id()
+        run_id = f"wrun_{_generate_run_ulid()}"
+        run_key = await world.run_key(run_id, deployment_id=deployment_id)
+        encryption_public_key = (
+            encryption.derive_run_public_key(run_key) if run_key is not None else None
+        )
+        input_data = ser.PayloadEncoder(compression=True, encryption_key=run_key).encode(
+            ser.argument_array(dumped_args, dumped_kwargs)
+        )
+        execution_context: dict[str, Any] = {
+            "workflowCoreVersion": w.WORKFLOW_CORE_COMPAT_VERSION,
+            "hookResumeInputVersion": w.HOOK_RESUME_INPUT_VERSION,
+            "features": {"encryption": run_key is not None},
+        }
+        if namespace is not None:
+            execution_context["queueNamespace"] = namespace
+        data = w.RunCreatedEventData(
+            deployment_id=deployment_id,
+            workflow_name=wf.workflow_id,
+            input=input_data,
+            execution_context=execution_context,
+            encryption_public_key=encryption_public_key,
+        )
+        await world.events_create(run_id, data.into_event())
+        await world.queue(
+            w.get_queue_name(wf.workflow_id, namespace),
+            w.WorkflowInvokePayload(
+                run_id=run_id,
+                run_input=w.RunInput(
+                    input=input_data,
+                    deployment_id=deployment_id,
+                    workflow_name=wf.workflow_id,
+                    spec_version=w.SPEC_VERSION_CURRENT,
+                    execution_context=execution_context,
+                    encryption_public_key=encryption_public_key,
+                    environment=world.get_environment(),
+                ),
+            ),
+            deployment_id=deployment_id,
+        )
+
+        return Run(run_id, output_validator=wf.codec.validate_return)

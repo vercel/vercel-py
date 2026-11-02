@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import decimal
 import hashlib
+import inspect
+from collections.abc import Coroutine
 from dataclasses import dataclass
 from typing import Any, get_type_hints
 from unittest.mock import AsyncMock, Mock
@@ -15,6 +17,7 @@ import pytest
 from tests.payloads import PLAIN_ENCODER
 from vercel.workflow import (
     Run,
+    StartRequest,
     WorkflowRunFailedError,
     WorkflowRunStatus,
     get_run,
@@ -722,3 +725,229 @@ async def test_suspended_context_does_not_fall_back_to_io(world) -> None:
     finally:
         ctx._ctx.reset(token)
     assert world.target_reads == world.terminations == 0
+
+
+@registry.workflow
+async def workflow(value: int, *, hook: str, options: str) -> int:
+    return value
+
+
+# @lat: [[vercel-workflow#Configurable workflow starts]]
+@pytest.mark.parametrize("scheduler", ["await", "create_task", "gather"])
+async def test_start_preserves_arguments_and_coroutine_scheduling(monkeypatch, scheduler) -> None:
+    result: Run[int] = Run("wrun_result")
+    launch = AsyncMock(return_value=result)
+    monkeypatch.setattr(StartRequest, "_start", launch)
+    request = start(workflow, 42, hook="payload", options="argument")
+    assert isinstance(request, StartRequest)
+    assert isinstance(request, Coroutine)
+    assert asyncio.iscoroutine(request)
+    assert inspect.isawaitable(request)
+    launch.assert_not_called()
+    if scheduler == "create_task":
+        received = await asyncio.create_task(request)
+    elif scheduler == "gather":
+        [received] = await asyncio.gather(request)
+    else:
+        received = await request
+    assert received is result
+    launch.assert_awaited_once_with()
+    with pytest.raises(RuntimeError, match="reuse"):
+        await request
+    launch.assert_awaited_once()
+
+
+async def test_cancellation_reaches_the_start_coroutine(monkeypatch) -> None:
+    entered, cancelled = asyncio.Event(), asyncio.Event()
+
+    async def launch(*args, **kwargs):
+        entered.set()
+        try:
+            await asyncio.Future()
+        finally:
+            cancelled.set()
+
+    monkeypatch.setattr(StartRequest, "_start", launch)
+    request = start(workflow, 1, hook="value", options="argument")
+    task = asyncio.create_task(request)
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cancelled.is_set()
+
+
+async def test_close_before_execution_creates_one_coroutine_without_running_it(monkeypatch) -> None:
+    launch = AsyncMock()
+    monkeypatch.setattr(StartRequest, "_start", launch)
+    request = start(workflow, 1, hook="value", options="argument")
+    request.close()
+    request.close()
+    launch.assert_called_once_with()
+    launch.assert_not_awaited()
+    with pytest.raises(RuntimeError, match="reuse"):
+        await request
+
+
+@pytest.mark.parametrize("operation", ["close", "throw"])
+async def test_close_and_throw_reach_the_started_coroutine(monkeypatch, operation) -> None:
+    finished = []
+
+    async def launch(self) -> Run[int]:
+        try:
+            await asyncio.sleep(0)
+            return Run("wrun_result")
+        finally:
+            finished.append(True)
+
+    monkeypatch.setattr(StartRequest, "_start", launch)
+    request = start(workflow, 1, hook="value", options="argument")
+    assert request.send(None) is None
+    if operation == "close":
+        request.close()
+    else:
+        error = ValueError("injected")
+        with pytest.raises(ValueError) as caught:
+            request.throw(error)
+        assert caught.value is error
+    assert finished == [True]
+
+
+async def test_start_errors_propagate_without_reexecuting(monkeypatch) -> None:
+    error = ValueError("invalid start")
+    launch = AsyncMock(side_effect=error)
+    monkeypatch.setattr(StartRequest, "_start", launch)
+    request = start(workflow, 1, hook="value", options="argument")
+    with pytest.raises(ValueError) as caught:
+        await request
+    assert caught.value is error
+    with pytest.raises(RuntimeError, match="reuse"):
+        await request
+    launch.assert_awaited_once()
+
+
+def test_start_rejects_invalid_arguments_synchronously(monkeypatch) -> None:
+    launch = AsyncMock()
+    monkeypatch.setattr(StartRequest, "_start", launch)
+    with pytest.raises(TypeError, match="missing a required keyword-only argument"):
+        start(workflow, 1, options="argument")  # type: ignore[call-arg]
+    launch.assert_not_called()
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+@pytest.mark.parametrize("suspension", ["yield", "future"])
+async def test_awaiting_scheduled_request_preserves_task_ownership(
+    monkeypatch, wrapped, suspension
+):
+    release = asyncio.Event()
+    result: Run[int] = Run("wrun_result")
+    calls = 0
+
+    async def launch(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if suspension == "yield":
+            await asyncio.sleep(0)
+        else:
+            await release.wait()
+        return result
+
+    monkeypatch.setattr(StartRequest, "_start", launch)
+    request = start(workflow, 1, hook="value", options="argument") if wrapped else launch()
+    task = asyncio.create_task(request)
+    try:
+        await asyncio.sleep(0)
+        # Also let a broken implementation finish instead of hanging this test.
+        asyncio.get_running_loop().call_soon(release.set)
+        with pytest.raises(RuntimeError, match="coroutine is being awaited already"):
+            await request
+        assert await task is result
+        assert calls == 1
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+@pytest.mark.parametrize("operation", ["close", "throw"])
+def test_unstarted_await_iterator_terminates_underlying_coroutine(monkeypatch, wrapped, operation):
+    async def launch(*args, **kwargs):
+        return Run("wrun_result")
+
+    monkeypatch.setattr(StartRequest, "_start", launch)
+    request = start(workflow, 1, hook="value", options="argument") if wrapped else launch()
+    iterator = request.__await__()
+    try:
+        if operation == "close":
+            iterator.close()
+        else:
+            error = ValueError("injected")
+            with pytest.raises(ValueError) as caught:
+                iterator.throw(error)
+            assert caught.value is error
+        with pytest.raises(RuntimeError, match="cannot reuse already awaited coroutine"):
+            request.send(None)
+    finally:
+        request.close()
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+@pytest.mark.parametrize("through_iterator", [False, True])
+def test_close_preserves_native_return_value(monkeypatch, wrapped, through_iterator):
+    import sys
+
+    result: Run[int] = Run("wrun_result")
+
+    async def launch(*args, **kwargs):
+        try:
+            await asyncio.sleep(0)
+        except GeneratorExit:
+            return result
+
+    monkeypatch.setattr(StartRequest, "_start", launch)
+    request = start(workflow, 1, hook="value", options="argument") if wrapped else launch()
+    driver = request.__await__() if through_iterator else request
+    assert driver.send(None) is None
+    closed_result = driver.close()
+    assert closed_result is (result if sys.version_info >= (3, 13) else None)
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+@pytest.mark.parametrize("through_iterator", [False, True])
+def test_failed_close_leaves_coroutine_resumable(monkeypatch, wrapped, through_iterator):
+    result: Run[int] = Run("wrun_result")
+
+    async def launch(*args, **kwargs):
+        try:
+            await asyncio.sleep(0)
+        except GeneratorExit:
+            await asyncio.sleep(0)
+        return result
+
+    monkeypatch.setattr(StartRequest, "_start", launch)
+    request = start(workflow, 1, hook="value", options="argument") if wrapped else launch()
+    driver = request.__await__() if through_iterator else request
+    try:
+        assert driver.send(None) is None
+        with pytest.raises(RuntimeError, match="ignored GeneratorExit"):
+            driver.close()
+        with pytest.raises(StopIteration) as stopped:
+            driver.send(None)
+        assert stopped.value.value is result
+    finally:
+        request.close()
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+async def test_failed_close_during_execution_does_not_poison_task(monkeypatch, wrapped):
+    result: Run[int] = Run("wrun_result")
+
+    async def launch(*args, **kwargs):
+        with pytest.raises(ValueError, match="already executing"):
+            request.close()
+        await asyncio.sleep(0)
+        return result
+
+    monkeypatch.setattr(StartRequest, "_start", launch)
+    request = start(workflow, 1, hook="value", options="argument") if wrapped else launch()
+    assert await asyncio.create_task(request) is result
