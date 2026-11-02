@@ -14,7 +14,8 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
     import tomli as tomllib  # type: ignore[no-redef]
 
-PYPROJECT = Path(__file__).resolve().parent.parent / "src/vercel-queue/pyproject.toml"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PYPROJECT = PROJECT_ROOT / "src/vercel-queue/pyproject.toml"
 
 
 def anyio_requirement(pyproject: Path = PYPROJECT) -> str:
@@ -33,7 +34,6 @@ def resolve_boundary(boundary: str, pyproject: Path = PYPROJECT) -> str:
             "uv",
             "pip",
             "compile",
-            "--no-config",
             "--no-deps",
             "--no-header",
             "--no-annotate",
@@ -44,6 +44,7 @@ def resolve_boundary(boundary: str, pyproject: Path = PYPROJECT) -> str:
             "lowest-direct" if boundary == "lowest" else "highest",
             "-",
         ],
+        cwd=PROJECT_ROOT,
         input=requirement + "\n",
         text=True,
         stdout=subprocess.PIPE,
