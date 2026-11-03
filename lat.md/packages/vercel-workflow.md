@@ -66,3 +66,21 @@ Workflow references carry immutable, reusable startup configuration while startu
 The compression option only controls the argument encoder during startup. The opt-out skips compression; unconfigured workflows retain [[src/vercel-workflow/vercel/workflow/_internal/compression.py#maybe_compress|the existing size, savings, codec, and environment policy]]. The encoded bytes are shared by run creation and queue delivery. Other payload encoders are unchanged.
 
 [[src/vercel-workflow/tests/unit/test_workflow_run.py]] verifies immutable configuration branches, reuse across independent starts, native coroutine scheduling, argument and result typing, and the separation of startup options from identically named workflow arguments. [[src/vercel-workflow/tests/unit/test_workflow_run.py#test_configuration_can_be_copied_and_replaced_between_workflows]] checks that a copied configuration applies to the receiving workflow and can be replaced without modifying the source. The tests check actual payload envelopes for default workflow behavior, default configuration, and compression opt-out, including environment opt-out and the small-payload threshold.
+
+## Regional routing
+
+Reusable workflow configuration pins run data and queue dispatch to a region.
+
+[[src/vercel-workflow/vercel/workflow/_internal/core.py#_Configurable#with_region]] returns an immutable configuration and preserves argument compression settings. [[src/vercel-workflow/vercel/workflow/_internal/run.py#start]] passes the region hint to run-ID creation and queue delivery.
+
+[[src/vercel-workflow/vercel/workflow/_internal/worlds/vercel.py#_create_run_id]] embeds TypeScript-compatible region metadata in Vercel run IDs and preserves monotonic ordering across region changes. Region selection prefers a recognized explicit hint, then the environment, then iad1. [[src/vercel-workflow/vercel/workflow/_internal/worlds/vercel.py#_region_from_tagged_run_id]] keeps later queue deliveries in the run’s region when no valid override is present. Queue clients are isolated by region. Local worlds ignore region hints and keep ordinary ULIDs.
+
+[[src/vercel-workflow/vercel/workflow/_internal/worlds/vercel.py#_RunIdState]] keeps the generator and last emitted ID in thread-local state, preserving monotonicity across region changes within each thread without a shared mutex. Cross-thread ordering is not guaranteed.
+
+When correcting ordering, [[src/vercel-workflow/vercel/workflow/_internal/worlds/vercel.py#_create_run_id]] advances the last emitted ID's timestamp and preserves its low random bits to match TypeScript. [[src/vercel-workflow/vercel/workflow/_internal/worlds/vercel.py#_region_from_tagged_run_id]] accepts ASCII Base32 in either case and rejects non-ASCII characters before case normalization.
+
+[[src/vercel-workflow/vercel/workflow/_internal/worlds/vercel.py#VercelWorld#_queue_client]] sends the selected region in the `x-vercel-queue-region` header when using the fixed queue proxy URL. Direct clients use regional hosts instead. Each client receives its own headers so regional routing does not mutate shared World headers.
+
+The region option controls data and queue placement. Functions follow the application’s configured compute regions; if the requested region has no application functions, steps execute in the nearest configured compute region.
+
+[[src/vercel-workflow/tests/unit/test_workflow_queue_transport.py]] checks TypeScript-generated region vectors, fallback, monotonicity, and queue region preservation. [[src/vercel-workflow/tests/unit/test_workflow_run.py]] checks immutable option composition, reuse, namespace preservation, and region hint propagation.
