@@ -267,58 +267,85 @@ async def start(
     *args: P.args,
     **kwargs: P.kwargs,
 ) -> Run[T]:
-    compress_arguments = True
-    region = None
-    if isinstance(wf, core.ConfiguredWorkflow):
-        compress_arguments = wf.compress_arguments
-        region = wf.region
-        wf = wf.workflow
-    # Bound before anything is written, so an arity mistake raises here instead
-    # of leaving a run behind that fails when its body is invoked.
+    configured = wf._configured()
+    wf = configured.workflow
+
+    # Bind and validate before preparing a run or writing anything durable.
     bound_args, bound_kwargs = wf.bind_arguments(args, kwargs)
     dumped_args, dumped_kwargs = wf.codec.dump_arguments(bound_args, bound_kwargs)
-    world = w.get_world()
-    deployment_id = await world.get_deployment_id()
-    namespace = wf._resolve_queue_namespace()
-    run_id = f"wrun_{world.create_run_id(region=region)}"
-    run_key = await world.run_key(run_id, deployment_id=deployment_id)
-    encryption_public_key = (
-        encryption.derive_run_public_key(run_key) if run_key is not None else None
-    )
-    input_data = ser.PayloadEncoder(compression=compress_arguments, encryption_key=run_key).encode(
-        ser.argument_array(dumped_args, dumped_kwargs)
-    )
-    execution_context: dict[str, Any] = {
-        "workflowCoreVersion": w.WORKFLOW_CORE_COMPAT_VERSION,
-        "hookResumeInputVersion": w.HOOK_RESUME_INPUT_VERSION,
-        "features": {"encryption": run_key is not None},
-    }
-    if namespace is not None:
-        execution_context["queueNamespace"] = namespace
-    data = w.RunCreatedEventData(
-        deployment_id=deployment_id,
-        workflow_name=wf.workflow_id,
-        input=input_data,
-        execution_context=execution_context,
-        encryption_public_key=encryption_public_key,
-    )
-    await world.events_create(run_id, data.into_event())
-    await world.queue(
-        w.get_queue_name(wf.workflow_id, namespace),
-        w.WorkflowInvokePayload(
-            run_id=run_id,
-            run_input=w.RunInput(
-                input=input_data,
-                deployment_id=deployment_id,
-                workflow_name=wf.workflow_id,
-                spec_version=w.SPEC_VERSION_CURRENT,
-                execution_context=execution_context,
-                encryption_public_key=encryption_public_key,
-                environment=world.get_environment(),
-            ),
-        ),
-        deployment_id=deployment_id,
-        region=region,
-    )
+    arguments = ser.argument_array(dumped_args, dumped_kwargs)
 
-    return Run(run_id, output_validator=wf.codec.validate_return)
+    world = w.get_world()
+    prepared = await _RunStart.prepare(world, configured, arguments)
+    return await prepared.submit(world)
+
+
+@dataclass(frozen=True)
+class _RunStart(Generic[T]):
+    configured: core.ConfiguredWorkflow[..., T]
+    run_id: str
+    deployment_id: str
+    input: bytes
+    execution_context: dict[str, Any]
+    encryption_public_key: str | None
+    queue_name: str
+
+    @classmethod
+    async def prepare(
+        cls,
+        world: w.World,
+        configured: core.ConfiguredWorkflow[..., T],
+        arguments: list[Any],
+    ) -> _RunStart[T]:
+        wf = configured.workflow
+        deployment_id = await world.get_deployment_id()
+        namespace = wf._resolve_queue_namespace()
+        run_id = f"wrun_{world.create_run_id(region=configured.region)}"
+        run_key = await world.run_key(run_id, deployment_id=deployment_id)
+        return cls(
+            configured=configured,
+            run_id=run_id,
+            deployment_id=deployment_id,
+            encryption_public_key=(
+                encryption.derive_run_public_key(run_key) if run_key is not None else None
+            ),
+            input=ser.PayloadEncoder(
+                compression=configured.compress_arguments, encryption_key=run_key
+            ).encode(arguments),
+            execution_context={
+                "workflowCoreVersion": w.WORKFLOW_CORE_COMPAT_VERSION,
+                "hookResumeInputVersion": w.HOOK_RESUME_INPUT_VERSION,
+                "features": {"encryption": run_key is not None},
+                **({"queueNamespace": namespace} if namespace is not None else {}),
+            },
+            queue_name=w.get_queue_name(wf.workflow_id, namespace),
+        )
+
+    async def submit(self, world: w.World) -> Run[T]:
+        wf = self.configured.workflow
+        event_data = w.RunCreatedEventData(
+            deployment_id=self.deployment_id,
+            workflow_name=wf.workflow_id,
+            input=self.input,
+            execution_context=self.execution_context,
+            encryption_public_key=self.encryption_public_key,
+        )
+        await world.events_create(self.run_id, event_data.into_event())
+        await world.queue(
+            self.queue_name,
+            w.WorkflowInvokePayload(
+                run_id=self.run_id,
+                run_input=w.RunInput(
+                    input=self.input,
+                    deployment_id=self.deployment_id,
+                    workflow_name=wf.workflow_id,
+                    spec_version=w.SPEC_VERSION_CURRENT,
+                    execution_context=self.execution_context,
+                    encryption_public_key=self.encryption_public_key,
+                    environment=world.get_environment(),
+                ),
+            ),
+            deployment_id=self.deployment_id,
+            region=self.configured.region,
+        )
+        return Run(self.run_id, output_validator=wf.codec.validate_return)
