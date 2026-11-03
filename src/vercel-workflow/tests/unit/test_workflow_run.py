@@ -7,6 +7,7 @@ import decimal
 import hashlib
 import inspect
 from dataclasses import FrozenInstanceError, dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Any, get_type_hints
 from unittest.mock import AsyncMock, Mock
 
@@ -738,6 +739,7 @@ async def upload(data: str, *, compress_arguments: bool) -> int:
 def start_world(monkeypatch):
     instance = Mock(spec=w.World)
     instance.get_deployment_id = AsyncMock(return_value="dpl_current")
+    instance.create_run_id.side_effect = partial(w.World.create_run_id, instance)
     instance.get_environment.return_value = None
     instance.run_key = AsyncMock(return_value=None)
     instance.events_create = AsyncMock()
@@ -817,7 +819,80 @@ if TYPE_CHECKING:
     from typing_extensions import assert_type
 
     async def _check_configuration_types(workflow: core.Workflow[[str], int]) -> None:
-        configured = workflow.without_argument_compression().without_argument_compression()
+        configured = workflow.with_region("fra1").without_argument_compression()
         assert_type(configured, ConfiguredWorkflow[[str], int])
         assert_type(await start(configured, "payload"), Run[int])
         assert_type(await start(workflow, "payload"), Run[int])
+
+
+def test_workflow_configuration_is_immutable_and_composable():
+    registry = core.Workflows(as_vercel_job=False)
+
+    @registry.workflow
+    async def workflow(order_id: str) -> int:
+        return len(order_id)
+
+    european = workflow.without_argument_compression().with_region("fra1")
+    american = european.with_region("iad1")
+    reverse = workflow.with_region("fra1").without_argument_compression()
+    assert european.workflow is american.workflow is reverse.workflow is workflow
+    assert not european.compress_arguments
+    assert not american.compress_arguments
+    assert not reverse.compress_arguments
+    assert european.region == reverse.region == "fra1"
+    assert american.region == "iad1"
+    assert workflow.with_region("fra1") is not european
+    with pytest.raises(FrozenInstanceError):
+        european.region = "iad1"  # type: ignore[misc]
+
+
+async def test_region_configuration_is_reusable(monkeypatch):
+    import asyncio
+    import inspect
+
+    from vercel.workflow import start
+    from vercel.workflow._internal import core, serialization as ser, world as w
+
+    registry = core.Workflows(as_vercel_job=False, namespace="orders")
+
+    @registry.workflow
+    async def workflow(order_id: str, *, region: str, deployment_id: str) -> int:
+        return len(order_id)
+
+    world = Mock(spec=w.World)
+    world.get_deployment_id = AsyncMock(return_value="dpl_current")
+    world.get_environment.return_value = "preview"
+    world.create_run_id.side_effect = ["first", "second", "unconfigured"]
+    world.run_key = AsyncMock(return_value=None)
+    world.events_create = AsyncMock()
+    world.queue = AsyncMock()
+    monkeypatch.setattr(w, "get_world", lambda: world)
+    configured = workflow.with_region("fra1").without_argument_compression()
+    assert inspect.iscoroutinefunction(start)
+    first = start(configured, "order_1", region="business", deployment_id="argument")
+    assert inspect.iscoroutine(first)
+    world.create_run_id.assert_not_called()
+    first_run = await asyncio.create_task(first)
+    second_run = await start(configured, "order_2", region="business", deployment_id="argument")
+    assert first_run.run_id != second_run.run_id
+    expected = "dpl_current"
+    assert world.create_run_id.call_count == 2
+    for call in world.create_run_id.call_args_list:
+        assert call.kwargs == {"region": "fra1"}
+    for call in world.run_key.call_args_list:
+        assert call.kwargs == {"deployment_id": expected}
+    for i, call in enumerate(world.events_create.call_args_list, 1):
+        event = call.args[1].event_data
+        assert event.input.startswith(ser.DEVALUE_V1)
+        assert event.deployment_id == expected
+        assert event.workflow_name == workflow.workflow_id
+        assert ser.hydrate(event.input, what="arguments") == [
+            {"order_id": f"order_{i}", "region": "business", "deployment_id": "argument"}
+        ]
+    for call in world.queue.call_args_list:
+        assert call.kwargs == {"region": "fra1", "deployment_id": expected}
+        assert call.args[1].run_input.deployment_id == expected
+        assert call.args[1].run_input.execution_context["queueNamespace"] == "orders"
+    await start(workflow, "order_3", region="business", deployment_id="argument")
+    assert world.create_run_id.call_args.kwargs == {"region": None}
+    assert world.queue.call_args.kwargs == {"deployment_id": "dpl_current", "region": None}

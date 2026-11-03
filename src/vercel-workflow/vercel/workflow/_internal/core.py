@@ -114,6 +114,10 @@ class _ConfigurableWorkflow(abc.ABC, Generic[P, T]):
         """Return a new configuration that skips startup argument compression."""
         return dataclasses.replace(self._configured(), compress_arguments=False)
 
+    def with_region(self, region: str) -> ConfiguredWorkflow[P, T]:
+        """Return a new configuration pinning run data and queue dispatch to a region."""
+        return dataclasses.replace(self._configured(), region=region)
+
 
 class Workflow(_ConfigurableWorkflow[P, T]):
     def __init__(
@@ -146,6 +150,7 @@ class Workflow(_ConfigurableWorkflow[P, T]):
 class ConfiguredWorkflow(_ConfigurableWorkflow[P, T]):
     workflow: Workflow[P, T]
     compress_arguments: bool = True
+    region: str | None = None
 
     def _configured(self) -> ConfiguredWorkflow[P, T]:
         return self

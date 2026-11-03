@@ -4,6 +4,7 @@ import json
 import math
 import os
 import platform
+import threading
 import traceback
 import urllib.parse
 from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
@@ -19,7 +20,7 @@ from vercel.headers import REQUEST_ID_HEADER_NAME, get_headers
 from vercel.oidc import VercelOidcTokenError
 from vercel.oidc.aio import get_vercel_oidc_token
 
-from .. import encryption, world as w
+from .. import encryption, ulid, world as w
 
 MAX_DELAY_SECONDS = float(
     os.getenv("VERCEL_QUEUE_MAX_DELAY_SECONDS", "82800")
@@ -227,6 +228,97 @@ class _LazyEventResult(w.EventResult):
         return value
 
 
+# Stable wire IDs: never reorder existing regions.
+_REGIONS = (
+    "iad1",
+    "sfo1",
+    "pdx1",
+    "cle1",
+    "yul1",
+    "gru1",
+    "dub1",
+    "lhr1",
+    "cdg1",
+    "fra1",
+    "bru1",
+    "arn1",
+    "hel1",
+    "zrh1",
+    "cpt1",
+    "dxb1",
+    "bom1",
+    "sin1",
+    "hkg1",
+    "hnd1",
+    "icn1",
+    "kix1",
+    "syd1",
+)
+
+
+class _RunIdState(threading.local):
+    def __init__(self) -> None:
+        self.generate = ulid.monotonic_factory()
+        self.last = 0
+
+
+_run_id_state = _RunIdState()
+
+
+def _resolve_region(region: str | None = None) -> str:
+    # Match TS region resolution (vercel/workflow#1981).
+    # New regions require updating this SDK's stable region-ID table
+    # (vercel/workflow#1978); unrecognized regions fall back to the
+    # environment region, then iad1.
+    for candidate in (region, os.getenv("VERCEL_REGION")):
+        if candidate in _REGIONS:
+            return candidate
+    return "iad1"
+
+
+def _create_run_id(*, region: str | None = None) -> str:
+    # Match TS createRunId (vercel/workflow#1981): generate a monotonic ULID,
+    # stamp region/version metadata while preserving 69 random bits, then
+    # correct ordering if changing regions makes the tagged ID go backwards.
+    metadata = ((_REGIONS.index(_resolve_region(region)) + 1) << 5) | 1
+    raw = _run_id_state.generate()
+    value = 0
+    for char in raw:
+        value = value * 32 + ulid.ENCODING.index(char)
+    value = (value & ~(((1 << 11) - 1) << 69)) | (metadata << 69) | (1 << 127)
+    if value <= _run_id_state.last:
+        value = (
+            (((_run_id_state.last >> 80) + 1) << 80)
+            | (metadata << 69)
+            | (_run_id_state.last & ((1 << 69) - 1))
+        )
+    if value >= 1 << 128:
+        raise ValueError("ULID space exhausted")
+    _run_id_state.last = value
+    chars = []
+    for _ in range(26):
+        chars.append(ulid.ENCODING[value & 31])
+        value >>= 5
+    return "".join(reversed(chars))
+
+
+def _region_from_tagged_run_id(value: str) -> str | None:
+    bare = value.removeprefix("wrun_")
+    if len(bare) != 26 or not bare.isascii():
+        return None
+    bare = bare.upper()
+    bits = 0
+    for char in bare:
+        index = ulid.ENCODING.find(char)
+        if index < 0:
+            return None
+        bits = bits * 32 + index
+    if bits >= 1 << 128 or not bits & (1 << 127):
+        return None
+    region_id = (bits >> 74) & 63
+    return _REGIONS[region_id - 1] if 1 <= region_id <= len(_REGIONS) else None
+
+
 class VercelWorld(w.World):
     def __init__(
         self,
@@ -284,18 +376,26 @@ class VercelWorld(w.World):
         self._queue_clients: dict[object, vqs.QueueClient] = {}
 
     def _queue_client(
-        self, *, deployment: vqs.DeploymentOption = vqs.CURRENT_DEPLOYMENT
+        self,
+        *,
+        deployment: vqs.DeploymentOption = vqs.CURRENT_DEPLOYMENT,
+        region: str | None = None,
     ) -> vqs.QueueClient:
-        if deployment not in self._queue_clients:
+        region = _resolve_region(region)
+        key = (deployment, region)
+        if key not in self._queue_clients:
             base_url = f"{self._base_url}/queues-proxy" if self._using_proxy else None
-            self._queue_clients[deployment] = vqs.QueueClient(
+            headers = self._headers.copy()
+            if self._using_proxy:
+                headers["x-vercel-queue-region"] = region
+            self._queue_clients[key] = vqs.QueueClient(
                 token=self._token if self._using_proxy else None,
-                region=os.getenv("VERCEL_REGION", "iad1"),
+                region=region,
                 base_url=base_url,
                 deployment=deployment,
-                headers=self._headers,
+                headers=headers,
             )
-        return self._queue_clients[deployment]
+        return self._queue_clients[key]
 
     async def aclose(self) -> None:
         self._queue_clients.clear()
@@ -430,6 +530,9 @@ class VercelWorld(w.World):
             )
         return message
 
+    def create_run_id(self, *, region: str | None = None) -> str:
+        return _create_run_id(region=region)
+
     async def get_deployment_id(self) -> str:
         deployment_id = os.getenv("VERCEL_DEPLOYMENT_ID")
         if not deployment_id:
@@ -544,6 +647,7 @@ class VercelWorld(w.World):
         deployment_id: str | None = None,
         idempotency_key: str | None = None,
         delay_seconds: float | None = None,
+        region: str | None = None,
         **kwargs,
     ) -> str:
         # Check if we have a deployment ID either from options or environment
@@ -563,7 +667,9 @@ class VercelWorld(w.World):
             "deploymentId": deployment_id,
         }
         delay = max(1, math.ceil(delay_seconds)) if delay_seconds is not None else None
-        client = self._queue_client(deployment=deployment_id)
+        if region not in _REGIONS:
+            region = _region_from_tagged_run_id(message.run_id or "")
+        client = self._queue_client(deployment=deployment_id, region=region)
         try:
             message_id = await client.send(
                 # The topic carries the codec, so the send is CBOR whichever

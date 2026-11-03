@@ -1198,9 +1198,16 @@ class HTTPHandler(Protocol):
     async def __call__(self, request: HTTPRequest) -> HTTPResponse: ...
 
 
+_generate_run_ulid = ulid.monotonic_factory()
+
+
 class World(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     async def get_deployment_id(self) -> str: ...
+
+    def create_run_id(self, *, region: str | None = None) -> str:
+        """Mint a run ID; worlds without regions ignore the hint."""
+        return _generate_run_ulid()
 
     def get_environment(self) -> str | None:
         """The environment this World's writes are attributed to."""
