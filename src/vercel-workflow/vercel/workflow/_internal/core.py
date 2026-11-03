@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import abc
 import contextlib
 import dataclasses
 import datetime
@@ -105,7 +106,16 @@ def _bind_arguments(
     return tuple(positional), keyword
 
 
-class Workflow(Generic[P, T]):
+class _ConfigurableWorkflow(abc.ABC, Generic[P, T]):
+    @abc.abstractmethod
+    def _configured(self) -> ConfiguredWorkflow[P, T]: ...
+
+    def without_argument_compression(self) -> ConfiguredWorkflow[P, T]:
+        """Return a new configuration that skips startup argument compression."""
+        return dataclasses.replace(self._configured(), compress_arguments=False)
+
+
+class Workflow(_ConfigurableWorkflow[P, T]):
     def __init__(
         self,
         func: Callable[P, Coroutine[Any, Any, T]],
@@ -120,6 +130,9 @@ class Workflow(Generic[P, T]):
         self._signature = inspect.signature(func)
         self.codec = signature_codec.SignatureCodec(func, self._signature, self.qualname)
 
+    def _configured(self) -> ConfiguredWorkflow[P, T]:
+        return ConfiguredWorkflow(self)
+
     def bind_arguments(
         self, args: tuple[Any, ...], kwargs: dict[str, Any]
     ) -> tuple[tuple[Any, ...], dict[str, Any]]:
@@ -127,6 +140,15 @@ class Workflow(Generic[P, T]):
 
     def _resolve_queue_namespace(self) -> str | None:
         return self._registry.namespace
+
+
+@dataclasses.dataclass(frozen=True)
+class ConfiguredWorkflow(_ConfigurableWorkflow[P, T]):
+    workflow: Workflow[P, T]
+    compress_arguments: bool = True
+
+    def _configured(self) -> ConfiguredWorkflow[P, T]:
+        return self
 
 
 class Step(Generic[P, T]):

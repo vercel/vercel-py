@@ -54,3 +54,13 @@ Hooks pause a run until an external caller resumes it, and streams let steps pub
 A `BaseHook` subclass waits under a generated or caller-chosen token, and resuming it records the payload as an event. Hook metadata is written once at registration and is not part of the payload.
 
 A run's stream ([[src/vercel-workflow/vercel/workflow/_internal/streams.py]]) is an append-only, indexed log of chunks. Only steps can write to it, and nothing closes it automatically. A step is not recorded as complete until its chunks are flushed, and a retried step writes its chunks again. Readers resume exactly from a chunk index and reconnect when the server ends a long read.
+
+## Configured workflows
+
+Workflow references carry immutable, reusable startup configuration while startup remains an ordinary coroutine.
+
+[[src/vercel-workflow/vercel/workflow/_internal/core.py#_ConfigurableWorkflow#without_argument_compression]] is inherited by both [[src/vercel-workflow/vercel/workflow/_internal/core.py#Workflow]] and [[src/vercel-workflow/vercel/workflow/_internal/core.py#ConfiguredWorkflow]]. Each provides its immutable configuration through the base class contract; the shared method returns a modified copy without changing either reference. Workflow parameter and result types are preserved through configuration and [[src/vercel-workflow/vercel/workflow/_internal/run.py#start]], which accepts either reference type and remains a native async function. Binding and execution retain their existing deferred behavior.
+
+The compression option only controls the argument encoder during startup. The opt-out skips compression; unconfigured workflows retain [[src/vercel-workflow/vercel/workflow/_internal/compression.py#maybe_compress|the existing size, savings, codec, and environment policy]]. The encoded bytes are shared by run creation and queue delivery. Other payload encoders are unchanged.
+
+[[src/vercel-workflow/tests/unit/test_workflow_run.py]] verifies immutable configuration branches, reuse across independent starts, native coroutine scheduling, argument and result typing, and the separation of startup options from identically named workflow arguments. It checks actual payload envelopes for default workflow behavior, default configuration, and compression opt-out, including environment opt-out and the small-payload threshold.

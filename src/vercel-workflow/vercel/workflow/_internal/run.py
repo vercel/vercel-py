@@ -264,7 +264,15 @@ async def _failure(run: w.WorkflowRun, *, world: w.World) -> Exception:
         return RuntimeError(f"cannot read {what}: {error}")
 
 
-async def start(wf: core.Workflow[P, T], *args: P.args, **kwargs: P.kwargs) -> Run[T]:
+async def start(
+    wf: core.Workflow[P, T] | core.ConfiguredWorkflow[P, T],
+    *args: P.args,
+    **kwargs: P.kwargs,
+) -> Run[T]:
+    compress_arguments = True
+    if isinstance(wf, core.ConfiguredWorkflow):
+        compress_arguments = wf.compress_arguments
+        wf = wf.workflow
     # Bound before anything is written, so an arity mistake raises here instead
     # of leaving a run behind that fails when its body is invoked.
     bound_args, bound_kwargs = wf.bind_arguments(args, kwargs)
@@ -278,7 +286,7 @@ async def start(wf: core.Workflow[P, T], *args: P.args, **kwargs: P.kwargs) -> R
     encryption_public_key = (
         encryption.derive_run_public_key(run_key) if run_key is not None else None
     )
-    input_data = ser.PayloadEncoder(compression=True, encryption_key=run_key).encode(
+    input_data = ser.PayloadEncoder(compression=compress_arguments, encryption_key=run_key).encode(
         ser.argument_array(dumped_args, dumped_kwargs)
     )
     execution_context: dict[str, Any] = {
