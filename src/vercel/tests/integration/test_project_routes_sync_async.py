@@ -6,8 +6,8 @@ from typing import Any
 
 import httpx2 as httpx
 import pytest
-import vendor.respx as respx
 
+import vendor.respx as respx
 from vercel.client import AsyncVercel, Vercel
 from vercel.project_routes import (
     GeneratedPathCondition,

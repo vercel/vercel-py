@@ -45,6 +45,9 @@ exclude-newer-package = { ggt = false, lograil = "2026-08-21T00:00:00Z" }
 [tool.uv.workspace]
 members = ["src/*", "integrations/*"]
 
+[tool.turbo]
+name = "vercel-py"
+
 [tool.vendoring]
 destination = "vendor/"
 requirements = "vendor/vendor.txt"
