@@ -864,6 +864,8 @@ class LocalWorld(w.World):
                 input=run_data.input,
                 execution_context=run_data.execution_context,
                 encryption_public_key=run_data.encryption_public_key,
+                attributes=run_data.attributes,
+                allow_reserved_attributes=run_data.allow_reserved_attributes,
             ),
             spec_version=data.spec_version,
         )
@@ -1025,6 +1027,7 @@ class LocalWorld(w.World):
                 execution_context=run_data.execution_context,
                 input=run_data.input,
                 encryption_public_key=run_data.encryption_public_key,
+                attributes=run_data.attributes or {},
                 created_at=now,
                 updated_at=now,
             )

@@ -7,14 +7,15 @@ import datetime
 import functools
 import inspect
 import random as _random
-from collections.abc import AsyncIterator, Callable, Coroutine, Generator, Iterator
+from collections.abc import AsyncIterator, Callable, Coroutine, Generator, Iterator, Mapping
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Generic, ParamSpec, TypeVar, overload
 
 import pydantic
 
 from vercel._internal.core.polyfills import Self
 
-from . import errors, py_sandbox, signature_codec, world as w
+from . import attributes as attr, errors, py_sandbox, signature_codec, world as w
 from .duration import DurationParam
 from .errors import HookDisposedError
 
@@ -122,6 +123,45 @@ class _ConfigurableWorkflow(abc.ABC, Generic[P, T]):
         """Return a new configuration targeting a deployment ID or ``"latest"``."""
         return dataclasses.replace(self._configured(), deployment_id=deployment_id)
 
+    def with_attributes(
+        self,
+        attributes: Mapping[str, str] | None = None,
+        /,
+        *,
+        allow_reserved_attributes: bool = False,
+        **kwargs: str,
+    ) -> ConfiguredWorkflow[P, T]:
+        """Seed plaintext run attributes, replacing any previously configured attributes.
+
+        Takes a mapping, keyword arguments, or both, like ``set_attributes()``.
+        Keyword arguments override matching keys in the mapping.
+
+        Given attributes are checked immediately. Keys must be nonempty and at most
+        256 UTF-16 code units, values must be strings of at most 256 UTF-8 bytes, and there
+        can be at most 64 attributes. To use keys beginning with ``$``, pass
+        ``allow_reserved_attributes=True``.
+
+        When using ``with_deployment_id()`` to start a run on another deployment,
+        that deployment must support spec version 4 or later to store attributes.
+        If it uses an older spec and attributes are nonempty, ``start()`` raises
+        ``RuntimeError`` before creating the run.
+        """
+        attributes = dict(attributes or {})
+        attributes.update(kwargs)
+        for key, value in attributes.items():
+            if not isinstance(value, str):
+                raise attr.AttributeValidationError(
+                    f"Initial workflow attribute {key!r} must be a string value."
+                )
+        attr.validate_attribute_changes(
+            attributes.items(), allow_reserved=allow_reserved_attributes
+        )
+        return dataclasses.replace(
+            self._configured(),
+            attributes=MappingProxyType(attributes),
+            allow_reserved_attributes=allow_reserved_attributes,
+        )
+
 
 class Workflow(_ConfigurableWorkflow[P, T]):
     def __init__(
@@ -156,6 +196,8 @@ class ConfiguredWorkflow(_ConfigurableWorkflow[P, T]):
     compress_arguments: bool = True
     region: str | None = None
     deployment_id: str | None = None
+    attributes: Mapping[str, str] | None = None
+    allow_reserved_attributes: bool = False
 
     def _configured(self) -> ConfiguredWorkflow[P, T]:
         return self

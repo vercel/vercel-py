@@ -118,6 +118,7 @@ def get_physical_topic(queue_name: str) -> SanitizedName:
 # `CURRENT` is what we stamp on rows we create; `MAX_SUPPORTED` is the highest
 # version we accept when reading, mirroring the same split in TS.
 SPEC_VERSION_SUPPORTS_COMPRESSION = 5
+SPEC_VERSION_SUPPORTS_ATTRIBUTES = 4
 SPEC_VERSION_CURRENT: Literal[5] = 5
 SPEC_VERSION_MAX_SUPPORTED = 7
 
@@ -500,6 +501,10 @@ class RunCreatedEventData(BaseModel):
     deployment_id: str = pydantic.Field(alias="deploymentId")
     workflow_name: str = pydantic.Field(alias="workflowName")
     input: bytes
+    attributes: dict[str, str] | None = pydantic.Field(default=None, exclude_if=lambda e: e is None)
+    allow_reserved_attributes: Literal[True] | None = pydantic.Field(
+        default=None, alias="allowReservedAttributes", exclude_if=lambda e: e is None
+    )
     execution_context: dict[str, Any] | None = pydantic.Field(
         default=None, alias="executionContext", exclude_if=lambda e: e is None
     )

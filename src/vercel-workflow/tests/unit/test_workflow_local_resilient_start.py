@@ -57,7 +57,11 @@ async def test_run_started_creates_the_missing_run(tmp_path, monkeypatch) -> Non
 
 async def test_recreated_run_carries_the_creating_client_data(tmp_path, monkeypatch) -> None:
     world = _world(tmp_path, monkeypatch)
-    run_input = _run_input(attributes={"tier": "pro"}, encryptionPublicKey="cHVibGljLWtleQ==")
+    run_input = _run_input(
+        attributes={"tier": "pro", "$rootRunId": "wrun_root"},
+        allowReservedAttributes=True,
+        encryptionPublicKey="cHVibGljLWtleQ==",
+    )
 
     await world.events_create(RUN_ID, _resilient_event(run_input))
 
@@ -66,7 +70,11 @@ async def test_recreated_run_carries_the_creating_client_data(tmp_path, monkeypa
     assert run.workflow_name == "add_ten"
     assert run.input == run_input.input
     assert run.execution_context == {"workflowCoreVersion": "5.0.0"}
-    assert run.attributes == {"tier": "pro"}
+    assert run.attributes == {"tier": "pro", "$rootRunId": "wrun_root"}
+    created = (await world.events_list(RUN_ID)).data[0]
+    assert isinstance(created, w.RunCreatedEvent)
+    assert created.event_data.attributes == run.attributes
+    assert created.event_data.allow_reserved_attributes is True
     # Neither is readable through this SDK, but a run that lost them could never
     # get them back.
     assert run.encryption_public_key == "cHVibGljLWtleQ=="
