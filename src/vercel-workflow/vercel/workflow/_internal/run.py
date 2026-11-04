@@ -291,6 +291,7 @@ class _RunStart(Generic[T]):
     execution_context: dict[str, Any]
     encryption_public_key: str | None
     queue_name: str
+    attributes: dict[str, str] | None
 
     @classmethod
     async def prepare(
@@ -304,6 +305,14 @@ class _RunStart(Generic[T]):
         run_id = f"wrun_{world.create_run_id(region=configured.region)}"
 
         target = await deployment.resolve(world, configured.deployment_id, run_id, namespace)
+        attributes = dict(configured.attributes) if configured.attributes else None
+        if attributes:
+            if target.spec_version < w.SPEC_VERSION_SUPPORTS_ATTRIBUTES:
+                raise RuntimeError(
+                    "Initial workflow attributes require spec version 4 or later; "
+                    f"deployment {target.deployment_id!r} supports "
+                    f"spec version {target.spec_version}"
+                )
         encoder = await target.encoder(
             world, run_id, compress_arguments=configured.compress_arguments
         )
@@ -331,16 +340,22 @@ class _RunStart(Generic[T]):
                 **({"queueNamespace": namespace} if namespace is not None else {}),
             },
             queue_name=w.get_queue_name(wf.workflow_id, namespace),
+            attributes=attributes,
         )
 
     async def submit(self, world: w.World) -> Run[T]:
         wf = self.configured.workflow
+        allow_reserved_attributes: Literal[True] | None = (
+            True if self.configured.allow_reserved_attributes else None
+        )
         event_data = w.RunCreatedEventData(
             deployment_id=self.deployment_id,
             workflow_name=wf.workflow_id,
             input=self.input,
             execution_context=self.execution_context,
             encryption_public_key=self.encryption_public_key,
+            attributes=self.attributes,
+            allow_reserved_attributes=allow_reserved_attributes,
         )
         await world.events_create(
             self.run_id, w.RunCreatedEvent(event_data=event_data, spec_version=self.spec_version)
@@ -357,6 +372,8 @@ class _RunStart(Generic[T]):
                     execution_context=self.execution_context,
                     encryption_public_key=self.encryption_public_key,
                     environment=world.get_environment(),
+                    attributes=self.attributes,
+                    allow_reserved_attributes=allow_reserved_attributes,
                 ),
             ),
             deployment_id=self.deployment_id,

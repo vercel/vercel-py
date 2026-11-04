@@ -25,6 +25,7 @@ from vercel.workflow import (
     start,
 )
 from vercel.workflow._internal import (
+    attributes as attr,
     core,
     deployment,
     encryption,
@@ -1134,3 +1135,95 @@ async def test_explicit_empty_deployment_is_rejected_before_creating_run(start_w
         await start(upload.with_deployment_id(""), "payload", compress_arguments=True)
     start_world.events_create.assert_not_awaited()
     start_world.queue.assert_not_awaited()
+
+
+@pytest.mark.parametrize("reserved", [False, True])
+async def test_start_attributes_seed_both_payloads(start_world, reserved):
+    attributes = {"tenant": "t1"}
+    if reserved:
+        attributes["$rootRunId"] = "wrun_root"
+    configured = upload.with_attributes(attributes, allow_reserved_attributes=reserved)
+    attributes["tenant"] = "changed"
+    configured = configured.with_region("fra1").without_argument_compression()
+    for _ in range(2):
+        await start(configured, "payload", compress_arguments=True)
+        event = start_world.events_create.call_args.args[1]
+        run_input = start_world.queue.call_args.args[1].run_input
+        expected = {"tenant": "t1", **({"$rootRunId": "wrun_root"} if reserved else {})}
+        assert event.event_data.attributes == run_input.attributes == expected
+        for payload in (event.event_data, run_input):
+            wire = payload.model_dump(by_alias=True)
+            assert wire["attributes"] == expected
+            if reserved:
+                assert wire["allowReservedAttributes"] is True
+            else:
+                assert "allowReservedAttributes" not in wire
+        assert configured.region == "fra1"
+        assert not configured.compress_arguments
+    assert upload._configured().attributes is None
+    assert configured.with_attributes({}).attributes == {}
+    assert configured.attributes == expected
+
+
+@pytest.mark.parametrize("mode", ["mapping", "kwargs", "both"])
+async def test_start_attributes_accept_mapping_and_kwargs(start_world, mode):
+    if mode == "mapping":
+        configured = upload.with_attributes({"tenant": "t1", "attributes": "metadata"})
+    elif mode == "kwargs":
+        configured = upload.with_attributes(tenant="t1", attributes="metadata")
+    else:
+        configured = upload.with_attributes(
+            {"tenant": "old", "attributes": "metadata"}, tenant="t1"
+        )
+    await start(configured, "payload", compress_arguments=True)
+    event = start_world.events_create.call_args.args[1]
+    assert event.event_data.attributes == {"tenant": "t1", "attributes": "metadata"}
+    assert configured.with_attributes().attributes == {}
+    assert configured.with_attributes(None).attributes == {}
+    assert configured.attributes == {"tenant": "t1", "attributes": "metadata"}
+
+
+@pytest.mark.parametrize(
+    "attributes,allow_reserved,message",
+    [
+        ({"tenant": None}, False, "must be a string"),
+        ({"tenant": 1}, False, "must be a string"),
+        ({"": "v"}, False, "must not be empty"),
+        ({"$system": "v"}, False, "reserved prefix"),
+        ({"k" * 257: "v"}, False, "key length"),
+        ({"😀" * 129: "v"}, False, "key length"),
+        ({"note": "é" * 129}, False, "byte length"),
+        ({"$note": "v" * 257}, True, "byte length"),
+        ({f"k{i}": "v" for i in range(65)}, False, "count would exceed"),
+    ],
+)
+def test_invalid_start_attributes_prevent_writes(start_world, attributes, allow_reserved, message):
+    with pytest.raises(attr.AttributeValidationError, match=message):
+        upload.with_attributes(attributes, allow_reserved_attributes=allow_reserved)
+    start_world.events_create.assert_not_awaited()
+    start_world.queue.assert_not_awaited()
+
+
+@pytest.mark.parametrize("spec", [2, 3, 4, 5])
+@pytest.mark.parametrize("attributes", [{}, {"tenant": "t1"}])
+async def test_start_attributes_use_target_spec(start_world, monkeypatch, spec, attributes):
+    monkeypatch.setattr(deployment, "_probe", AsyncMock(return_value={"specVersion": spec}))
+    configured = upload.with_deployment_id("dpl_target").with_attributes(attributes)
+    if attributes and spec < 4:
+        with pytest.raises(RuntimeError, match=f"dpl_target.*spec version {spec}"):
+            await start(configured, "payload", compress_arguments=True)
+        start_world.events_create.assert_not_awaited()
+        start_world.queue.assert_not_awaited()
+    else:
+        await start(configured, "payload", compress_arguments=True)
+        data = start_world.events_create.call_args.args[1].event_data
+        assert data.attributes == (attributes or None)
+        if not attributes:
+            assert "attributes" not in data.model_dump(by_alias=True)
+
+
+async def test_start_attributes_persist_locally(world):
+    run = await start(upload.with_attributes({"tenant": "t1"}), "payload", compress_arguments=True)
+    assert await run.attributes() == {"tenant": "t1"}
+    queued = world.queued[-1]
+    assert queued.run_input.attributes == {"tenant": "t1"}
