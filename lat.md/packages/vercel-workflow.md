@@ -54,3 +54,21 @@ Hooks pause a run until an external caller resumes it, and streams let steps pub
 A `BaseHook` subclass waits under a generated or caller-chosen token, and resuming it records the payload as an event. Hook metadata is written once at registration and is not part of the payload.
 
 A run's stream ([[src/vercel-workflow/vercel/workflow/_internal/streams.py]]) is an append-only, indexed log of chunks. Only steps can write to it, and nothing closes it automatically. A step is not recorded as complete until its chunks are flushed, and a retried step writes its chunks again. Readers resume exactly from a chunk index and reconnect when the server ends a long read.
+
+## Local file leases
+
+Local filesystem writers can share directory leases with TypeScript's proper-lockfile library without requiring the protected file to exist.
+
+[[src/vercel-workflow/vercel/workflow/_internal/file_lock.py#file_lock]] implements the `realpath: false` protocol: atomic creation of a sibling `.lock` directory, millisecond-aware heartbeat timestamps, bounded retries, and stale recovery. A stale observation is revalidated against directory identity and mtime before removal.
+
+[[src/vercel-workflow/vercel/workflow/_internal/file_lock.py#FileLock#check]] detects a missing or replaced directory or a changed heartbeat marker. Ownership loss cancels the protected async body and raises [[src/vercel-workflow/vercel/workflow/_internal/file_lock.py#FileLockCompromisedError]]; release never intentionally removes a successor's lease. Participants must agree on the stale threshold and allow heartbeat tasks to run. As with proper-lockfile, this cooperative lease cannot fence a paused writer's filesystem operations atomically.
+
+[[src/vercel-workflow/vercel/workflow/_internal/worlds/local.py#LocalWorld#_hook_token_lock]] applies these leases to hook token creation, disposal, and terminal cleanup with TypeScript world-local's 30-second stale threshold, one-second heartbeat, and 35-second acquisition timeout. It translates lease failures into world errors. Async token locks are acquired before the synchronous per-run mutex; cleanup awaits happen after that mutex is released.
+
+[[src/vercel-workflow/vercel/workflow/_internal/worlds/local.py#LocalWorld#_delete_hook]] removes a token claim only when its run and hook IDs still match the captured hook. Permanent disposal, wait, and attribute claim markers retain their exclusive-create semantics. [[src/vercel-workflow/tests/unit/test_workflow_local_hook_locking.py]] covers lease integration, mutation serialization, and successor-claim protection independently of retention.
+
+[[src/vercel-workflow/vercel/workflow/_internal/worlds/local.py#LocalWorld#_hook_token_claim_releasable]] lets a new claimant recover a token whose owner run is terminal or whose hook has a durable disposal marker, even if cleanup was cancelled or timed out. Recovery holds the token lease; a missing owner run alone does not release a claim. Disposal rejects an initially missing hook rather than deleting a concurrently published hook without its token lock. Regression tests cover cancellation, timeout, committed disposal debris, and publication after the initial missing read.
+
+[[src/vercel-workflow/tests/unit/test_workflow_file_lock.py]] covers contention, cancellation, stale recovery, changed observations, heartbeat renewal, and ownership loss. [[src/vercel-workflow/tests/integration/test_file_lock_interop.py]] runs the pinned proper-lockfile npm package to verify mutual exclusion, heartbeat compatibility, release, and recovery after either runtime crashes.
+
+The interop fixture resolves npm's executable path before installing the pinned package so Windows can launch its command shim as well as Unix executables. Its subprocess readiness handshake accepts both Unix and Windows line endings.
