@@ -1559,9 +1559,9 @@ async def _answer_health_check(world: w.World, health: w.HealthCheckPayload) -> 
     run_id = _health_check_run_id(health.correlation_id)
     name = _health_check_stream_name(health.correlation_id)
     encryption_public_key = None
-    if health.run_id is not None:
+    if health.probe_run_id is not None:
         try:
-            run_key = await world.run_key(health.run_id)
+            run_key = await world.run_key(health.probe_run_id)
             if run_key is not None:
                 encryption_public_key = encryption.derive_run_public_key(run_key)
         except Exception as error:

@@ -60,6 +60,17 @@ def test_compression_can_be_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     assert payload.startswith(ser.DEVALUE_V1)
 
 
+def test_gzip_mode_overrides_the_environment_codec(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WORKFLOW_COMPRESSION_CODEC", "zstd")
+    monkeypatch.delenv("WORKFLOW_DISABLE_COMPRESSION", raising=False)
+    value = "charged " * 256
+
+    payload = ser.PayloadEncoder(compression="gzip").encode(value)
+
+    assert payload.startswith(ser.GZIP)
+    assert ser.hydrate(payload, what="a payload") == value
+
+
 def test_small_payloads_are_not_compressed() -> None:
     assert compression.maybe_compress(b"x" * 1023, mode="auto") == b"x" * 1023
 

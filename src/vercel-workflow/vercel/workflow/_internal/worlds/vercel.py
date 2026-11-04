@@ -539,6 +539,54 @@ class VercelWorld(w.World):
             raise ValueError("VERCEL_DEPLOYMENT_ID environment variable is not set.")
         return deployment_id
 
+    async def resolve_latest_deployment_id(self) -> str:
+        current = await self.get_deployment_id()
+        running_on_vercel = os.getenv("VERCEL") == "1"
+
+        # Explicit credentials always win. Outside Vercel, prefer the user's
+        # environment token; inside Vercel, prefer the deployment's OIDC identity.
+        token = self._token
+        if not token and not running_on_vercel:
+            token = os.getenv("VERCEL_TOKEN")
+
+        if not token:
+            try:
+                token = await get_vercel_oidc_token()
+            except VercelOidcTokenError as error:
+                if running_on_vercel:
+                    # Inside Vercel, the environment token is the fallback.
+                    token = os.getenv("VERCEL_TOKEN")
+                if not token:
+                    raise RuntimeError(
+                        "Cannot resolve latest deployment: no OIDC token or VERCEL_TOKEN available"
+                    ) from error
+
+        url = f"{_vercel_api_url()}/resolve-latest-deployment/{_quote(current)}"
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                url,
+                params={"teamId": self._team_id} if self._team_id else {},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        if not response.is_success:
+            hint = (
+                " Check the owning team and configure team_id."
+                if response.status_code == 404
+                else ""
+            )
+            raise w.WorkflowWorldError(
+                f"Failed to resolve latest deployment: HTTP {response.status_code}.{hint}",
+                status=response.status_code,
+                url=url,
+            )
+        try:
+            data = response.json()
+        except ValueError as error:
+            raise ValueError("Invalid response from Vercel API: expected {id: string}") from error
+        if not isinstance(data, dict) or not isinstance(data.get("id"), str) or not data["id"]:
+            raise ValueError("Invalid response from Vercel API: expected {id: string}")
+        return data["id"]
+
     def get_environment(self) -> str | None:
         """utils.ts, resolveClientEnvironment."""
         header = self._headers.get("x-vercel-environment")
@@ -648,6 +696,7 @@ class VercelWorld(w.World):
         idempotency_key: str | None = None,
         delay_seconds: float | None = None,
         region: str | None = None,
+        spec_version: int = w.SPEC_VERSION_CURRENT,
         **kwargs,
     ) -> str:
         # Check if we have a deployment ID either from options or environment
@@ -660,21 +709,31 @@ class VercelWorld(w.World):
                     "Either set VERCEL_DEPLOYMENT_ID or provide deploymentId in options."
                 )
 
+        legacy = spec_version < 3
         payload = {
             "payload": message.model_dump(),
             "queueName": queue_name,
             # Store deploymentId in the message so it can be preserved when re-enqueueing
             "deploymentId": deployment_id,
         }
+        if legacy and isinstance(message, w.WorkflowInvokePayload):
+            payload["payload"] = message.model_dump(exclude={"run_input", "hook_input"})
         delay = max(1, math.ceil(delay_seconds)) if delay_seconds is not None else None
         if region not in _REGIONS:
-            region = _region_from_tagged_run_id(message.run_id or "")
+            routing_id = (
+                message.correlation_id
+                if isinstance(message, w.HealthCheckPayload)
+                else message.run_id
+            )
+            region = _region_from_tagged_run_id(routing_id)
         client = self._queue_client(deployment=deployment_id, region=region)
         try:
             message_id = await client.send(
-                # The topic carries the codec, so the send is CBOR whichever
-                # client happens to make it.
-                vqs.Topic(w.get_physical_topic(queue_name), transport=_QUEUE_TRANSPORT),
+                # Probes and old targets need JSON; newer targets use CBOR.
+                vqs.Topic(
+                    w.get_physical_topic(queue_name),
+                    transport=vqs.RawJsonTransport() if legacy else _QUEUE_TRANSPORT,
+                ),
                 payload,
                 idempotency_key=idempotency_key,
                 delay=delay,

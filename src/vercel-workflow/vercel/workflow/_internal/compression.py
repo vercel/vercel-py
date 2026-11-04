@@ -20,7 +20,7 @@ ZSTD_LEVEL = 3
 GZIP = b"gzip"
 ZSTD = b"zstd"
 
-CompressionMode: TypeAlias = Literal["none", "auto"]
+CompressionMode: TypeAlias = Literal["none", "auto", "gzip"]
 
 
 class DecompressionError(Exception):
@@ -36,7 +36,7 @@ def maybe_compress(data: bytes, *, mode: CompressionMode) -> bytes:
     ):
         return data
 
-    if os.getenv("WORKFLOW_COMPRESSION_CODEC") == "gzip":
+    if mode == "gzip" or os.getenv("WORKFLOW_COMPRESSION_CODEC") == "gzip":
         prefix = GZIP
         compressed = gzip.compress(data, compresslevel=6, mtime=0)
     else:

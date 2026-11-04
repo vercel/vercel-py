@@ -10,6 +10,7 @@ from typing import Any, Generic, Literal, ParamSpec, TypeVar, cast, overload
 
 from . import (
     core,
+    deployment,
     encryption,
     errors,
     serialization as ser,
@@ -285,6 +286,7 @@ class _RunStart(Generic[T]):
     configured: core.ConfiguredWorkflow[..., T]
     run_id: str
     deployment_id: str
+    spec_version: int
     input: bytes
     execution_context: dict[str, Any]
     encryption_public_key: str | None
@@ -298,25 +300,34 @@ class _RunStart(Generic[T]):
         arguments: list[Any],
     ) -> _RunStart[T]:
         wf = configured.workflow
-        deployment_id = await world.get_deployment_id()
         namespace = wf._resolve_queue_namespace()
         run_id = f"wrun_{world.create_run_id(region=configured.region)}"
-        run_key = await world.run_key(run_id, deployment_id=deployment_id)
+
+        target = await deployment.resolve(world, configured.deployment_id, run_id, namespace)
+        encoder = await target.encoder(
+            world, run_id, compress_arguments=configured.compress_arguments
+        )
+
+        encrypted = True
+        if encoder.recipient_public_key is not None:
+            public_key = target.encryption_public_key
+        elif encoder.encryption_key is not None:
+            public_key = encryption.derive_run_public_key(encoder.encryption_key)
+        else:
+            public_key = None
+            encrypted = False
+
         return cls(
             configured=configured,
             run_id=run_id,
-            deployment_id=deployment_id,
-            encryption_public_key=(
-                encryption.derive_run_public_key(run_key) if run_key is not None else None
-            ),
-            input=ser.PayloadEncoder(
-                compression="auto" if configured.compress_arguments else "none",
-                encryption_key=run_key,
-            ).encode(arguments),
+            deployment_id=target.deployment_id,
+            spec_version=target.spec_version,
+            encryption_public_key=public_key,
+            input=encoder.encode(arguments),
             execution_context={
                 "workflowCoreVersion": w.WORKFLOW_CORE_COMPAT_VERSION,
-                "hookResumeInputVersion": w.HOOK_RESUME_INPUT_VERSION,
-                "features": {"encryption": run_key is not None},
+                **target.execution_context,
+                "features": {"encryption": encrypted},
                 **({"queueNamespace": namespace} if namespace is not None else {}),
             },
             queue_name=w.get_queue_name(wf.workflow_id, namespace),
@@ -331,7 +342,9 @@ class _RunStart(Generic[T]):
             execution_context=self.execution_context,
             encryption_public_key=self.encryption_public_key,
         )
-        await world.events_create(self.run_id, event_data.into_event())
+        await world.events_create(
+            self.run_id, w.RunCreatedEvent(event_data=event_data, spec_version=self.spec_version)
+        )
         await world.queue(
             self.queue_name,
             w.WorkflowInvokePayload(
@@ -340,7 +353,7 @@ class _RunStart(Generic[T]):
                     input=self.input,
                     deployment_id=self.deployment_id,
                     workflow_name=wf.workflow_id,
-                    spec_version=w.SPEC_VERSION_CURRENT,
+                    spec_version=self.spec_version,
                     execution_context=self.execution_context,
                     encryption_public_key=self.encryption_public_key,
                     environment=world.get_environment(),
@@ -348,5 +361,6 @@ class _RunStart(Generic[T]):
             ),
             deployment_id=self.deployment_id,
             region=self.configured.region,
+            spec_version=self.spec_version,
         )
         return Run(self.run_id, output_validator=wf.codec.validate_return)
