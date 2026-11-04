@@ -6,6 +6,7 @@ from vercel.workflow._internal.errors import (
     RetryableError,
     StepNotRegisteredError,
     WorkflowRunFailedError,
+    WorkflowStartError,
 )
 from vercel.workflow._internal.serialization import SerializationError
 from vercel.workflow._internal.signature_codec import TypeValidationError
@@ -33,5 +34,6 @@ __all__ = [
     "TooEarlyError",
     "TypeValidationError",
     "WorkflowRunFailedError",
+    "WorkflowStartError",
     "WorkflowWorldError",
 ]

@@ -26,7 +26,7 @@ import vercel.queue as vqs
 import vercel.queue.embedded as vqs_embedded
 from vercel._internal.core.polyfills import UTC
 
-from .. import attributes as attrs, world as w
+from .. import attributes as attrs, errors, start_hooks, world as w
 from ..file_lock import FileLockError, file_lock
 from ..ulid import monotonic_factory
 
@@ -64,11 +64,18 @@ class RunStreams(w.BaseModel):
     streams: list[str]
 
 
+class StartHookDecision(w.BaseModel):
+    token: str
+    conflicting_run_id: str | None = pydantic.Field(default=None, alias="conflictingRunId")
+    reason: str | None = None
+
+
 class HookTokenClaim(w.BaseModel):
     token: str
     hook_id: str = pydantic.Field(alias="hookId")
     run_id: str = pydantic.Field(alias="runId")
     event_id: str | None = pydantic.Field(default=None, alias="eventId")
+    reserved_at: float | None = pydantic.Field(default=None, alias="reservedAt")
     token_retention_until: datetime | None = pydantic.Field(
         default=None, alias="tokenRetentionUntil"
     )
@@ -476,6 +483,9 @@ def _wipe_flat_layout(data_dir: pathlib.Path) -> None:
 
 
 class LocalWorld(w.World):
+    atomic_start_hook = True
+    hook_retention = True
+
     def __init__(self) -> None:
         retention_limit = float(os.getenv("WORKFLOW_LOCAL_HOOK_RETENTION_LIMIT_DAYS", "30"))
         if not math.isfinite(retention_limit) or retention_limit <= 0:
@@ -648,6 +658,16 @@ class LocalWorld(w.World):
         # was interrupted. A new claimant can finish releasing the old token.
         disposed = self.data_dir / ".locks" / "hooks" / f"{claim.hook_id}.disposed"
         if disposed.exists():
+            return True
+        run_path = self.data_dir / "runs" / f"{claim.run_id}.json"
+        if (
+            not run_path.exists()
+            and claim.reserved_at is not None
+            and js_now().timestamp() * 1000 - claim.reserved_at >= 86400000
+        ):
+            write_json(
+                self._start_hook_path(claim.run_id, "fence"), {"reason": "expired"}, overwrite=True
+            )
             return True
         return self._hook_retention_ended(claim.run_id, claim.token_retention_until)
 
@@ -845,9 +865,260 @@ class LocalWorld(w.World):
                     if self._hook_retention_ended(hook.run_id, hook.token_retention_until):
                         continue
                     return hook
+        claim = read_json(self._hook_token_path(token), HookTokenClaim)
+        if claim is not None:
+            async with self._hook_token_lock(token):
+                claim = read_json(self._hook_token_path(token), HookTokenClaim)
+                if claim is not None:
+                    run = read_json(
+                        self.data_dir / "runs" / f"{claim.run_id}.json", w.WorkflowRunAdaptor
+                    )
+                    if run is not None:
+                        self._ensure_start_hook(run, claim)
+                        hook = read_json(self.data_dir / "hooks" / f"{claim.hook_id}.json", w.Hook)
+                        if hook is not None and not self._hook_retention_ended(
+                            hook.run_id, hook.token_retention_until
+                        ):
+                            return hook
         raise w.HookNotFoundError(token=token)
 
+    def _start_hook_path(self, run_id: str, suffix: str) -> pathlib.Path:
+        assert_safe_entity_id("runId", run_id)
+        return self.data_dir / "hooks" / "starts" / f"{run_id}.{suffix}.json"
+
+    def _ensure_start_hook(self, run: w.WorkflowRun, claim: HookTokenClaim | None) -> None:
+        hook = run.start_hook
+        if (
+            hook is None
+            or claim is None
+            or (claim.run_id, claim.hook_id) != (run.run_id, w.start_hook_id(run.run_id))
+        ):
+            return
+        if self._hook_retention_ended(run.run_id, hook.token_retention_until):
+            return
+        if (self.data_dir / ".locks" / "hooks" / f"{claim.hook_id}.disposed").exists():
+            return
+        record = w.Hook(
+            run_id=run.run_id,
+            hook_id=claim.hook_id,
+            token=hook.token,
+            metadata=hook.metadata,
+            created_at=run.created_at,
+            spec_version=run.spec_version,
+            owner_id="local-owner",
+            project_id="local-project",
+            environment="local",
+            is_webhook=False,
+            is_system=False,
+            token_retention_until=hook.token_retention_until,
+        )
+        path = self.data_dir / "hooks" / f"{claim.hook_id}.json"
+        if not path.exists():
+            write_json(path, record)
+        if claim.event_id is not None and not self._event_path(run.run_id, claim.event_id).exists():
+            assert isinstance(run.input, bytes)
+            data = w.RunCreatedEventData(
+                deployment_id=run.deployment_id,
+                workflow_name=run.workflow_name,
+                input=run.input,
+                execution_context=run.execution_context,
+                encryption_public_key=run.encryption_public_key,
+                attributes=run.attributes or None,
+                start_hook=hook,
+            )
+            event = w.RunCreatedEvent(
+                event_data=data, spec_version=run.spec_version or w.SPEC_VERSION_CURRENT
+            )
+            stored = w.EventAdaptor.from_wire(
+                event.model_dump()
+                | {"runId": run.run_id, "eventId": claim.event_id, "createdAt": run.created_at}
+            )
+            write_json(self._event_path(run.run_id, claim.event_id), event_record(stored))
+
+    async def _admit_start_hook(
+        self, run_id: str, data: w.RunCreatedEvent | w.RunStartedEvent
+    ) -> w.EventResult:
+        assert data.event_data is not None and data.event_data.start_hook is not None
+        requested = data.event_data.start_hook
+        hook = requested.model_copy(update={"hook_id": w.start_hook_id(run_id)})
+        decision_path = self._start_hook_path(run_id, "decision")
+        decision_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            async with file_lock(decision_path, stale=30, update=1, timeout=35):
+                async with self._hook_token_lock(hook.token):
+                    # No awaits from here through publication: both token and
+                    # candidate decisions are serialized across processes.
+                    decision = read_json(decision_path, StartHookDecision)
+                    if decision is not None and decision.token != hook.token:
+                        raise start_hooks.rejected(
+                            "Candidate was decided under another token", "token_mismatch"
+                        )
+                    if self._start_hook_path(run_id, "fence").exists():
+                        raise start_hooks.rejected("Candidate can no longer be created", "expired")
+                    if decision is not None and decision.conflicting_run_id is not None:
+                        raise errors.HookConflictError(hook.token, decision.conflicting_run_id)
+                    if decision is not None and decision.reason is not None:
+                        raise start_hooks.rejected(
+                            "Start hook candidate was rejected", decision.reason
+                        )
+                    run_path = self.data_dir / "runs" / f"{run_id}.json"
+                    run = read_json(run_path, w.WorkflowRunAdaptor)
+                    if run is not None:
+                        if run.start_hook is None or run.start_hook.token != hook.token:
+                            raise start_hooks.rejected(
+                                "Candidate names an ordinary run", "ordinary_run"
+                            )
+                        self._ensure_start_hook(
+                            run, read_json(self._hook_token_path(hook.token), HookTokenClaim)
+                        )
+                        if isinstance(data, w.RunCreatedEvent):
+                            return w.EventResult(run=run)
+                        return self._events_create_impl(run_id, data)
+                    now = js_now()
+                    try:
+                        age = now.timestamp() - w.ulid.decode_time(run_id[5:]) / 1000
+                    except ValueError:
+                        age = 0
+                    reason = None
+                    if age > 86400:
+                        reason = "expired"
+                    if (
+                        hook.token_retention_until is not None
+                        and hook.token_retention_until > now + self._hook_retention_limit
+                    ):
+                        reason = "invalid"
+                    if reason is not None:
+                        write_json(
+                            decision_path,
+                            StartHookDecision(token=hook.token, reason=reason),
+                            overwrite=True,
+                        )
+                        raise start_hooks.rejected(
+                            "Invalid or expired start hook candidate", reason
+                        )
+                    claim_path = self._hook_token_path(hook.token)
+                    claim = read_json(claim_path, HookTokenClaim)
+                    if claim is None:
+                        # Recover a lost claim from the live hook entities.
+                        for path in (self.data_dir / "hooks").glob("*.json"):
+                            live = read_json(path, w.Hook)
+                            if (
+                                live is not None
+                                and live.token == hook.token
+                                and not self._hook_retention_ended(
+                                    live.run_id, live.token_retention_until
+                                )
+                            ):
+                                claim = HookTokenClaim(
+                                    token=hook.token,
+                                    run_id=live.run_id,
+                                    hook_id=live.hook_id,
+                                    token_retention_until=live.token_retention_until,
+                                )
+                                write_json(claim_path, claim)
+                                break
+                    own_claim = claim is not None and (claim.run_id, claim.hook_id) == (
+                        run_id,
+                        hook.hook_id,
+                    )
+                    if claim is not None and not own_claim:
+                        if not self._hook_token_claim_releasable(claim):
+                            write_json(
+                                decision_path,
+                                StartHookDecision(
+                                    token=hook.token, conflicting_run_id=claim.run_id
+                                ),
+                                overwrite=True,
+                            )
+                            raise errors.HookConflictError(hook.token, claim.run_id)
+                        claim_path.unlink(missing_ok=True)
+                        (self.data_dir / "hooks" / f"{claim.hook_id}.json").unlink(missing_ok=True)
+                    # Record the token identity before claiming it. A crash can
+                    # retry this candidate, and cancellation can fence it.
+                    write_json(decision_path, StartHookDecision(token=hook.token), overwrite=True)
+                    if not own_claim:
+                        claim = HookTokenClaim(
+                            token=hook.token,
+                            run_id=run_id,
+                            hook_id=w.start_hook_id(run_id),
+                            event_id=self._new_id("evnt"),
+                            token_retention_until=hook.token_retention_until,
+                            reserved_at=now.timestamp() * 1000,
+                        )
+                        write_json(claim_path, claim)
+                    seed = data.event_data
+                    assert seed.deployment_id is not None and seed.workflow_name is not None
+                    run = w.NonFinalWorkflowRun(
+                        run_id=run_id,
+                        status="pending",
+                        deployment_id=seed.deployment_id,
+                        workflow_name=seed.workflow_name,
+                        input=seed.input,
+                        spec_version=data.spec_version,
+                        execution_context=seed.execution_context,
+                        encryption_public_key=seed.encryption_public_key,
+                        attributes=getattr(seed, "attributes", None) or {},
+                        start_hook=hook,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    # Acceptance is the exclusive run publication. Retrying
+                    # after a crash restores its hook and creation event.
+                    if not write_exclusive(
+                        run_path, dumps_js(run.model_dump(exclude_none=True)).decode()
+                    ):
+                        run = read_json(run_path, w.WorkflowRunAdaptor)
+                        assert run is not None
+                        if run.start_hook is None or run.start_hook.token != hook.token:
+                            raise start_hooks.rejected(
+                                "Candidate names an ordinary run", "ordinary_run"
+                            )
+                    self._ensure_start_hook(run, claim)
+                    if isinstance(data, w.RunStartedEvent):
+                        return self._events_create_impl(run_id, data)
+                    return w.EventResult(run=run)
+        except FileLockError as error:
+            raise w.WorkflowWorldError(
+                f"Start hook admission lock failed: {error}", status=500
+            ) from error
+
     async def events_create(self, run_id: str | None, data: w.Event) -> w.EventResult:
+        if (
+            isinstance(data, w.RunCreatedEvent | w.RunStartedEvent)
+            and data.event_data is not None
+            and data.event_data.start_hook is not None
+        ):
+            if run_id is None:
+                raise start_hooks.rejected(
+                    "Start hook admission requires a candidate run ID", "invalid"
+                )
+            result = await self._admit_start_hook(run_id, data)
+            if result.run is not None and is_run_terminal(result.run.status):
+                await self.delete_all_hooks_for_run(run_id)
+            return result
+        if run_id is not None and isinstance(data, w.RunCancelledEvent):
+            decision_path = self._start_hook_path(run_id, "decision")
+            run_path = self.data_dir / "runs" / f"{run_id}.json"
+            if decision_path.exists() or not run_path.exists():
+                decision_path.parent.mkdir(parents=True, exist_ok=True)
+                async with file_lock(decision_path, stale=30, update=1, timeout=35):
+                    decision = read_json(decision_path, StartHookDecision)
+                    async with contextlib.AsyncExitStack() as stack:
+                        if decision is not None:
+                            await stack.enter_async_context(self._hook_token_lock(decision.token))
+                        if not run_path.exists():
+                            write_json(
+                                self._start_hook_path(run_id, "fence"),
+                                {"reason": "cancelled"},
+                                overwrite=True,
+                            )
+                            if decision is not None:
+                                claim_path = self._hook_token_path(decision.token)
+                                claim = read_json(claim_path, HookTokenClaim)
+                                if claim is not None and claim.run_id == run_id:
+                                    claim_path.unlink(missing_ok=True)
+                            return w.EventResult(event=data)
+
         token = None
         if isinstance(data, w.HookCreatedEvent):
             token = data.event_data.token
@@ -1108,6 +1379,7 @@ class LocalWorld(w.World):
                     spec_version=current_run.spec_version,
                     execution_context=current_run.execution_context,
                     input=current_run.input,
+                    start_hook=current_run.start_hook,
                     attributes=current_run.attributes,
                     encryption_public_key=current_run.encryption_public_key,
                     created_at=current_run.created_at,
@@ -1129,6 +1401,7 @@ class LocalWorld(w.World):
                     spec_version=current_run.spec_version,
                     execution_context=current_run.execution_context,
                     input=current_run.input,
+                    start_hook=current_run.start_hook,
                     attributes=current_run.attributes,
                     encryption_public_key=current_run.encryption_public_key,
                     created_at=current_run.created_at,
@@ -1152,6 +1425,7 @@ class LocalWorld(w.World):
                     spec_version=current_run.spec_version,
                     execution_context=current_run.execution_context,
                     input=current_run.input,
+                    start_hook=current_run.start_hook,
                     attributes=current_run.attributes,
                     encryption_public_key=current_run.encryption_public_key,
                     created_at=current_run.created_at,
@@ -1175,6 +1449,7 @@ class LocalWorld(w.World):
                     spec_version=current_run.spec_version,
                     execution_context=current_run.execution_context,
                     input=current_run.input,
+                    start_hook=current_run.start_hook,
                     attributes=current_run.attributes,
                     encryption_public_key=current_run.encryption_public_key,
                     created_at=current_run.created_at,
@@ -1301,6 +1576,12 @@ class LocalWorld(w.World):
                 write_json(step_path, step, overwrite=True)
 
         elif data.event_type == "hook_created":
+            if (
+                current_run is not None
+                and current_run.start_hook is not None
+                and data.correlation_id == w.start_hook_id(effective_run_id)
+            ):
+                raise w.WorkflowWorldError("The start hook ID is reserved by admission", status=400)
             hook_data = data.event_data
             if (
                 hook_data.token_retention_until is not None

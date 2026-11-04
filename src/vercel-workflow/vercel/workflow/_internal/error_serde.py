@@ -10,7 +10,14 @@ from typing import Any, TypedDict, cast
 
 from vercel._internal.core.polyfills import UTC
 
-from .errors import FatalError, HookConflictError, RemoteError, RetryableError, StepCancelledError
+from .errors import (
+    FatalError,
+    HookConflictError,
+    RemoteError,
+    RetryableError,
+    StepCancelledError,
+    WorkflowStartError,
+)
 
 
 class _OptionalErrorFields(TypedDict, total=False):
@@ -32,6 +39,7 @@ class RetryableErrorPayload(ErrorPayload):
 
 class _OptionalHookConflictFields(TypedDict, total=False):
     conflictingRunId: str
+    kind: str
 
 
 class HookConflictErrorPayload(ErrorPayload, _OptionalHookConflictFields):
@@ -161,6 +169,8 @@ def _reduce_hook_conflict_error(value: Any) -> HookConflictErrorPayload | bool:
     }
     if value.conflicting_run_id is not None:
         payload["conflictingRunId"] = value.conflicting_run_id
+    if value.kind is not None:
+        payload["kind"] = value.kind
     return payload
 
 
@@ -172,7 +182,26 @@ def _revive_hook_conflict_error(value: Any) -> HookConflictError:
     conflicting_run_id = value.get("conflictingRunId")
     if conflicting_run_id is not None and not isinstance(conflicting_run_id, str):
         raise ValueError(f"invalid HookConflictError conflictingRunId: {conflicting_run_id!r}")
-    exc = HookConflictError(token, conflicting_run_id)
+    kind = value.get("kind")
+    if kind not in (None, "start"):
+        raise ValueError("invalid HookConflictError kind")
+    exc = HookConflictError(token, conflicting_run_id, kind=kind)
+    _apply_error_payload(exc, payload)
+    return exc
+
+
+def _reduce_workflow_start_error(value: Any) -> Any:
+    if not isinstance(value, WorkflowStartError):
+        return False
+    return {**_error_payload(value), "runId": value.run_id, "stage": value.stage}
+
+
+def _revive_workflow_start_error(value: Any) -> WorkflowStartError:
+    payload = _require_error_payload(value)
+    run_id, stage = value.get("runId"), value.get("stage")
+    if not isinstance(run_id, str) or stage not in ("queue", "admission"):
+        raise ValueError("invalid WorkflowStartError payload")
+    exc = WorkflowStartError(run_id, stage)
     _apply_error_payload(exc, payload)
     return exc
 
@@ -249,6 +278,7 @@ REDUCERS: dict[str, Callable[[Any], Any]] = {
         tag: _reduce_error_class(cls, subclasses=cls is FatalError)
         for tag, cls in _ERROR_CLASS_BY_TAG.items()
     },
+    "WorkflowStartError": _reduce_workflow_start_error,
     HOOK_CONFLICT_ERROR_TAG: _reduce_hook_conflict_error,
     RETRYABLE_ERROR_TAG: _reduce_retryable_error,
     **{tag: _reduce_foreign_error(tag) for tag in _FOREIGN_ERROR_TAGS},
@@ -258,6 +288,7 @@ REDUCERS: dict[str, Callable[[Any], Any]] = {
 REVIVERS: dict[str, Callable[[Any], Any]] = {
     **{tag: _revive_error_class(cls) for tag, cls in _ERROR_CLASS_BY_TAG.items()},
     **{tag: _revive_foreign_error(tag) for tag in _FOREIGN_ERROR_TAGS},
+    "WorkflowStartError": _revive_workflow_start_error,
     HOOK_CONFLICT_ERROR_TAG: _revive_hook_conflict_error,
     RETRYABLE_ERROR_TAG: _revive_retryable_error,
     ERROR_TAG: revive_error,

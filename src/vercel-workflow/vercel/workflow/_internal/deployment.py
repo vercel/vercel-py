@@ -39,6 +39,8 @@ class Target:
     compression: CompressionMode
     execution_context: dict[str, Any]
     encryption_public_key: str | None = None
+    probe: dict[str, Any] | None = None
+    cross_deployment: bool = False
 
     async def encoder(
         self, world: w.World, run_id: str, *, compress_arguments: bool
@@ -104,6 +106,8 @@ async def resolve(
         _compression_mode(answer),
         context,
         public_key if isinstance(public_key, str) else None,
+        probe=answer,
+        cross_deployment=True,
     )
 
 

@@ -1,0 +1,1 @@
+Add `workflow.with_experimental_hook(token=..., metadata=..., experimental_min_retention=...)` to reserve a hook token atomically when starting a run. The hook accepts payloads before the workflow body starts; duplicate starts raise `HookConflictError` naming the owner without creating another run. Unconfirmed starts raise `WorkflowStartError` with the candidate ID and stage.

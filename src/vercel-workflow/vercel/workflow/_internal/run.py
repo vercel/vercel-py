@@ -15,6 +15,7 @@ from . import (
     errors,
     serialization as ser,
     signature_codec,
+    start_hooks,
     streams,
     utils,
     world as w,
@@ -277,8 +278,19 @@ async def start(
     arguments = ser.argument_array(dumped_args, dumped_kwargs)
 
     world = w.get_world()
-    prepared = await _RunStart.prepare(world, configured, arguments)
-    return await prepared.submit(world)
+    hook = (
+        start_hooks.normalize(configured.start_hook) if configured.start_hook is not None else None
+    )
+    try:
+        prepared = await _RunStart.prepare(world, configured, arguments, hook=hook)
+        return await prepared.submit(world)
+    except (errors.HookConflictError, w.WorkflowWorldError) as error:
+        if hook is not None and (
+            isinstance(error, errors.HookConflictError) or start_hooks.permanent(error)
+        ):
+            # A deterministic refusal should reach the workflow without step retries.
+            error.__dict__["fatal"] = True
+        raise
 
 
 @dataclass(frozen=True)
@@ -292,6 +304,7 @@ class _RunStart(Generic[T]):
     encryption_public_key: str | None
     queue_name: str
     attributes: dict[str, str] | None
+    start_hook: w.StartHook | None
 
     @classmethod
     async def prepare(
@@ -299,12 +312,16 @@ class _RunStart(Generic[T]):
         world: w.World,
         configured: core.ConfiguredWorkflow[..., T],
         arguments: list[Any],
+        *,
+        hook: w.StartHook | None = None,
     ) -> _RunStart[T]:
         wf = configured.workflow
         namespace = wf._resolve_queue_namespace()
         run_id = f"wrun_{world.create_run_id(region=configured.region)}"
 
         target = await deployment.resolve(world, configured.deployment_id, run_id, namespace)
+        if hook is not None:
+            start_hooks.validate_target(hook, world, target)
         attributes = dict(configured.attributes) if configured.attributes else None
         if attributes:
             if target.spec_version < w.SPEC_VERSION_SUPPORTS_ATTRIBUTES:
@@ -316,6 +333,17 @@ class _RunStart(Generic[T]):
         encoder = await target.encoder(
             world, run_id, compress_arguments=configured.compress_arguments
         )
+
+        if (
+            hook is not None
+            and configured.start_hook is not None
+            and configured.start_hook.metadata is not None
+        ):
+            # Argument compression is independent of the ordinary hook metadata codec.
+            metadata_encoder = await target.encoder(world, run_id, compress_arguments=True)
+            hook = hook.model_copy(
+                update={"metadata": metadata_encoder.encode(configured.start_hook.metadata)}
+            )
 
         encrypted = True
         if encoder.recipient_public_key is not None:
@@ -341,6 +369,7 @@ class _RunStart(Generic[T]):
             },
             queue_name=w.get_queue_name(wf.workflow_id, namespace),
             attributes=attributes,
+            start_hook=hook,
         )
 
     async def submit(self, world: w.World) -> Run[T]:
@@ -349,6 +378,7 @@ class _RunStart(Generic[T]):
             True if self.configured.allow_reserved_attributes else None
         )
         event_data = w.RunCreatedEventData(
+            start_hook=self.start_hook,
             deployment_id=self.deployment_id,
             workflow_name=wf.workflow_id,
             input=self.input,
@@ -357,27 +387,55 @@ class _RunStart(Generic[T]):
             attributes=self.attributes,
             allow_reserved_attributes=allow_reserved_attributes,
         )
-        await world.events_create(
-            self.run_id, w.RunCreatedEvent(event_data=event_data, spec_version=self.spec_version)
-        )
-        await world.queue(
-            self.queue_name,
-            w.WorkflowInvokePayload(
-                run_id=self.run_id,
-                run_input=w.RunInput(
-                    input=self.input,
-                    deployment_id=self.deployment_id,
-                    workflow_name=wf.workflow_id,
-                    spec_version=self.spec_version,
-                    execution_context=self.execution_context,
-                    encryption_public_key=self.encryption_public_key,
-                    environment=world.get_environment(),
-                    attributes=self.attributes,
-                    allow_reserved_attributes=allow_reserved_attributes,
+
+        async def create() -> w.EventResult:
+            return await world.events_create(
+                self.run_id,
+                w.RunCreatedEvent(event_data=event_data, spec_version=self.spec_version),
+            )
+
+        async def enqueue() -> Any:
+            return await world.queue(
+                self.queue_name,
+                w.WorkflowInvokePayload(
+                    run_id=self.run_id,
+                    run_input=w.RunInput(
+                        input=self.input,
+                        start_hook=self.start_hook,
+                        deployment_id=self.deployment_id,
+                        workflow_name=wf.workflow_id,
+                        spec_version=self.spec_version,
+                        execution_context=self.execution_context,
+                        encryption_public_key=self.encryption_public_key,
+                        environment=world.get_environment(),
+                        attributes=self.attributes,
+                        allow_reserved_attributes=allow_reserved_attributes,
+                    ),
                 ),
-            ),
-            deployment_id=self.deployment_id,
-            region=self.configured.region,
-            spec_version=self.spec_version,
-        )
+                deployment_id=self.deployment_id,
+                region=self.configured.region,
+                spec_version=self.spec_version,
+            )
+
+        if self.start_hook is None:
+            await create()
+            await enqueue()
+        else:
+
+            async def wake_holder(run_id: str) -> None:
+                # A lost first queue message must not leave a pending owner stuck.
+                try:
+                    holder = await world.runs_get(run_id)
+                    if holder.status == "pending":
+                        namespace = (holder.execution_context or {}).get("queueNamespace")
+                        await world.queue(
+                            w.get_queue_name(holder.workflow_name, namespace),
+                            w.WorkflowInvokePayload(run_id=run_id),
+                            deployment_id=holder.deployment_id,
+                            spec_version=holder.spec_version or w.SPEC_VERSION_CURRENT,
+                        )
+                except Exception:
+                    logger.debug("Could not wake pending start hook holder", exc_info=True)
+
+            await start_hooks.submit(self.run_id, self.start_hook, create, enqueue, wake_holder)
         return Run(self.run_id, output_validator=wf.codec.validate_return)

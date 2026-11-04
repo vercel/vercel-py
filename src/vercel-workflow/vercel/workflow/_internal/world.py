@@ -178,7 +178,27 @@ class WireAdaptor(Generic[T]):
         return self._adaptor.validate_python(data, by_alias=True, by_name=False)
 
 
+class StartHook(BaseModel):
+    token: str = pydantic.Field(min_length=1)
+    hook_id: str | None = pydantic.Field(
+        default=None, alias="hookId", exclude_if=lambda e: e is None
+    )
+    token_retention_until: datetime | None = pydantic.Field(
+        default=None, alias="tokenRetentionUntil", exclude_if=lambda e: e is None
+    )
+    metadata: bytes | None = pydantic.Field(default=None, exclude_if=lambda e: e is None)
+
+
+def start_hook_id(run_id: str) -> str:
+    if not run_id.startswith("wrun_") or len(run_id) <= 5:
+        raise ValueError("Not a workflow run ID")
+    return f"hook_{run_id[5:]}"
+
+
 class RunInput(BaseModel):
+    start_hook: StartHook | None = pydantic.Field(
+        default=None, alias="startHook", exclude_if=lambda e: e is None
+    )
     input: Any
     deployment_id: str = pydantic.Field(alias="deploymentId")
     workflow_name: str = pydantic.Field(alias="workflowName")
@@ -304,6 +324,9 @@ class _ContextWrapper(Generic[T]):
 
 
 class BaseWorkflowRun(BaseModel):
+    start_hook: StartHook | None = pydantic.Field(
+        default=None, alias="startHook", exclude_if=lambda e: e is None
+    )
     model_config = pydantic.ConfigDict(extra="ignore")
 
     run_id: str = pydantic.Field(alias="runId")
@@ -498,6 +521,9 @@ class BaseEvent(BaseModel):
 
 
 class RunCreatedEventData(BaseModel):
+    start_hook: StartHook | None = pydantic.Field(
+        default=None, alias="startHook", exclude_if=lambda e: e is None
+    )
     deployment_id: str = pydantic.Field(alias="deploymentId")
     workflow_name: str = pydantic.Field(alias="workflowName")
     input: bytes
@@ -530,6 +556,9 @@ class RunCreatedEvent(BaseEvent):
 
 
 class RunStartedEventData(BaseModel):
+    start_hook: StartHook | None = pydantic.Field(
+        default=None, alias="startHook", exclude_if=lambda e: e is None
+    )
     input: Any = None
     deployment_id: str | None = pydantic.Field(
         default=None, alias="deploymentId", exclude_if=lambda e: e is None
@@ -554,6 +583,7 @@ class RunStartedEventData(BaseModel):
     @classmethod
     def from_run_input(cls, run_input: RunInput) -> "RunStartedEventData":
         return cls(
+            start_hook=run_input.start_hook,
             input=run_input.input,
             deployment_id=run_input.deployment_id,
             workflow_name=run_input.workflow_name,
@@ -1117,12 +1147,19 @@ class WorkflowWorldError(Exception):
     (e.g. a 404 on a hook event becomes a HookNotFoundError)."""
 
     def __init__(
-        self, message: str, *, status: int, code: str | None = None, url: str | None = None
+        self,
+        message: str,
+        *,
+        status: int,
+        code: str | None = None,
+        url: str | None = None,
+        reason: str | None = None,
     ) -> None:
         super().__init__(message)
         self.status = status
         self.code = code
         self.url = url
+        self.reason = reason
 
 
 class RunExpiredError(WorkflowWorldError):
@@ -1222,6 +1259,9 @@ _latest_deployment_warned = False
 
 
 class World(metaclass=abc.ABCMeta):
+    atomic_start_hook = False
+    hook_retention = False
+
     @abc.abstractmethod
     async def get_deployment_id(self) -> str: ...
 

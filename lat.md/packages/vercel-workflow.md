@@ -65,13 +65,21 @@ Retention tests follow the existing hook test boundaries: [[src/vercel-workflow/
 
 A run's stream ([[src/vercel-workflow/vercel/workflow/_internal/streams.py]]) is an append-only, indexed log of chunks. Only steps can write to it, and nothing closes it automatically. A step is not recorded as complete until its chunks are flushed, and a retried step writes its chunks again. Readers resume exactly from a chunk index and reconnect when the server ends a long read.
 
+### Pre-admitted hook replay
+
+A start hook exists before the workflow body runs, so replay preserves its payloads until the body opens it.
+
+[[src/vercel-workflow/vercel/workflow/_internal/start_hooks.py#resolve]] checks the creation log, queue input, and run entity for a consistent token and derives its hook ID with [[src/vercel-workflow/vercel/workflow/_internal/world.py#start_hook_id]]. The first matching [[src/vercel-workflow/vercel/workflow/_internal/core.py#BaseHook#wait]] binds that identity without writing a creation event. Binding consumes one positional ID so later operations retain their IDs; ordinary and step-cancellation hooks avoid the reserved ID. Metadata and retention on the binding call are rejected because admission already stored them.
+
+[[src/vercel-workflow/vercel/workflow/_internal/runtime.py#WorkflowOrchestratorContext#_replay_next_event]] buffers only the admitted hook's receipt and disposal events before binding, validates recorded tokens, and preserves delivery order. Payload decoding waits until binding supplies the hook's type. Disposal suppresses buffered and subsequent payloads. [[src/vercel-workflow/tests/unit/test_workflow_start_hook_runtime.py#test_payloads_before_open_survive_real_workflow_replay]] verifies repeated sandboxed replay with payloads preceding an earlier step's completion.
+
 ## Configured workflows
 
 Workflow references carry immutable, reusable startup configuration while startup remains an ordinary coroutine.
 
 [[src/vercel-workflow/vercel/workflow/_internal/core.py#_ConfigurableWorkflow#without_argument_compression]] is inherited by both [[src/vercel-workflow/vercel/workflow/_internal/core.py#Workflow]] and [[src/vercel-workflow/vercel/workflow/_internal/core.py#ConfiguredWorkflow]]. Each provides its immutable configuration through the base class contract; the shared method returns a modified copy without changing either reference. Workflow parameter and result types are preserved through configuration and [[src/vercel-workflow/vercel/workflow/_internal/run.py#start]], which accepts either reference type and remains a native async function. Binding and execution retain their existing deferred behavior.
 
-[[src/vercel-workflow/vercel/workflow/_internal/run.py#start]] normalizes configuration and binds arguments before preparing a run. [[src/vercel-workflow/vercel/workflow/_internal/run.py#_RunStart#prepare]] retains the immutable workflow configuration alongside the encoded input, execution context, run identity, and resolved queue name; [[src/vercel-workflow/vercel/workflow/_internal/run.py#_RunStart#submit]] assembles the event and queue payload separately from those fields, creating the run before enqueueing it and returning a typed run handle with the workflow result validator. Preparation creates no workflow run, though cross-deployment capability probes use the queue and a synthetic response stream. Run creation failure prevents invocation delivery.
+[[src/vercel-workflow/vercel/workflow/_internal/run.py#start]] normalizes configuration and binds arguments before preparing a run. [[src/vercel-workflow/vercel/workflow/_internal/run.py#_RunStart#prepare]] retains the immutable workflow configuration alongside the encoded input, execution context, run identity, and resolved queue name; [[src/vercel-workflow/vercel/workflow/_internal/run.py#_RunStart#submit]] assembles the event and queue payload separately from those fields and returns a typed run handle with the workflow result validator. Ordinary starts create the run before enqueueing it; atomic hook starts enqueue the candidate before confirming admission. Preparation creates no workflow run, though cross-deployment capability probes use the queue and a synthetic response stream. For ordinary starts, run creation failure prevents invocation delivery.
 
 The compression option only controls the argument encoder during startup. The opt-out skips compression; unconfigured workflows retain [[src/vercel-workflow/vercel/workflow/_internal/compression.py#maybe_compress|the existing size, savings, codec, and environment policy]]. The encoded bytes are shared by run creation and queue delivery. Other payload encoders are unchanged.
 
@@ -135,3 +143,21 @@ Local filesystem writers can share directory leases with TypeScript's proper-loc
 [[src/vercel-workflow/tests/unit/test_workflow_file_lock.py]] covers contention, cancellation, stale recovery, changed observations, heartbeat renewal, and ownership loss. [[src/vercel-workflow/tests/integration/test_file_lock_interop.py]] runs the pinned proper-lockfile npm package to verify mutual exclusion, heartbeat compatibility, release, and recovery after either runtime crashes.
 
 The interop fixture resolves npm's executable path before installing the pinned package so Windows can launch its command shim as well as Unix executables. Its subprocess readiness handshake accepts both Unix and Windows line endings.
+
+## Start hooks
+
+Configured workflows can reserve a hook token atomically with run admission, preventing a duplicate start from creating or executing a run while that token is held.
+
+[[src/vercel-workflow/vercel/workflow/_internal/core.py#_ConfigurableWorkflow#with_experimental_hook]] configures the token, metadata, and optional minimum retention. [[src/vercel-workflow/vercel/workflow/_internal/start_hooks.py#normalize]] resolves relative retention afresh at each start. Metadata uses the ordinary hook payload encoder, independent of argument compression. [[src/vercel-workflow/vercel/workflow/_internal/start_hooks.py#validate_target]] requires explicit World capabilities and, across deployments, positive capability-probe evidence. A missing probe is retryable; an unsupported target is refused before publication.
+
+[[src/vercel-workflow/vercel/workflow/_internal/start_hooks.py#submit]] queues the candidate first, then confirms admission by retrying the same creation write with bounded delays. Both paths carry the same [[src/vercel-workflow/vercel/workflow/_internal/world.py#StartHook]] seed. Conflicts raise [[src/vercel-workflow/vercel/workflow/_internal/errors.py#HookConflictError]] with the owning run ID and start kind. An unconfirmed result raises [[src/vercel-workflow/vercel/workflow/_internal/errors.py#WorkflowStartError]] with the candidate ID and queue or admission stage. Accepted responses must echo the token reservation. A transient initial queue error triggers republication of the accepted candidate; a refused duplicate best-effort wakes a pending owner.
+
+[[src/vercel-workflow/vercel/workflow/_internal/runtime.py#workflow_handler]] awaits admission before executing any workflow code, acknowledges refused queued candidates, and verifies the World echoed the reservation. The start hook can be looked up and resumed immediately after start returns. Terminal runs reject new payloads; explicit disposal releases the token immediately, while normal termination honors [[vercel-workflow#Hooks and streams|hook retention]]. Deterministic start refusals are fatal to a containing step and reach the workflow with their original error type.
+
+### Local admission recovery
+
+Local admission records a durable candidate decision under cross-process candidate and token leases, so retries and late queue copies cannot change a refusal into acceptance.
+
+[[src/vercel-workflow/vercel/workflow/_internal/worlds/local.py#LocalWorld#_admit_start_hook]] shares token claims with ordinary hooks. The exclusive run publication accepts a candidate; its claim records the creation event ID. [[src/vercel-workflow/vercel/workflow/_internal/worlds/local.py#LocalWorld#_ensure_start_hook]] repairs a missing hook entity or creation event after a crash while the candidate still owns its token. Disposed and released hooks are not resurrected. Orphan claims are held for a day and fenced before release; cancellation can fence a candidate before its run exists.
+
+[[src/vercel-workflow/tests/unit/test_workflow_start_hook.py]] verifies immediate resume before body execution, queue-first admission, permanent rejection, retention and disposal, recovery after publication failure, bounded confirmation, deployment gates, cross-process ownership, orphan and cancellation fencing, error round trips, step error propagation, and Vercel CBOR transport.
