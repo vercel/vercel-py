@@ -15,7 +15,11 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import hashlib
+import json
 from collections.abc import Iterator
+from datetime import datetime, timedelta
+from typing import Any
 from unittest.mock import Mock
 
 import pydantic
@@ -23,11 +27,13 @@ import pytest
 
 from tests.payloads import PLAIN_ENCODER
 from tests.workflow_context import bind_context
-from vercel.workflow import Run, WorkflowRunFailedError, start
+from vercel._internal.core.polyfills import UTC
+from vercel.workflow import Run, WorkflowRunFailedError, get_hook_by_token, start
 from vercel.workflow._internal import core, runtime, serialization as ser, world as w
 from vercel.workflow._internal.worlds import local as local_mod
 
 TOKEN = "order:42"
+RETENTION_NOW = datetime(2026, 9, 22, tzinfo=UTC)
 
 registry = core.Workflows(as_vercel_job=False)
 
@@ -136,6 +142,16 @@ async def unconsumed_hook(end: str, disposition: str) -> str:
         await pending_step()
     if end == "raise":
         raise ValueError("body failed")
+    return "done"
+
+
+@registry.workflow
+async def retain_approval(param: Any = "1d", naive_date: bool = False) -> str:
+    if naive_date:
+        param = datetime(2026, 9, 22)
+    approval = Approval.wait(token=TOKEN, metadata={"order": 42}, experimental_min_retention=param)
+    assert await approval.get_conflict() is None
+    await approval
     return "done"
 
 
@@ -675,4 +691,63 @@ async def test_replay_divergence_does_not_flush_disposed_hooks(
         else "has not registered its suspension"
     )
     with pytest.raises(WorkflowRunFailedError, match=message):
+        await run.return_value()
+
+
+@pytest.mark.parametrize(
+    "param", [86400, 86400.0, "1d", timedelta(days=1), RETENTION_NOW + timedelta(days=1)]
+)
+async def test_retention_uses_workflow_time_and_reaches_storage(world, monkeypatch, param) -> None:
+    monkeypatch.setattr(local_mod, "js_now", lambda: RETENTION_NOW)
+    run = await start(retain_approval, param)
+    await _invoke(run.run_id, retain_approval.workflow_id)
+
+    hook = await get_hook_by_token(TOKEN)
+    deadline = RETENTION_NOW + timedelta(days=1)
+    assert hook.token_retention_until == deadline
+    assert hook.metadata == {"order": 42}
+    events = (await world.events_list(run.run_id)).data
+    created = next(e for e in events if isinstance(e, w.HookCreatedEvent))
+    assert created.event_data.token_retention_until == deadline
+    claim_path = (
+        world.data_dir / "hooks" / "tokens" / f"{hashlib.sha256(TOKEN.encode()).hexdigest()}.json"
+    )
+    assert json.loads(claim_path.read_text())["tokenRetentionUntil"] == "2026-09-23T00:00:00.000Z"
+
+
+async def test_replay_does_not_extend_retention(world, monkeypatch) -> None:
+    monkeypatch.setattr(local_mod, "js_now", lambda: RETENTION_NOW)
+    run = await start(retain_approval)
+    await _invoke(run.run_id, retain_approval.workflow_id)
+    before = await get_hook_by_token(TOKEN)
+
+    monkeypatch.setattr(local_mod, "js_now", lambda: RETENTION_NOW + timedelta(hours=12))
+    await _invoke(run.run_id, retain_approval.workflow_id)
+    await Approval(approved=True).resume(TOKEN)
+    await _invoke(run.run_id, retain_approval.workflow_id)
+
+    after = await get_hook_by_token(TOKEN)
+    assert after.token_retention_until == before.token_retention_until
+    assert after.hook_id == before.hook_id
+    assert await run.return_value() == "done"
+    assert (
+        sum(e.event_type == "hook_created" for e in (await world.events_list(run.run_id)).data) == 1
+    )
+
+
+@pytest.mark.parametrize("param", [-1, "-1s", timedelta(seconds=-1), "invalid"])
+async def test_invalid_duration_fails_before_registration(world, param) -> None:
+    run = await start(retain_approval, param)
+    await _invoke(run.run_id, retain_approval.workflow_id)
+    assert await run.status() == "failed"
+    assert not any(
+        e.event_type == "hook_created" for e in (await world.events_list(run.run_id)).data
+    )
+
+
+async def test_naive_datetime_is_rejected_at_wait(world) -> None:
+    # Passing it as workflow input would normalize it during serialization.
+    run = await start(retain_approval, naive_date=True)
+    await _invoke(run.run_id, retain_approval.workflow_id)
+    with pytest.raises(WorkflowRunFailedError, match="tzinfo"):
         await run.return_value()

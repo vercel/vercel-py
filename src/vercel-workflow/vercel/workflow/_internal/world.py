@@ -829,10 +829,16 @@ class Hook(BaseModel):
     spec_version: int | None = pydantic.Field(default=None, alias="specVersion")
     is_webhook: bool | None = pydantic.Field(default=None, alias="isWebhook")
     is_system: bool | None = pydantic.Field(default=None, alias="isSystem")
+    token_retention_until: datetime | None = pydantic.Field(
+        default=None, alias="tokenRetentionUntil", exclude_if=lambda e: e is None
+    )
 
 
 class HookCreatedEventData(BaseModel):
     token: str
+    token_retention_until: datetime | None = pydantic.Field(
+        default=None, alias="tokenRetentionUntil", exclude_if=lambda e: e is None
+    )
     metadata: bytes | None = pydantic.Field(default=None, exclude_if=lambda e: e is None)
     # Always sent: a backend reads a `hook_created` without `isWebhook` as a
     # legacy webhook, which would make the hook resumable through the public
