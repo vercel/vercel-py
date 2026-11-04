@@ -63,6 +63,8 @@ Values are encoded with a port of devalue ([[src/vercel-workflow/vercel/workflow
 
 Payloads may be compressed ([[src/vercel-workflow/vercel/workflow/_internal/compression.py]]) and encrypted with a per-run key derived from the deployment key ([[src/vercel-workflow/vercel/workflow/_internal/encryption.py#derive_run_key]]). Run attributes are deliberately plaintext and size-limited ([[src/vercel-workflow/vercel/workflow/_internal/attributes.py]]).
 
+[[src/vercel-workflow/vercel/workflow/_internal/compression.py#CompressionMode]] explicitly selects `none` to skip compression or `auto` to apply the existing codec, size, savings, and environment policy. [[src/vercel-workflow/vercel/workflow/_internal/serialization.py#PayloadEncoder]] carries this mode; boolean workflow options are converted when constructing the encoder.
+
 CI checks these encodings against the real JavaScript implementations: the devalue interop tests run the published package, and local-world tests run the `workflow` CLI against files written by Python.
 
 ## Hooks and streams

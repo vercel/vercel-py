@@ -303,7 +303,10 @@ class _RunStart(Generic[T]):
         namespace = wf._resolve_queue_namespace()
         run_id = f"wrun_{world.create_run_id(region=config.region)}"
         run_key = await world.run_key(run_id, deployment_id=deployment_id)
-        encoder = ser.PayloadEncoder(compression=config.compress_arguments, encryption_key=run_key)
+        encoder = ser.PayloadEncoder(
+            compression="auto" if config.compress_arguments else "none",
+            encryption_key=run_key,
+        )
         return cls(
             workflow=wf,
             config=config,
