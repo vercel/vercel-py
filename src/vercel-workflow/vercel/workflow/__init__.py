@@ -53,6 +53,7 @@ from .errors import (
     TooEarlyError,
     TypeValidationError,
     WorkflowRunFailedError,
+    WorkflowStartError,
     WorkflowWorldError,
 )
 from .sandbox import SandboxPolicy
@@ -105,6 +106,7 @@ __all__ = [
     "TooEarlyError",
     "TypeValidationError",
     "WorkflowRunFailedError",
+    "WorkflowStartError",
     "WorkflowWorldError",
     "sandbox",
     "SandboxPolicy",

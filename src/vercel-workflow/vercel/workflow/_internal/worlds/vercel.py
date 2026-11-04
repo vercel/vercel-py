@@ -320,6 +320,9 @@ def _region_from_tagged_run_id(value: str) -> str | None:
 
 
 class VercelWorld(w.World):
+    atomic_start_hook = True
+    hook_retention = True
+
     def __init__(
         self,
         *,
@@ -497,6 +500,29 @@ class VercelWorld(w.World):
         message = result.get("message") or self._status_message(method, endpoint, resp)
         url = f"{self._base_url}{endpoint}"
         code = result.get("code")
+        if not isinstance(code, str):
+            wire_error = result.get("error")
+            code = wire_error if isinstance(wire_error, str) else None
+        details = result.get("details") or {}
+        if not isinstance(details, dict):
+            details = {}
+        if code == "start-hook-conflict":
+            from ..errors import HookConflictError
+
+            return HookConflictError(result.get("token", ""), result.get("conflictingRunId"))
+        hook_codes = {
+            "start-hook-admission-rejected": "START_HOOK_ADMISSION_REJECTED",
+            "start-hook-disabled": "START_HOOK_ADMISSION_DISABLED",
+            "start-hook-candidate-cancelled": "START_HOOK_CANDIDATE_CANCELLED",
+        }
+        if code in hook_codes:
+            return w.WorkflowWorldError(
+                message,
+                status=resp.status_code,
+                code=hook_codes[code],
+                url=url,
+                reason=details.get("reason"),
+            )
         if resp.status_code == 409:
             return w.EntityConflictError(message)
         if resp.status_code == 410:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from .duration import DurationParam, parse_duration_to_date
 
@@ -44,11 +44,38 @@ class HookConflictError(Exception):
     token: str
     conflicting_run_id: str | None
 
-    def __init__(self, token: str, conflicting_run_id: str | None = None) -> None:
+    def __init__(
+        self,
+        token: str,
+        conflicting_run_id: str | None = None,
+        *,
+        kind: Literal["start"] | None = None,
+    ) -> None:
         owner = f' (run "{conflicting_run_id}")' if conflicting_run_id else ""
         super().__init__(f'Hook token "{token}" is already in use by another workflow{owner}')
         self.token = token
         self.conflicting_run_id = conflicting_run_id
+        self.kind = kind
+        if kind == "start":
+            self.args = (
+                f'No run was created: workflow run "{conflicting_run_id}" '
+                "already owns this hook token",
+            )
+
+
+class WorkflowStartError(Exception):
+    """The candidate may have been admitted or queued; retry with the same token."""
+
+    def __init__(
+        self, run_id: str, stage: Literal["queue", "admission"], cause: Exception | None = None
+    ) -> None:
+        self.run_id = run_id
+        self.stage = stage
+        self.__cause__ = cause
+        super().__init__(
+            f'Could not confirm whether workflow run "{run_id}" was {stage}: {cause}. '
+            "Retrying with the same hook token is safe while the token is held."
+        )
 
 
 class HookDisposedError(Exception):

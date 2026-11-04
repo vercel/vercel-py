@@ -41,6 +41,7 @@ from . import (
     nanoid,
     serialization as ser,
     signature_codec,
+    start_hooks,
     streams,
     ulid,
     world as w,
@@ -888,9 +889,13 @@ class WorkflowOrchestratorContext:
         run_key: bytes | None = None,
         workflow_info: WorkflowInfo | None = None,
         payload_encoder: ser.PayloadEncoder | None = None,
+        start_hook: start_hooks.RunStartHook | None = None,
     ):
         self.run_id = run_id
         self.events = events
+        self.start_hook = start_hook
+        self._start_hook_bound = False
+        self._start_hook_events: deque[w.HookReceivedEvent | w.HookDisposedEvent] = deque()
         # The key is per-run, so it is resolved once and reused for every
         # payload in the replay.
         self.run_key = run_key
@@ -1050,7 +1055,7 @@ class WorkflowOrchestratorContext:
         self.suspensions[sus.correlation_id] = sus
         if step.cancellable:
             cancellation = Cancellation(
-                correlation_id=f"hook_{self.generate_ulid()}",
+                correlation_id=self._mint_hook_id(),
                 token=f"abrt_{ulid}",
                 step_id=sus.correlation_id,
             )
@@ -1143,22 +1148,59 @@ class WorkflowOrchestratorContext:
                 "Pass a non-empty token, or omit it to use a generated one."
             )
 
-        token_retention_until = None
-        if experimental_min_retention is not None:
+        binds_start_hook = (
+            self.start_hook is not None
+            and not self._start_hook_bound
+            and token == self.start_hook.token
+        )
+        if binds_start_hook and (metadata is not None or experimental_min_retention is not None):
+            raise ValueError(
+                "The start hook already exists; set metadata and retention when starting the run, "
+                "rather than in wait()."
+            )
+        # Opening the admitted hook still consumes one positional ID, matching TS.
+        if binds_start_hook:
+            assert self.start_hook is not None
+            self.generate_ulid()
+            correlation_id = self.start_hook.hook_id
+            self._start_hook_bound = True
+        else:
+            correlation_id = self._mint_hook_id()
+        token_retention_until = (
+            self.start_hook.token_retention_until
+            if binds_start_hook and self.start_hook is not None
+            else None
+        )
+        if not binds_start_hook and experimental_min_retention is not None:
             token_retention_until = parse_duration_to_date(
                 experimental_min_retention, now=self.now()
             )
 
         hook = Hook(
-            correlation_id=f"hook_{self.generate_ulid()}",
+            correlation_id=correlation_id,
             token=self.generate_nanoid() if token is None else token,
             hook_cls=hook_cls,
             metadata=None if metadata is None else self.payload_encoder.encode(metadata),
+            has_created_event=binds_start_hook,
             token_retention_until=token_retention_until,
         )
         self.hooks[hook.correlation_id] = hook
         self.suspensions[hook.correlation_id] = hook
+        if binds_start_hook:
+            while self._start_hook_events:
+                event = self._start_hook_events.popleft()
+                if isinstance(event, w.HookDisposedEvent):
+                    hook.has_dispose_event = True
+                    self.dispose_hook(correlation_id=hook.correlation_id)
+                elif not hook.disposed:
+                    hook.receive_payload(event.event_data.payload)
         return core.HookEvent(correlation_id=hook.correlation_id, token=hook.token)
+
+    def _mint_hook_id(self) -> str:
+        correlation_id = f"hook_{self.generate_ulid()}"
+        while self.start_hook is not None and correlation_id == self.start_hook.hook_id:
+            correlation_id = f"hook_{self.generate_ulid()}"
+        return correlation_id
 
     async def run_hook(self, *, correlation_id: str) -> T:
         hook = self.hooks[correlation_id]
@@ -1255,6 +1297,23 @@ class WorkflowOrchestratorContext:
     def _replay_next_event(self) -> None:
         event = self.events[self.replay_index]
         self.replay_index += 1
+        if (
+            self.start_hook is not None
+            and event.correlation_id == self.start_hook.hook_id
+            and isinstance(event, w.HookReceivedEvent | w.HookDisposedEvent)
+        ):
+            if (
+                isinstance(event, w.HookReceivedEvent)
+                and event.event_data.token is not None
+                and event.event_data.token != self.start_hook.token
+            ):
+                self._fail_nondeterminism(
+                    None, NondeterminismError("recorded start hook token differs from admission")
+                )
+                return
+            if not self._start_hook_bound:
+                self._start_hook_events.append(event)
+                return
         if event.correlation_id in self.hooks:
             registered_hook = self.hooks[event.correlation_id]
             match event:
@@ -1584,9 +1643,14 @@ async def _answer_health_check(world: w.World, health: w.HealthCheckPayload) -> 
                 health.correlation_id,
                 error,
             )
-    body = json.dumps(
-        _health_check_response(health.correlation_id, encryption_public_key=encryption_public_key)
-    ).encode()
+    response = _health_check_response(
+        health.correlation_id, encryption_public_key=encryption_public_key
+    )
+    response["capabilities"] = {
+        "atomicStartHook": {"active": world.atomic_start_hook},
+        "hookRetention": {"active": world.hook_retention},
+    }
+    body = json.dumps(response).encode()
     try:
         await world.streams_write(run_id, name, body)
         await world.streams_close(run_id, name)
@@ -1691,6 +1755,20 @@ async def workflow_handler(
     )
     try:
         result = await world.events_create(run_id, started)
+    except errors.HookConflictError:
+        if run_input is not None and run_input.start_hook is not None:
+            return None
+        raise
+    except w.WorkflowWorldError as error:
+        if isinstance(error, w.RunExpiredError):
+            return None
+        if (
+            run_input is not None
+            and run_input.start_hook is not None
+            and error.code == start_hooks.ADMISSION_REJECTED
+        ):
+            return None
+        raise
     except (w.EntityConflictError, w.RunExpiredError):
         # Concurrently completed, failed or cancelled — either during setup or
         # before we got here. Nothing to do and nothing to retry.
@@ -1698,6 +1776,24 @@ async def workflow_handler(
         return None
     assert result.run is not None
     workflow_run = result.run
+    if run_input is not None and run_input.start_hook is not None:
+        if (
+            workflow_run.start_hook is None
+            or workflow_run.start_hook.token != run_input.start_hook.token
+        ):
+            contract_failure = start_hooks.contract_error(
+                "World did not confirm the queued candidate's token reservation; "
+                "no code was executed"
+            )
+            run_key = await _resolve_run_key(world, workflow_run, [])
+            encoder = workflow_run.payload_encoder(encryption_key=run_key)
+            await world.events_create(
+                run_id,
+                w.RunFailedEventData(
+                    error=encoder.encode(contract_failure), error_code="WORLD_CONTRACT_ERROR"
+                ).into_event(),
+            )
+            raise contract_failure
 
     if workflow_run.status == "cancelled":
         return None
@@ -1959,6 +2055,7 @@ async def _workflow_replay_pass(
         registry=registry,
         run_key=run_key,
         payload_encoder=workflow_run.payload_encoder(encryption_key=run_key),
+        start_hook=start_hooks.resolve(workflow_run, events, req.run_input),
         workflow_info=WorkflowInfo(
             run_id=run_id,
             workflow_name=workflow_run.workflow_name,
@@ -2414,7 +2511,7 @@ async def _execute_step(
         current_attempt = step_run.attempt
         error_text = "".join(traceback.format_exception_only(type(e), e)).strip()
 
-        fatal = isinstance(e, errors.FatalError)
+        fatal = isinstance(e, errors.FatalError) or getattr(e, "fatal", False) is True
         if fatal or current_attempt >= step.max_retries + 1:
             failure: Exception = e
             if fatal:
@@ -2713,6 +2810,12 @@ async def resume_hook(token_or_hook: str | core.Hook, payload: Any) -> core.Hook
     else:
         hook = token_or_hook
         run = await world.runs_get(hook.run_id)
+    if (
+        run.start_hook is not None
+        and hook.hook_id == w.start_hook_id(run.run_id)
+        and run.status in {"completed", "failed", "cancelled"}
+    ):
+        raise w.HookNotFoundError(token=hook.token)
     payload_encoder = await _hook_resume_payload_encoder(world, run)
     data = w.HookReceivedEventData(payload=payload_encoder.encode(payload))
     await world.events_create(hook.run_id, data.into_event(hook.hook_id))

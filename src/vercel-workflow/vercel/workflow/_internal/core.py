@@ -107,6 +107,13 @@ def _bind_arguments(
     return tuple(positional), keyword
 
 
+@dataclasses.dataclass(frozen=True)
+class _StartHookOptions:
+    token: str
+    metadata: Any = None
+    experimental_min_retention: DurationParam | None = None
+
+
 class _ConfigurableWorkflow(abc.ABC, Generic[P, T]):
     @abc.abstractmethod
     def _configured(self) -> ConfiguredWorkflow[P, T]: ...
@@ -122,6 +129,28 @@ class _ConfigurableWorkflow(abc.ABC, Generic[P, T]):
     def with_deployment_id(self, deployment_id: str) -> ConfiguredWorkflow[P, T]:
         """Return a new configuration targeting a deployment ID or ``"latest"``."""
         return dataclasses.replace(self._configured(), deployment_id=deployment_id)
+
+    def with_experimental_hook(
+        self,
+        *,
+        token: str,
+        metadata: Any = None,
+        experimental_min_retention: DurationParam | None = None,
+    ) -> ConfiguredWorkflow[P, T]:
+        """Atomically reserve a hook token when starting the run (experimental).
+
+        Conflicting starts raise HookConflictError naming the existing owner.
+        The hook is resumable as soon as start() returns, before the body runs.
+        Open it with BaseHook.wait(token=...) without metadata or retention.
+        Relative retention starts at each start() call; disposal releases the
+        token immediately, even if retention remains.
+        """
+        if not isinstance(token, str) or not token:
+            raise ValueError("start hook token must be a non-empty string")
+        return dataclasses.replace(
+            self._configured(),
+            start_hook=_StartHookOptions(token, metadata, experimental_min_retention),
+        )
 
     def with_attributes(
         self,
@@ -193,6 +222,7 @@ class Workflow(_ConfigurableWorkflow[P, T]):
 @dataclasses.dataclass(frozen=True)
 class ConfiguredWorkflow(_ConfigurableWorkflow[P, T]):
     workflow: Workflow[P, T]
+    start_hook: _StartHookOptions | None = None
     compress_arguments: bool = True
     region: str | None = None
     deployment_id: str | None = None
