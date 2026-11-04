@@ -6,6 +6,7 @@ import gzip
 import os
 import sys
 import zlib
+from typing import Literal, TypeAlias
 
 if sys.version_info >= (3, 14):
     from compression import zstd as _zstd
@@ -19,15 +20,17 @@ ZSTD_LEVEL = 3
 GZIP = b"gzip"
 ZSTD = b"zstd"
 
+CompressionMode: TypeAlias = Literal["none", "auto"]
+
 
 class DecompressionError(Exception):
     """A compressed payload is invalid."""
 
 
-def maybe_compress(data: bytes, *, enabled: bool) -> bytes:
+def maybe_compress(data: bytes, *, mode: CompressionMode) -> bytes:
     """Compress *data* when the target run supports it and doing so pays off."""
     if (
-        not enabled
+        mode == "none"
         or len(data) < COMPRESSION_MIN_BYTES
         or os.getenv("WORKFLOW_DISABLE_COMPRESSION") == "1"
     ):

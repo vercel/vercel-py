@@ -350,7 +350,7 @@ class BaseWorkflowRun(BaseModel):
                     compression = False
 
         return PayloadEncoder(
-            compression=compression,
+            compression="auto" if compression else "none",
             encryption_key=encryption_key,
             recipient_public_key=recipient_public_key,
         )

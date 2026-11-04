@@ -310,7 +310,8 @@ class _RunStart(Generic[T]):
                 encryption.derive_run_public_key(run_key) if run_key is not None else None
             ),
             input=ser.PayloadEncoder(
-                compression=configured.compress_arguments, encryption_key=run_key
+                compression="auto" if configured.compress_arguments else "none",
+                encryption_key=run_key,
             ).encode(arguments),
             execution_context={
                 "workflowCoreVersion": w.WORKFLOW_CORE_COMPAT_VERSION,
