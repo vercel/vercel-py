@@ -118,6 +118,10 @@ class _ConfigurableWorkflow(abc.ABC, Generic[P, T]):
         """Return a new configuration pinning run data and queue dispatch to a region."""
         return dataclasses.replace(self._configured(), region=region)
 
+    def with_deployment_id(self, deployment_id: str) -> ConfiguredWorkflow[P, T]:
+        """Return a new configuration targeting a deployment ID or ``"latest"``."""
+        return dataclasses.replace(self._configured(), deployment_id=deployment_id)
+
 
 class Workflow(_ConfigurableWorkflow[P, T]):
     def __init__(
@@ -151,6 +155,7 @@ class ConfiguredWorkflow(_ConfigurableWorkflow[P, T]):
     workflow: Workflow[P, T]
     compress_arguments: bool = True
     region: str | None = None
+    deployment_id: str | None = None
 
     def _configured(self) -> ConfiguredWorkflow[P, T]:
         return self

@@ -262,3 +262,160 @@ def test_region_tag_encoding_matches_typescript_vectors(monkeypatch, raw, region
     monkeypatch.setattr(vercel_mod._run_id_state, "last", 0)
     assert vercel_mod._create_run_id(region=region) == expected
     assert vercel_mod._region_from_tagged_run_id("wrun_" + expected) == region
+
+
+async def test_health_probe_uses_json_transport(monkeypatch):
+    world = vercel_mod.VercelWorld()
+    client = Mock()
+    client.send = AsyncMock(return_value="message")
+    monkeypatch.setattr(world, "_queue_client", lambda **kwargs: client)
+    await world.queue(
+        "__wkf_workflow_health_check",
+        w.HealthCheckPayload(health_check=True, correlation_id="id", probe_run_id="wrun_1"),
+        deployment_id="dpl_target",
+        spec_version=1,
+    )
+    topic, payload = client.send.call_args.args
+    assert topic.transport.content_type == "application/json"
+    assert json.loads(topic.transport.serialize(payload))["payload"]["probeRunId"] == "wrun_1"
+
+
+@pytest.mark.parametrize("runtime", [False, True])
+@pytest.mark.parametrize("explicit_token", [None, "explicit-token"])
+@pytest.mark.parametrize("oidc_available", [False, True])
+async def test_latest_deployment_identity_and_team(
+    monkeypatch, runtime, explicit_token, oidc_available
+):
+    from vercel.workflow._internal.worlds import vercel as mod
+
+    monkeypatch.setenv("VERCEL_DEPLOYMENT_ID", "dpl_current")
+    monkeypatch.setenv("VERCEL_TOKEN", "user-token")
+    monkeypatch.setenv("VERCEL", "1" if runtime else "0")
+    oidc = AsyncMock(return_value="deployment-token")
+    if not oidc_available:
+        oidc.side_effect = mod.VercelOidcTokenError("unavailable")
+    monkeypatch.setattr(mod, "get_vercel_oidc_token", oidc)
+    response = Mock(is_success=True)
+    response.json.return_value = {"id": "dpl_latest"}
+    client = Mock()
+    client.get = AsyncMock(return_value=response)
+    context = Mock()
+    context.__aenter__ = AsyncMock(return_value=client)
+    context.__aexit__ = AsyncMock(return_value=False)
+    monkeypatch.setattr(mod.httpx, "AsyncClient", lambda: context)
+    assert (
+        await vercel_mod.VercelWorld(
+            token=explicit_token, team_id="team_owner"
+        ).resolve_latest_deployment_id()
+        == "dpl_latest"
+    )
+    args, kwargs = client.get.call_args
+    assert args[0].endswith("/resolve-latest-deployment/dpl_current")
+    assert kwargs["params"] == {"teamId": "team_owner"}
+    assert kwargs["headers"]["Authorization"] == "Bearer " + (
+        explicit_token or ("deployment-token" if runtime and oidc_available else "user-token")
+    )
+    assert oidc.await_count == (1 if runtime and explicit_token is None else 0)
+
+
+@pytest.mark.parametrize("runtime", [False, True])
+async def test_latest_deployment_attempts_oidc_only_once(monkeypatch, runtime):
+    monkeypatch.setenv("VERCEL_DEPLOYMENT_ID", "dpl_current")
+    monkeypatch.setenv("VERCEL", "1" if runtime else "0")
+    monkeypatch.delenv("VERCEL_TOKEN", raising=False)
+    error = vercel_mod.VercelOidcTokenError("unavailable")
+    oidc = AsyncMock(side_effect=error)
+    monkeypatch.setattr(vercel_mod, "get_vercel_oidc_token", oidc)
+    with pytest.raises(RuntimeError, match="no OIDC token") as caught:
+        await vercel_mod.VercelWorld().resolve_latest_deployment_id()
+    assert caught.value.__cause__ is error
+    oidc.assert_awaited_once()
+
+
+async def test_latest_deployment_preserves_unexpected_oidc_errors(monkeypatch):
+    monkeypatch.setenv("VERCEL_DEPLOYMENT_ID", "dpl_current")
+    monkeypatch.setenv("VERCEL", "1")
+    monkeypatch.setenv("VERCEL_TOKEN", "fallback")
+    error = ValueError("unexpected")
+    monkeypatch.setattr(vercel_mod, "get_vercel_oidc_token", AsyncMock(side_effect=error))
+    with pytest.raises(ValueError) as caught:
+        await vercel_mod.VercelWorld().resolve_latest_deployment_id()
+    assert caught.value is error
+
+
+async def test_legacy_target_omits_inline_input_but_preserves_invocation_fields(monkeypatch):
+    world = vercel_mod.VercelWorld()
+    client = Mock(send=AsyncMock(return_value="message"))
+    monkeypatch.setattr(world, "_queue_client", lambda **kwargs: client)
+    message = w.WorkflowInvokePayload(
+        run_id="wrun_1",
+        step_id="step_1",
+        step_name="greet",
+        run_input=w.RunInput(
+            input=b"devl[]", deployment_id="dpl_target", workflow_name="greet", spec_version=2
+        ),
+    )
+    await world.queue("__wkf_workflow_greet", message, deployment_id="dpl_target", spec_version=2)
+    topic, payload = client.send.call_args.args
+    assert topic.transport.content_type == "application/json"
+    wire = json.loads(topic.transport.serialize(payload))
+    assert wire["payload"] == {"runId": "wrun_1", "stepId": "step_1", "stepName": "greet"}
+
+
+@pytest.mark.parametrize("status,body", [(404, {}), (500, {}), (200, {}), (200, {"id": 42})])
+async def test_latest_deployment_rejects_api_errors_and_malformed_responses(
+    monkeypatch, status, body
+):
+    monkeypatch.setenv("VERCEL_DEPLOYMENT_ID", "dpl_current")
+    response = Mock(is_success=status == 200, status_code=status)
+    response.json.return_value = body
+    client = Mock(get=AsyncMock(return_value=response))
+    context = Mock()
+    context.__aenter__ = AsyncMock(return_value=client)
+    context.__aexit__ = AsyncMock(return_value=False)
+    monkeypatch.setattr(vercel_mod.httpx, "AsyncClient", lambda: context)
+    with pytest.raises(w.WorkflowWorldError if status != 200 else ValueError) as caught:
+        await vercel_mod.VercelWorld(
+            token="explicit", team_id="team_owner"
+        ).resolve_latest_deployment_id()
+    if status == 404:
+        assert "team_id" in str(caught.value)
+
+
+async def test_latest_deployment_requires_current_deployment(monkeypatch):
+    monkeypatch.delenv("VERCEL_DEPLOYMENT_ID", raising=False)
+    client = Mock()
+    monkeypatch.setattr(vercel_mod.httpx, "AsyncClient", client)
+    with pytest.raises(ValueError, match="VERCEL_DEPLOYMENT_ID"):
+        await vercel_mod.VercelWorld(token="explicit").resolve_latest_deployment_id()
+    client.assert_not_called()
+
+
+async def test_health_probe_routes_by_correlation_id_not_probed_run(monkeypatch):
+    world = vercel_mod.VercelWorld()
+    client = Mock(send=AsyncMock(return_value="message"))
+    selected = []
+
+    def queue_client(**kwargs):
+        selected.append(kwargs)
+        return client
+
+    monkeypatch.setattr(world, "_queue_client", queue_client)
+    correlation = world.create_run_id(region="iad1")
+    run_id = f"wrun_{world.create_run_id(region='fra1')}"
+    await world.queue(
+        "__wkf_workflow_health_check",
+        w.HealthCheckPayload(health_check=True, correlation_id=correlation, probe_run_id=run_id),
+        deployment_id="dpl_target",
+        spec_version=1,
+    )
+    assert selected == [{"deployment": "dpl_target", "region": "iad1"}]
+
+
+async def test_local_world_latest_is_noop_and_warns_once(monkeypatch, caplog):
+    monkeypatch.setattr(w, "_latest_deployment_warned", False)
+    world = Mock(spec=w.World)
+    world.get_deployment_id = AsyncMock(return_value="local")
+    assert await w.World.resolve_latest_deployment_id(world) == "local"
+    assert await w.World.resolve_latest_deployment_id(world) == "local"
+    assert sum("has no effect" in record.message for record in caplog.records) == 1

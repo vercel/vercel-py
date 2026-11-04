@@ -1,6 +1,7 @@
 import abc
 import dataclasses
 import json
+import logging
 import os
 import pathlib
 import re
@@ -35,6 +36,8 @@ from .utils import Utf16MaxLength
 
 if TYPE_CHECKING:
     from .serialization import PayloadEncoder
+
+logger = logging.getLogger("vercel.workflow")
 
 T = TypeVar("T")
 QueuePrefix: TypeAlias = str
@@ -272,7 +275,12 @@ class HealthCheckPayload(BaseModel):
     # handler answers a probe *instead of* doing the work the message asked for.
     health_check: Literal[True] = pydantic.Field(alias="__healthCheck")
     correlation_id: str = pydantic.Field(alias="correlationId")
-    run_id: str | None = pydantic.Field(default=None, alias="runId", exclude_if=lambda e: e is None)
+    probe_run_id: str | None = pydantic.Field(
+        default=None,
+        alias="probeRunId",
+        validation_alias=pydantic.AliasChoices("probeRunId", "runId"),
+        exclude_if=lambda e: e is None,
+    )
 
 
 QueuePayload: TypeAlias = WorkflowInvokePayload | HealthCheckPayload
@@ -350,7 +358,7 @@ class BaseWorkflowRun(BaseModel):
                     compression = False
 
         return PayloadEncoder(
-            compression=compression,
+            compression="auto" if compression else "none",
             encryption_key=encryption_key,
             recipient_public_key=recipient_public_key,
         )
@@ -1199,6 +1207,7 @@ class HTTPHandler(Protocol):
 
 
 _generate_run_ulid = ulid.monotonic_factory()
+_latest_deployment_warned = False
 
 
 class World(metaclass=abc.ABCMeta):
@@ -1208,6 +1217,16 @@ class World(metaclass=abc.ABCMeta):
     def create_run_id(self, *, region: str | None = None) -> str:
         """Mint a run ID; worlds without regions ignore the hint."""
         return _generate_run_ulid()
+
+    async def resolve_latest_deployment_id(self) -> str:
+        """Worlds without atomic deployments use their current deployment."""
+        global _latest_deployment_warned
+        if not _latest_deployment_warned:
+            logger.warning(
+                "deployment_id='latest' has no effect in this World; using the current deployment"
+            )
+            _latest_deployment_warned = True
+        return await self.get_deployment_id()
 
     def get_environment(self) -> str | None:
         """The environment this World's writes are attributed to."""
