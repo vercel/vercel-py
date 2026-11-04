@@ -51,7 +51,15 @@ CI checks these encodings against the real JavaScript implementations: the deval
 
 Hooks pause a run until an external caller resumes it, and streams let steps publish incremental output that clients read while the run is in progress.
 
-A `BaseHook` subclass waits under a generated or caller-chosen token, and resuming it records the payload as an event. Hook metadata is written once at registration and is not part of the payload.
+A [[src/vercel-workflow/vercel/workflow/_internal/core.py#BaseHook]] subclass waits under a generated or caller-chosen token, and resuming it records the payload as an event. Hook metadata is written once at registration and is not part of the payload.
+
+[[src/vercel-workflow/vercel/workflow/_internal/core.py#BaseHook#wait]] accepts `experimental_min_retention`, resolved against the workflow's deterministic clock. The recorded deadline is reused on replay and exposed on the public [[src/vercel-workflow/vercel/workflow/_internal/core.py#Hook]] as `token_retention_until`. A terminal run keeps the token reserved until that deadline; explicit disposal releases it immediately. A retained terminal hook cannot receive further payloads.
+
+[[src/vercel-workflow/vercel/workflow/_internal/worlds/local.py#LocalWorld]] enforces a default 30-day retention limit, configurable with `WORKFLOW_LOCAL_HOOK_RETENTION_LIMIT_DAYS`. It releases expired claims only after their runs become terminal, serializes token handoffs across processes, and protects successor claims from delayed cleanup.
+
+[[src/vercel-workflow/vercel/workflow/_internal/worlds/local.py#LocalWorld#_events_create_impl]] checks retention limits in hook creation after run-state validation and before changing token claims. Committed resume retries remain idempotent on terminal runs; new payloads are rejected before a resume claim is written.
+
+Retention tests follow the existing hook test boundaries: [[src/vercel-workflow/tests/unit/test_workflow_hook_registration.py]] covers deadline calculation and replay; [[src/vercel-workflow/tests/unit/test_workflow_hook_conflict.py]] covers reserved tokens, expiry, limits, and competing claims; [[src/vercel-workflow/tests/unit/test_workflow_hook_disposal.py]] covers release and terminal cleanup; [[src/vercel-workflow/tests/unit/test_workflow_hook_created_models.py]] covers wire encoding.
 
 A run's stream ([[src/vercel-workflow/vercel/workflow/_internal/streams.py]]) is an append-only, indexed log of chunks. Only steps can write to it, and nothing closes it automatically. A step is not recorded as complete until its chunks are flushed, and a retried step writes its chunks again. Readers resume exactly from a chunk index and reconnect when the server ends a long read.
 
@@ -67,7 +75,7 @@ Local filesystem writers can share directory leases with TypeScript's proper-loc
 
 [[src/vercel-workflow/vercel/workflow/_internal/worlds/local.py#LocalWorld#_delete_hook]] removes a token claim only when its run and hook IDs still match the captured hook. Permanent disposal, wait, and attribute claim markers retain their exclusive-create semantics. [[src/vercel-workflow/tests/unit/test_workflow_local_hook_locking.py]] covers lease integration, mutation serialization, and successor-claim protection independently of retention.
 
-[[src/vercel-workflow/vercel/workflow/_internal/worlds/local.py#LocalWorld#_hook_token_claim_releasable]] lets a new claimant recover a token whose owner run is terminal or whose hook has a durable disposal marker, even if cleanup was cancelled or timed out. Recovery holds the token lease; a missing owner run alone does not release a claim. Disposal rejects an initially missing hook rather than deleting a concurrently published hook without its token lock. Regression tests cover cancellation, timeout, committed disposal debris, and publication after the initial missing read.
+[[src/vercel-workflow/vercel/workflow/_internal/worlds/local.py#LocalWorld#_hook_token_claim_releasable]] lets a new claimant recover a token whose owner run is terminal and retention has ended, or whose hook has a durable disposal marker, even if cleanup was interrupted. Recovery holds the token lease; a missing owner run alone does not release a claim. Disposal rejects an initially missing hook rather than deleting a concurrently published hook without its token lock. Regression tests cover cancellation, timeout, committed disposal debris, and publication after the initial missing read.
 
 [[src/vercel-workflow/tests/unit/test_workflow_file_lock.py]] covers contention, cancellation, stale recovery, changed observations, heartbeat renewal, and ownership loss. [[src/vercel-workflow/tests/integration/test_file_lock_interop.py]] runs the pinned proper-lockfile npm package to verify mutual exclusion, heartbeat compatibility, release, and recovery after either runtime crashes.
 

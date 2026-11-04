@@ -249,6 +249,7 @@ class Hook(BaseSuspension, Generic[T]):
     conflicting_run: Run[Any] | None = None
     hook_cls: type[T]
     metadata: bytes | None = None
+    token_retention_until: datetime | None = None
 
     def fail(self, exc: Exception) -> None:
         while self.futures:
@@ -1129,7 +1130,12 @@ class WorkflowOrchestratorContext:
         )
 
     def create_hook(
-        self, token: str | None, hook_cls: type[T], *, metadata: Any = None
+        self,
+        token: str | None,
+        hook_cls: type[T],
+        *,
+        metadata: Any = None,
+        experimental_min_retention: DurationParam | None = None,
     ) -> core.HookEvent[T]:
         if token == "":
             raise ValueError(
@@ -1137,11 +1143,18 @@ class WorkflowOrchestratorContext:
                 "Pass a non-empty token, or omit it to use a generated one."
             )
 
+        token_retention_until = None
+        if experimental_min_retention is not None:
+            token_retention_until = parse_duration_to_date(
+                experimental_min_retention, now=self.now()
+            )
+
         hook = Hook(
             correlation_id=f"hook_{self.generate_ulid()}",
             token=self.generate_nanoid() if token is None else token,
             hook_cls=hook_cls,
             metadata=None if metadata is None else self.payload_encoder.encode(metadata),
+            token_retention_until=token_retention_until,
         )
         self.hooks[hook.correlation_id] = hook
         self.suspensions[hook.correlation_id] = hook
@@ -1335,6 +1348,7 @@ class WorkflowOrchestratorContext:
                     hook = self.suspensions[event.correlation_id]
                 hook.has_created_event = True
                 if isinstance(hook, Hook):
+                    hook.token_retention_until = event.event_data.token_retention_until
                     hook.notify_created()
                 else:
                     assert isinstance(hook, Cancellation)
@@ -1793,9 +1807,11 @@ async def _flush_hook_lifecycle_events(
                 try:
                     result = await world.events_create(
                         context.run_id,
-                        w.HookCreatedEventData(token=hook.token, metadata=hook.metadata).into_event(
-                            hook.correlation_id
-                        ),
+                        w.HookCreatedEventData(
+                            token=hook.token,
+                            metadata=hook.metadata,
+                            token_retention_until=hook.token_retention_until,
+                        ).into_event(hook.correlation_id),
                     )
                 except w.EntityConflictError:
                     logger.debug("Workflow hook %r has already been created", hook.correlation_id)
@@ -2650,6 +2666,7 @@ async def _public_hook(
         run_id=hook.run_id,
         created_at=hook.created_at,
         metadata=metadata,
+        token_retention_until=hook.token_retention_until,
     )
 
 

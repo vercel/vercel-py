@@ -324,11 +324,18 @@ class Hook:
     run_id: str
     created_at: datetime.datetime
     metadata: Any = None
+    token_retention_until: datetime.datetime | None = None
 
 
 class BaseHook:
     @classmethod
-    def wait(cls, *, token: str | None = None, metadata: Any = None) -> HookEvent[Self]:
+    def wait(
+        cls,
+        *,
+        token: str | None = None,
+        metadata: Any = None,
+        experimental_min_retention: DurationParam | None = None,
+    ) -> HookEvent[Self]:
         from . import runtime
 
         try:
@@ -336,7 +343,9 @@ class BaseHook:
         except LookupError:
             raise RuntimeError("cannot call wait() outside workflow") from None
         else:
-            return ctx.create_hook(token, cls, metadata=metadata)
+            return ctx.create_hook(
+                token, cls, metadata=metadata, experimental_min_retention=experimental_min_retention
+            )
 
     async def resume(self, token_or_hook: str | Hook, **kwargs) -> Hook:
         from . import runtime

@@ -15,7 +15,7 @@ import threading
 import traceback
 from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from contextlib import AbstractAsyncContextManager
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, TypeVar, cast
 from uuid import uuid4
 
@@ -69,6 +69,9 @@ class HookTokenClaim(w.BaseModel):
     hook_id: str = pydantic.Field(alias="hookId")
     run_id: str = pydantic.Field(alias="runId")
     event_id: str | None = pydantic.Field(default=None, alias="eventId")
+    token_retention_until: datetime | None = pydantic.Field(
+        default=None, alias="tokenRetentionUntil"
+    )
 
 
 class HookResumeClaim(w.BaseModel):
@@ -474,6 +477,13 @@ def _wipe_flat_layout(data_dir: pathlib.Path) -> None:
 
 class LocalWorld(w.World):
     def __init__(self) -> None:
+        retention_limit = float(os.getenv("WORKFLOW_LOCAL_HOOK_RETENTION_LIMIT_DAYS", "30"))
+        if not math.isfinite(retention_limit) or retention_limit <= 0:
+            raise w.WorkflowWorldError(
+                "WORKFLOW_LOCAL_HOOK_RETENTION_LIMIT_DAYS must be a positive number",
+                status=400,
+            )
+        self._hook_retention_limit = timedelta(days=retention_limit)
         self.monotonic_ulid = monotonic_factory()
         self.data_dir = pathlib.Path(os.getenv("WORKFLOW_LOCAL_DATA_DIR", ".workflow-data"))
         self._embedded_queue_service_cm: AbstractAsyncContextManager[Any] | None
@@ -639,8 +649,7 @@ class LocalWorld(w.World):
         disposed = self.data_dir / ".locks" / "hooks" / f"{claim.hook_id}.disposed"
         if disposed.exists():
             return True
-        run = read_json(self.data_dir / "runs" / f"{claim.run_id}.json", w.WorkflowRunAdaptor)
-        return run is not None and is_run_terminal(run.status)
+        return self._hook_retention_ended(claim.run_id, claim.token_retention_until)
 
     @contextlib.asynccontextmanager
     async def _hook_token_lock(self, token: str) -> AsyncIterator[None]:
@@ -651,6 +660,12 @@ class LocalWorld(w.World):
                 yield
         except FileLockError as exc:
             raise w.WorkflowWorldError(f"Hook token claim lock failed: {exc}", status=500) from exc
+
+    def _hook_retention_ended(self, run_id: str, deadline: datetime | None) -> bool:
+        if deadline is not None and deadline > js_now():
+            return False
+        run = read_json(self.data_dir / "runs" / f"{run_id}.json", w.WorkflowRunAdaptor)
+        return run is not None and is_run_terminal(run.status)
 
     def _delete_hook(self, hook: w.Hook) -> None:
         # Caller holds this token's lock. An old hook's cleanup must never
@@ -671,7 +686,8 @@ class LocalWorld(w.World):
             hook = read_json(hook_path, w.Hook)
             if hook is not None and hook.run_id == run_id:
                 async with self._hook_token_lock(hook.token):
-                    self._delete_hook(hook)
+                    if self._hook_retention_ended(hook.run_id, hook.token_retention_until):
+                        self._delete_hook(hook)
 
     async def get_deployment_id(self) -> str:
         return ""
@@ -826,6 +842,8 @@ class LocalWorld(w.World):
                     continue
                 hook = read_json(hook_path, w.Hook)
                 if hook is not None and hook.token == token:
+                    if self._hook_retention_ended(hook.run_id, hook.token_retention_until):
+                        continue
                     return hook
         raise w.HookNotFoundError(token=token)
 
@@ -1018,6 +1036,15 @@ class LocalWorld(w.World):
             if existing_hook is None:
                 # Already disposed (or never created). Mirrors the backend's 404.
                 raise w.HookNotFoundError(hook_id=data.correlation_id)
+
+            if (
+                isinstance(data, w.HookReceivedEvent)
+                and current_run is not None
+                and is_run_terminal(current_run.status)
+            ):
+                raise w.EntityConflictError(
+                    f"Cannot resume hook on run in terminal state {current_run.status}"
+                )
 
             if claim_path is not None and resume is not None:
                 converged = self._claim_hook_resume(
@@ -1271,10 +1298,20 @@ class LocalWorld(w.World):
                 write_json(step_path, step, overwrite=True)
 
         elif data.event_type == "hook_created":
+            hook_data = data.event_data
+            if (
+                hook_data.token_retention_until is not None
+                and hook_data.token_retention_until > now + self._hook_retention_limit
+            ):
+                raise w.WorkflowWorldError(
+                    "Hook minimum retention cannot exceed "
+                    f"{self._hook_retention_limit.total_seconds() / 86400:g} days "
+                    "in the Local World",
+                    status=400,
+                )
             dispose_lock = self.data_dir / ".locks" / "hooks" / f"{data.correlation_id}.disposed"
             if dispose_lock.exists():
                 raise w.EntityConflictError(f'Hook "{data.correlation_id}" already disposed')
-            hook_data = data.event_data
             constraint_path = self._hook_token_path(hook_data.token)
             existing_claim = read_json(constraint_path, HookTokenClaim)
             if (
@@ -1286,17 +1323,21 @@ class LocalWorld(w.World):
                 # All claim writers hold the token lock, including delayed
                 # cleanup, so the ownership check and unlink are serialized.
                 constraint_path.unlink()
+                (self.data_dir / "hooks" / f"{existing_claim.hook_id}.json").unlink(missing_ok=True)
             token_claimed = write_exclusive(
                 constraint_path,
                 # Compact, key-for-key what TS writes here — including the
                 # `eventId` its cross-process claim recovery reads back.
                 json.dumps(
-                    HookTokenClaim(
-                        token=hook_data.token,
-                        hook_id=data.correlation_id,
-                        run_id=effective_run_id,
-                        event_id=event_id,
-                    ).model_dump(exclude_none=True),
+                    _encode_js(
+                        HookTokenClaim(
+                            token=hook_data.token,
+                            hook_id=data.correlation_id,
+                            run_id=effective_run_id,
+                            event_id=event_id,
+                            token_retention_until=hook_data.token_retention_until,
+                        ).model_dump(exclude_none=True)
+                    ),
                     separators=(",", ":"),
                     ensure_ascii=False,
                 ),
@@ -1346,6 +1387,7 @@ class LocalWorld(w.World):
                 spec_version=data.spec_version,
                 is_webhook=False,
                 is_system=bool(hook_data.is_system),
+                token_retention_until=hook_data.token_retention_until,
             )
             hook_path = self.data_dir / "hooks" / f"{data.correlation_id}.json"
             write_json(hook_path, hook)
