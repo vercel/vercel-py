@@ -118,12 +118,17 @@ class _Configurable(abc.ABC, Generic[Res]):
         """Return a new configuration that skips startup argument compression."""
         return self.configure(dataclasses.replace(self.get_config(), compress_arguments=False))
 
+    def with_region(self, region: str) -> Res:
+        """Return a new configuration pinning run data and queue dispatch to a region."""
+        return self.configure(dataclasses.replace(self.get_config(), region=region))
+
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class Configuration(_Configurable["Configuration"]):
     """Immutable startup options that can be shared across workflows."""
 
     compress_arguments: bool = True
+    region: str | None = None
 
     def get_config(self) -> Configuration:
         return self

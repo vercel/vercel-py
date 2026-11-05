@@ -15,7 +15,6 @@ from . import (
     serialization as ser,
     signature_codec,
     streams,
-    ulid,
     utils,
     world as w,
 )
@@ -24,7 +23,6 @@ P = ParamSpec("P")
 T = TypeVar("T")
 Chunk = TypeVar("Chunk")
 logger = logging.getLogger("vercel.workflow")
-_generate_run_ulid = ulid.monotonic_factory()
 
 
 @dataclass
@@ -278,8 +276,7 @@ async def start(
     world = w.get_world()
     deployment_id = await world.get_deployment_id()
     namespace = wf._resolve_queue_namespace()
-    # TODO: add and prefer world.create_run_id()
-    run_id = f"wrun_{_generate_run_ulid()}"
+    run_id = f"wrun_{world.create_run_id(region=config.region)}"
     run_key = await world.run_key(run_id, deployment_id=deployment_id)
     encryption_public_key = (
         encryption.derive_run_public_key(run_key) if run_key is not None else None
@@ -316,6 +313,7 @@ async def start(
             ),
         ),
         deployment_id=deployment_id,
+        region=config.region,
     )
 
     return Run(run_id, output_validator=wf.codec.validate_return)

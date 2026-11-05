@@ -9,16 +9,54 @@ timestamps go backwards or are the same.
 import os
 import time
 from collections.abc import Callable
+from math import ceil
 from typing import Protocol
 
 # Crockford's Base32 alphabet
 ENCODING = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 ENCODING_LEN = len(ENCODING)
+BITS_PER_CHAR = 5  # Each Crockford Base32 character encodes 5 bits.
 
-# ULID structure: 48 bits timestamp + 80 bits randomness = 128 bits total
-TIME_MAX = 281474976710655  # 2^48 - 1
-TIME_LEN = 10  # characters for timestamp part
-RANDOM_LEN = 16  # characters for random part
+# Standard ULID layout (128 bits, most significant bit first):
+# +----------------+----------------+
+# | timestamp (ms) | randomness     |
+# | 48 bits        | 80 bits        |
+# +----------------+----------------+
+TIME_FIELD_BITS = 48
+RANDOM_FIELD_BITS = 80
+VALUE_LIMIT_EXCLUSIVE = 1 << (TIME_FIELD_BITS + RANDOM_FIELD_BITS)
+TIME_MAX = (1 << TIME_FIELD_BITS) - 1
+TIME_LEN = ceil(TIME_FIELD_BITS / BITS_PER_CHAR)
+RANDOM_LEN = ceil(RANDOM_FIELD_BITS / BITS_PER_CHAR)
+
+
+def to_int(value: str) -> int:
+    """Decode a 26-character Crockford Base32 ULID as an unsigned 128-bit integer.
+
+    Accepts ASCII in either case. Malformed or overflowing values raise ValueError.
+    """
+    if len(value) != TIME_LEN + RANDOM_LEN or not value.isascii():
+        raise ValueError("malformed ulid")
+    result = 0
+    for char in value.upper():
+        index = ENCODING.find(char)
+        if index < 0:
+            raise ValueError(f"invalid character found: {char}")
+        result = result * ENCODING_LEN + index
+    if result >= VALUE_LIMIT_EXCLUSIVE:
+        raise ValueError("malformed ulid, value exceeds 128 bits")
+    return result
+
+
+def from_int(value: int) -> str:
+    """Encode an unsigned 128-bit integer as an uppercase, 26-character ULID."""
+    if not 0 <= value < VALUE_LIMIT_EXCLUSIVE:
+        raise ValueError("ULID value must be an unsigned 128-bit integer")
+    chars = []
+    for _ in range(TIME_LEN + RANDOM_LEN):
+        value, index = divmod(value, ENCODING_LEN)
+        chars.append(ENCODING[index])
+    return "".join(reversed(chars))
 
 
 def _encode_time(timestamp_ms: int, length: int) -> str:
