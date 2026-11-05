@@ -269,10 +269,8 @@ async def start(
     *args: P.args,
     **kwargs: P.kwargs,
 ) -> Run[T]:
-    compress_arguments = True
-    if isinstance(wf, core.ConfiguredWorkflow):
-        compress_arguments = wf.compress_arguments
-        wf = wf.workflow
+    config = wf.get_config()
+    wf = wf.configure(config).workflow
     # Bound before anything is written, so an arity mistake raises here instead
     # of leaving a run behind that fails when its body is invoked.
     bound_args, bound_kwargs = wf.bind_arguments(args, kwargs)
@@ -286,9 +284,8 @@ async def start(
     encryption_public_key = (
         encryption.derive_run_public_key(run_key) if run_key is not None else None
     )
-    input_data = ser.PayloadEncoder(compression=compress_arguments, encryption_key=run_key).encode(
-        ser.argument_array(dumped_args, dumped_kwargs)
-    )
+    encoder = ser.PayloadEncoder(compression=config.compress_arguments, encryption_key=run_key)
+    input_data = encoder.encode(ser.argument_array(dumped_args, dumped_kwargs))
     execution_context: dict[str, Any] = {
         "workflowCoreVersion": w.WORKFLOW_CORE_COMPAT_VERSION,
         "hookResumeInputVersion": w.HOOK_RESUME_INPUT_VERSION,

@@ -15,6 +15,7 @@ import pytest
 
 from tests.payloads import PLAIN_ENCODER
 from vercel.workflow import (
+    Configuration,
     ConfiguredWorkflow,
     Run,
     WorkflowRunFailedError,
@@ -748,15 +749,59 @@ def start_world(monkeypatch):
 
 # @lat: [[vercel-workflow#Configured workflows]]
 def test_configuration_is_immutable_and_does_not_modify_the_workflow():
+    default = upload.get_config()
     plain = upload.without_argument_compression()
     another = plain.without_argument_compression()
     assert plain.workflow is another.workflow is upload
-    assert plain.compress_arguments is False
-    assert another.compress_arguments is False
+    assert plain.get_config().compress_arguments is False
+    assert another.get_config().compress_arguments is False
     assert another is not plain
     assert upload.without_argument_compression() is not plain
+    assert upload.get_config() == default == Configuration()
+    assert default.compress_arguments is True
     with pytest.raises(FrozenInstanceError):
-        plain.compress_arguments = True  # type: ignore[misc]
+        plain.config = default  # type: ignore[misc]
+    with pytest.raises(FrozenInstanceError):
+        plain.get_config().compress_arguments = True  # type: ignore[misc]
+
+
+async def test_configuration_can_be_copied_and_replaced_between_workflows(monkeypatch, start_world):
+    monkeypatch.delenv("WORKFLOW_COMPRESSION_CODEC", raising=False)
+    monkeypatch.delenv("WORKFLOW_DISABLE_COMPRESSION", raising=False)
+    registry = core.Workflows(as_vercel_job=False, namespace="copies")
+
+    @registry.workflow
+    async def download(data: str) -> str:
+        return data
+
+    config = Configuration().without_argument_compression()
+    assert config.get_config() is config
+    configured = upload.configure(config)
+    copied = download.configure(configured.get_config())
+    default = config.configure(upload.get_config())
+    reset = copied.configure(default)
+    assert configured.get_config() is copied.get_config() is config
+    assert reset.workflow is copied.workflow is download
+    assert reset.get_config() is default
+    assert default.compress_arguments is True
+    assert config.compress_arguments is False
+
+    data = "compressible payload " * 200
+    await start(copied, data)
+    await start(reset, data)
+    plain, compressed = [
+        call.args[1].event_data for call in start_world.events_create.call_args_list
+    ]
+    assert plain.workflow_name == compressed.workflow_name == download.workflow_id
+    assert plain.input.startswith(ser.DEVALUE_V1)
+    assert compressed.input.startswith(ser.ZSTD)
+    assert (
+        ser.hydrate(plain.input, what="arguments")
+        == ser.hydrate(compressed.input, what="arguments")
+        == [{"data": data}]
+    )
+    for call in start_world.queue.call_args_list:
+        assert call.args[1].run_input.execution_context["queueNamespace"] == "copies"
 
 
 @pytest.mark.parametrize("enabled", [None, True, False])
@@ -807,7 +852,7 @@ async def test_configuration_is_reusable_and_start_remains_a_native_coroutine(st
     first = await asyncio.create_task(request)
     second = await start(configured, "second", compress_arguments=False)
     assert first.run_id != second.run_id
-    assert configured.compress_arguments is False
+    assert configured.get_config().compress_arguments is False
     assert len(start_world.events_create.call_args_list) == 2
     for call in start_world.events_create.call_args_list:
         assert call.args[1].event_data.input.startswith(ser.DEVALUE_V1)
@@ -816,8 +861,21 @@ async def test_configuration_is_reusable_and_start_remains_a_native_coroutine(st
 if TYPE_CHECKING:
     from typing_extensions import assert_type
 
-    async def _check_configuration_types(workflow: core.Workflow[[str], int]) -> None:
+    async def _check_configuration_types(
+        workflow: core.Workflow[[str], int], other_workflow: core.Workflow[[int], str]
+    ) -> None:
+        config = Configuration().without_argument_compression()
+        assert_type(config, Configuration)
+        assert_type(config.get_config(), Configuration)
+        assert_type(config.configure(Configuration()), Configuration)
         configured = workflow.without_argument_compression().without_argument_compression()
         assert_type(configured, ConfiguredWorkflow[[str], int])
+        assert_type(workflow.get_config(), Configuration)
+        assert_type(configured.get_config(), Configuration)
+        assert_type(workflow.configure(config), ConfiguredWorkflow[[str], int])
+        assert_type(configured.configure(config), ConfiguredWorkflow[[str], int])
+        copied = other_workflow.configure(configured.get_config())
+        assert_type(copied, ConfiguredWorkflow[[int], str])
+        assert_type(await start(copied, 42), Run[str])
         assert_type(await start(configured, "payload"), Run[int])
         assert_type(await start(workflow, "payload"), Run[int])
