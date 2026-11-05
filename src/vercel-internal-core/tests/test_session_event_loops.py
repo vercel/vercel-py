@@ -1,4 +1,4 @@
-"""The default async session must follow the running event loop.
+"""The default async session must follow the running event loop, on asyncio and Trio.
 
 These tests use a real loopback server rather than `respx`, because the bug they
 guard lives in the keep-alive connection pool: a mocked transport never pools a
@@ -14,13 +14,14 @@ from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import cast
 
+import anyio
 import httpx2 as httpx
 import pytest
 
-from vercel._internal.core.errors import VercelSessionClosedError
+from vercel._internal.core.errors import VercelSessionClosedError, VercelSessionError
 from vercel._internal.core.http import AsyncTransport
 from vercel._internal.core.http.transport import ReadResponsePolicy
-from vercel._internal.core.session import SdkSession
+from vercel._internal.core.session import SdkSession, get_active_sync_session, session
 
 
 class _CountingServer(ThreadingHTTPServer):
@@ -209,3 +210,60 @@ def test_concurrent_loops_in_separate_threads_each_get_their_own_client(
         assert server.request_count == thread_count + 1
         # A client each, so no loop is handed sockets opened by another.
         assert len({id(client) for client in clients}) == thread_count
+
+
+@pytest.mark.parametrize(
+    "backends",
+    [
+        pytest.param(["trio"] * 4, id="trio"),
+        pytest.param(["asyncio", "trio", "asyncio", "trio"], id="asyncio-and-trio"),
+    ],
+)
+def test_default_session_follows_successive_anyio_event_loops(
+    isolated_default_session: None, backends: list[str]
+) -> None:
+    """Each AnyIO run gets its own client, and a finished run's client is dropped."""
+    with _keep_alive_server() as server:
+        url = _url(server)
+        clients: list[httpx.AsyncClient] = []
+
+        async def call() -> int:
+            session = SdkSession.default()
+            clients.append(session._client_for_running_loop())
+            return await _post(session.get_transport(), url)
+
+        statuses = [anyio.run(call, backend=backend) for backend in backends]
+
+        assert statuses == [200] * len(backends)
+        assert server.request_count == len(backends)
+        assert len({id(client) for client in clients}) == len(backends)
+        # Only the client built by the last run is left; every earlier run ended.
+        assert list(SdkSession.default()._clients.values()) == [clients[-1]]
+
+
+@pytest.mark.parametrize("backend", ["asyncio", "trio"])
+def test_session_close_releases_the_client_of_the_current_anyio_loop(backend: str) -> None:
+    async def scenario() -> httpx.AsyncClient:
+        active = SdkSession()
+        client = active._client_for_running_loop()
+        await active.aclose()
+        return client
+
+    assert anyio.run(scenario, backend=backend).is_closed
+
+
+@pytest.mark.parametrize("backend", ["asyncio", "trio"])
+def test_sync_session_closes_wrong_async_client_from_inside_an_event_loop(backend: str) -> None:
+    """The rejected client is closed before the error surfaces, even under a running loop."""
+    client = httpx.AsyncClient()
+
+    async def scenario() -> None:
+        # Sync APIs refuse to run inside an async session, but not inside a loop.
+        with session(httpx_client_factory=lambda: client):
+            active = get_active_sync_session()
+            with pytest.raises(VercelSessionError, match=r"httpx2\.Client or httpx\.Client"):
+                active.get_transport()
+
+    anyio.run(scenario, backend=backend)
+
+    assert client.is_closed

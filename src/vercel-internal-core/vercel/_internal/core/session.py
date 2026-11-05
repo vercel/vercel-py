@@ -1,6 +1,5 @@
 """Mode-specific sessions shared by Vercel Python services."""
 
-import asyncio
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -9,6 +8,7 @@ from types import TracebackType
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, cast, overload
 
 import anyio
+import anyio.lowlevel
 import httpx2 as httpx
 
 from vercel._internal.core.errors import (
@@ -35,6 +35,45 @@ ServiceOptionsT = TypeVar("ServiceOptionsT", bound=ServiceOptions)
 ServiceT = TypeVar("ServiceT")
 HttpxClientFactory = Callable[[], httpx.AsyncClient] | Callable[[], httpx.Client]
 _UNSET = object()
+
+
+def _current_event_loop() -> object | None:
+    """Return the native AnyIO token of the running event loop, or `None` outside one.
+
+    The token is the loop itself on asyncio and the run's `TrioToken` on Trio. It
+    stays the same object for the whole run, so it can key per-loop state.
+    """
+    try:
+        return anyio.lowlevel.current_token().native_token
+    except RuntimeError:
+        # Outside an event loop AnyIO raises `NoEventLoopError`, or sniffio's
+        # `AsyncLibraryNotFoundError` on older releases; both are `RuntimeError`s.
+        return None
+
+
+def _ignore() -> None:
+    pass
+
+
+def _event_loop_has_finished(token: object) -> bool:
+    """Tell whether the event loop behind a native AnyIO token can no longer run.
+
+    AnyIO does not expose this, so each backend's own token is asked directly.
+    """
+    is_closed = getattr(token, "is_closed", None)
+    if callable(is_closed):
+        # asyncio: the token is the event loop.
+        return bool(is_closed())
+    run_sync_soon = getattr(token, "run_sync_soon", None)
+    if callable(run_sync_soon):
+        # Trio: a token whose run has ended raises `RunFinishedError`, a
+        # `RuntimeError`, instead of queueing the callback. For a live run the
+        # no-op is deduplicated and is harmless.
+        try:
+            run_sync_soon(_ignore, idempotent=True)
+        except RuntimeError:
+            return True
+    return False
 
 
 class _BaseSdkSession:
@@ -116,9 +155,10 @@ class SdkSession(_BaseSdkSession):
         )
         self._transport: AsyncTransport | None = None
         self._staging_file_runtime: AsyncByteStreamRuntime | None = None
-        # Keyed by loop, with `None` for a client built outside one. The default
-        # session is process-wide, so it outlives any loop its sockets belong to.
-        self._clients: dict[asyncio.AbstractEventLoop | None, httpx.AsyncClient] = {}
+        # Keyed by the event loop's native AnyIO token, with `None` for a client
+        # built outside one. The default session is process-wide, so it outlives
+        # any loop its sockets belong to.
+        self._clients: dict[object | None, httpx.AsyncClient] = {}
         # One session can be reached from threads running loops of their own.
         self._clients_lock = threading.Lock()
 
@@ -150,13 +190,6 @@ class SdkSession(_BaseSdkSession):
             ),
         )
 
-    @staticmethod
-    def _running_loop() -> "asyncio.AbstractEventLoop | None":
-        try:
-            return asyncio.get_running_loop()
-        except RuntimeError:
-            return None
-
     def _client_for_running_loop(self) -> httpx.AsyncClient:
         """Return the client owned by the loop making this request.
 
@@ -166,7 +199,7 @@ class SdkSession(_BaseSdkSession):
         closed`. The caller sees an error for work the server already did, so the
         client is chosen per loop up front rather than repaired afterwards.
         """
-        loop = self._running_loop()
+        loop = _current_event_loop()
         with self._clients_lock:
             # Under the lock, so a request holding this transport cannot build a
             # client that outlives the session it belongs to.
@@ -175,7 +208,9 @@ class SdkSession(_BaseSdkSession):
             if client is not None:
                 return client
             for known in [
-                known for known in self._clients if known is not None and known.is_closed()
+                known
+                for known in self._clients
+                if known is not None and _event_loop_has_finished(known)
             ]:
                 # Dropped, not closed: `aclose` needs the loop that owns the
                 # sockets, and that loop is gone.
@@ -239,7 +274,7 @@ class SdkSession(_BaseSdkSession):
             return
         self._clear_services()
         self._transport = None
-        loop = self._running_loop()
+        loop = _current_event_loop()
         with self._clients_lock:
             # Closing and the flag that stops new clients have to be one step, or
             # a resolver already past the check registers a client nothing closes.
@@ -300,15 +335,22 @@ class SyncSdkSession(_BaseSdkSession):
         )
 
     def _close_wrong_async_client(self, client: Any) -> None:
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
+        """Close, best effort, an async client a factory returned to this sync session.
+
+        The client was just built and has sent nothing, so no event loop owns its
+        resources and any loop can close it. A fresh one runs in a worker thread,
+        because this sync path may itself be called from inside a running loop.
+        """
+
+        def close() -> None:
             try:
-                asyncio.run(client.aclose())
+                anyio.run(client.aclose)
             except Exception:
                 pass
-        else:
-            loop.create_task(client.aclose())
+
+        worker = threading.Thread(target=close, name="vercel-close-async-client", daemon=True)
+        worker.start()
+        worker.join()
 
     def get_transport(self) -> "SyncTransport":
         from vercel._internal.core.http import (
