@@ -255,6 +255,23 @@ _REGIONS = (
     "syd1",
 )
 
+# Original ULID fields (top) and tagged fields (bottom), most significant bit first:
+# +---------------------+----------------------------------+
+# | timestamp: 48 bits  | randomness: 80 bits              |
+# +---------+-----------+-----------+---------+------------+
+# | tag=1   | timestamp | region ID | version | randomness |
+# | 1 bit   | remaining | 6 bits    | 5 bits  | remaining  |
+# +---------+-----------+-----------+---------+------------+
+_ULID_TAG_BIT = ulid.VALUE_LIMIT_EXCLUSIVE >> 1
+_RUN_ID_VERSION = 1
+_RUN_ID_REGION_BITS = 6
+_RUN_ID_VERSION_BITS = 5
+_RUN_ID_RANDOM_BITS = ulid.RANDOM_FIELD_BITS - _RUN_ID_REGION_BITS - _RUN_ID_VERSION_BITS
+_RUN_ID_METADATA_CLEAR_MASK = ~(
+    ((1 << (_RUN_ID_REGION_BITS + _RUN_ID_VERSION_BITS)) - 1) << _RUN_ID_RANDOM_BITS
+)
+_RUN_ID_REGION_MASK = (1 << _RUN_ID_REGION_BITS) - 1
+
 
 class _RunIdState(threading.local):
     def __init__(self) -> None:
@@ -276,46 +293,39 @@ def _resolve_region(region: str | None = None) -> str:
     return "iad1"
 
 
-def _create_run_id(*, region: str | None = None) -> str:
-    # Match TS createRunId (vercel/workflow#1981): generate a monotonic ULID,
-    # stamp region/version metadata while preserving 69 random bits, then
-    # correct ordering if changing regions makes the tagged ID go backwards.
-    metadata = ((_REGIONS.index(_resolve_region(region)) + 1) << 5) | 1
-    raw = _run_id_state.generate()
-    value = 0
-    for char in raw:
-        value = value * 32 + ulid.ENCODING.index(char)
-    value = (value & ~(((1 << 11) - 1) << 69)) | (metadata << 69) | (1 << 127)
-    if value <= _run_id_state.last:
-        value = (
-            (((_run_id_state.last >> 80) + 1) << 80)
-            | (metadata << 69)
-            | (_run_id_state.last & ((1 << 69) - 1))
-        )
-    if value >= 1 << 128:
+def _encode_run_id(value: int, region_id: int) -> int:
+    # Match TS encode(): set the tag and metadata, leaving all other bits intact.
+    metadata = (region_id << _RUN_ID_VERSION_BITS) | _RUN_ID_VERSION
+    return (value & _RUN_ID_METADATA_CLEAR_MASK) | (metadata << _RUN_ID_RANDOM_BITS) | _ULID_TAG_BIT
+
+
+def _bump_above_metadata(value: int) -> int:
+    # Match TS bumpAboveMetadata(): advance the timestamp, keeping all random bits.
+    timestamp, randomness = divmod(value, 1 << ulid.RANDOM_FIELD_BITS)
+    if timestamp == ulid.TIME_MAX:
         raise ValueError("ULID space exhausted")
-    _run_id_state.last = value
-    chars = []
-    for _ in range(26):
-        chars.append(ulid.ENCODING[value & 31])
-        value >>= 5
-    return "".join(reversed(chars))
+    return ((timestamp + 1) << ulid.RANDOM_FIELD_BITS) | randomness
+
+
+def _create_run_id(*, region: str | None = None) -> str:
+    # Match TS createRunId (vercel/workflow#1981).
+    region_id = _REGIONS.index(_resolve_region(region)) + 1
+    candidate = _encode_run_id(ulid.to_int(_run_id_state.generate()), region_id)
+    if candidate <= _run_id_state.last:
+        candidate = _encode_run_id(_bump_above_metadata(_run_id_state.last), region_id)
+    _run_id_state.last = candidate
+    return ulid.from_int(candidate)
 
 
 def _region_from_tagged_run_id(value: str) -> str | None:
-    bare = value.removeprefix("wrun_")
-    if len(bare) != 26 or not bare.isascii():
+    try:
+        bits = ulid.to_int(value.removeprefix("wrun_"))
+    except ValueError:
         return None
-    bare = bare.upper()
-    bits = 0
-    for char in bare:
-        index = ulid.ENCODING.find(char)
-        if index < 0:
-            return None
-        bits = bits * 32 + index
-    if bits >= 1 << 128 or not bits & (1 << 127):
+    if not bits & _ULID_TAG_BIT:
         return None
-    region_id = (bits >> 74) & 63
+    metadata = bits >> _RUN_ID_RANDOM_BITS
+    region_id = (metadata >> _RUN_ID_VERSION_BITS) & _RUN_ID_REGION_MASK
     return _REGIONS[region_id - 1] if 1 <= region_id <= len(_REGIONS) else None
 
 

@@ -67,6 +67,16 @@ The compression option only controls the argument encoder during startup. The op
 
 [[src/vercel-workflow/tests/unit/test_workflow_run.py]] verifies immutable configuration branches, reuse across independent starts, native coroutine scheduling, argument and result typing, and the separation of startup options from identically named workflow arguments. [[src/vercel-workflow/tests/unit/test_workflow_run.py#test_configuration_can_be_copied_and_replaced_between_workflows]] checks that a copied configuration applies to the receiving workflow and can be replaced without modifying the source. The tests check actual payload envelopes for default workflow behavior, default configuration, and compression opt-out, including environment opt-out and the small-payload threshold.
 
+## ULID utilities
+
+Workflow identifiers share a Crockford Base32 codec and monotonic generator.
+
+[[src/vercel-workflow/vercel/workflow/_internal/ulid.py#TIME_FIELD_BITS|The timestamp width]] and [[src/vercel-workflow/vercel/workflow/_internal/ulid.py#RANDOM_FIELD_BITS|the randomness-field width]] determine [[src/vercel-workflow/vercel/workflow/_internal/ulid.py#VALUE_LIMIT_EXCLUSIVE|the exclusive integer upper bound]], the timestamp limit, and encoded field lengths. The Vercel world reuses this layout when tagging IDs and advancing their timestamps.
+
+[[src/vercel-workflow/vercel/workflow/_internal/ulid.py#monotonic_factory]] generates ordinary ULIDs, and [[src/vercel-workflow/vercel/workflow/_internal/ulid.py#decode_time]] reads their timestamps. [[src/vercel-workflow/vercel/workflow/_internal/ulid.py#to_int]] and [[src/vercel-workflow/vercel/workflow/_internal/ulid.py#from_int]] convert between 26-character ULIDs and unsigned 128-bit integers. Decoding accepts ASCII in either case and rejects invalid lengths, characters, and overflow; encoding rejects out-of-range integers and emits uppercase text. Vercel run-ID creation and region decoding share this codec, while region tagging stays in the Vercel world.
+
+[[src/vercel-workflow/tests/unit/test_ulid.py#TestIntegerConversion]] verifies known numeric values, case handling, malformed strings, and integer bounds.
+
 ## Regional routing
 
 Reusable workflow configuration pins run data and queue dispatch to a region.
@@ -77,7 +87,7 @@ Reusable workflow configuration pins run data and queue dispatch to a region.
 
 [[src/vercel-workflow/vercel/workflow/_internal/worlds/vercel.py#_RunIdState]] keeps the generator and last emitted ID in thread-local state, preserving monotonicity across region changes within each thread without a shared mutex. Cross-thread ordering is not guaranteed.
 
-When correcting ordering, [[src/vercel-workflow/vercel/workflow/_internal/worlds/vercel.py#_create_run_id]] advances the last emitted ID's timestamp and preserves its low random bits to match TypeScript. [[src/vercel-workflow/vercel/workflow/_internal/worlds/vercel.py#_region_from_tagged_run_id]] accepts ASCII Base32 in either case and rejects non-ASCII characters before case normalization.
+[[src/vercel-workflow/vercel/workflow/_internal/worlds/vercel.py#_encode_run_id]] sets [[src/vercel-workflow/vercel/workflow/_internal/worlds/vercel.py#_ULID_TAG_BIT|the tag bit]] in the original timestamp field and replaces the high bits of the original randomness field with region/version metadata, leaving all other bits intact. Encoding ANDs the ID with [[src/vercel-workflow/vercel/workflow/_internal/worlds/vercel.py#_RUN_ID_METADATA_CLEAR_MASK|a module-level mask that clears metadata]], while decoding drops the random bits before extracting the region. Both derive their layout from [[src/vercel-workflow/vercel/workflow/_internal/worlds/vercel.py#_RUN_ID_REGION_BITS|the region width]] and [[src/vercel-workflow/vercel/workflow/_internal/worlds/vercel.py#_RUN_ID_VERSION_BITS|the version width]]. When correcting ordering, [[src/vercel-workflow/vercel/workflow/_internal/worlds/vercel.py#_bump_above_metadata]] advances the last emitted ID's timestamp before re-encoding it, matching TypeScript; timestamp exhaustion raises an error. [[src/vercel-workflow/vercel/workflow/_internal/worlds/vercel.py#_region_from_tagged_run_id]] accepts ASCII Base32 in either case and rejects non-ASCII characters before case normalization.
 
 [[src/vercel-workflow/vercel/workflow/_internal/worlds/vercel.py#VercelWorld#_queue_client]] sends the selected region in the `x-vercel-queue-region` header when using the fixed queue proxy URL. Direct clients use regional hosts instead. Each client receives its own headers so regional routing does not mutate shared World headers.
 

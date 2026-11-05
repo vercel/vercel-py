@@ -1,8 +1,57 @@
-"""Tests for monotonic ULID generation."""
+"""Tests for monotonic ULID generation and encoding."""
 
 import pytest
 
-from vercel.workflow._internal.ulid import decode_time, monotonic_factory
+from vercel.workflow._internal.ulid import decode_time, from_int, monotonic_factory, to_int
+
+
+# @lat: [[vercel-workflow#ULID utilities]]
+class TestIntegerConversion:
+    """Check the codec's numeric values, bounds, and accepted string representation."""
+
+    @pytest.mark.parametrize(
+        "text,value",
+        [
+            ("00000000000000000000000000", 0),
+            ("00000000000000000000000001", 1),
+            ("0000000000000000000000000Z", 31),
+            ("00000000000000000000000010", 32),
+            ("00000000010000000000000000", 1 << 80),
+            ("40000000000000000000000000", 1 << 127),
+            ("7ZZZZZZZZZZZZZZZZZZZZZZZZZ", (1 << 128) - 1),
+        ],
+    )
+    def test_known_values(self, text, value):
+        assert to_int(text) == value
+        assert from_int(value) == text
+
+    def test_accepts_ascii_lowercase(self):
+        assert to_int("7" + "z" * 25) == (1 << 128) - 1
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "",
+            "0" * 25,
+            "0" * 27,
+            "0" * 25 + "U",
+            "0" * 25 + "I",
+            "0" * 25 + "O",
+            "0" * 25 + "L",
+            "0" * 25 + "ſ",
+            "0" * 24 + "ß",
+            "8" + "0" * 25,
+            "Z" * 26,
+        ],
+    )
+    def test_rejects_malformed_ulids(self, value):
+        with pytest.raises(ValueError):
+            to_int(value)
+
+    @pytest.mark.parametrize("value", [-1, 1 << 128])
+    def test_rejects_integers_outside_128_bits(self, value):
+        with pytest.raises(ValueError, match="unsigned 128-bit integer"):
+            from_int(value)
 
 
 class TestMonotonicFactory:
