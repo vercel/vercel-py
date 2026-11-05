@@ -1,6 +1,10 @@
 """Shared HTTP infrastructure for Vercel API clients."""
 
-from vercel._internal.core.http.config import DEFAULT_API_BASE_URL, DEFAULT_TIMEOUT
+from vercel._internal.core.http.config import (
+    DEFAULT_API_BASE_URL,
+    DEFAULT_KEEPALIVE_EXPIRY,
+    DEFAULT_TIMEOUT,
+)
 from vercel._internal.core.http.httpx import (
     create_base_async_client,
     create_base_client,
@@ -28,6 +32,7 @@ from vercel._internal.core.http.transport import (
 
 __all__ = [
     "DEFAULT_API_BASE_URL",
+    "DEFAULT_KEEPALIVE_EXPIRY",
     "DEFAULT_TIMEOUT",
     "BaseTransport",
     "SyncTransport",
