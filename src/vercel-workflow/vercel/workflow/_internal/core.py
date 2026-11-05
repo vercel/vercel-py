@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import abc
 import contextlib
 import dataclasses
 import datetime
@@ -22,6 +23,7 @@ if TYPE_CHECKING:
 
 P = ParamSpec("P")
 T = TypeVar("T")
+Res = TypeVar("Res")
 
 DEFAULT_MAX_RETRIES = 3
 
@@ -105,7 +107,32 @@ def _bind_arguments(
     return tuple(positional), keyword
 
 
-class Workflow(Generic[P, T]):
+class _Configurable(abc.ABC, Generic[Res]):
+    @abc.abstractmethod
+    def get_config(self) -> Configuration: ...
+
+    @abc.abstractmethod
+    def configure(self, config: Configuration) -> Res: ...
+
+    def without_argument_compression(self) -> Res:
+        """Return a new configuration that skips startup argument compression."""
+        return self.configure(dataclasses.replace(self.get_config(), compress_arguments=False))
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class Configuration(_Configurable["Configuration"]):
+    """Immutable startup options that can be shared across workflows."""
+
+    compress_arguments: bool = True
+
+    def get_config(self) -> Configuration:
+        return self
+
+    def configure(self, config: Configuration) -> Configuration:
+        return config
+
+
+class Workflow(_Configurable["ConfiguredWorkflow[P, T]"], Generic[P, T]):
     def __init__(
         self,
         func: Callable[P, Coroutine[Any, Any, T]],
@@ -120,6 +147,12 @@ class Workflow(Generic[P, T]):
         self._signature = inspect.signature(func)
         self.codec = signature_codec.SignatureCodec(func, self._signature, self.qualname)
 
+    def get_config(self) -> Configuration:
+        return Configuration()
+
+    def configure(self, config: Configuration) -> ConfiguredWorkflow[P, T]:
+        return ConfiguredWorkflow(self, config)
+
     def bind_arguments(
         self, args: tuple[Any, ...], kwargs: dict[str, Any]
     ) -> tuple[tuple[Any, ...], dict[str, Any]]:
@@ -127,6 +160,18 @@ class Workflow(Generic[P, T]):
 
     def _resolve_queue_namespace(self) -> str | None:
         return self._registry.namespace
+
+
+@dataclasses.dataclass(frozen=True)
+class ConfiguredWorkflow(_Configurable["ConfiguredWorkflow[P, T]"], Generic[P, T]):
+    workflow: Workflow[P, T]
+    config: Configuration = dataclasses.field(default_factory=Configuration)
+
+    def get_config(self) -> Configuration:
+        return self.config
+
+    def configure(self, config: Configuration) -> ConfiguredWorkflow[P, T]:
+        return ConfiguredWorkflow(self.workflow, config)
 
 
 class Step(Generic[P, T]):

@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import decimal
 import hashlib
-from dataclasses import dataclass
-from typing import Any, get_type_hints
+import inspect
+from dataclasses import FrozenInstanceError, dataclass
+from typing import TYPE_CHECKING, Any, get_type_hints
 from unittest.mock import AsyncMock, Mock
 
 import pydantic
@@ -14,6 +15,8 @@ import pytest
 
 from tests.payloads import PLAIN_ENCODER
 from vercel.workflow import (
+    Configuration,
+    ConfiguredWorkflow,
     Run,
     WorkflowRunFailedError,
     WorkflowRunStatus,
@@ -722,3 +725,157 @@ async def test_suspended_context_does_not_fall_back_to_io(world) -> None:
     finally:
         ctx._ctx.reset(token)
     assert world.target_reads == world.terminations == 0
+
+
+_upload_registry = core.Workflows(as_vercel_job=False, namespace="uploads")
+
+
+@_upload_registry.workflow
+async def upload(data: str, *, compress_arguments: bool) -> int:
+    return len(data)
+
+
+@pytest.fixture
+def start_world(monkeypatch):
+    instance = Mock(spec=w.World)
+    instance.get_deployment_id = AsyncMock(return_value="dpl_current")
+    instance.get_environment.return_value = None
+    instance.run_key = AsyncMock(return_value=None)
+    instance.events_create = AsyncMock()
+    instance.queue = AsyncMock()
+    monkeypatch.setattr(w, "get_world", lambda: instance)
+    return instance
+
+
+# @lat: [[vercel-workflow#Configured workflows]]
+def test_configuration_is_immutable_and_does_not_modify_the_workflow():
+    default = upload.get_config()
+    plain = upload.without_argument_compression()
+    another = plain.without_argument_compression()
+    assert plain.workflow is another.workflow is upload
+    assert plain.get_config().compress_arguments is False
+    assert another.get_config().compress_arguments is False
+    assert another is not plain
+    assert upload.without_argument_compression() is not plain
+    assert upload.get_config() == default == Configuration()
+    assert default.compress_arguments is True
+    with pytest.raises(FrozenInstanceError):
+        plain.config = default  # type: ignore[misc]
+    with pytest.raises(FrozenInstanceError):
+        plain.get_config().compress_arguments = True  # type: ignore[misc]
+
+
+async def test_configuration_can_be_copied_and_replaced_between_workflows(monkeypatch, start_world):
+    monkeypatch.delenv("WORKFLOW_COMPRESSION_CODEC", raising=False)
+    monkeypatch.delenv("WORKFLOW_DISABLE_COMPRESSION", raising=False)
+    registry = core.Workflows(as_vercel_job=False, namespace="copies")
+
+    @registry.workflow
+    async def download(data: str) -> str:
+        return data
+
+    config = Configuration().without_argument_compression()
+    assert config.get_config() is config
+    configured = upload.configure(config)
+    copied = download.configure(configured.get_config())
+    default = config.configure(upload.get_config())
+    reset = copied.configure(default)
+    assert configured.get_config() is copied.get_config() is config
+    assert reset.workflow is copied.workflow is download
+    assert reset.get_config() is default
+    assert default.compress_arguments is True
+    assert config.compress_arguments is False
+
+    data = "compressible payload " * 200
+    await start(copied, data)
+    await start(reset, data)
+    plain, compressed = [
+        call.args[1].event_data for call in start_world.events_create.call_args_list
+    ]
+    assert plain.workflow_name == compressed.workflow_name == download.workflow_id
+    assert plain.input.startswith(ser.DEVALUE_V1)
+    assert compressed.input.startswith(ser.ZSTD)
+    assert (
+        ser.hydrate(plain.input, what="arguments")
+        == ser.hydrate(compressed.input, what="arguments")
+        == [{"data": data}]
+    )
+    for call in start_world.queue.call_args_list:
+        assert call.args[1].run_input.execution_context["queueNamespace"] == "copies"
+
+
+@pytest.mark.parametrize("enabled", [None, True, False])
+@pytest.mark.parametrize("disabled_by_environment", [False, True])
+async def test_argument_compression_respects_configuration_and_environment(
+    monkeypatch, start_world, enabled, disabled_by_environment
+):
+    monkeypatch.delenv("WORKFLOW_COMPRESSION_CODEC", raising=False)
+    monkeypatch.delenv("WORKFLOW_DISABLE_COMPRESSION", raising=False)
+    if disabled_by_environment:
+        monkeypatch.setenv("WORKFLOW_DISABLE_COMPRESSION", "1")
+    workflow = (
+        upload
+        if enabled is None
+        else (ConfiguredWorkflow(upload) if enabled else upload.without_argument_compression())
+    )
+    data = "compressible payload " * 200
+    run = await start(workflow, data, compress_arguments=False)
+    event = start_world.events_create.call_args.args[1].event_data
+    expected_prefix = (
+        ser.ZSTD if enabled is not False and not disabled_by_environment else ser.DEVALUE_V1
+    )
+    assert event.input.startswith(expected_prefix)
+    assert ser.hydrate(event.input, what="arguments") == [
+        {"data": data, "compress_arguments": False}
+    ]
+    start_world.run_key.assert_awaited_once_with(run.run_id, deployment_id="dpl_current")
+    queued = start_world.queue.call_args.args[1]
+    assert queued.run_input.input == event.input
+    assert queued.run_input.execution_context["queueNamespace"] == "uploads"
+    assert event.workflow_name == upload.workflow_id
+
+
+async def test_default_configuration_preserves_the_small_payload_threshold(
+    monkeypatch, start_world
+):
+    monkeypatch.delenv("WORKFLOW_DISABLE_COMPRESSION", raising=False)
+    await start(ConfiguredWorkflow(upload), "small", compress_arguments=True)
+    assert start_world.events_create.call_args.args[1].event_data.input.startswith(ser.DEVALUE_V1)
+
+
+async def test_configuration_is_reusable_and_start_remains_a_native_coroutine(start_world):
+    configured = upload.without_argument_compression()
+    assert inspect.iscoroutinefunction(start)
+    request = start(configured, "first", compress_arguments=True)
+    assert inspect.iscoroutine(request)
+    start_world.events_create.assert_not_called()
+    first = await asyncio.create_task(request)
+    second = await start(configured, "second", compress_arguments=False)
+    assert first.run_id != second.run_id
+    assert configured.get_config().compress_arguments is False
+    assert len(start_world.events_create.call_args_list) == 2
+    for call in start_world.events_create.call_args_list:
+        assert call.args[1].event_data.input.startswith(ser.DEVALUE_V1)
+
+
+if TYPE_CHECKING:
+    from typing_extensions import assert_type
+
+    async def _check_configuration_types(
+        workflow: core.Workflow[[str], int], other_workflow: core.Workflow[[int], str]
+    ) -> None:
+        config = Configuration().without_argument_compression()
+        assert_type(config, Configuration)
+        assert_type(config.get_config(), Configuration)
+        assert_type(config.configure(Configuration()), Configuration)
+        configured = workflow.without_argument_compression().without_argument_compression()
+        assert_type(configured, ConfiguredWorkflow[[str], int])
+        assert_type(workflow.get_config(), Configuration)
+        assert_type(configured.get_config(), Configuration)
+        assert_type(workflow.configure(config), ConfiguredWorkflow[[str], int])
+        assert_type(configured.configure(config), ConfiguredWorkflow[[str], int])
+        copied = other_workflow.configure(configured.get_config())
+        assert_type(copied, ConfiguredWorkflow[[int], str])
+        assert_type(await start(copied, 42), Run[str])
+        assert_type(await start(configured, "payload"), Run[int])
+        assert_type(await start(workflow, "payload"), Run[int])
