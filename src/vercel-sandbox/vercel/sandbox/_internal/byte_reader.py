@@ -1,23 +1,19 @@
 """Command log readers backed by one async-shaped streaming core."""
 
-import inspect
 import subprocess
 import threading
-import time
 from abc import ABC, abstractmethod
 from collections import deque
-from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator, Mapping
+from collections.abc import AsyncGenerator, Callable, Iterator, Mapping
 from types import TracebackType
 from typing import Protocol, TypeAlias
 
 import anyio
 
-from vercel._internal.core.http import StreamingResponse
 from vercel._internal.core.iter_coroutine import iter_coroutine
-from vercel.sandbox._internal.log_stream import AsyncSleep, _iter_command_logs
 from vercel.sandbox._internal.models import ProcessLog, ProcessLogStream
 
-_OpenResponse: TypeAlias = Callable[[], StreamingResponse | Awaitable[StreamingResponse]]
+_OpenLogs: TypeAlias = Callable[[], AsyncGenerator[ProcessLog, None]]
 
 
 class _ByteBuffer:
@@ -175,20 +171,6 @@ class _AsyncPumpCondition:
         self._condition.notify_all()
 
 
-def _normalize_open_response(
-    open_response: _OpenResponse,
-) -> Callable[[], Awaitable[StreamingResponse]]:
-    async def open_stream() -> StreamingResponse:
-        result = open_response()
-        if inspect.isawaitable(result):
-            result = await result
-        if isinstance(result, StreamingResponse):
-            return result
-        raise TypeError("open_response must return an HTTP streaming response")
-
-    return open_stream
-
-
 class _ByteTransportCore:
     """Route one shared log stream into per-reader buffers.
 
@@ -200,13 +182,11 @@ class _ByteTransportCore:
 
     def __init__(
         self,
-        open_response: Callable[[], Awaitable[StreamingResponse]],
+        open_logs: _OpenLogs,
         routes: Mapping[ProcessLogStream, _ByteBuffer | None],
         condition: _PumpCondition,
-        sleep: AsyncSleep,
     ) -> None:
-        self._open_response = open_response
-        self._sleep = sleep
+        self._open_logs = open_logs
         self._events: AsyncGenerator[ProcessLog, None] | None = None
         self._routes = dict(routes)
         self._live = len(_distinct_buffers(routes))
@@ -245,7 +225,7 @@ class _ByteTransportCore:
         # waiting on the stream so other readers can take what is routed.
         self._pumping = True
         if self._events is None:
-            self._events = _iter_command_logs(self._open_response, sleep=self._sleep)
+            self._events = self._open_logs()
         events = self._events
         self._condition.release()
         try:
@@ -265,7 +245,7 @@ class _ByteTransportCore:
                 self._mark_eof()
                 await self._cleanup()
             elif (target := self._routes[event.stream]) is not None:
-                target.append(event.data.encode("utf-8"))
+                target.append(event.data)
         finally:
             self._pumping = False
             self._condition.notify_all()
@@ -383,10 +363,6 @@ class _SyncByteReader(SyncByteReader):
         iter_coroutine(self._core.close())
 
 
-async def _blocking_sleep(seconds: float) -> None:
-    time.sleep(seconds)
-
-
 def _reader_buffers(stdout: int, stderr: int) -> tuple[_ByteBuffer | None, _ByteBuffer | None]:
     stdout_buffer = _ByteBuffer() if stdout == subprocess.PIPE else None
     if stderr == subprocess.STDOUT:
@@ -399,20 +375,18 @@ def _reader_buffers(stdout: int, stderr: int) -> tuple[_ByteBuffer | None, _Byte
 
 
 def _cores(
-    open_response: Callable[[], Awaitable[StreamingResponse]],
+    open_logs: _OpenLogs,
     stdout: int,
     stderr: int,
     condition: _PumpCondition,
-    sleep: AsyncSleep,
 ) -> tuple[_ReaderCore | None, _ReaderCore | None]:
     stdout_buffer, stderr_buffer = _reader_buffers(stdout, stderr)
     if stdout_buffer is None and stderr_buffer is None:
         return None, None
     transport = _ByteTransportCore(
-        open_response,
+        open_logs,
         {ProcessLogStream.STDOUT: stdout_buffer, ProcessLogStream.STDERR: stderr_buffer},
         condition,
-        sleep,
     )
     return (
         None if stdout_buffer is None else _ReaderCore(transport, stdout_buffer),
@@ -423,15 +397,12 @@ def _cores(
 
 
 def _byte_readers(
-    open_response: _OpenResponse,
+    open_logs: _OpenLogs,
     *,
     stdout: int = subprocess.PIPE,
     stderr: int = subprocess.PIPE,
-    sleep: AsyncSleep = anyio.sleep,
 ) -> tuple[ByteReader | None, ByteReader | None]:
-    stdout_core, stderr_core = _cores(
-        _normalize_open_response(open_response), stdout, stderr, _AsyncPumpCondition(), sleep
-    )
+    stdout_core, stderr_core = _cores(open_logs, stdout, stderr, _AsyncPumpCondition())
     return (
         None if stdout_core is None else _ByteReader(stdout_core),
         None if stderr_core is None else _ByteReader(stderr_core),
@@ -439,15 +410,12 @@ def _byte_readers(
 
 
 def _sync_byte_readers(
-    open_response: _OpenResponse,
+    open_logs: _OpenLogs,
     *,
     stdout: int = subprocess.PIPE,
     stderr: int = subprocess.PIPE,
-    sleep: AsyncSleep = _blocking_sleep,
 ) -> tuple[SyncByteReader | None, SyncByteReader | None]:
-    stdout_core, stderr_core = _cores(
-        _normalize_open_response(open_response), stdout, stderr, _SyncPumpCondition(), sleep
-    )
+    stdout_core, stderr_core = _cores(open_logs, stdout, stderr, _SyncPumpCondition())
     return (
         None if stdout_core is None else _SyncByteReader(stdout_core),
         None if stderr_core is None else _SyncByteReader(stderr_core),

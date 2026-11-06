@@ -1,9 +1,10 @@
+import inspect
 import json
 import math
 import queue
 import subprocess
 import threading
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator
 
 import anyio
 import httpx2 as httpx
@@ -11,12 +12,11 @@ import pytest
 from hypothesis import example, given, settings, strategies as st
 
 from vercel._internal.core.http import StreamingResponse
-from vercel.sandbox._internal.byte_reader import (
-    SyncByteReader,
-    _byte_readers,
-    _sync_byte_readers,
-)
+from vercel.sandbox._internal import byte_reader
+from vercel.sandbox._internal.byte_reader import SyncByteReader
 from vercel.sandbox._internal.errors import SandboxStreamError
+from vercel.sandbox._internal.log_stream import AsyncSleep, _iter_command_logs
+from vercel.sandbox._internal.models import ProcessLog
 
 
 class _TestStreamingResponse(StreamingResponse):
@@ -69,6 +69,41 @@ def _logs_body(*records: object) -> bytes:
 
 async def _no_sleep(seconds: float) -> None:
     pass
+
+
+def _wire_logs(
+    open_response: Callable[[], StreamingResponse | Awaitable[StreamingResponse]],
+    sleep: AsyncSleep,
+) -> AsyncGenerator[ProcessLog, None]:
+    async def open_stream() -> StreamingResponse:
+        response = open_response()
+        return await response if inspect.isawaitable(response) else response
+
+    return _iter_command_logs(open_stream, sleep=sleep)
+
+
+def _byte_readers(
+    open_response: Callable[[], StreamingResponse | Awaitable[StreamingResponse]],
+    *,
+    stdout: int = subprocess.PIPE,
+    stderr: int = subprocess.PIPE,
+    sleep: AsyncSleep = _no_sleep,
+) -> tuple[byte_reader.ByteReader | None, byte_reader.ByteReader | None]:
+    return byte_reader._byte_readers(
+        lambda: _wire_logs(open_response, sleep), stdout=stdout, stderr=stderr
+    )
+
+
+def _sync_byte_readers(
+    open_response: Callable[[], StreamingResponse | Awaitable[StreamingResponse]],
+    *,
+    stdout: int = subprocess.PIPE,
+    stderr: int = subprocess.PIPE,
+    sleep: AsyncSleep = _no_sleep,
+) -> tuple[SyncByteReader | None, SyncByteReader | None]:
+    return byte_reader._sync_byte_readers(
+        lambda: _wire_logs(open_response, sleep), stdout=stdout, stderr=stderr
+    )
 
 
 class _TrackingAsyncStream(httpx.AsyncByteStream):
@@ -640,3 +675,47 @@ def test_sync_byte_reader_sizes_count_bytes() -> None:
     assert reader.readline() == "雪\n".encode()
     assert list(reader) == [b"last"]
     assert reader.read() == b""
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
+@pytest.mark.parametrize("sync", [False, True], ids=["async-reader", "sync-reader"])
+async def test_output_consumers_accept_native_byte_events(anyio_backend: str, sync: bool) -> None:
+    """Replacing the wire adapter does not change readers, capture, or text sinks."""
+    import io
+
+    from vercel.sandbox._internal.process_output import ProcessOutputRouter
+
+    async def native_logs() -> AsyncGenerator[ProcessLog, None]:
+        # Include invalid UTF-8 and split a valid character across records.
+        for stream, data in (
+            ("stdout", b"\xc3"),
+            ("stderr", b"\x00\xff"),
+            ("stdout", b"\xa9\n\x80tail"),
+            ("stdout", b"\xe2"),
+        ):
+            yield ProcessLog(stream=stream, data=data)
+
+    sink = io.StringIO()
+    captured = ProcessOutputRouter(stdout=None, stderr=None, capture_output=True)
+    text = ProcessOutputRouter(stdout=sink, stderr=subprocess.DEVNULL, capture_output=False)
+    async for event in native_logs():
+        captured.route(event)
+        text.route(event)
+    expected = (b"\xc3\xa9\n\x80tail\xe2", b"\x00\xff")
+    assert captured.captured() == expected
+    assert text.captured() == (None, None)
+    assert sink.getvalue() == expected[0].decode(errors="replace")
+
+    if sync:
+        sync_stdout, sync_stderr = byte_reader._sync_byte_readers(native_logs)
+        assert sync_stdout is not None and sync_stderr is not None
+        assert (sync_stdout.read(), sync_stderr.read()) == expected
+        sync_stdout.close()
+        sync_stderr.close()
+    else:
+        stdout, stderr = byte_reader._byte_readers(native_logs)
+        assert stdout is not None and stderr is not None
+        assert (await stdout.read(), await stderr.read()) == expected
+        await stdout.aclose()
+        await stderr.aclose()

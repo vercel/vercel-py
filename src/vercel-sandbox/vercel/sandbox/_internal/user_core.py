@@ -663,16 +663,16 @@ class UserService(SandboxService):
         )
         logs = self.process_logs(session_id=session_id, process_id=state.id)
         if state.returncode != 0:
-            stdout: list[str] = []
-            stderr: list[str] = []
+            stdout: list[bytes] = []
+            stderr: list[bytes] = []
             async for event in logs:
                 (stdout if event.stream == "stdout" else stderr).append(event.data)
             error = SandboxFilesystemCommandError(
                 operation,
                 paths=(path,),
                 exit_code=state.returncode,
-                stdout="".join(stdout),
-                stderr="".join(stderr),
+                stdout=b"".join(stdout).decode("utf-8"),
+                stderr=b"".join(stderr).decode("utf-8"),
             )
             if "No such file or directory" in error.stderr:
                 raise SandboxPathNotFoundError(
@@ -717,7 +717,7 @@ class UserService(SandboxService):
 class _UserReadResponse(StreamingResponse):
     def __init__(self, logs: AsyncIterator[ProcessLog]) -> None:
         self._logs = logs
-        self._pending = ""
+        self._pending = b""
 
     async def __anext__(self) -> bytes:
         async for event in self._logs:

@@ -1095,9 +1095,9 @@ DriveQuery: TypeAlias = DriveQueryByCreatedAt | DriveQueryByUpdatedAt | DriveQue
 
 
 class ProcessLog(BaseModel):
-    """One streamed process output event."""
+    """One byte-oriented process output event, independent of the wire format."""
 
-    data: str
+    data: StrictBytes
     stream: ProcessLogStream
 
 

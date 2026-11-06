@@ -172,7 +172,7 @@ class Command(_ProcessHandleState):
         self._service = service
         self.stdin = _async_stdin(service, payload, stdin)
         self.stdout, self.stderr = _byte_readers(
-            lambda: service.process_logs_response(session_id=self._session_id, process_id=self.id),
+            lambda: service.process_logs(session_id=self._session_id, process_id=self.id),
             stdout=stdout,
             stderr=stderr,
         )
@@ -586,8 +586,8 @@ class SandboxFilesystem:
         return SandboxTextWriter(TextWriterCore(binding, encoding, errors, newline, permissions))
 
     async def _collect_output(self, command: ProcessState) -> tuple[str, str]:
-        stdout: list[str] = []
-        stderr: list[str] = []
+        stdout: list[bytes] = []
+        stderr: list[bytes] = []
         async for event in self._service.process_logs(
             session_id=command.session_id, process_id=command.id
         ):
@@ -595,7 +595,7 @@ class SandboxFilesystem:
                 stdout.append(event.data)
             else:
                 stderr.append(event.data)
-        return "".join(stdout), "".join(stderr)
+        return b"".join(stdout).decode("utf-8"), b"".join(stderr).decode("utf-8")
 
     async def mkdir(
         self, path: RemotePath, *, cwd: RemotePath | None = None, recursive: bool = True

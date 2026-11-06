@@ -12,6 +12,7 @@ from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from typing import TypeVar
 
 import httpx2 as httpx
+from pydantic import BaseModel
 
 from vercel._internal.core.http import StreamingResponse
 from vercel.sandbox._internal.errors import (
@@ -33,6 +34,17 @@ _RETRY_BACKOFF_SECONDS = 0.2
 STREAM_CLOSED_ERROR_CODE = "sandbox_stream_closed"
 
 _ResultT = TypeVar("_ResultT")
+
+
+class _CommandLogPayload(BaseModel):
+    """Adapt the current text wire format to the byte output contract."""
+
+    stream: ProcessLogStream
+    data: str
+
+    def to_log(self) -> ProcessLog:
+        # Temporary compatibility shim until the service provides native bytes.
+        return ProcessLog(stream=self.stream, data=self.data.encode("utf-8"))
 
 
 class _TruncatedStreamError(SandboxResponseError):
@@ -123,7 +135,7 @@ def _parse_command_log_record(line: str, *, terminated: bool = True) -> ProcessL
     stream = record.get("stream")
     data = record.get("data")
     if stream in {"stdout", "stderr"} and isinstance(data, str):
-        return ProcessLog(stream=stream, data=data)
+        return _CommandLogPayload.model_validate(record).to_log()
     if stream != "error" or not isinstance(data, dict):
         return None
 
@@ -135,7 +147,7 @@ def _parse_command_log_record(line: str, *, terminated: bool = True) -> ProcessL
 
 
 class _OutputOffsets:
-    """Count the characters of each output stream delivered to a consumer."""
+    """Count the bytes of each output stream delivered to a consumer."""
 
     __slots__ = ("_counts",)
 
@@ -148,7 +160,7 @@ class _OutputOffsets:
     def advance(self, stream: ProcessLogStream, count: int) -> None:
         self._counts[stream] += count
 
-    def skip(self, event: ProcessLog) -> str:
+    def skip(self, event: ProcessLog) -> bytes:
         """Consume replayed output from ``event`` and return the data past it."""
         skipped = min(self._counts[event.stream], len(event.data))
         self._counts[event.stream] -= skipped
@@ -164,7 +176,7 @@ async def _iter_command_logs(
     """Yield a command's logs, reconnecting when the connection is interrupted.
 
     Each reconnection replays the logs from the beginning and skips what
-    ``delivered`` has already counted, so consumers see every character once.
+    ``delivered`` has already counted, so consumers see every byte once.
     Passing the offsets of output delivered by a different stream continues
     from where that stream stopped. Retries are bounded per interruption: a
     connection that delivers new output resets the retry budget.

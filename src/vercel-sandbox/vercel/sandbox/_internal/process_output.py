@@ -1,11 +1,12 @@
 """Output routing for completed Sandbox processes."""
 
+import codecs
 import io
 import subprocess
 import sys
 from typing import TextIO
 
-from pydantic import SkipValidation
+from pydantic import PrivateAttr, SkipValidation
 
 from vercel.sandbox._internal.models import ProcessLog, ProcessLogStream
 from vercel.sandbox._internal.value_model import SandboxModel
@@ -15,15 +16,21 @@ class _OutputTarget(SandboxModel):
     # _resolve_target checks the writable-stream protocol, including duck types.
     stream: SkipValidation[TextIO | None] = None
     chunks: list[bytes] | None = None
+    _decoder: codecs.IncrementalDecoder = PrivateAttr(
+        default_factory=lambda: codecs.getincrementaldecoder("utf-8")(errors="replace")
+    )
 
-    def write(self, data: str) -> None:
+    def write(self, data: bytes) -> None:
         if self.chunks is not None:
-            self.chunks.append(data.encode("utf-8"))
+            self.chunks.append(data)
         elif self.stream is not None:
-            self.stream.write(data)
+            self.stream.write(self._decoder.decode(data))
             self.stream.flush()
 
     def captured(self) -> bytes | None:
+        if self.stream is not None and (tail := self._decoder.decode(b"", final=True)):
+            self.stream.write(tail)
+            self.stream.flush()
         return None if self.chunks is None else b"".join(self.chunks)
 
 
