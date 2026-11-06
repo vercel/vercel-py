@@ -143,6 +143,10 @@ finally:
 Standalone clients expose the same service operations as their module-level
 counterparts. They do not read or modify the active SDK session.
 
+Transient request failures are retried automatically. See the
+[standalone-client example](examples/sandbox_08_standalone_client.py) for
+request timeouts and an overall deadline for a command.
+
 ## Region placement
 
 Sandbox and Drive creation omit `region` by default, leaving placement to the

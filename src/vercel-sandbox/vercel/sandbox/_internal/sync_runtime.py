@@ -175,6 +175,7 @@ class SyncCommand(_ProcessHandleState):
             lambda: service.process_logs_response(session_id=self._session_id, process_id=self.id),
             stdout=stdout,
             stderr=stderr,
+            sleep=service.sleep,
         )
 
     def refresh(self) -> Self:

@@ -10,6 +10,7 @@ import pytest
 from httpx2._types import HeaderTypes, QueryParamTypes
 
 from vercel._internal.core.http import (
+    NO_READ_TIMEOUT,
     NO_TIMEOUT,
     BaseTransport,
     BytesBody,
@@ -345,13 +346,13 @@ async def test_waiting_for_command_disables_client_timeout() -> None:
     assert transport.timeout is NO_TIMEOUT
 
 
-async def test_polling_command_uses_client_timeout() -> None:
+async def test_polling_command_disables_read_timeout() -> None:
     transport = RecordingJsonTransport(_command_response(exit_code=None))
     client = _sandbox_client(transport)
 
     await client.get_command(session_id="sbx_1", command_id="cmd_1", wait=False)
 
-    assert transport.timeout is None
+    assert transport.timeout is NO_READ_TIMEOUT
 
 
 async def test_run_process_disables_client_timeout() -> None:

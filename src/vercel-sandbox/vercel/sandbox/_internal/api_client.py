@@ -11,6 +11,7 @@ from datetime import timedelta
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from typing import Literal, TypeVar, cast
 
+import anyio
 from httpx2 import Response
 from httpx2._types import QueryParamTypes
 from pydantic import (
@@ -25,6 +26,7 @@ from pydantic import (
 
 from vercel._internal.core.detect_agent import detect_agent_name
 from vercel._internal.core.http import (
+    NO_READ_TIMEOUT,
     NO_TIMEOUT,
     BaseTransport,
     BytesBody,
@@ -80,6 +82,7 @@ from vercel.sandbox._internal.options import (
 )
 from vercel.sandbox._internal.process_output import ProcessOutputRouter
 from vercel.sandbox._internal.region import ResolvedRegion
+from vercel.sandbox._internal.retry import _RETRIES, AsyncSleep, _with_request_retries
 from vercel.sandbox._internal.state import (
     CompletedProcessState,
     DrivesPageState,
@@ -1041,11 +1044,15 @@ class SandboxApiClient:
         credentials_factory: SandboxCredentialsFactory,
         transport: BaseTransport,
         file_transfer_timeout: timedelta,
+        request_timeout: timedelta | None = None,
+        sleep: AsyncSleep = anyio.sleep,
     ) -> None:
         self._credentials_factory = credentials_factory
         self._base_url = base_url
         self._transport = transport
         self._file_transfer_timeout = file_transfer_timeout
+        self._request_timeout = NO_READ_TIMEOUT if request_timeout is None else request_timeout
+        self._sleep = sleep
 
     def _url(self, path: str) -> str:
         return self._base_url.rstrip("/") + "/" + path.lstrip("/")
@@ -1060,6 +1067,7 @@ class SandboxApiClient:
         params: Mapping[str, JSONValue | None] | None = None,
         headers: Mapping[str, str] | None = None,
         timeout: RequestTimeout = None,
+        retries: int = _RETRIES,
     ) -> Response:
         query = cast(
             QueryParamTypes,
@@ -1074,22 +1082,26 @@ class SandboxApiClient:
             "user-agent": _user_agent(),
             **dict(headers or {}),
         }
-        response = await self._transport.send(
-            method,
-            self._url(path),
-            token=credentials.token,
-            params=query,
-            body=body,
-            headers=request_headers,
-            timeout=timeout,
-            read_response=ReadResponsePolicy.ALWAYS,
-        )
 
-        if not response.is_success:
-            message, data = extract_structured_error(response)
-            raise SandboxApiError(response, message, data=data)
+        async def send() -> Response:
+            response = await self._transport.send(
+                method,
+                self._url(path),
+                token=credentials.token,
+                params=query,
+                body=body,
+                headers=request_headers,
+                timeout=self._request_timeout if timeout is None else timeout,
+                read_response=ReadResponsePolicy.ALWAYS,
+            )
 
-        return response
+            if not response.is_success:
+                message, data = extract_structured_error(response)
+                raise SandboxApiError(response, message, data=data)
+
+            return response
+
+        return await _with_request_retries(send, sleep=self._sleep, retries=retries)
 
     async def _request_stream(
         self,
@@ -1101,6 +1113,7 @@ class SandboxApiClient:
         params: Mapping[str, JSONValue | None] | None = None,
         headers: Mapping[str, str] | None = None,
         timeout: RequestTimeout = None,
+        retries: int = _RETRIES,
     ) -> StreamingResponse:
         query = cast(
             QueryParamTypes,
@@ -1115,25 +1128,29 @@ class SandboxApiClient:
             "user-agent": _user_agent(),
             **dict(headers or {}),
         }
-        response = await self._transport.open_response_stream(
-            method,
-            self._url(path),
-            token=credentials.token,
-            params=query,
-            body=body,
-            headers=request_headers,
-            timeout=timeout,
-            read_response=ReadResponsePolicy.NON_SUCCESS_ONLY,
-        )
 
-        if response.response.is_success:
-            return response
+        async def send() -> StreamingResponse:
+            response = await self._transport.open_response_stream(
+                method,
+                self._url(path),
+                token=credentials.token,
+                params=query,
+                body=body,
+                headers=request_headers,
+                timeout=self._request_timeout if timeout is None else timeout,
+                read_response=ReadResponsePolicy.NON_SUCCESS_ONLY,
+            )
 
-        try:
-            message, data = extract_structured_error(response.response)
-            raise SandboxApiError(response.response, message, data=data)
-        finally:
-            await response.aclose()
+            if response.response.is_success:
+                return response
+
+            try:
+                message, data = extract_structured_error(response.response)
+                raise SandboxApiError(response.response, message, data=data)
+            finally:
+                await response.aclose()
+
+        return await _with_request_retries(send, sleep=self._sleep, retries=retries)
 
     async def _request_json(
         self,
@@ -1144,6 +1161,7 @@ class SandboxApiClient:
         body: JSONValue | None = None,
         params: Mapping[str, JSONValue | None] | None = None,
         timeout: RequestTimeout = None,
+        retries: int = _RETRIES,
     ) -> JSONObject:
         response = await self._request(
             method,
@@ -1153,6 +1171,7 @@ class SandboxApiClient:
             params=params,
             headers={"content-type": "application/json"},
             timeout=timeout,
+            retries=retries,
         )
 
         try:
@@ -1859,6 +1878,7 @@ class SandboxApiClient:
             body=JSONBody(request.to_api_dict()),
             headers={"connection": "close"},
             timeout=NO_TIMEOUT,
+            retries=0,
         )
 
         initial: ProcessState | None = None
@@ -1962,6 +1982,8 @@ class SandboxApiClient:
             credentials=credentials,
             params={"wait": "true" if wait else "false"},
             timeout=NO_TIMEOUT if wait else None,
+            # The service retries the entire read, including its response body.
+            retries=0,
         )
         return _validate_response(_CommandResponse, data).to_command()
 
@@ -2083,6 +2105,7 @@ class SandboxApiClient:
             ),
             credentials=credentials,
             body=body,
+            retries=0,
         )
         return _validate_response(_CommandStdinResponse, response).bytes_written
 
@@ -2123,4 +2146,5 @@ class SandboxApiClient:
             credentials=credentials,
             headers={"connection": "close"},
             timeout=NO_TIMEOUT,
+            retries=0,
         )

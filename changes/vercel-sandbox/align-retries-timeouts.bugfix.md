@@ -1,0 +1,1 @@
+Align Sandbox retries and timeouts with the TypeScript SDK. Retry transient ordinary requests twice with randomized backoff and bounded Retry-After handling, remove the inherited read timeout, and support an explicit request_timeout. Preserve bounded file transfers and separate streaming recovery policies.

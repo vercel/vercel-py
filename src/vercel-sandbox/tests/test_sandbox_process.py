@@ -1452,9 +1452,12 @@ def _ndjson_stream(*records: object, interruption: str | None = None) -> httpx.R
 
 @pytest.fixture
 def no_retry_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
-    from vercel.sandbox._internal import log_stream
+    from vercel._internal.core.session import SdkSession
 
-    monkeypatch.setattr(log_stream, "_RETRY_BACKOFF_SECONDS", 0)
+    async def sleep(self: SdkSession, seconds: float) -> None:
+        pass
+
+    monkeypatch.setattr(SdkSession, "sleep", sleep)
 
 
 def _mock_interrupted_run(interruption: str) -> tuple[respx.Route, respx.Route, respx.Route]:
