@@ -106,6 +106,8 @@ Command readers, captured results, and communication return bytes in both I/O mo
 
 [[src/vercel-sandbox/tests/test_sandbox_byte_reader.py#test_async_byte_reader_receives_available_bytes_without_newlines]] verifies bounded receives, byte-sized Unicode splits, EOF, and text stream interoperability on asyncio and Trio. [[src/vercel-sandbox/tests/test_sandbox_byte_reader.py#test_sync_readers_deliver_interrupted_output_exactly_once]] checks recovery under arbitrary record boundaries and Unicode output. [[src/vercel-sandbox/tests/test_sandbox_byte_reader.py#test_output_consumers_accept_native_byte_events]] verifies that readers and routing preserve arbitrary bytes when the wire adapter is replaced, and text sinks handle split or invalid UTF-8.
 
+[[src/vercel-sandbox/vercel/sandbox/_internal/byte_reader.py#_ByteTransportCore#_pump]] handles failures during both log iterator creation and iteration: the initiating read raises the original exception, subsequent reads on either stream raise `BrokenResourceError`, and both readers remain closable. [[src/vercel-sandbox/tests/test_sandbox_public_flow.py#test_closed_session_rejects_handles_and_lazy_readers|Async regressions]] on asyncio and Trio and [[src/vercel-sandbox/tests/test_sandbox_process.py#test_sync_closed_session_breaks_lazy_readers|the sync regression]] verify this behavior when the SDK session closes before the first read.
+
 ## Command stdin
 
 Command stdin is a byte stream backed by offset-carrying requests, so writes can be resent without duplicating input and any handle can continue a stream.

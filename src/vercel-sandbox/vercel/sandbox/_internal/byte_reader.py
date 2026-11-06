@@ -224,11 +224,11 @@ class _ByteTransportCore:
         # Entered and exited holding the condition, which is released while
         # waiting on the stream so other readers can take what is routed.
         self._pumping = True
-        if self._events is None:
-            self._events = self._open_logs()
-        events = self._events
         self._condition.release()
         try:
+            if self._events is None:
+                self._events = self._open_logs()
+            events = self._events
             try:
                 event: ProcessLog | None = await anext(events)
             except StopAsyncIteration:

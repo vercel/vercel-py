@@ -6,7 +6,7 @@ import subprocess
 from collections.abc import AsyncIterator, Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
-from threading import Condition, Event, Lock
+from threading import Condition, Event, Lock, Thread
 from typing import Any
 
 import anyio
@@ -19,6 +19,7 @@ import vendor.respx as respx
 from vercel import sandbox
 from vercel._internal.core.options import ServiceOptions
 from vercel.api import session
+from vercel.errors import VercelSessionClosedError
 from vercel.sandbox import sync as sandbox_sync
 from vercel.sandbox._internal.state import (
     SandboxRuntimeSessionState,
@@ -254,6 +255,46 @@ async def test_async_process_readers_wait_and_signals(mock_env_clear: None) -> N
         sandbox.CommandSignal.SIGUSR1,
         sandbox.CommandSignal.SIGUSR1,
     ]
+
+
+@respx.mock
+def test_sync_closed_session_breaks_lazy_readers(mock_env_clear: None) -> None:
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
+        return_value=httpx.Response(200, json=_process_response())
+    )
+    with session(service_options=_session_options()):
+        box = sandbox_sync.create_sandbox(name="preview")
+        command = box.create_command("python")
+
+    assert command.stdout is not None and command.stderr is not None
+    readers = (command.stdout, command.stderr)
+    with pytest.raises(VercelSessionClosedError):
+        readers[0].read()
+
+    done = Event()
+    errors: list[BaseException] = []
+
+    def read_and_close() -> None:
+        try:
+            for reader in readers:
+                with pytest.raises(anyio.BrokenResourceError):
+                    reader.read()
+            for reader in readers:
+                reader.close()
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            done.set()
+
+    # A regression must fail promptly even if a synchronous read blocks.
+    Thread(target=read_and_close, daemon=True).start()
+    assert done.wait(5), "readers hung after the session closed"
+    if errors:
+        raise errors[0]
+    assert all(reader.closed for reader in readers)
 
 
 @respx.mock
