@@ -82,7 +82,7 @@ class SchedulesValidationError(SchedulesError, ValueError):
     """
 
 
-class ScheduleEventError(SchedulesError):
+class ScheduleEventParseError(SchedulesError):
     """Raised when the environment does not hold a valid schedule firing."""
 
 
@@ -95,7 +95,7 @@ class NotAScheduleInvocationError(ScheduleEventParseError):
 
 __all__ = [
     "NotAScheduleInvocationError",
-    "ScheduleEventError",
+    "ScheduleEventParseError",
     "ScheduleNotFoundError",
     "SchedulesApiError",
     "SchedulesCredentialsError",

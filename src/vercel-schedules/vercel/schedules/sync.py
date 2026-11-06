@@ -13,7 +13,7 @@ Vercel Queue topic, a function, or a path. A schedule is identified by its name 
 namespace. Manage them with `create_schedule` and friends.
 
 A schedule command runs once per firing; read the firing with
-`ScheduleEvent.from_env()`.
+`ScheduleMetadata.from_env()`.
 
 Requests authenticate with the deployment's Vercel OIDC token. Locally, run
 `vercel env pull` or pass `SchedulesServiceOptions(token=...)` in a session.
@@ -26,7 +26,7 @@ from vercel._internal.core.sentinel import UNSET, UnsetType
 from vercel._internal.core.session import get_active_sync_session
 from vercel.schedules._internal.errors import (
     NotAScheduleInvocationError,
-    ScheduleEventError,
+    ScheduleEventParseError,
     ScheduleNotFoundError,
     SchedulesApiError,
     SchedulesCredentialsError,
@@ -34,7 +34,7 @@ from vercel.schedules._internal.errors import (
     SchedulesResponseError,
     SchedulesValidationError,
 )
-from vercel.schedules._internal.event import ScheduleEvent
+from vercel.schedules._internal.metadata import ScheduleMetadata
 from vercel.schedules._internal.models import (
     MAX_JITTER,
     MIN_JITTER,
@@ -281,9 +281,9 @@ __all__ = [
     "PathTarget",
     "QueueTarget",
     "Schedule",
-    "ScheduleEvent",
-    "ScheduleEventError",
+    "ScheduleEventParseError",
     "ScheduleExpression",
+    "ScheduleMetadata",
     "ScheduleNotFoundError",
     "ScheduleSource",
     "ScheduleState",
