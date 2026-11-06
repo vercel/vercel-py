@@ -20,7 +20,7 @@ Each wraps one Vercel product.
 - [[vercel-cache]] — Runtime Cache clients and tag invalidation.
 - [[vercel-queue]] — Vercel Queues publishing, push delivery, polling, and local emulation.
 - [[vercel-sandbox]] — Vercel Sandbox lifecycle, processes, filesystems, drives, and PTYs.
-- [[vercel-schedules]] — Vercel Schedules management, and firings read inside a schedule command.
+- [[vercel-schedules]] — Vercel Schedules declared in code or managed through the API, and the firings they run.
 - [[vercel-workflow]] — durable workflows replayed from an event log.
 - [[vercel-connect]] — short-lived third-party credentials brokered by Vercel Connect.
 - [[vercel-passport]] — Vercel Passport visitor identities, read from the request and verified.

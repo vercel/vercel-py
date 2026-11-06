@@ -1,6 +1,6 @@
 # vercel-schedules
 
-Client for Vercel Schedules: manages schedules through the Schedules API, and reads the current firing inside a schedule command.
+Client for Vercel Schedules: declares schedules in code, manages them through the Schedules API, and reads the current firing.
 
 Lives in [[src/vercel-schedules]] and is exposed as [[src/vercel-schedules/vercel/schedules/__init__.py|vercel.schedules]] (async) and [[src/vercel-schedules/vercel/schedules/sync.py|vercel.schedules.sync]], which use identical names and arguments. It follows the TypeScript `@vercel/schedules` wire contract, as of version 0.0.3.
 
@@ -26,10 +26,20 @@ Requests send the deployment's Vercel OIDC token, unless `SchedulesServiceOption
 
 `vercel dev` sets `VERCEL_SCHEDULE_DEV_API_VERSION` and points `VERCEL_SCHEDULE_BASE_URL` at its local Schedules API, which accepts `VERCEL_SCHEDULE_TOKEN` instead. [[src/vercel-schedules/vercel/schedules/_internal/options.py#local_credentials_factory]] selects that token only outside a deployment and only for the advertised base URL, matching `@vercel/schedules`. An unsupported local API version raises [[src/vercel-schedules/vercel/schedules/_internal/errors.py#SchedulesCredentialsError]] when the first request is made.
 
-## Firing environment
+## Declared schedules
 
-A schedule command runs once per firing, and the platform passes the firing's metadata to it in `VERCEL_SCHEDULE_*` environment variables.
+`@schedule` declares a function as the handler of a recurring schedule in a process-wide registry, which a build can read by importing the module.
 
-[[src/vercel-schedules/vercel/schedules/_internal/metadata.py#ScheduleMetadata#from_env]] reads them into a [[src/vercel-schedules/vercel/schedules/_internal/metadata.py#ScheduleMetadata]]. Its fields match `ScheduleMetadata` in the TypeScript `@vercel/schedules`, and each variable carries one schedule dispatch header, such as `ce-vssschedulename` in `VERCEL_SCHEDULE_NAME`.
+[[src/vercel-schedules/vercel/schedules/_internal/registry.py#schedule]] validates the cron, timezone, jitter, and name when the module is imported, so an invalid declaration fails at import rather than at deploy. The name defaults to the function's `__name__`, and must match the names the Schedules API accepts. A second function with the same name is rejected, but the same function registering again replaces its entry, because importing a module again decorates its functions again.
+
+[[src/vercel-schedules/vercel/schedules/_internal/registry.py#get_registered_schedules]] returns the registered schedules. [[src/vercel-schedules/vercel/schedules/_internal/registry.py#RegisteredSchedule#run]] calls the handler for one firing: with the `ScheduleMetadata` if the handler takes a positional argument, and in a worker thread unless it is a coroutine function, so a blocking handler does not stall the event loop. It rejects a firing of another schedule, because a caller that routes firings by name must not run the wrong handler.
+
+## Firing metadata
+
+A firing's metadata reaches a schedule command in `VERCEL_SCHEDULE_*` environment variables, and a function or path in the dispatch request's CloudEvent headers.
+
+[[src/vercel-schedules/vercel/schedules/_internal/metadata.py#ScheduleMetadata#from_headers]] implements the receiving side of the schedule dispatch protocol, and its tests run the protocol's conformance fixtures from `vercel/schedules`. It does not check the request method. A request without `ce-type`, such as a legacy Cron Job on a public path, raises [[src/vercel-schedules/vercel/schedules/_internal/errors.py#NotAScheduleInvocationError]], so a path handler can tell it apart from a malformed dispatch.
+
+A schedule command runs once per firing. [[src/vercel-schedules/vercel/schedules/_internal/metadata.py#ScheduleMetadata#from_env]] reads its variables into a [[src/vercel-schedules/vercel/schedules/_internal/metadata.py#ScheduleMetadata]]. Its fields match `ScheduleMetadata` in the TypeScript `@vercel/schedules`, and each variable carries one schedule dispatch header, such as `ce-vssschedulename` in `VERCEL_SCHEDULE_NAME`.
 
 `VERCEL_SCHEDULE_EXECUTION_ID` decides whether the process is a firing. Client settings such as `VERCEL_SCHEDULE_BASE_URL` share the prefix and can be inherited by any process, but the execution ID is set only per firing. Without it, `from_env` raises [[src/vercel-schedules/vercel/schedules/_internal/errors.py#NotAScheduleInvocationError]]. Any other missing or invalid variable raises its parent, [[src/vercel-schedules/vercel/schedules/_internal/errors.py#ScheduleEventParseError]].
