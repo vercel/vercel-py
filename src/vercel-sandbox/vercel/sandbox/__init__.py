@@ -39,6 +39,7 @@ from vercel.sandbox._internal.async_runtime import (
     query_snapshots as _query_snapshots,
     resume_sandbox_operation as _resume_sandbox_operation,
 )
+from vercel.sandbox._internal.byte_reader import ByteReader
 from vercel.sandbox._internal.errors import (
     SandboxApiError,
     SandboxCleanupError,
@@ -115,7 +116,6 @@ from vercel.sandbox._internal.process_stdin import CommandStdin
 from vercel.sandbox._internal.region import CURRENT_REGION, CurrentRegion, RegionInput
 from vercel.sandbox._internal.service import SandboxService, get_sandbox_service
 from vercel.sandbox._internal.state import SnapshotRetentionState
-from vercel.sandbox._internal.text_reader import TextReader
 from vercel.sandbox.protocols import (
     SandboxExecution,
     SandboxFilesystemOperations,
@@ -730,7 +730,7 @@ __all__ = [
     "SnapshotSource",
     "TagFilter",
     "TarballSource",
-    "TextReader",
+    "ByteReader",
     "create_sandbox",
     "delete_drive",
     "fork_drive",

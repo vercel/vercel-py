@@ -173,7 +173,7 @@ def test_public_process_exports() -> None:
         "CommandStatus",
         "SandboxCredentials",
         "SandboxCredentialsFactory",
-        "TextReader",
+        "ByteReader",
     ):
         assert name in sandbox.__all__
     for name in (
@@ -183,7 +183,7 @@ def test_public_process_exports() -> None:
         "SandboxCredentials",
         "SyncCommand",
         "SyncSandboxCredentialsFactory",
-        "SyncTextReader",
+        "SyncByteReader",
     ):
         assert name in sandbox_sync.__all__
 
@@ -228,9 +228,9 @@ async def test_async_process_readers_wait_and_signals(mock_env_clear: None) -> N
         assert process.returncode is None
         assert process.stdout is not None
         assert process.stderr is not None
-        assert await process.stdout.readline() == "out-1\n"
-        assert await process.stdout.read() == "out-2"
-        assert await process.stderr.read() == "err\n"
+        assert await process.stdout.readline() == b"out-1\n"
+        assert await process.stdout.read() == b"out-2"
+        assert await process.stderr.read() == b"err\n"
         assert await process.refresh() is process
         assert await process.wait() == 7
         assert process.returncode == 7
@@ -283,7 +283,7 @@ def test_sync_process_readers_wait_and_signals(mock_env_clear: None) -> None:
     with session(service_options=_session_options()):
         box = sandbox_sync.create_sandbox(name="preview")
         process = box.create_command("python")
-        assert process.communicate() == ("out-1\nout-2", "err\n")
+        assert process.communicate() == (b"out-1\nout-2", b"err\n")
         assert process.returncode == 0
         process.terminate()
         process.kill()
@@ -313,7 +313,7 @@ async def test_async_create_command_merges_stderr_into_stdout_reader(
         process = await box.create_command("python", stderr=subprocess.STDOUT)
         assert process.stderr is None
         assert process.stdout is not None
-        assert await process.communicate() == ("out-1\nout-2err\n", None)
+        assert await process.communicate() == (b"out-1\nout-2err\n", None)
         assert process.returncode == 0
 
     assert logs.call_count == 1
@@ -338,7 +338,7 @@ async def test_async_create_command_devnull_drops_reader(mock_env_clear: None) -
         box = await sandbox.create_sandbox(name="preview")
         process = await box.create_command("python", stderr=subprocess.DEVNULL)
         assert process.stderr is None
-        assert await process.communicate() == ("out-1\nout-2", None)
+        assert await process.communicate() == (b"out-1\nout-2", None)
 
 
 @pytest.mark.parametrize("stderr", [subprocess.DEVNULL, subprocess.STDOUT])
@@ -417,7 +417,7 @@ def test_sync_create_command_merges_stderr_into_stdout_reader(mock_env_clear: No
         process = box.create_command("python", stderr=subprocess.STDOUT)
         assert process.stderr is None
         assert process.stdout is not None
-        assert process.communicate() == ("out-1\nout-2err\n", None)
+        assert process.communicate() == (b"out-1\nout-2err\n", None)
         assert process.returncode == 0
 
     assert logs.call_count == 1
@@ -495,11 +495,11 @@ async def test_run_command_routes_output_checks_and_uses_one_request(
         assert capsys.readouterr() == ("out\n", "err\n")
 
         captured = await box.run_command("python", capture_output=True)
-        assert captured.stdout == "out\n"
-        assert captured.stderr == "err\n"
+        assert captured.stdout == b"out\n"
+        assert captured.stderr == b"err\n"
 
         merged = await box.run_command("python", stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        assert merged.stdout == "out-1\nerr\nout-2\n"
+        assert merged.stdout == b"out-1\nerr\nout-2\n"
         assert merged.stderr is None
 
         with pytest.raises(subprocess.CalledProcessError) as exc_info:
@@ -510,8 +510,8 @@ async def test_run_command_routes_output_checks_and_uses_one_request(
 
         with pytest.raises(subprocess.CalledProcessError) as captured_error:
             await box.run_command("python", check=True, capture_output=True)
-        assert captured_error.value.stdout == "out\n"
-        assert captured_error.value.stderr == "err\n"
+        assert captured_error.value.stdout == b"out\n"
+        assert captured_error.value.stderr == b"err\n"
 
     assert run.call_count == 5
     assert all(call.request.url.params["wait"] == "true" for call in run.calls)
@@ -557,7 +557,7 @@ async def test_async_run_command_explicit_and_discarded_destinations(
         stdout_only = await box.run_command(
             "python", stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
         )
-        assert stdout_only.stdout == "out\n"
+        assert stdout_only.stdout == b"out\n"
         assert stdout_only.stderr is None
 
     assert run.call_count == 4
@@ -582,7 +582,7 @@ def test_sync_run_command_routes_and_captures(
         assert capsys.readouterr() == ("out\n", "err\n")
 
         captured = box.run_command("python", stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        assert captured.stdout == "out-1\nerr\nout-2\n"
+        assert captured.stdout == b"out-1\nerr\nout-2\n"
         assert captured.stderr is None
 
     assert run.call_count == 2
@@ -609,8 +609,8 @@ async def test_async_run_command_reads_chunked_ndjson(mock_env_clear: None) -> N
         box = await sandbox.create_sandbox(name="preview")
         result = await box.run_command("python", capture_output=True)
 
-    assert result.stdout == "café\n"
-    assert result.stderr == "雪\n"
+    assert result.stdout == b"caf\xc3\xa9\n"
+    assert result.stderr == b"\xe9\x9b\xaa\n"
     assert stream.closed
 
 
@@ -653,7 +653,7 @@ async def test_async_run_command_replays_pre_stream_stopped_session_error(
         result = await box.run_command("python", capture_output=True)
 
     assert result.session_id == "sbx_new"
-    assert result.stdout == "out\n"
+    assert result.stdout == b"out\n"
     assert events == ["old-command", "resume", "replacement-command"]
 
 
@@ -696,7 +696,7 @@ def test_sync_run_command_replays_pre_stream_stopped_session_error(
         result = box.run_command("python", capture_output=True)
 
     assert result.session_id == "sbx_new"
-    assert result.stdout == "out\n"
+    assert result.stdout == b"out\n"
     assert events == ["old-command", "resume", "replacement-command"]
 
 
@@ -721,8 +721,8 @@ def test_sync_run_command_reads_chunked_ndjson(mock_env_clear: None) -> None:
         box = sandbox_sync.create_sandbox(name="preview")
         result = box.run_command("python", capture_output=True)
 
-    assert result.stdout == "café\n"
-    assert result.stderr == "雪\n"
+    assert result.stdout == b"caf\xc3\xa9\n"
+    assert result.stderr == b"\xe9\x9b\xaa\n"
     assert stream.closed
 
 
@@ -752,7 +752,7 @@ async def test_async_process_readers_read_chunked_ndjson(mock_env_clear: None) -
         process = await box.create_command("python")
         output = await process.communicate()
 
-    assert output == ("café\n", "雪\n")
+    assert output == (b"caf\xc3\xa9\n", b"\xe9\x9b\xaa\n")
     assert stream.closed
 
 
@@ -782,7 +782,7 @@ def test_sync_process_readers_read_chunked_ndjson(mock_env_clear: None) -> None:
         process = box.create_command("python")
         output = process.communicate()
 
-    assert output == ("café\n", "雪\n")
+    assert output == (b"caf\xc3\xa9\n", b"\xe9\x9b\xaa\n")
     assert stream.closed
 
 
@@ -1498,7 +1498,11 @@ async def test_async_run_command_resumes_interrupted_stream_without_rerunning(
         box = await sandbox.create_sandbox(name="preview")
         result = await box.run_command("python", capture_output=True)
 
-    assert (result.returncode, result.stdout, result.stderr) == (3, "hé😀 world", "warning")
+    assert (result.returncode, result.stdout, result.stderr) == (
+        3,
+        b"h\xc3\xa9\xf0\x9f\x98\x80 world",
+        b"warning",
+    )
     assert (run.call_count, logs.call_count, wait.call_count) == (1, 1, 1)
     assert wait.calls[0].request.url.params["wait"] == "true"
 
@@ -1514,7 +1518,11 @@ def test_sync_run_command_resumes_interrupted_stream_without_rerunning(
         box = sandbox_sync.create_sandbox(name="preview")
         result = box.run_command("python", stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
-    assert (result.returncode, result.stdout, result.stderr) == (3, "hé😀warning world", None)
+    assert (result.returncode, result.stdout, result.stderr) == (
+        3,
+        b"h\xc3\xa9\xf0\x9f\x98\x80warning world",
+        None,
+    )
     assert (run.call_count, logs.call_count, wait.call_count) == (1, 1, 1)
 
 
@@ -1587,7 +1595,7 @@ async def test_async_process_readers_reconnect_without_duplicating_output(
         process = await box.create_command("python")
         output = await process.communicate()
 
-    assert output == ("one two three", "é😀")
+    assert output == (b"one two three", b"\xc3\xa9\xf0\x9f\x98\x80")
     assert logs.call_count == 3
 
 
@@ -1603,7 +1611,7 @@ def test_sync_process_readers_reconnect_without_duplicating_output(
         process = box.create_command("python")
         output = process.communicate()
 
-    assert output == ("one two three", "é😀")
+    assert output == (b"one two three", b"\xc3\xa9\xf0\x9f\x98\x80")
     assert logs.call_count == 3
 
 
@@ -2136,5 +2144,5 @@ async def test_run_command_on_start_runs_before_check_fails(
             sync, "sandbox", capture_output=True, check=True, on_start=started.append
         )
 
-    assert (raised.value.returncode, raised.value.stdout) == (9, "out\n")
+    assert (raised.value.returncode, raised.value.stdout) == (9, b"out\n")
     assert [process.returncode for process in started] == [9]

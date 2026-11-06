@@ -20,9 +20,9 @@ from vercel.sandbox._internal.models import ProcessLog, ProcessLogStream
 _OpenResponse: TypeAlias = Callable[[], StreamingResponse | Awaitable[StreamingResponse]]
 
 
-class _TextBuffer:
+class _ByteBuffer:
     def __init__(self) -> None:
-        self._chunks: deque[str] = deque()
+        self._chunks: deque[bytes] = deque()
         self._head = 0
         self._size = 0
         self.eof = False
@@ -30,7 +30,7 @@ class _TextBuffer:
     def __len__(self) -> int:
         return self._size
 
-    def append(self, value: str) -> None:
+    def append(self, value: bytes) -> None:
         if value:
             self._chunks.append(value)
             self._size += len(value)
@@ -40,10 +40,10 @@ class _TextBuffer:
         self._head = 0
         self._size = 0
 
-    def take(self, size: int) -> str:
+    def take(self, size: int) -> bytes:
         size = self._size if size < 0 else min(size, self._size)
         remaining = size
-        parts: list[str] = []
+        parts: list[bytes] = []
         while remaining:
             chunk = self._chunks[0]
             available = len(chunk) - self._head
@@ -55,13 +55,13 @@ class _TextBuffer:
                 self._chunks.popleft()
                 self._head = 0
         self._size -= size
-        return "".join(parts)
+        return b"".join(parts)
 
-    def take_line(self) -> str | None:
+    def take_line(self) -> bytes | None:
         seen = 0
         for index, chunk in enumerate(self._chunks):
             start = self._head if index == 0 else 0
-            newline = chunk.find("\n", start)
+            newline = chunk.find(b"\n", start)
             if newline >= 0:
                 return self.take(seen + newline - start + 1)
             seen += len(chunk) - start
@@ -70,37 +70,45 @@ class _TextBuffer:
         return None
 
 
-class TextReader(anyio.abc.ObjectReceiveStream[str], ABC):
+class ByteReader(anyio.abc.ByteReceiveStream, ABC):
+    """Read command output as bytes; sizes count bytes, not characters.
+
+    Output is currently re-encoded from the service's UTF-8 text, so bytes
+    already lost by the service cannot be recovered.
+    """
+
     @property
     @abstractmethod
     def closed(self) -> bool: ...
 
     @abstractmethod
-    async def read(self, size: int = -1) -> str: ...
+    async def read(self, size: int = -1) -> bytes: ...
 
     @abstractmethod
-    async def readline(self) -> str: ...
+    async def readline(self) -> bytes: ...
 
 
-class SyncTextReader(ABC):
+class SyncByteReader(ABC):
+    """Read command output as bytes with a forward-only cursor."""
+
     @property
     @abstractmethod
     def closed(self) -> bool: ...
 
     @abstractmethod
-    def read(self, size: int = -1) -> str: ...
+    def read(self, size: int = -1) -> bytes: ...
 
     @abstractmethod
-    def readline(self) -> str: ...
+    def readline(self) -> bytes: ...
 
     @abstractmethod
     def close(self) -> None: ...
 
-    def __iter__(self) -> Iterator[str]:
+    def __iter__(self) -> Iterator[bytes]:
         while line := self.readline():
             yield line
 
-    def __enter__(self) -> "SyncTextReader":
+    def __enter__(self) -> "SyncByteReader":
         if self.closed:
             raise anyio.ClosedResourceError
         return self
@@ -114,7 +122,7 @@ class SyncTextReader(ABC):
         self.close()
 
 
-def _distinct_buffers(routes: Mapping[ProcessLogStream, _TextBuffer | None]) -> list[_TextBuffer]:
+def _distinct_buffers(routes: Mapping[ProcessLogStream, _ByteBuffer | None]) -> list[_ByteBuffer]:
     return list({id(buffer): buffer for buffer in routes.values() if buffer is not None}.values())
 
 
@@ -181,7 +189,7 @@ def _normalize_open_response(
     return open_stream
 
 
-class _TextTransportCore:
+class _ByteTransportCore:
     """Route one shared log stream into per-reader buffers.
 
     One reader at a time pumps the stream, reading records without holding the
@@ -193,7 +201,7 @@ class _TextTransportCore:
     def __init__(
         self,
         open_response: Callable[[], Awaitable[StreamingResponse]],
-        routes: Mapping[ProcessLogStream, _TextBuffer | None],
+        routes: Mapping[ProcessLogStream, _ByteBuffer | None],
         condition: _PumpCondition,
         sleep: AsyncSleep,
     ) -> None:
@@ -215,7 +223,7 @@ class _TextTransportCore:
         for buffer in _distinct_buffers(self._routes):
             buffer.eof = True
 
-    async def receive(self, take: Callable[[], str | None]) -> str:
+    async def receive(self, take: Callable[[], bytes | None]) -> bytes:
         """Return the first non-``None`` result of ``take``, pumping as needed."""
         await self._condition.acquire()
         try:
@@ -257,12 +265,12 @@ class _TextTransportCore:
                 self._mark_eof()
                 await self._cleanup()
             elif (target := self._routes[event.stream]) is not None:
-                target.append(event.data)
+                target.append(event.data.encode("utf-8"))
         finally:
             self._pumping = False
             self._condition.notify_all()
 
-    async def close(self, buffer: _TextBuffer) -> None:
+    async def close(self, buffer: _ByteBuffer) -> None:
         await self._condition.acquire()
         try:
             buffer.clear()
@@ -280,7 +288,7 @@ class _TextTransportCore:
 
 
 class _ReaderCore:
-    def __init__(self, transport: _TextTransportCore, buffer: _TextBuffer) -> None:
+    def __init__(self, transport: _ByteTransportCore, buffer: _ByteBuffer) -> None:
         self.transport = transport
         self.buffer = buffer
         self.closed = False
@@ -291,22 +299,37 @@ class _ReaderCore:
         if self.transport._broken:
             raise anyio.BrokenResourceError
 
-    async def read(self, size: int = -1) -> str:
+    async def read(self, size: int = -1) -> bytes:
         self.ensure_open()
         if size < -1:
             raise ValueError("size must be -1 or non-negative")
         if size == 0:
-            return ""
+            return b""
         buffer = self.buffer
 
-        def take() -> str | None:
+        def take() -> bytes | None:
             if buffer.eof or (size >= 0 and len(buffer) >= size):
                 return buffer.take(size)
             return None
 
         return await self.transport.receive(take)
 
-    async def readline(self) -> str:
+    async def receive(self, max_bytes: int) -> bytes:
+        self.ensure_open()
+        if max_bytes < 1:
+            raise ValueError("max_bytes must be at least 1")
+
+        def take() -> bytes | None:
+            if self.buffer or self.buffer.eof:
+                return self.buffer.take(max_bytes)
+            return None
+
+        data = await self.transport.receive(take)
+        if not data:
+            raise anyio.EndOfStream
+        return data
+
+    async def readline(self) -> bytes:
         self.ensure_open()
         return await self.transport.receive(self.buffer.take_line)
 
@@ -316,7 +339,7 @@ class _ReaderCore:
             await self.transport.close(self.buffer)
 
 
-class _TextReader(TextReader):
+class _ByteReader(ByteReader):
     def __init__(self, core: _ReaderCore) -> None:
         self._core = core
         self._guard = anyio.ResourceGuard("reading from")
@@ -325,26 +348,24 @@ class _TextReader(TextReader):
     def closed(self) -> bool:
         return self._core.closed
 
-    async def read(self, size: int = -1) -> str:
+    async def read(self, size: int = -1) -> bytes:
         with self._guard:
             return await self._core.read(size)
 
-    async def readline(self) -> str:
+    async def readline(self) -> bytes:
         with self._guard:
             return await self._core.readline()
 
-    async def receive(self) -> str:
-        line = await self.readline()
-        if not line:
-            raise anyio.EndOfStream
-        return line
+    async def receive(self, max_bytes: int = 65536) -> bytes:
+        with self._guard:
+            return await self._core.receive(max_bytes)
 
     async def aclose(self) -> None:
         with anyio.CancelScope(shield=True):
             await self._core.close()
 
 
-class _SyncTextReader(SyncTextReader):
+class _SyncByteReader(SyncByteReader):
     def __init__(self, core: _ReaderCore) -> None:
         self._core = core
 
@@ -352,10 +373,10 @@ class _SyncTextReader(SyncTextReader):
     def closed(self) -> bool:
         return self._core.closed
 
-    def read(self, size: int = -1) -> str:
+    def read(self, size: int = -1) -> bytes:
         return iter_coroutine(self._core.read(size))
 
-    def readline(self) -> str:
+    def readline(self) -> bytes:
         return iter_coroutine(self._core.readline())
 
     def close(self) -> None:
@@ -366,12 +387,12 @@ async def _blocking_sleep(seconds: float) -> None:
     time.sleep(seconds)
 
 
-def _reader_buffers(stdout: int, stderr: int) -> tuple[_TextBuffer | None, _TextBuffer | None]:
-    stdout_buffer = _TextBuffer() if stdout == subprocess.PIPE else None
+def _reader_buffers(stdout: int, stderr: int) -> tuple[_ByteBuffer | None, _ByteBuffer | None]:
+    stdout_buffer = _ByteBuffer() if stdout == subprocess.PIPE else None
     if stderr == subprocess.STDOUT:
         stderr_buffer = stdout_buffer
     elif stderr == subprocess.PIPE:
-        stderr_buffer = _TextBuffer()
+        stderr_buffer = _ByteBuffer()
     else:
         stderr_buffer = None
     return stdout_buffer, stderr_buffer
@@ -387,7 +408,7 @@ def _cores(
     stdout_buffer, stderr_buffer = _reader_buffers(stdout, stderr)
     if stdout_buffer is None and stderr_buffer is None:
         return None, None
-    transport = _TextTransportCore(
+    transport = _ByteTransportCore(
         open_response,
         {ProcessLogStream.STDOUT: stdout_buffer, ProcessLogStream.STDERR: stderr_buffer},
         condition,
@@ -401,33 +422,33 @@ def _cores(
     )
 
 
-def _text_readers(
+def _byte_readers(
     open_response: _OpenResponse,
     *,
     stdout: int = subprocess.PIPE,
     stderr: int = subprocess.PIPE,
     sleep: AsyncSleep = anyio.sleep,
-) -> tuple[TextReader | None, TextReader | None]:
+) -> tuple[ByteReader | None, ByteReader | None]:
     stdout_core, stderr_core = _cores(
         _normalize_open_response(open_response), stdout, stderr, _AsyncPumpCondition(), sleep
     )
     return (
-        None if stdout_core is None else _TextReader(stdout_core),
-        None if stderr_core is None else _TextReader(stderr_core),
+        None if stdout_core is None else _ByteReader(stdout_core),
+        None if stderr_core is None else _ByteReader(stderr_core),
     )
 
 
-def _sync_text_readers(
+def _sync_byte_readers(
     open_response: _OpenResponse,
     *,
     stdout: int = subprocess.PIPE,
     stderr: int = subprocess.PIPE,
     sleep: AsyncSleep = _blocking_sleep,
-) -> tuple[SyncTextReader | None, SyncTextReader | None]:
+) -> tuple[SyncByteReader | None, SyncByteReader | None]:
     stdout_core, stderr_core = _cores(
         _normalize_open_response(open_response), stdout, stderr, _SyncPumpCondition(), sleep
     )
     return (
-        None if stdout_core is None else _SyncTextReader(stdout_core),
-        None if stderr_core is None else _SyncTextReader(stderr_core),
+        None if stdout_core is None else _SyncByteReader(stdout_core),
+        None if stderr_core is None else _SyncByteReader(stderr_core),
     )

@@ -1,0 +1,1 @@
+Return bytes from command output readers, communicate(), and captured results. Replace TextReader/SyncTextReader with ByteReader/SyncByteReader; async readers implement AnyIO ByteReceiveStream and iterate byte chunks. Decode output explicitly for text. The current API still re-encodes service UTF-8 text, so it cannot recover binary data lost by the service.

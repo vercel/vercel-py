@@ -21,6 +21,7 @@ from vercel.sandbox._internal.async_filesystem_handle import (
     SandboxTextReader,
     SandboxTextWriter,
 )
+from vercel.sandbox._internal.byte_reader import ByteReader, _byte_readers
 from vercel.sandbox._internal.errors import (
     SandboxApiError,
     SandboxCleanupError,
@@ -126,7 +127,6 @@ from vercel.sandbox._internal.state import (
     SnapshotSessionState,
     SnapshotState,
 )
-from vercel.sandbox._internal.text_reader import TextReader, _text_readers
 from vercel.sandbox._internal.value_model import SandboxModel, SandboxValueModel
 
 if TYPE_CHECKING:
@@ -156,8 +156,8 @@ class Command(_ProcessHandleState):
     __slots__ = ("_service", "stderr", "stdin", "stdout")
 
     stdin: CommandStdin | None
-    stdout: TextReader | None
-    stderr: TextReader | None
+    stdout: ByteReader | None
+    stderr: ByteReader | None
 
     def __init__(
         self,
@@ -171,7 +171,7 @@ class Command(_ProcessHandleState):
         super().__init__(payload)
         self._service = service
         self.stdin = _async_stdin(service, payload, stdin)
-        self.stdout, self.stderr = _text_readers(
+        self.stdout, self.stderr = _byte_readers(
             lambda: service.process_logs_response(session_id=self._session_id, process_id=self.id),
             stdout=stdout,
             stderr=stderr,
@@ -198,7 +198,9 @@ class Command(_ProcessHandleState):
             raise SandboxResponseError("Wait response did not include a process return code")
         return self.returncode
 
-    async def communicate(self, input: CommandInput | None = None) -> tuple[str | None, str | None]:
+    async def communicate(
+        self, input: CommandInput | None = None
+    ) -> tuple[bytes | None, bytes | None]:
         """Send input, read all output, and wait for the process to exit.
 
         Stdin is closed whenever ``input`` is given, even if it is empty. With
@@ -213,7 +215,7 @@ class Command(_ProcessHandleState):
                 reading before taking all of it.
 
         Returns:
-            A ``(stdout, stderr)`` tuple. A stream without a reader is
+            A ``(stdout, stderr)`` tuple of bytes. A stream without a reader is
             ``None``, so merging with ``stderr=subprocess.STDOUT`` returns
             ``(merged, None)``.
 

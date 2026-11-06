@@ -47,8 +47,8 @@ def test_command_types_preserve_process_import_compatibility() -> None:
         session_id="sbx_test",
         started_at=1,
         returncode=0,
-        stdout="hello\n",
-        stderr="",
+        stdout=b"hello\n",
+        stderr=b"",
     )
     assert isinstance(result, sandbox.CompletedProcess)
     assert sync.CompletedCommand is sandbox.CompletedCommand

@@ -224,7 +224,7 @@ class UserContext:
             )
             if result.process.returncode != 0:
                 raise SandboxError(f"Linux user {self.username!r} does not exist")
-            fields = (result.stdout or "").strip().split(":")
+            fields = (result.stdout or b"").decode("utf-8").strip().split(":")
             if len(fields) != 7 or fields[0] != self.username or not fields[5].startswith("/"):
                 raise SandboxError(f"Cannot resolve home directory for {self.username!r}")
             self.home_dir = fields[5]
@@ -267,11 +267,14 @@ class UserContext:
                 sudo=True,
                 output_router=ProcessOutputRouter(stdout=None, stderr=None, capture_output=True),
             )
-            if result.process.returncode == 9 and result.stdout == _USER_ALREADY_EXISTS + "\n":
+            if result.process.returncode == 9 and result.stdout == (
+                _USER_ALREADY_EXISTS + "\n"
+            ).encode("utf-8"):
                 raise SandboxUserAlreadyExistsError(self.username)
             if result.process.returncode != 0:
                 raise SandboxError(
-                    f"Failed to create Linux user {self.username!r}: {result.stderr or ''}"
+                    f"Failed to create Linux user {self.username!r}: "
+                    f"{(result.stderr or b'').decode('utf-8')}"
                 )
             await self.resolve(session_id)
 
@@ -344,9 +347,12 @@ class UserService(SandboxService):
                 args=["-g"],
                 output_router=ProcessOutputRouter(stdout=None, stderr=None, capture_output=True),
             )
-            gid = (result.stdout or "").strip()
+            gid = (result.stdout or b"").decode("utf-8").strip()
             if result.process.returncode != 0 or not re.fullmatch(r"[0-9]+", gid):
-                raise SandboxError(f"Cannot resolve sandbox default group: {result.stderr or ''}")
+                raise SandboxError(
+                    "Cannot resolve sandbox default group: "
+                    f"{(result.stderr or b'').decode('utf-8')}"
+                )
             self._default_gid = (session_id, gid)
         return self._default_gid[1]
 
@@ -391,8 +397,8 @@ class UserService(SandboxService):
                     operation,
                     paths=tuple(paths),
                     exit_code=result.process.returncode,
-                    stdout=result.stdout or "",
-                    stderr=result.stderr or "",
+                    stdout=(result.stdout or b"").decode("utf-8"),
+                    stderr=(result.stderr or b"").decode("utf-8"),
                 )
 
     async def _wrap(

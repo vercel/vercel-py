@@ -14,17 +14,17 @@ from vercel.sandbox._internal.value_model import SandboxModel
 class _OutputTarget(SandboxModel):
     # _resolve_target checks the writable-stream protocol, including duck types.
     stream: SkipValidation[TextIO | None] = None
-    chunks: list[str] | None = None
+    chunks: list[bytes] | None = None
 
     def write(self, data: str) -> None:
         if self.chunks is not None:
-            self.chunks.append(data)
+            self.chunks.append(data.encode("utf-8"))
         elif self.stream is not None:
             self.stream.write(data)
             self.stream.flush()
 
-    def captured(self) -> str | None:
-        return None if self.chunks is None else "".join(self.chunks)
+    def captured(self) -> bytes | None:
+        return None if self.chunks is None else b"".join(self.chunks)
 
 
 class ProcessOutputRouter:
@@ -57,7 +57,7 @@ class ProcessOutputRouter:
         target = self._stdout if event.stream is ProcessLogStream.STDOUT else self._stderr
         target.write(event.data)
 
-    def captured(self) -> tuple[str | None, str | None]:
+    def captured(self) -> tuple[bytes | None, bytes | None]:
         stdout = self._stdout.captured()
         stderr = None if self._stderr is self._stdout else self._stderr.captured()
         return stdout, stderr

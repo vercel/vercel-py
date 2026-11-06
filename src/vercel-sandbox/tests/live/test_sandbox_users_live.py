@@ -83,7 +83,7 @@ async def test_user_upload_provisioning_and_process_regressions(driver: Any) -> 
                 assert (await _run(box, "getent", ["group", name])).returncode != 0
             assert (await _run(box, "stat", ["-c", "%u:%g:%a", "/home/occupied"])).stdout == before
             assert await _call(box.fs.read_text, "/home/occupied/keep") == "untouched"
-            assert (await _run(box, "readlink", ["/home/linked"])).stdout == "/home/occupied\n"
+            assert (await _run(box, "readlink", ["/home/linked"])).stdout == b"/home/occupied\n"
             assert not await _call(box.fs.exists, "/tmp/absent-home")
 
             await _call(alice.fs.mkdir, "workspace")
@@ -100,14 +100,14 @@ async def test_user_upload_provisioning_and_process_regressions(driver: Any) -> 
                 process = await _call(alice.create_command, "/bin/bash", args, cwd="workspace")
                 metadata = ("/bin/bash", args, "/home/alice/workspace")
                 with anyio.fail_after(10):
-                    assert await _call(process.stdout.readline) == "READY\n"
+                    assert await _call(process.stdout.readline) == b"READY\n"
                     if signal == "TERM":
                         await _call(process.terminate)
                     else:
                         await _call(process.send_signal, signal)
                     assert (process.name, process.args, process.cwd) == metadata
                     output, _ = await _call(process.communicate)
-                    assert output == "HANDLED\n" + ("CLEANED\n" if cleanup else "")
+                    assert output == ("HANDLED\n" + ("CLEANED\n" if cleanup else "")).encode()
                     assert await _call(process.wait) == 0
 
             # An unhandled signal must retain the actual signal exit status.
@@ -117,10 +117,10 @@ async def test_user_upload_provisioning_and_process_regressions(driver: Any) -> 
                 ["-c", 'printf "READY\\n"; exec /bin/sleep 60'],
             )
             with anyio.fail_after(10):
-                assert await _call(process.stdout.readline) == "READY\n"
+                assert await _call(process.stdout.readline) == b"READY\n"
                 await _call(process.terminate)
                 output, _ = await _call(process.communicate)
-                assert output == ""
+                assert output == b""
                 assert await _call(process.wait) == 143
 
             # Pause signals cannot safely target the command through this
@@ -130,7 +130,7 @@ async def test_user_upload_provisioning_and_process_regressions(driver: Any) -> 
             process = await _call(alice.create_command, "/bin/bash", args, cwd="workspace")
             metadata = ("/bin/bash", args, "/home/alice/workspace")
             with anyio.fail_after(10):
-                pid = (await _call(process.stdout.readline)).strip()
+                pid = (await _call(process.stdout.readline)).decode().strip()
                 for signal in ("STOP", "TSTP", "TTIN", "TTOU"):
                     with pytest.raises(NotImplementedError, match=f"SIG{signal}.*user processes"):
                         await _call(process.send_signal, signal)
@@ -138,12 +138,12 @@ async def test_user_upload_provisioning_and_process_regressions(driver: Any) -> 
                     assert process.returncode is None
                     state = await _run(box, "/bin/ps", ["-o", "stat=", "-p", pid])
                     assert state.returncode == 0
-                    assert state.stdout.strip().startswith("S")
+                    assert state.stdout.strip().startswith(b"S")
                 await _call(process.refresh)
                 assert process.returncode is None
                 assert (process.name, process.args, process.cwd) == metadata
                 await _call(process.kill)
-                assert await _call(process.communicate) == ("", "")
+                assert await _call(process.communicate) == (b"", b"")
                 assert await _call(process.wait) != 0
 
             # Check actual Linux children, not only backend return codes. The
@@ -156,7 +156,7 @@ async def test_user_upload_provisioning_and_process_regressions(driver: Any) -> 
                 process = await _call(
                     alice.create_command, "/bin/bash", args, cwd="workspace", sudo=sudo
                 )
-                pids = (await _call(process.stdout.readline)).strip().split()
+                pids = (await _call(process.stdout.readline)).decode().strip().split()
                 assert len(pids) == 2
                 metadata = ("/bin/bash", args, "/home/alice/workspace")
                 await _call(process.send_signal, "CONT")
@@ -167,11 +167,11 @@ async def test_user_upload_provisioning_and_process_regressions(driver: Any) -> 
                 )
                 assert (process.name, process.args, process.cwd) == metadata
                 with anyio.fail_after(10):
-                    assert await _call(process.communicate) == ("", "")
+                    assert await _call(process.communicate) == (b"", b"")
                     assert await _call(process.wait) != 0
                 assert time.monotonic() - started < 10
                 states = (await _run(box, "/bin/ps", ["-o", "stat=", "-p", ",".join(pids)])).stdout
-                assert all(state.startswith("Z") for state in states.split())
+                assert all(state.startswith(b"Z") for state in states.split())
                 assert (process.name, process.args, process.cwd) == metadata
 
             # The internal deadline is trusted even with a custom PATH, while
@@ -202,7 +202,9 @@ async def test_user_upload_provisioning_and_process_regressions(driver: Any) -> 
                             await _call(result.wait)
                     assert result.returncode not in (0, 42, 126, 127)
                     assert time.monotonic() - started < 10
-                    assert output == (custom_bin + "\n" if command == "custom-command" else "")
+                    assert output == (
+                        (custom_bin + "\n" if command == "custom-command" else "").encode()
+                    )
 
 
 @requires_sandbox_credentials
@@ -223,10 +225,10 @@ async def test_user_rapid_term_handler_preserves_returncode(driver: Any, returnc
             for _ in range(5):
                 process = await _call(alice.create_command, "/bin/bash", args)
                 with anyio.fail_after(10):
-                    assert await _call(process.stdout.readline) == "READY\n"
+                    assert await _call(process.stdout.readline) == b"READY\n"
                     await _call(process.terminate)
                     output, _ = await _call(process.communicate)
-                    assert output == "HANDLED\n"
+                    assert output == b"HANDLED\n"
                     assert process.returncode == returncode
                     assert await _call(process.wait) == returncode
 
@@ -243,14 +245,14 @@ async def test_user_identity_and_permission_enforcement(driver: Any) -> None:
             bob = await _call(runtime.create_user, "bob")
             assert alice.home_dir == "/home/alice"
             assert bob.home_dir == "/home/bob"
-            default_gid = (await _run(box, "id", ["-g"], check=True)).stdout.strip()
+            default_gid = (await _run(box, "id", ["-g"], check=True)).stdout.decode().strip()
             homes = await _run(box, "stat", ["-c", "%U:%g:%a", alice.home_dir, bob.home_dir])
-            assert homes.stdout == f"alice:{default_gid}:770\nbob:{default_gid}:770\n"
+            assert homes.stdout == f"alice:{default_gid}:770\nbob:{default_gid}:770\n".encode()
             with pytest.raises(SandboxUserAlreadyExistsError) as duplicate:
                 await _call(runtime.create_user, "alice")
             assert duplicate.value.username == "alice"
             recovered = runtime.as_user(duplicate.value.username)
-            assert (await _run(recovered, "whoami", check=True)).stdout == "alice\n"
+            assert (await _run(recovered, "whoami", check=True)).stdout == b"alice\n"
 
             # Safe argv includes empty strings, quotes, newlines, and shell syntax.
             argv = [
@@ -263,13 +265,13 @@ async def test_user_identity_and_permission_enforcement(driver: Any) -> None:
                 "--flag",
             ]
             echoed = await _run(alice, "printf", ["%s\\0", *argv], check=True)
-            assert echoed.stdout == "\0".join(argv) + "\0"
+            assert echoed.stdout == ("\0".join(argv) + "\0").encode()
             assert not await _call(box.fs.exists, "/tmp/injected")
             await _call(alice.fs.write_text, "-runner", "#!/bin/sh\nprintf safe", mode=0o700)
             dash_command = await _run(
                 alice, "-runner", env={"PATH": "/home/alice:/usr/bin:/bin"}, check=True
             )
-            assert dash_command.stdout == "safe"
+            assert dash_command.stdout == b"safe"
             environment = await _run(
                 alice,
                 "bash",
@@ -277,19 +279,18 @@ async def test_user_identity_and_permission_enforcement(driver: Any) -> None:
                 env={"CUSTOM": "a 'value' $HOME\nnext"},
                 check=True,
             )
-            assert (
-                environment.stdout
-                == "/home/alice\nalice\nalice\na 'value' $HOME\nnext\n/home/alice\nalice\nalice\n"
+            assert environment.stdout == (
+                b"/home/alice\nalice\nalice\na 'value' $HOME\nnext\n/home/alice\nalice\nalice\n"
             )
             root_command = await _run(alice, "id", ["-u"], sudo=True, check=True)
-            assert root_command.stdout == "0\n"
-            assert (await _run(alice, "whoami", check=True)).stdout == "alice\n"
+            assert root_command.stdout == b"0\n"
+            assert (await _run(alice, "whoami", check=True)).stdout == b"alice\n"
 
             process = await _call(bob.create_command, "whoami")
             assert process.name == "whoami" and process.args == []
             assert process.cwd == "/home/bob"
             stdout, stderr = await _call(process.communicate)
-            assert stdout == "bob\n" and stderr == ""
+            assert stdout == b"bob\n" and stderr == b""
             assert process.returncode == 0
             assert process.cwd == "/home/bob" and process.name == "whoami"
             sleeper = await _call(bob.create_command, "sleep", ["60"])
@@ -303,7 +304,7 @@ async def test_user_identity_and_permission_enforcement(driver: Any) -> None:
                 await _call(alice.fs.mkdir, "missing/child", recursive=False)
             await _run(box, "groupadd", ["agents"], sudo=True, check=True)
             await _run(box, "usermod", ["-aG", "agents", "alice"], sudo=True, check=True)
-            groups = (await _run(alice, "id", ["-Gn"], check=True)).stdout.split()
+            groups = (await _run(alice, "id", ["-Gn"], check=True)).stdout.decode().split()
             assert set(groups) == {"alice", "agents"}
             with pytest.raises(subprocess.CalledProcessError):
                 await _run(alice, "false", check=True)
@@ -320,10 +321,10 @@ async def test_user_identity_and_permission_enforcement(driver: Any) -> None:
             ownership = await _run(
                 alice, "stat", ["-c", "%U:%G:%a", "workspace/secret.bin"], check=True
             )
-            assert ownership.stdout == "alice:alice:600\n"
-            assert (
-                await _run(alice, "pwd", cwd="workspace", check=True)
-            ).stdout == "/home/alice/workspace\n"
+            assert ownership.stdout == b"alice:alice:600\n"
+            assert (await _run(alice, "pwd", cwd="workspace", check=True)).stdout == (
+                b"/home/alice/workspace\n"
+            )
             async with _scope(alice.fs.batch()) as batch:
                 batch.write_text("batch/note.txt", "batch contents", mode=0o600)
             assert await _call(alice.fs.read_text, "batch/note.txt") == "batch contents"
@@ -343,12 +344,12 @@ async def test_user_identity_and_permission_enforcement(driver: Any) -> None:
             for directory in ("workspace", "batch"):
                 assert (
                     await _run(alice, "stat", ["-c", "%U:%g:%a", directory], check=True)
-                ).stdout == f"alice:{default_gid}:770\n"
+                ).stdout == f"alice:{default_gid}:770\n".encode()
             await _call(alice.fs.mkdir, "created/nested")
             for directory in ("created", "created/nested"):
                 assert (
                     await _run(alice, "stat", ["-c", "%U:%g:%a", directory], check=True)
-                ).stdout == f"alice:{default_gid}:770\n"
+                ).stdout == f"alice:{default_gid}:770\n".encode()
             private = "/home/alice/workspace/secret.bin"
             operations: list[tuple[Callable[..., Any], tuple[str, ...], dict[str, Any]]] = [
                 (bob.fs.read_bytes, (private,), {}),
@@ -374,7 +375,7 @@ async def test_user_identity_and_permission_enforcement(driver: Any) -> None:
             await _call(bob.fs.write_text, delivery, "delivered by orchestration", mode=0o600)
             assert (
                 await _run(box, "stat", ["-c", "%U:%G:%a", delivery], sudo=True, check=True)
-            ).stdout == "bob:bob:600\n"
+            ).stdout == b"bob:bob:600\n"
             with pytest.raises(SandboxFilesystemError):
                 await _call(bob.fs.read_text, delivery)
             assert not await _call(bob.fs.exists, private)
@@ -408,9 +409,9 @@ async def test_user_identity_and_permission_enforcement(driver: Any) -> None:
             )
             custom = runtime.as_user("custom")
             assert custom.home_dir is None
-            assert (await _run(custom, "pwd", check=True)).stdout == "/srv/custom-home\n"
+            assert (await _run(custom, "pwd", check=True)).stdout == b"/srv/custom-home\n"
             assert custom.home_dir == "/srv/custom-home"
-            assert (await _run(custom, "id", ["-gn"], check=True)).stdout == "users\n"
+            assert (await _run(custom, "id", ["-gn"], check=True)).stdout == b"users\n"
             before = (await _run(box, "stat", ["-c", "%u:%g:%a", "/srv/custom-home"])).stdout
             # Existing homes retain their permissions; uploaded files use the
             # resolved primary group rather than assuming username == group.
@@ -419,12 +420,12 @@ async def test_user_identity_and_permission_enforcement(driver: Any) -> None:
             assert (
                 await _run(box, "stat", ["-c", "%u:%g:%a", "/srv/custom-home"])
             ).stdout == before
-            assert (
-                await _run(custom, "stat", ["-c", "%U:%G:%a", "nested/custom.txt"])
-            ).stdout == "custom:users:600\n"
+            assert (await _run(custom, "stat", ["-c", "%U:%G:%a", "nested/custom.txt"])).stdout == (
+                b"custom:users:600\n"
+            )
             root = box.as_user("root")
             assert root.home_dir == "/root"
-            assert (await _run(root, "pwd", check=True)).stdout == "/root\n"
+            assert (await _run(root, "pwd", check=True)).stdout == b"/root\n"
             absent = box.as_user("missing_account")
             with pytest.raises(SandboxError, match="does not exist"):
                 await _run(absent, "true")
@@ -446,7 +447,7 @@ async def test_sandbox_users_resume_and_session_users_remain_pinned(driver: Any)
             await _call(runtime.stop)
             assert await _call(alice.fs.read_text, "persisted.txt") == "survives snapshot"
             resumed = await _run(alice, "whoami", check=True)
-            assert resumed.stdout == "alice\n" and resumed.session_id != runtime.id
+            assert resumed.stdout == b"alice\n" and resumed.session_id != runtime.id
             with pytest.raises(SandboxError):
                 await _run(pinned, "true")
 
@@ -462,7 +463,7 @@ async def test_user_processes_read_stdin_through_the_launcher(driver: Any) -> No
             script = 'read -r line; printf "%s:%s\\n" "$(whoami)" "$line"; cat'
 
             result = await _run(alice, "/bin/bash", ["-c", script], input="hi\nrest\n")
-            assert result.stdout == "alice:hi\nrest\n"
+            assert result.stdout == b"alice:hi\nrest\n"
 
             process = await _call(
                 alice.create_command, "/bin/bash", ["-c", script], stdin=subprocess.PIPE
@@ -480,4 +481,4 @@ async def test_user_processes_read_stdin_through_the_launcher(driver: Any) -> No
             empty = await _call(alice.create_command, "/bin/cat")
             assert empty.stdin is None
             with anyio.fail_after(30):
-                assert await _call(empty.communicate) == ("", "")
+                assert await _call(empty.communicate) == (b"", b"")

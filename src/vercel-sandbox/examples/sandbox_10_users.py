@@ -19,16 +19,16 @@ async def greet(executor: SandboxExecution) -> str:
     """A consumer only needs command and file capabilities."""
     await executor.fs.write_text("greeting.txt", "hello from a generic consumer\n")
     result = await executor.run_command("cat", ["greeting.txt"], capture_output=True, check=True)
-    assert result.stdout == await executor.fs.read_text("greeting.txt")
-    return result.stdout or ""
+    assert result.stdout == await executor.fs.read_bytes("greeting.txt")
+    return (result.stdout or b"").decode()
 
 
 def greet_sync(executor: SyncSandboxExecution) -> str:
     """The same capability contract is available to synchronous applications."""
     executor.fs.write_text("greeting.txt", "hello from a generic consumer\n")
     result = executor.run_command("cat", ["greeting.txt"], capture_output=True, check=True)
-    assert result.stdout == executor.fs.read_text("greeting.txt")
-    return result.stdout or ""
+    assert result.stdout == executor.fs.read_bytes("greeting.txt")
+    return (result.stdout or b"").decode()
 
 
 async def main() -> None:
@@ -58,11 +58,11 @@ async def main() -> None:
                 raise AssertionError("user filesystem isolation failed")
 
             identity = await alice.run_command("whoami", capture_output=True, check=True)
-            assert identity.stdout == "alice\n"
+            assert identity.stdout == b"alice\n"
             root = box.as_user("root")
             assert root.home_dir == "/root"
             privileged = await root.run_command("pwd", capture_output=True, check=True)
-            assert privileged.stdout == "/root\n"
+            assert privileged.stdout == b"/root\n"
             print(f"{alice.username} works in {alice.home_dir}")
 
     # Sync APIs use the same example consumer.

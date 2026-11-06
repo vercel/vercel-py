@@ -898,7 +898,12 @@ class CommandSignal(IntEnum):
 
 
 class CompletedCommand(SandboxValueModel):
-    """The captured result of one completed remote command."""
+    """The captured result of one completed remote command.
+
+    Captured output is bytes, or ``None`` for streams that were not captured.
+    It is currently re-encoded from the service's UTF-8 text and cannot
+    recover bytes already lost by the service.
+    """
 
     id: str
     name: str
@@ -907,8 +912,8 @@ class CompletedCommand(SandboxValueModel):
     session_id: str
     started_at: int
     returncode: int
-    stdout: str | None
-    stderr: str | None
+    stdout: bytes | None
+    stderr: bytes | None
 
     def check_returncode(self) -> None:
         """Raise an error when the process exited unsuccessfully.

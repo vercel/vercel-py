@@ -15,6 +15,7 @@ from vercel._internal.core.byte_stream import SyncByteStreamRuntime
 from vercel._internal.core.iter_coroutine import iter_coroutine
 from vercel._internal.core.polyfills import Self
 from vercel._internal.core.time import parse_duration_seconds, parse_required_duration_seconds
+from vercel.sandbox._internal.byte_reader import SyncByteReader, _sync_byte_readers
 from vercel.sandbox._internal.errors import (
     SandboxApiError,
     SandboxCleanupError,
@@ -124,7 +125,6 @@ from vercel.sandbox._internal.sync_filesystem_handle import (
     SyncSandboxTextReader,
     SyncSandboxTextWriter,
 )
-from vercel.sandbox._internal.text_reader import SyncTextReader, _sync_text_readers
 from vercel.sandbox._internal.value_model import SandboxModel
 
 if TYPE_CHECKING:
@@ -156,8 +156,8 @@ class SyncCommand(_ProcessHandleState):
     __slots__ = ("_service", "stderr", "stdin", "stdout")
 
     stdin: SyncCommandStdin | None
-    stdout: SyncTextReader | None
-    stderr: SyncTextReader | None
+    stdout: SyncByteReader | None
+    stderr: SyncByteReader | None
 
     def __init__(
         self,
@@ -171,7 +171,7 @@ class SyncCommand(_ProcessHandleState):
         super().__init__(payload)
         self._service = service
         self.stdin = _sync_stdin(service, payload, stdin)
-        self.stdout, self.stderr = _sync_text_readers(
+        self.stdout, self.stderr = _sync_byte_readers(
             lambda: service.process_logs_response(session_id=self._session_id, process_id=self.id),
             stdout=stdout,
             stderr=stderr,
@@ -200,7 +200,7 @@ class SyncCommand(_ProcessHandleState):
             raise SandboxResponseError("Wait response did not include a process return code")
         return self.returncode
 
-    def communicate(self, input: CommandInput | None = None) -> tuple[str | None, str | None]:
+    def communicate(self, input: CommandInput | None = None) -> tuple[bytes | None, bytes | None]:
         """Send input, read all output, and wait for the process to exit.
 
         Stdin is closed whenever ``input`` is given, even if it is empty. With
@@ -215,7 +215,7 @@ class SyncCommand(_ProcessHandleState):
                 reading before taking all of it.
 
         Returns:
-            A ``(stdout, stderr)`` tuple. A stream without a reader is
+            A ``(stdout, stderr)`` tuple of bytes. A stream without a reader is
             ``None``, so merging with ``stderr=subprocess.STDOUT`` returns
             ``(merged, None)``.
 
