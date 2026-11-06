@@ -25,14 +25,14 @@ runs the command once per firing:
 ```
 
 The firing's metadata is in `VERCEL_SCHEDULE_*` environment variables.
-`ScheduleEvent.from_env()` reads them:
+`ScheduleMetadata.from_env()` reads them:
 
 ```python
 # jobs/reindex.py
-from vercel.schedules import ScheduleEvent
+from vercel.schedules import ScheduleMetadata
 
-event = ScheduleEvent.from_env()
-print(f"Running {event.name}, scheduled at {event.scheduled_at}")
+metadata = ScheduleMetadata.from_env()
+print(f"Running {metadata.name}, scheduled at {metadata.scheduled_at}")
 ```
 
 A non-zero exit status marks the firing as failed. Failed firings are not
@@ -42,7 +42,7 @@ Run by hand, without the variables, `from_env()` raises
 `NotAScheduleInvocationError`. The package is optional here:
 `os.environ["VERCEL_SCHEDULE_NAME"]` works too.
 
-| Variable | `ScheduleEvent` attribute |
+| Variable | `ScheduleMetadata` attribute |
 | --- | --- |
 | `VERCEL_SCHEDULE_ID` | `schedule_id` |
 | `VERCEL_SCHEDULE_EXECUTION_ID` | `execution_id` |

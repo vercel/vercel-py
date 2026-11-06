@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from vercel.schedules import NotAScheduleInvocationError, ScheduleEvent, ScheduleEventError
+from vercel.schedules import NotAScheduleInvocationError, ScheduleEventParseError, ScheduleMetadata
 
 FIRING_ENV = {
     "VERCEL_SCHEDULE_ID": "schedule-id",
@@ -14,7 +14,7 @@ FIRING_ENV = {
     "VERCEL_SCHEDULE_EXPRESSION": "0 12 * * *",
 }
 
-EVENT = ScheduleEvent(
+METADATA = ScheduleMetadata(
     schedule_id="schedule-id",
     execution_id="execution-id",
     name="nightly",
@@ -29,7 +29,7 @@ def test_reads_the_firing_from_the_process_environment(monkeypatch: pytest.Monke
     for name, value in FIRING_ENV.items():
         monkeypatch.setenv(name, value)
 
-    assert ScheduleEvent.from_env() == EVENT
+    assert ScheduleMetadata.from_env() == METADATA
 
 
 def test_a_process_with_only_client_settings_is_not_a_firing() -> None:
@@ -37,7 +37,7 @@ def test_a_process_with_only_client_settings_is_not_a_firing() -> None:
     env = {"VERCEL_SCHEDULE_BASE_URL": "https://schedules.test"}
 
     with pytest.raises(NotAScheduleInvocationError):
-        ScheduleEvent.from_env(env)
+        ScheduleMetadata.from_env(env)
 
 
 @pytest.mark.parametrize(
@@ -49,7 +49,7 @@ def test_a_process_with_only_client_settings_is_not_a_firing() -> None:
     ],
 )
 def test_rejects_an_invalid_firing(overrides: dict[str, str], message: str) -> None:
-    with pytest.raises(ScheduleEventError, match=message) as exc_info:
-        ScheduleEvent.from_env({**FIRING_ENV, **overrides})
+    with pytest.raises(ScheduleEventParseError, match=message) as exc_info:
+        ScheduleMetadata.from_env({**FIRING_ENV, **overrides})
 
     assert not isinstance(exc_info.value, NotAScheduleInvocationError)

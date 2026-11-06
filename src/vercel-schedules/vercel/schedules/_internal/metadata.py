@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from vercel.schedules._internal.errors import NotAScheduleInvocationError, ScheduleEventError
+from vercel.schedules._internal.errors import NotAScheduleInvocationError, ScheduleEventParseError
 
 # Set once per firing, unlike client settings such as `VERCEL_SCHEDULE_BASE_URL`
 # that a process can inherit without being a firing.
@@ -16,7 +16,7 @@ _SCHEDULED_AT_VAR = "VERCEL_SCHEDULE_SCHEDULED_AT"
 def _require(env: Mapping[str, str], name: str) -> str:
     value = env.get(name)
     if not value:
-        raise ScheduleEventError(f"{name} is not set")
+        raise ScheduleEventParseError(f"{name} is not set")
     return value
 
 
@@ -26,14 +26,14 @@ def _scheduled_at(env: Mapping[str, str]) -> datetime:
         # Python 3.10's `fromisoformat` does not accept a `Z` suffix.
         value = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError as exc:
-        raise ScheduleEventError(f"invalid {_SCHEDULED_AT_VAR} {raw!r}") from exc
+        raise ScheduleEventParseError(f"invalid {_SCHEDULED_AT_VAR} {raw!r}") from exc
     if value.utcoffset() is None:
-        raise ScheduleEventError(f"invalid {_SCHEDULED_AT_VAR} {raw!r}: missing offset")
+        raise ScheduleEventParseError(f"invalid {_SCHEDULED_AT_VAR} {raw!r}: missing offset")
     return value.astimezone(timezone.utc)
 
 
 @dataclass(frozen=True)
-class ScheduleEvent:
+class ScheduleMetadata:
     """One firing of a schedule.
 
     Attributes:
@@ -57,7 +57,7 @@ class ScheduleEvent:
     expression: str
 
     @classmethod
-    def from_env(cls, env: Mapping[str, str] | None = None) -> "ScheduleEvent":
+    def from_env(cls, env: Mapping[str, str] | None = None) -> "ScheduleMetadata":
         """Read the current firing from `VERCEL_SCHEDULE_*` variables.
 
         The platform sets them each time it runs a schedule command.
@@ -68,7 +68,7 @@ class ScheduleEvent:
         Raises:
             NotAScheduleInvocationError: If `VERCEL_SCHEDULE_EXECUTION_ID` is not
                 set, such as when the command is run by hand.
-            ScheduleEventError: If another variable is missing or invalid.
+            ScheduleEventParseError: If another variable is missing or invalid.
         """
         env = os.environ if env is None else env
         if not env.get(_EXECUTION_ID_VAR):
@@ -85,4 +85,4 @@ class ScheduleEvent:
         )
 
 
-__all__ = ["ScheduleEvent"]
+__all__ = ["ScheduleMetadata"]
