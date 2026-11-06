@@ -46,7 +46,7 @@ async def sandbox_stdio(
 
     async def read_stdout() -> None:
         async with read_writer:
-            async for line in stdout:
+            while line := await stdout.readline():
                 message: SessionMessage | Exception
                 try:
                     message = SessionMessage(

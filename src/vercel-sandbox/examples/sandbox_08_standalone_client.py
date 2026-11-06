@@ -23,7 +23,7 @@ class ScriptRunner:
                 capture_output=True,
                 check=True,
             )
-            return result.stdout or ""
+            return (result.stdout or b"").decode()
 
 
 async def main() -> None:

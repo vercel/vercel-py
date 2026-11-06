@@ -1,9 +1,10 @@
+import inspect
 import json
 import math
 import queue
 import subprocess
 import threading
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator
 
 import anyio
 import httpx2 as httpx
@@ -11,12 +12,11 @@ import pytest
 from hypothesis import example, given, settings, strategies as st
 
 from vercel._internal.core.http import StreamingResponse
+from vercel.sandbox._internal import byte_reader
+from vercel.sandbox._internal.byte_reader import SyncByteReader
 from vercel.sandbox._internal.errors import SandboxStreamError
-from vercel.sandbox._internal.text_reader import (
-    SyncTextReader,
-    _sync_text_readers,
-    _text_readers,
-)
+from vercel.sandbox._internal.log_stream import AsyncSleep, _iter_command_logs
+from vercel.sandbox._internal.models import ProcessLog
 
 
 class _TestStreamingResponse(StreamingResponse):
@@ -71,6 +71,41 @@ async def _no_sleep(seconds: float) -> None:
     pass
 
 
+def _wire_logs(
+    open_response: Callable[[], StreamingResponse | Awaitable[StreamingResponse]],
+    sleep: AsyncSleep,
+) -> AsyncGenerator[ProcessLog, None]:
+    async def open_stream() -> StreamingResponse:
+        response = open_response()
+        return await response if inspect.isawaitable(response) else response
+
+    return _iter_command_logs(open_stream, sleep=sleep)
+
+
+def _byte_readers(
+    open_response: Callable[[], StreamingResponse | Awaitable[StreamingResponse]],
+    *,
+    stdout: int = subprocess.PIPE,
+    stderr: int = subprocess.PIPE,
+    sleep: AsyncSleep = _no_sleep,
+) -> tuple[byte_reader.ByteReader | None, byte_reader.ByteReader | None]:
+    return byte_reader._byte_readers(
+        lambda: _wire_logs(open_response, sleep), stdout=stdout, stderr=stderr
+    )
+
+
+def _sync_byte_readers(
+    open_response: Callable[[], StreamingResponse | Awaitable[StreamingResponse]],
+    *,
+    stdout: int = subprocess.PIPE,
+    stderr: int = subprocess.PIPE,
+    sleep: AsyncSleep = _no_sleep,
+) -> tuple[SyncByteReader | None, SyncByteReader | None]:
+    return byte_reader._sync_byte_readers(
+        lambda: _wire_logs(open_response, sleep), stdout=stdout, stderr=stderr
+    )
+
+
 class _TrackingAsyncStream(httpx.AsyncByteStream):
     def __init__(self, content: bytes) -> None:
         self.content = content
@@ -97,7 +132,7 @@ class _TrackingSyncStream(httpx.SyncByteStream):
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
-async def test_async_text_reader_lines_shared_cursor_eof_and_close(anyio_backend: str) -> None:
+async def test_async_byte_reader_lines_shared_cursor_eof_and_close(anyio_backend: str) -> None:
     async def open_response() -> StreamingResponse:
         return _logs_response(
             {"stream": "stdout", "data": "first\nsecond"},
@@ -105,27 +140,27 @@ async def test_async_text_reader_lines_shared_cursor_eof_and_close(anyio_backend
             {"stream": "stdout", "data": " line\nlast"},
         )
 
-    reader, peer = _text_readers(open_response)
+    reader, peer = _byte_readers(open_response)
     assert reader is not None and peer is not None
 
-    assert await reader.read(2) == "fi"
-    assert await reader.readline() == "rst\n"
-    assert await reader.receive() == "second line\n"
-    assert [line async for line in reader] == ["last"]
-    assert await reader.readline() == ""
+    assert await reader.read(2) == b"fi"
+    assert await reader.readline() == b"rst\n"
+    assert await reader.readline() == b"second line\n"
+    assert [line async for line in reader] == [b"last"]
+    assert await reader.readline() == b""
     with pytest.raises(anyio.EndOfStream):
         await reader.receive()
 
     await reader.aclose()
     assert reader.closed
-    assert await peer.read() == "ignored\n"
+    assert await peer.read() == b"ignored\n"
     with pytest.raises(anyio.ClosedResourceError):
         await reader.read()
 
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
-async def test_async_text_reader_rejects_concurrent_reads(anyio_backend: str) -> None:
+async def test_async_byte_reader_rejects_concurrent_reads(anyio_backend: str) -> None:
     started = anyio.Event()
     release = anyio.Event()
 
@@ -138,7 +173,7 @@ async def test_async_text_reader_rejects_concurrent_reads(anyio_backend: str) ->
     async def open_response() -> StreamingResponse:
         return _streaming(httpx.Response(200, stream=PendingStream()))
 
-    reader, _ = _text_readers(open_response)
+    reader, _ = _byte_readers(open_response)
     assert reader is not None
     async with anyio.create_task_group() as group:
         group.start_soon(reader.readline)
@@ -150,16 +185,16 @@ async def test_async_text_reader_rejects_concurrent_reads(anyio_backend: str) ->
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
-async def test_async_text_reader_propagates_in_band_errors(anyio_backend: str) -> None:
+async def test_async_byte_reader_propagates_in_band_errors(anyio_backend: str) -> None:
     async def open_response() -> StreamingResponse:
         return _logs_response(
             {"stream": "stdout", "data": "before\n"},
             {"stream": "error", "data": {"code": "stopped", "message": "process stopped"}},
         )
 
-    reader, peer = _text_readers(open_response)
+    reader, peer = _byte_readers(open_response)
     assert reader is not None and peer is not None
-    assert await reader.readline() == "before\n"
+    assert await reader.readline() == b"before\n"
     with pytest.raises(SandboxStreamError, match="process stopped") as exc_info:
         await reader.readline()
     assert exc_info.value.code == "stopped"
@@ -169,7 +204,7 @@ async def test_async_text_reader_propagates_in_band_errors(anyio_backend: str) -
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
-async def test_async_text_reader_breaks_peer_after_transport_failure(
+async def test_async_byte_reader_breaks_peer_after_transport_failure(
     anyio_backend: str,
 ) -> None:
     class FailedStream(httpx.AsyncByteStream):
@@ -184,7 +219,7 @@ async def test_async_text_reader_breaks_peer_after_transport_failure(
         opened += 1
         return _streaming(httpx.Response(200, stream=FailedStream()))
 
-    reader, peer = _text_readers(open_response, sleep=_no_sleep)
+    reader, peer = _byte_readers(open_response, sleep=_no_sleep)
     assert reader is not None and peer is not None
     with pytest.raises(httpx.ReadError, match="connection failed"):
         await reader.read()
@@ -195,7 +230,7 @@ async def test_async_text_reader_breaks_peer_after_transport_failure(
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
-async def test_async_text_reader_breaks_peer_after_cancellation(anyio_backend: str) -> None:
+async def test_async_byte_reader_breaks_peer_after_cancellation(anyio_backend: str) -> None:
     reading = anyio.Event()
 
     class PendingStream(httpx.AsyncByteStream):
@@ -207,7 +242,7 @@ async def test_async_text_reader_breaks_peer_after_cancellation(anyio_backend: s
     async def open_response() -> StreamingResponse:
         return _streaming(httpx.Response(200, stream=PendingStream()))
 
-    reader, peer = _text_readers(open_response)
+    reader, peer = _byte_readers(open_response)
     assert reader is not None and peer is not None
 
     async def cancel_once_reading(scope: anyio.CancelScope) -> None:
@@ -228,23 +263,23 @@ async def test_async_text_reader_breaks_peer_after_cancellation(anyio_backend: s
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
-async def test_async_text_reader_cancelled_before_reading_leaves_peer_usable(
+async def test_async_byte_reader_cancelled_before_reading_leaves_peer_usable(
     anyio_backend: str,
 ) -> None:
     async def open_response() -> StreamingResponse:
         return _logs_response({"stream": "stderr", "data": "still here\n"})
 
-    reader, peer = _text_readers(open_response)
+    reader, peer = _byte_readers(open_response)
     assert reader is not None and peer is not None
     with anyio.CancelScope() as scope:
         scope.cancel()
         await reader.read()
 
-    assert await peer.read() == "still here\n"
+    assert await peer.read() == b"still here\n"
 
 
-def test_sync_text_reader_lines_shared_cursor_eof_and_close() -> None:
-    reader, peer = _sync_text_readers(
+def test_sync_byte_reader_lines_shared_cursor_eof_and_close() -> None:
+    reader, peer = _sync_byte_readers(
         lambda: _logs_response(
             {"stream": "stdout", "data": "first\nsecond"},
             {"stream": "stderr", "data": "ignored\n"},
@@ -254,20 +289,20 @@ def test_sync_text_reader_lines_shared_cursor_eof_and_close() -> None:
 
     assert reader is not None and peer is not None
 
-    assert reader.read(2) == "fi"
-    assert reader.readline() == "rst\n"
-    assert list(reader) == ["second line\n", "last"]
-    assert reader.readline() == ""
+    assert reader.read(2) == b"fi"
+    assert reader.readline() == b"rst\n"
+    assert list(reader) == [b"second line\n", b"last"]
+    assert reader.readline() == b""
 
     reader.close()
     assert reader.closed
-    assert peer.read() == "ignored\n"
+    assert peer.read() == b"ignored\n"
     with pytest.raises(anyio.ClosedResourceError):
         reader.read()
 
 
-def test_sync_text_reader_propagates_in_band_errors() -> None:
-    reader, peer = _sync_text_readers(
+def test_sync_byte_reader_propagates_in_band_errors() -> None:
+    reader, peer = _sync_byte_readers(
         lambda: _logs_response(
             {"stream": "error", "data": {"code": "stopped", "message": "process stopped"}},
         ),
@@ -282,7 +317,7 @@ def test_sync_text_reader_propagates_in_band_errors() -> None:
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
-async def test_async_text_reader_merges_stderr_in_arrival_order(anyio_backend: str) -> None:
+async def test_async_byte_reader_merges_stderr_in_arrival_order(anyio_backend: str) -> None:
     stream = _TrackingAsyncStream(
         _logs_body(
             {"stream": "stdout", "data": "out-1\n"},
@@ -294,11 +329,11 @@ async def test_async_text_reader_merges_stderr_in_arrival_order(anyio_backend: s
     async def open_response() -> StreamingResponse:
         return _streaming(httpx.Response(200, stream=stream))
 
-    reader, peer = _text_readers(open_response, stderr=subprocess.STDOUT)
+    reader, peer = _byte_readers(open_response, stderr=subprocess.STDOUT)
     assert peer is None
     assert reader is not None
-    assert await reader.readline() == "out-1\n"
-    assert await reader.read() == "err\nout-2\n"
+    assert await reader.readline() == b"out-1\n"
+    assert await reader.read() == b"err\nout-2\n"
 
     await reader.aclose()
     assert stream.closed
@@ -306,23 +341,23 @@ async def test_async_text_reader_merges_stderr_in_arrival_order(anyio_backend: s
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
-async def test_async_text_reader_drops_devnull_stream(anyio_backend: str) -> None:
+async def test_async_byte_reader_drops_devnull_stream(anyio_backend: str) -> None:
     async def open_response() -> StreamingResponse:
         return _logs_response(
             {"stream": "stdout", "data": "dropped\n"},
             {"stream": "stderr", "data": "kept\n"},
         )
 
-    stdout, stderr = _text_readers(open_response, stdout=subprocess.DEVNULL)
+    stdout, stderr = _byte_readers(open_response, stdout=subprocess.DEVNULL)
     assert stdout is None
     assert stderr is not None
-    assert await stderr.read() == "kept\n"
+    assert await stderr.read() == b"kept\n"
 
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
 @pytest.mark.parametrize("stderr", [subprocess.DEVNULL, subprocess.STDOUT])
-async def test_async_text_readers_with_no_streams_never_open_response(
+async def test_async_byte_readers_with_no_streams_never_open_response(
     anyio_backend: str, stderr: int
 ) -> None:
     opened = 0
@@ -332,7 +367,7 @@ async def test_async_text_readers_with_no_streams_never_open_response(
         opened += 1
         return _logs_response()
 
-    readers = _text_readers(open_response, stdout=subprocess.DEVNULL, stderr=stderr)
+    readers = _byte_readers(open_response, stdout=subprocess.DEVNULL, stderr=stderr)
     assert readers == (None, None)
     assert opened == 0
 
@@ -346,16 +381,16 @@ async def test_async_merged_reader_propagates_in_band_errors(anyio_backend: str)
             {"stream": "error", "data": {"code": "stopped", "message": "process stopped"}},
         )
 
-    reader, _ = _text_readers(open_response, stderr=subprocess.STDOUT)
+    reader, _ = _byte_readers(open_response, stderr=subprocess.STDOUT)
     assert reader is not None
-    assert await reader.readline() == "before\n"
+    assert await reader.readline() == b"before\n"
     with pytest.raises(SandboxStreamError, match="process stopped"):
         await reader.readline()
     with pytest.raises(anyio.BrokenResourceError):
         await reader.read()
 
 
-def test_sync_text_reader_merges_stderr_in_arrival_order() -> None:
+def test_sync_byte_reader_merges_stderr_in_arrival_order() -> None:
     stream = _TrackingSyncStream(
         _logs_body(
             {"stream": "stdout", "data": "out-1\n"},
@@ -364,20 +399,20 @@ def test_sync_text_reader_merges_stderr_in_arrival_order() -> None:
         )
     )
 
-    reader, peer = _sync_text_readers(
+    reader, peer = _sync_byte_readers(
         lambda: _streaming(httpx.Response(200, stream=stream)), stderr=subprocess.STDOUT
     )
     assert peer is None
     assert reader is not None
-    assert reader.readline() == "out-1\n"
-    assert reader.read() == "err\nout-2\n"
+    assert reader.readline() == b"out-1\n"
+    assert reader.read() == b"err\nout-2\n"
 
     reader.close()
     assert stream.closed
 
 
-def test_sync_text_reader_drops_devnull_stream() -> None:
-    stdout, stderr = _sync_text_readers(
+def test_sync_byte_reader_drops_devnull_stream() -> None:
+    stdout, stderr = _sync_byte_readers(
         lambda: _logs_response(
             {"stream": "stdout", "data": "kept\n"},
             {"stream": "stderr", "data": "dropped\n"},
@@ -386,11 +421,11 @@ def test_sync_text_reader_drops_devnull_stream() -> None:
     )
     assert stderr is None
     assert stdout is not None
-    assert stdout.read() == "kept\n"
+    assert stdout.read() == b"kept\n"
 
 
 @pytest.mark.parametrize("stderr", [subprocess.DEVNULL, subprocess.STDOUT])
-def test_sync_text_readers_with_no_streams_never_open_response(stderr: int) -> None:
+def test_sync_byte_readers_with_no_streams_never_open_response(stderr: int) -> None:
     opened = 0
 
     def open_response() -> StreamingResponse:
@@ -398,7 +433,7 @@ def test_sync_text_readers_with_no_streams_never_open_response(stderr: int) -> N
         opened += 1
         return _logs_response()
 
-    readers = _sync_text_readers(open_response, stdout=subprocess.DEVNULL, stderr=stderr)
+    readers = _sync_byte_readers(open_response, stdout=subprocess.DEVNULL, stderr=stderr)
     assert readers == (None, None)
     assert opened == 0
 
@@ -454,11 +489,14 @@ def test_sync_readers_deliver_interrupted_output_exactly_once(
     ]
     responses = iter(connections)
 
-    stdout, stderr = _sync_text_readers(
+    stdout, stderr = _sync_byte_readers(
         lambda: _streaming(httpx.Response(200, stream=next(responses))), sleep=_no_sleep
     )
     assert stdout is not None and stderr is not None
-    assert (stdout.read(), stderr.read()) == (expected["stdout"], expected["stderr"])
+    assert (stdout.read(), stderr.read()) == (
+        expected["stdout"].encode(),
+        expected["stderr"].encode(),
+    )
 
 
 # Each turn is one server reply: a run of stdout/stderr records containing at
@@ -497,12 +535,12 @@ def _lines(conversation: list[list[dict[str, str]]], stream: str) -> list[str]:
 @given(turns=_TURNS)
 @example(turns=[["stdout"], ["stdout"]])
 @example(turns=[["stderr", "stdout"], ["stdout", "stderr"]])
-def test_async_text_readers_read_stdout_while_another_task_reads_stderr(
+def test_async_byte_readers_read_stdout_while_another_task_reads_stderr(
     backend: str, turns: list[list[str]]
 ) -> None:
     conversation = _conversation(turns)
 
-    async def converse() -> list[str]:
+    async def converse() -> list[bytes]:
         send, receive = anyio.create_memory_object_stream[bytes](math.inf)
 
         class ServerStream(httpx.AsyncByteStream):
@@ -513,12 +551,12 @@ def test_async_text_readers_read_stdout_while_another_task_reads_stderr(
         async def open_response() -> StreamingResponse:
             return _streaming(httpx.Response(200, stream=ServerStream()))
 
-        stdout, stderr = _text_readers(open_response)
+        stdout, stderr = _byte_readers(open_response)
         assert stdout is not None and stderr is not None
-        forwarded: list[str] = []
+        forwarded: list[bytes] = []
 
         async def forward_stderr() -> None:
-            async for line in stderr:
+            while line := await stderr.readline():
                 forwarded.append(line)
 
         async def reply(records: list[dict[str, str]]) -> None:
@@ -534,15 +572,17 @@ def test_async_text_readers_read_stdout_while_another_task_reads_stderr(
                 for record in records:
                     if record["stream"] == "stdout":
                         with anyio.fail_after(1):
-                            assert await stdout.readline() == record["data"]
+                            assert await stdout.readline() == record["data"].encode()
             send.close()
         return forwarded
 
-    assert anyio.run(converse, backend=backend) == _lines(conversation, "stderr")
+    assert anyio.run(converse, backend=backend) == [
+        line.encode() for line in _lines(conversation, "stderr")
+    ]
 
 
-def _readline_within(reader: SyncTextReader, timeout: float = 1) -> str:
-    result: queue.Queue[str] = queue.Queue()
+def _readline_within(reader: SyncByteReader, timeout: float = 1) -> bytes:
+    result: queue.Queue[bytes] = queue.Queue()
     threading.Thread(target=lambda: result.put(reader.readline()), daemon=True).start()
     try:
         return result.get(timeout=timeout)
@@ -554,7 +594,7 @@ def _readline_within(reader: SyncTextReader, timeout: float = 1) -> str:
 @given(turns=_TURNS)
 @example(turns=[["stdout"], ["stdout"]])
 @example(turns=[["stderr", "stdout"], ["stdout", "stderr"]])
-def test_sync_text_readers_read_stdout_while_another_thread_reads_stderr(
+def test_sync_byte_readers_read_stdout_while_another_thread_reads_stderr(
     turns: list[list[str]],
 ) -> None:
     conversation = _conversation(turns)
@@ -565,11 +605,11 @@ def test_sync_text_readers_read_stdout_while_another_thread_reads_stderr(
             while (chunk := chunks.get()) is not None:
                 yield chunk
 
-    stdout, stderr = _sync_text_readers(
+    stdout, stderr = _sync_byte_readers(
         lambda: _streaming(httpx.Response(200, stream=ServerStream()))
     )
     assert stdout is not None and stderr is not None
-    forwarded: list[str] = []
+    forwarded: list[bytes] = []
     forwarder = threading.Thread(target=lambda: forwarded.extend(stderr), daemon=True)
     forwarder.start()
     try:
@@ -577,9 +617,105 @@ def test_sync_text_readers_read_stdout_while_another_thread_reads_stderr(
             threading.Timer(0.02, chunks.put, (_logs_body(*records),)).start()
             for record in records:
                 if record["stream"] == "stdout":
-                    assert _readline_within(stdout) == record["data"]
+                    assert _readline_within(stdout) == record["data"].encode()
     finally:
         chunks.put(None)
     forwarder.join(timeout=1)
     assert not forwarder.is_alive()
-    assert forwarded == _lines(conversation, "stderr")
+    assert forwarded == [line.encode() for line in _lines(conversation, "stderr")]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
+async def test_async_byte_reader_receives_available_bytes_without_newlines(
+    anyio_backend: str,
+) -> None:
+    from anyio.streams.text import TextReceiveStream
+
+    release = anyio.Event()
+
+    class ServerStream(httpx.AsyncByteStream):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            yield _logs_body({"stream": "stdout", "data": ""})
+            yield _logs_body({"stream": "stdout", "data": "é雪"})
+            await release.wait()
+            yield _logs_body({"stream": "stdout", "data": "café\n"})
+
+    async def open_response() -> StreamingResponse:
+        return _streaming(httpx.Response(200, stream=ServerStream()))
+
+    reader, _ = _byte_readers(open_response)
+    assert isinstance(reader, anyio.abc.ByteReceiveStream)
+    with pytest.raises(ValueError, match="max_bytes"):
+        await reader.receive(0)
+    with anyio.fail_after(1):
+        # receive() returns before EOF or a newline; one byte can split UTF-8.
+        assert await reader.receive(1) == b"\xc3"
+        assert await reader.read(1) == b"\xa9"
+        assert await reader.receive(2) == b"\xe9\x9b"
+        assert await reader.receive(2) == b"\xaa"
+    release.set()
+    assert [chunk async for chunk in TextReceiveStream(reader)] == ["café\n"]
+    assert await reader.read() == b""
+    with pytest.raises(anyio.EndOfStream):
+        await reader.receive()
+    await reader.aclose()
+    with pytest.raises(anyio.ClosedResourceError):
+        await reader.receive()
+
+
+def test_sync_byte_reader_sizes_count_bytes() -> None:
+    reader, _ = _sync_byte_readers(
+        lambda: _logs_response({"stream": "stdout", "data": "é雪\nlast"})
+    )
+    assert reader is not None
+    assert reader.read(0) == b""
+    assert reader.read(1) == b"\xc3"
+    assert reader.read(1) == b"\xa9"
+    assert reader.readline() == "雪\n".encode()
+    assert list(reader) == [b"last"]
+    assert reader.read() == b""
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
+@pytest.mark.parametrize("sync", [False, True], ids=["async-reader", "sync-reader"])
+async def test_output_consumers_accept_native_byte_events(anyio_backend: str, sync: bool) -> None:
+    """Replacing the wire adapter does not change readers, capture, or text sinks."""
+    import io
+
+    from vercel.sandbox._internal.process_output import ProcessOutputRouter
+
+    async def native_logs() -> AsyncGenerator[ProcessLog, None]:
+        # Include invalid UTF-8 and split a valid character across records.
+        for stream, data in (
+            ("stdout", b"\xc3"),
+            ("stderr", b"\x00\xff"),
+            ("stdout", b"\xa9\n\x80tail"),
+            ("stdout", b"\xe2"),
+        ):
+            yield ProcessLog(stream=stream, data=data)
+
+    sink = io.StringIO()
+    captured = ProcessOutputRouter(stdout=None, stderr=None, capture_output=True)
+    text = ProcessOutputRouter(stdout=sink, stderr=subprocess.DEVNULL, capture_output=False)
+    async for event in native_logs():
+        captured.route(event)
+        text.route(event)
+    expected = (b"\xc3\xa9\n\x80tail\xe2", b"\x00\xff")
+    assert captured.captured() == expected
+    assert text.captured() == (None, None)
+    assert sink.getvalue() == expected[0].decode(errors="replace")
+
+    if sync:
+        sync_stdout, sync_stderr = byte_reader._sync_byte_readers(native_logs)
+        assert sync_stdout is not None and sync_stderr is not None
+        assert (sync_stdout.read(), sync_stderr.read()) == expected
+        sync_stdout.close()
+        sync_stderr.close()
+    else:
+        stdout, stderr = byte_reader._byte_readers(native_logs)
+        assert stdout is not None and stderr is not None
+        assert (await stdout.read(), await stderr.read()) == expected
+        await stdout.aclose()
+        await stderr.aclose()

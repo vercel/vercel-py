@@ -5,7 +5,7 @@ import json
 import os
 import platform
 import sys
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
 from datetime import timedelta
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
@@ -44,7 +44,10 @@ from vercel.sandbox._internal.errors import (
     SandboxStreamError,
 )
 from vercel.sandbox._internal.log_stream import (
+    AsyncSleep,
+    _CommandLogPayload,
     _is_transient_error,
+    _iter_command_logs,
     _ndjson_lines,
     _OutputOffsets,
     _TruncatedStreamError,
@@ -60,7 +63,6 @@ from vercel.sandbox._internal.models import (
     NetworkPolicyReadback,
     PrivateSandboxParameters,
     ProcessLog,
-    ProcessLogStream,
     SandboxResources,
     SandboxSource,
     SandboxStatus,
@@ -1908,9 +1910,9 @@ class SandboxApiClient:
                                 "Sandbox process response included output outside process metadata",
                                 data=record,
                             )
-                        event = ProcessLog(stream=ProcessLogStream(stream), data=data)
+                        event = _CommandLogPayload.model_validate(record).to_log()
                         output_router.route(event)
-                        delivered.advance(event.stream, len(data))
+                        delivered.advance(event.stream, len(event.data))
                         continue
                     if stream == "error" and isinstance(data, dict):
                         code = data.get("code")
@@ -2106,7 +2108,22 @@ class SandboxApiClient:
         )
         return _validate_response(_CommandResponse, data).to_command()
 
-    async def command_logs_response(
+    def command_logs(
+        self,
+        *,
+        session_id: str,
+        command_id: str,
+        sleep: AsyncSleep,
+        delivered: _OutputOffsets | None = None,
+    ) -> AsyncGenerator[ProcessLog, None]:
+        """Yield byte output events, handling wire decoding and interrupted streams."""
+        return _iter_command_logs(
+            lambda: self._command_logs_response(session_id=session_id, command_id=command_id),
+            sleep=sleep,
+            delivered=delivered,
+        )
+
+    async def _command_logs_response(
         self,
         *,
         session_id: str,

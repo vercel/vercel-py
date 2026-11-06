@@ -549,14 +549,14 @@ class AsyncDriver(_ScenarioDriver):
         await process.stdin.aclose()
 
     async def readline(self, process: Any) -> str:
-        return cast(str, await process.stdout.readline())
+        return cast(bytes, await process.stdout.readline()).decode()
 
     async def communicate(self, process: Any, input: bytes) -> tuple[str, str]:
-        return cast(tuple[str, str], await process.communicate(input))
+        return tuple(part.decode() for part in await process.communicate(input))
 
     async def run_with_input(self, box: Any, command: str, args: list[str], input: bytes) -> str:
         result = await box.run_command(command, args, input=input, capture_output=True, check=True)
-        return cast(str, result.stdout)
+        return cast(bytes, result.stdout).decode()
 
     async def write_after_exit_breaks(self, process: Any) -> bool:
         try:
@@ -601,7 +601,7 @@ class AsyncDriver(_ScenarioDriver):
         return await command.wait()
 
     async def read_process_streams(self, process: Any) -> tuple[str, str]:
-        return await process.communicate()
+        return tuple(part.decode() for part in await process.communicate())
 
     async def terminate(self, process: Any) -> None:
         await process.terminate()
@@ -636,7 +636,7 @@ class AsyncDriver(_ScenarioDriver):
                 "printf", ["session follow-up\n"], stdout=subprocess.PIPE
             )
             assert command.stdout is not None
-            output = command.stdout
+            output = command.stdout.decode()
             exit_code = command.returncode
             runtime_session = resumed.current_session
             assert runtime_session is not None
@@ -802,14 +802,14 @@ class SyncDriver(_ScenarioDriver):
         process.stdin.close()
 
     async def readline(self, process: Any) -> str:
-        return cast(str, process.stdout.readline())
+        return cast(bytes, process.stdout.readline()).decode()
 
     async def communicate(self, process: Any, input: bytes) -> tuple[str, str]:
-        return cast(tuple[str, str], process.communicate(input))
+        return tuple(part.decode() for part in process.communicate(input))
 
     async def run_with_input(self, box: Any, command: str, args: list[str], input: bytes) -> str:
         result = box.run_command(command, args, input=input, capture_output=True, check=True)
-        return cast(str, result.stdout)
+        return cast(bytes, result.stdout).decode()
 
     async def write_after_exit_breaks(self, process: Any) -> bool:
         try:
@@ -852,7 +852,7 @@ class SyncDriver(_ScenarioDriver):
         return command.wait()
 
     async def read_process_streams(self, process: Any) -> tuple[str, str]:
-        return process.communicate()
+        return tuple(part.decode() for part in process.communicate())
 
     async def terminate(self, process: Any) -> None:
         process.terminate()
@@ -885,7 +885,7 @@ class SyncDriver(_ScenarioDriver):
         with sandbox_sync.resume_sandbox(name=box.name) as resumed:
             command = resumed.run_command("printf", ["session follow-up\n"], stdout=subprocess.PIPE)
             assert command.stdout is not None
-            output = command.stdout
+            output = command.stdout.decode()
             exit_code = command.returncode
             runtime_session = resumed.current_session
             assert runtime_session is not None
@@ -1032,7 +1032,7 @@ async def process_filesystem_flow(
         returncode=returncode,
         terminated_returncode=terminated_returncode,
         timed_out_returncode=timed_out_returncode,
-        on_start_stdout=observed.stdout,
+        on_start_stdout=None if observed.stdout is None else observed.stdout.decode(),
         on_start_process_found=on_start_process_found,
         missing_executable_failed=missing_executable_failed,
         text=text,

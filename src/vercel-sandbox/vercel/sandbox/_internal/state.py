@@ -33,8 +33,8 @@ class ProcessState(SandboxValueModel):
 
 class CompletedProcessState(SandboxValueModel):
     process: ProcessState
-    stdout: str | None
-    stderr: str | None
+    stdout: bytes | None
+    stderr: bytes | None
 
 
 class InteractiveSessionState(SandboxValueModel):
