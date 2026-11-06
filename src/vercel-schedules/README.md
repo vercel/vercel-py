@@ -6,6 +6,54 @@ Python SDK for [Vercel Schedules](https://vercel.com/docs/schedules).
 pip install vercel-schedules
 ```
 
+## Declare schedules in code
+
+`@schedule` declares a function as the handler of a recurring schedule:
+
+```python
+# jobs.py
+from vercel.schedules import Cron, ScheduleMetadata, schedule
+
+
+@schedule(Cron(hour=3))
+def reindex() -> None:
+    ...
+
+
+@schedule("*/15 * * * *", name="sync-billing", timezone="America/New_York")
+async def sync_billing(metadata: ScheduleMetadata) -> None:
+    print(f"Running {metadata.name}, scheduled at {metadata.scheduled_at}")
+```
+
+The schedule name defaults to the function's name and must be unique within
+the project. Renaming a schedule replaces it. A handler takes no arguments, or
+the `ScheduleMetadata` of the firing, and may be a coroutine function.
+
+Importing the module registers its schedules. `get_registered_schedules()`
+returns them, and `RegisteredSchedule.run(metadata)` calls the handler for one
+firing: a coroutine function is awaited, and a regular function runs in a
+worker thread.
+
+To handle a firing in your own route, such as a schedule that targets a path,
+read it from the request headers with `ScheduleMetadata.from_headers()`:
+
+```python
+from fastapi import FastAPI, Request
+from vercel.schedules import ScheduleMetadata
+
+app = FastAPI()
+
+
+@app.post("/api/cleanup")
+async def cleanup(request: Request) -> None:
+    metadata = ScheduleMetadata.from_headers(request.headers)
+    ...
+```
+
+A request without a schedule CloudEvent, such as a legacy Cron Job, raises
+`NotAScheduleInvocationError`. A path is public, so check
+`authorization: Bearer <CRON_SECRET>` as you would for a Cron Job.
+
 ## Manage schedules
 
 A schedule fires on a cron cadence or once at a fixed time, and publishes to a
