@@ -1955,6 +1955,7 @@ def test_apscheduler_bundle_keeps_apscheduler_peer_dependency(
         ("vercel-connect", "pydantic>=2.7.0,<3"),
         ("vercel-blob", "pydantic>=2.7.0,<3"),
         ("vercel-passport", "pydantic>=2.10.0,<3"),
+        ("vercel-schedules", "pydantic>=2.7.0,<3"),
     ],
 )
 def test_bundle_keeps_bounded_pydantic_external(

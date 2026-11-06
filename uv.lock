@@ -2830,11 +2830,19 @@ requires-dist = [
 name = "vercel-schedules"
 source = { editable = "src/vercel-schedules" }
 dependencies = [
+    { name = "httpx2" },
+    { name = "pydantic" },
     { name = "vercel-internal-core" },
+    { name = "vercel-oidc" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "vercel-internal-core", editable = "src/vercel-internal-core" }]
+requires-dist = [
+    { name = "httpx2", specifier = ">=2" },
+    { name = "pydantic", specifier = ">=2.7.0,<3" },
+    { name = "vercel-internal-core", editable = "src/vercel-internal-core" },
+    { name = "vercel-oidc", editable = "src/vercel-oidc" },
+]
 
 [[package]]
 name = "vercel-workflow"
