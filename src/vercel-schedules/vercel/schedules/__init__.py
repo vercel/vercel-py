@@ -1,7 +1,7 @@
 """Vercel Schedules SDK surface.
 
 Schedules fire on a cron cadence or once at a fixed instant, and dispatch to a
-Vercel Queue topic or function. A schedule is identified by its name within a
+Vercel Queue topic, a function, or a path. A schedule is identified by its name within a
 namespace. Manage them with `create_schedule` and friends.
 
 A schedule command runs once per firing; read the firing with
