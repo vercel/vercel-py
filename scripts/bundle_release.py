@@ -71,6 +71,7 @@ SHARED_VENDORED_CONSUMERS = {
     "vercel-oidc",
     "vercel-queue",
     "vercel-sandbox",
+    "vercel-schedules",
 }
 # Queue lease renewal uses EventLoopToken and from_thread token support (4.11).
 ANYIO_REQUIREMENT = "anyio>=4.11.0,<5"
@@ -93,6 +94,7 @@ EXTERNAL_DEPENDENCIES = {
     # extras are already passed through unvendored.
     "vercel-connect": {"pydantic"},
     "vercel-passport": {"pydantic"},
+    "vercel-schedules": {"pydantic"},
     # redis-py's dotted self-imports cannot be rewritten for namespace
     # vendoring, and applications import redis directly to build the job
     # store's connection pool anyway.
