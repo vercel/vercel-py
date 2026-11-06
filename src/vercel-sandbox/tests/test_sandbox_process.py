@@ -246,7 +246,8 @@ async def test_async_process_readers_wait_and_signals(mock_env_clear: None) -> N
     assert get_command.calls[0].request.url.params["wait"] == "false"
     assert get_command.calls[1].request.url.params["wait"] == "true"
     assert logs.call_count == 1
-    assert all(call.request.headers["connection"] == "close" for call in logs.calls)
+    # Log streams return their connection to the pool once read to the end.
+    assert all(call.request.headers["connection"] == "keep-alive" for call in logs.calls)
     assert signals == [
         sandbox.CommandSignal.SIGTERM,
         sandbox.CommandSignal.SIGKILL,
@@ -516,6 +517,8 @@ async def test_run_command_routes_output_checks_and_uses_one_request(
     assert run.call_count == 5
     assert all(call.request.url.params["wait"] == "true" for call in run.calls)
     assert all(call.request.url.params["logs"] == "true" for call in run.calls)
+    # Each command reuses a pooled connection instead of a new TLS handshake.
+    assert all(call.request.headers["connection"] == "keep-alive" for call in run.calls)
 
 
 @respx.mock

@@ -9,6 +9,8 @@ import httpx2 as httpx
 from vercel._internal.core.http.transport import TransportOptions
 from vercel._internal.core.time import to_seconds_float
 
+_HTTPX_DEFAULT_KEEPALIVE_EXPIRY = httpx.Limits().keepalive_expiry
+
 
 def _normalize_base_url(base_url: str) -> str:
     return base_url.rstrip("/") + "/"
@@ -26,7 +28,14 @@ def _options_to_httpx_kwargs(options: TransportOptions) -> _HttpxClientKwargs:
     if options.base_url is not None:
         kwargs["base_url"] = _normalize_base_url(options.base_url)
     if options.max_connections is not None:
-        kwargs["limits"] = httpx.Limits(max_connections=options.max_connections)
+        kwargs["limits"] = httpx.Limits(
+            max_connections=options.max_connections,
+            keepalive_expiry=(
+                _HTTPX_DEFAULT_KEEPALIVE_EXPIRY
+                if options.keepalive_expiry is None
+                else to_seconds_float(options.keepalive_expiry)
+            ),
+        )
     if options.enable_http2 is not None:
         kwargs["http2"] = options.enable_http2
     return kwargs

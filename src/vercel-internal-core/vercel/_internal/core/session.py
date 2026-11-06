@@ -221,6 +221,7 @@ class SdkSession(_BaseSdkSession):
 
     def _create_client(self) -> httpx.AsyncClient:
         from vercel._internal.core.http import (
+            DEFAULT_KEEPALIVE_EXPIRY,
             DEFAULT_TIMEOUT,
             TransportOptions,
             create_base_async_client,
@@ -233,6 +234,7 @@ class SdkSession(_BaseSdkSession):
                     base_url=None,
                     max_connections=100,
                     enable_http2=False,
+                    keepalive_expiry=DEFAULT_KEEPALIVE_EXPIRY,
                 )
             )
         else:
@@ -354,6 +356,7 @@ class SyncSdkSession(_BaseSdkSession):
 
     def get_transport(self) -> "SyncTransport":
         from vercel._internal.core.http import (
+            DEFAULT_KEEPALIVE_EXPIRY,
             DEFAULT_TIMEOUT,
             SyncTransport,
             TransportOptions,
@@ -371,6 +374,7 @@ class SyncSdkSession(_BaseSdkSession):
                     base_url=None,
                     max_connections=100,
                     enable_http2=False,
+                    keepalive_expiry=DEFAULT_KEEPALIVE_EXPIRY,
                 )
             )
         else:

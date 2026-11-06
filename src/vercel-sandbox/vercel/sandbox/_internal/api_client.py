@@ -1857,7 +1857,6 @@ class SandboxApiClient:
             credentials=credentials,
             params={"wait": "true", "logs": "true"},
             body=JSONBody(request.to_api_dict()),
-            headers={"connection": "close"},
             timeout=NO_TIMEOUT,
         )
 
@@ -2121,6 +2120,5 @@ class SandboxApiClient:
                 command_id=command_id,
             ),
             credentials=credentials,
-            headers={"connection": "close"},
             timeout=NO_TIMEOUT,
         )

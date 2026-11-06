@@ -87,6 +87,8 @@ class TransportOptions:
     base_url: str | None
     max_connections: int
     enable_http2: bool
+    # `None` keeps HTTPX's default idle expiry for pooled connections.
+    keepalive_expiry: timedelta | None = None
 
 
 class BaseTransport(abc.ABC):
