@@ -14,7 +14,7 @@ Every consumer declares a dependency like `vercel-internal-core>=0.2.0,<0.3.0`. 
 
 Sessions own pooled HTTP clients and per-service configuration, scoped through a context variable; the cross-package model is in [[runtime#SDK sessions]].
 
-[[src/vercel-internal-core/vercel/_internal/core/session.py#SdkSession]] keeps one `httpx2.AsyncClient` per event loop, because the process-wide default session can be reached from several threads that each run their own loop. Services cache their per-session objects with `get_or_create_service`, so a service's API client is built once per session.
+[[src/vercel-internal-core/vercel/_internal/core/session.py#SdkSession]] keeps one `httpx2.AsyncClient` per AnyIO event loop, keyed by the loop's native token so asyncio and Trio runs are told apart, because the process-wide default session can be reached from several threads that each run their own loop. A client whose loop has finished is dropped, not closed, the next time another loop needs a client. Services cache their per-session objects with `get_or_create_service`, so a service's API client is built once per session.
 
 [[src/vercel-internal-core/vercel/_internal/core/options.py#ServiceOptions]] subclasses key themselves by logical service via `service_options_key`. That lets a sync and an async options class configure the same service, and lets [[src/vercel-internal-core/vercel/_internal/core/options.py#merge_service_options]] replace a parent's options for one service without touching the others.
 
