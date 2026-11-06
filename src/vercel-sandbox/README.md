@@ -66,10 +66,8 @@ with session():
 
 Command output is bytes by default: live `stdout`/`stderr` readers,
 `communicate()`, and captured `CompletedCommand` output all return bytes.
-Use `.decode()` when you need text. For now, the SDK encodes the service's
-UTF-8 text back to bytes; binary data already lost by the service cannot be
-recovered. Explicit text stream destinations on `run_command()` still receive
-text, and uncaptured result streams are `None`.
+Use `.decode()` when you need text. Explicit text stream destinations on
+`run_command()` still receive text, and uncaptured result streams are `None`.
 
 The async `ByteReader` implements `anyio.abc.ByteReceiveStream`:
 `await process.stdout.receive(max_bytes)` returns available bytes without
