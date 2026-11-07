@@ -32,7 +32,7 @@ Requests send the deployment's Vercel OIDC token, unless `SchedulesServiceOption
 
 [[src/vercel-schedules/vercel/schedules/_internal/registry.py#schedule]] validates the cron, timezone, jitter, and name when the module is imported, so an invalid declaration fails at import rather than at deploy. The name defaults to the function's `__name__`, and must match the names the Schedules API accepts. A second function with the same name is rejected, but the same function registering again replaces its entry, because importing a module again decorates its functions again.
 
-[[src/vercel-schedules/vercel/schedules/_internal/registry.py#get_registered_schedules]] returns the registered schedules. [[src/vercel-schedules/vercel/schedules/_internal/registry.py#RegisteredSchedule#run]] calls the handler for one firing: with the `ScheduleMetadata` if the handler takes a positional argument, and in a worker thread unless it is a coroutine function, so a blocking handler does not stall the event loop. It rejects a firing of another schedule, because a caller that routes firings by name must not run the wrong handler.
+[[src/vercel-schedules/vercel/schedules/_internal/registry.py#get_registered_schedules]] returns the registered schedules. [[src/vercel-schedules/vercel/schedules/_internal/registry.py#RegisteredSchedule#run]] calls the handler for one firing: with the `ScheduleMetadata` if the handler takes a positional argument, and in a worker thread unless it is a coroutine function, so a blocking handler does not stall the event loop. It does not compare the firing's name with its own: a deployment names the schedule `<entry>.<name>` after its `vercel.json` entry, and the caller routes firings by that name.
 
 ## Firing metadata
 

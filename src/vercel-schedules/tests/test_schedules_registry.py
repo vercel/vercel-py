@@ -8,7 +8,6 @@ import pytest
 from vercel.schedules import (
     Cron,
     RegisteredSchedule,
-    ScheduleEventParseError,
     ScheduleMetadata,
     SchedulesValidationError,
     get_registered_schedules,
@@ -98,15 +97,6 @@ async def test_handler_errors_propagate() -> None:
     [registered] = get_registered_schedules()
     with pytest.raises(RuntimeError, match="index unavailable"):
         await registered.run(metadata("reindex"))
-
-
-async def test_rejects_a_firing_of_another_schedule() -> None:
-    @schedule("0 3 * * *")
-    async def reindex() -> None: ...
-
-    [registered] = get_registered_schedules()
-    with pytest.raises(ScheduleEventParseError, match="cannot run schedule 'reindex'"):
-        await registered.run(metadata("cleanup"))
 
 
 def test_rejects_a_second_handler_with_the_same_name() -> None:
