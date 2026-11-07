@@ -26,18 +26,19 @@ async def sync_billing(metadata: ScheduleMetadata) -> None:
 ```
 
 Deploy them by naming the module in `vercel.json`. The cron, timezone, and
-jitter come from the code, so the entry sets only `entrypoint`:
+jitter come from the code, so the entry sets only the `root` the schedule
+runs in and the module path, relative to it:
 
 ```json
 {
   "schedules": {
-    "jobs": { "entrypoint": "jobs" }
+    "jobs": { "root": ".", "entrypoint": "jobs" }
   }
 }
 ```
 
-The build imports `jobs` and creates a schedule for each `@schedule` it
-registers, including those in modules it imports. Each schedule is named after
+The build imports `jobs` from the root and creates a schedule for each
+`@schedule` it registers, including those in modules it imports. Each schedule is named after
 the entry and the handler, such as `jobs.reindex` and `jobs.sync-billing`. Use
 that name with `get_schedule()` and the other management functions, and expect
 it in `metadata.name`.
