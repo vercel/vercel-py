@@ -5,13 +5,13 @@ import inspect
 import re
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, TypeVar
 
 from anyio import to_thread
 
-from vercel.schedules._internal.errors import ScheduleEventParseError, SchedulesValidationError
+from vercel.schedules._internal.errors import SchedulesValidationError
 from vercel.schedules._internal.metadata import ScheduleMetadata
 from vercel.schedules._internal.models import Cron
 from vercel.schedules._internal.service import jitter_minutes, zone_info
@@ -54,7 +54,7 @@ class RegisteredSchedule:
     """A schedule declared in code with `@schedule`.
 
     Attributes:
-        name: Schedule name, unique within the project.
+        name: Schedule name, unique within the process.
         cron: When the schedule fires.
         timezone: IANA timezone `cron` is evaluated in, or `None` for UTC.
         jitter: Random delay added to each firing, if configured.
@@ -66,6 +66,10 @@ class RegisteredSchedule:
     timezone: str | None
     jitter: timedelta | None
     func: Callable[..., Any]
+    _takes_metadata: bool = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "_takes_metadata", _takes_metadata(self.func))
 
     async def run(self, metadata: ScheduleMetadata) -> None:
         """Run the handler for one firing of this schedule.
@@ -73,15 +77,8 @@ class RegisteredSchedule:
         A coroutine function is awaited, and a regular function runs in a
         worker thread so it does not block the event loop. Exceptions from the
         handler propagate.
-
-        Raises:
-            ScheduleEventParseError: If `metadata` is a firing of another schedule.
         """
-        if metadata.name != self.name:
-            raise ScheduleEventParseError(
-                f"firing of schedule {metadata.name!r} cannot run schedule {self.name!r}"
-            )
-        call = functools.partial(self.func, metadata) if _takes_metadata(self.func) else self.func
+        call = functools.partial(self.func, metadata) if self._takes_metadata else self.func
         if inspect.iscoroutinefunction(self.func):
             await call()
         else:
@@ -135,8 +132,10 @@ def schedule(
     Args:
         cron: When the schedule fires, as a `Cron` or a five-field crontab
             string, evaluated in `timezone`.
-        name: Schedule name, unique within the project. Defaults to the
-            function's name. Renaming a schedule replaces it.
+        name: Schedule name, unique among the schedules the entrypoint
+            registers. Defaults to the function's name. A deployment names
+            the schedule `<entry>.<name>`, after its `vercel.json` entry.
+            Renaming a schedule replaces it.
         timezone: IANA timezone name. Defaults to UTC.
         jitter: Random delay added to each firing, in whole minutes between one
             and fifteen inclusive.
@@ -163,7 +162,6 @@ def schedule(
                 f"schedule name {schedule_name!r} must start with a letter or number and "
                 "contain only letters, numbers, '.', '_' and '-'; pass name=..."
             )
-        _takes_metadata(func)
         _register(
             RegisteredSchedule(
                 name=schedule_name, cron=parsed, timezone=timezone, jitter=jitter, func=func

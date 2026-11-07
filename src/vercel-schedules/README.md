@@ -25,9 +25,27 @@ async def sync_billing(metadata: ScheduleMetadata) -> None:
     print(f"Running {metadata.name}, scheduled at {metadata.scheduled_at}")
 ```
 
-The schedule name defaults to the function's name and must be unique within
-the project. Renaming a schedule replaces it. A handler takes no arguments, or
-the `ScheduleMetadata` of the firing, and may be a coroutine function.
+Deploy them by naming the module in `vercel.json`. The cron, timezone, and
+jitter come from the code, so the entry sets only `entrypoint`:
+
+```json
+{
+  "schedules": {
+    "jobs": { "entrypoint": "jobs" }
+  }
+}
+```
+
+The build imports `jobs` and creates a schedule for each `@schedule` it
+registers, including those in modules it imports. Each schedule is named after
+the entry and the handler, such as `jobs.reindex` and `jobs.sync-billing`. Use
+that name with `get_schedule()` and the other management functions, and expect
+it in `metadata.name`.
+
+The schedule name defaults to the function's name and must be unique among the
+schedules the module registers. Renaming a schedule replaces it. A handler
+takes no arguments, or the `ScheduleMetadata` of the firing, and may be a
+coroutine function.
 
 Importing the module registers its schedules. `get_registered_schedules()`
 returns them, and `RegisteredSchedule.run(metadata)` calls the handler for one
