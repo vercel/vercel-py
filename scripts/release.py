@@ -393,8 +393,20 @@ def prepare_release_files(
     return releases, pr_numbers
 
 
-def prepare() -> int:
-    prepare_release_files()
+def prepare(*, pr_body: Path | None = None) -> int:
+    releases, _pr_numbers = prepare_release_files()
+    if pr_body is not None:
+        body = (
+            "This PR accumulates pending releases from `main`. Mark it ready for review "
+            "to run CI, including the release publish dry run, then merge to publish. "
+            "Further updates from `main` return it to draft; mark it ready again to "
+            "check the updated release.\n\n"
+        )
+        if releases:
+            body += _release_commit_body(releases, packages_by_name=workspace.packages())
+        else:
+            body += "No pending releases.\n"
+        pr_body.write_text(body, encoding="utf-8")
     return 0
 
 
@@ -1024,7 +1036,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("status").set_defaults(func=lambda _args: status())
-    subparsers.add_parser("prepare").set_defaults(func=lambda _args: prepare())
+    prepare_parser = subparsers.add_parser("prepare")
+    prepare_parser.add_argument("--pr-body", type=Path, help="write the release PR description")
+    prepare_parser.set_defaults(func=lambda args: prepare(pr_body=args.pr_body))
     release_parser = subparsers.add_parser("release")
     release_parser.add_argument(
         "--force-bump",
