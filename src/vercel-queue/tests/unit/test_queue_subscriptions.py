@@ -746,6 +746,7 @@ def test_get_subscriptions_returns_trigger_metadata(
         initial_delay=5.9,
         max_concurrency=4,
         max_attempts=12,
+        max_duration=timedelta(minutes=15),
     )
     def handle(payload: object) -> None:
         del payload
@@ -760,6 +761,54 @@ def test_get_subscriptions_returns_trigger_metadata(
     assert subscriptions[0].initial_delay_seconds == 5
     assert subscriptions[0].max_concurrency == 4
     assert subscriptions[0].max_attempts == 12
+    assert subscriptions[0].max_duration_seconds == 900
+
+
+def test_get_subscriptions_resolves_deferred_max_duration(
+    isolated_subscriptions: None,
+) -> None:
+    limit: int | None = None
+
+    @subscribe(topic="emails", consumer_group="test-group", max_duration=lambda: limit)
+    def handle(payload: object) -> None:
+        del payload
+
+    # The value was unknown at registration time and resolves on every call.
+    assert get_subscriptions()[0].max_duration_seconds is None
+
+    limit = 1800
+    assert get_subscriptions()[0].max_duration_seconds == 1800
+
+
+def test_subscribe_rejects_invalid_max_duration(isolated_subscriptions: None) -> None:
+    with pytest.raises(ValueError, match="max_duration must be between 1 and 1800 seconds"):
+
+        @subscribe(topic="emails", max_duration=0)
+        def handle_zero(payload: object) -> None:
+            del payload
+
+    with pytest.raises(ValueError, match="max_duration must be between 1 and 1800 seconds"):
+
+        @subscribe(topic="emails", max_duration=1801)
+        def handle_too_large(payload: object) -> None:
+            del payload
+
+    with pytest.raises(TypeError, match="max_duration must be an int or float"):
+
+        @subscribe(topic="emails", max_duration=cast("Any", "15 minutes"))
+        def handle_string(payload: object) -> None:
+            del payload
+
+
+def test_get_subscriptions_rejects_invalid_deferred_max_duration(
+    isolated_subscriptions: None,
+) -> None:
+    @subscribe(topic="emails", consumer_group="test-group", max_duration=lambda: 0)
+    def handle(payload: object) -> None:
+        del payload
+
+    with pytest.raises(ValueError, match="max_duration must be between 1 and 1800 seconds"):
+        get_subscriptions()
 
 
 def test_default_consumer_group_uses_shared_sanitizer(
