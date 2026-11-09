@@ -35,7 +35,7 @@ _MAX_RETRIES = 5
 _MAX_STALLED_TIMEOUTS = 2
 _MAX_RETRY_AFTER_SECONDS = 20.0
 
-CommandInput = str | bytes | bytearray | memoryview
+CommandInput = bytes | bytearray | memoryview
 
 StdinMode: TypeAlias = Literal["attached", "fetched"] | None
 """How a process handle relates to its stdin.
@@ -74,13 +74,6 @@ def _coerce_bytes(data: object) -> bytes:
         return bytes(memoryview(data).cast("B"))  # type: ignore[arg-type]
     except TypeError:
         raise TypeError(f"a bytes-like object is required, not {type(data).__name__}") from None
-
-
-def _coerce_input(input: CommandInput) -> bytes:
-    """Encode ``communicate`` and ``run_command`` input; text becomes UTF-8."""
-    if isinstance(input, str):
-        return input.encode("utf-8")
-    return _coerce_bytes(input)
 
 
 def _is_stdin_unavailable(error: BaseException) -> bool:

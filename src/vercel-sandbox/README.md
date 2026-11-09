@@ -14,7 +14,7 @@ async with session():
         print(process.stdout.decode())
 
         # Pass input to run_command, or keep stdin open with stdin=subprocess.PIPE.
-        result = await instance.run_command("sort", input="b\na\n", capture_output=True)
+        result = await instance.run_command("sort", input=b"b\na\n", capture_output=True)
         server = await instance.create_command("cat", stdin=subprocess.PIPE)
         await server.stdin.send(b"ping\n")
         print((await server.stdout.readline()).decode())
@@ -64,10 +64,12 @@ with session():
         print(process.stdout.decode())
 ```
 
-Command output is bytes by default: live `stdout`/`stderr` readers,
+Command input and output use bytes: live `stdout`/`stderr` readers,
 `communicate()`, and captured `CompletedCommand` output all return bytes.
-Use `.decode()` when you need text. Explicit text stream destinations on
-`run_command()` still receive text, and uncaptured result streams are `None`.
+Encode text input explicitly and use `.decode()` when you need text output.
+`run_command()` destinations must be writable binary streams, such as
+`io.BytesIO` or files opened with `"wb"`; inherited output uses the local
+stdout/stderr binary buffers. Uncaptured result streams are `None`.
 
 The async `ByteReader` implements `anyio.abc.ByteReceiveStream`:
 `await process.stdout.receive(max_bytes)` returns available bytes without

@@ -4,7 +4,7 @@ import subprocess
 import warnings
 from collections.abc import Mapping, Sequence
 from datetime import timedelta
-from typing import TextIO
+from typing import BinaryIO
 
 from vercel._internal.core.time import parse_duration_seconds
 from vercel.sandbox._internal.async_runtime import Command, SandboxFilesystem
@@ -15,7 +15,7 @@ from vercel.sandbox._internal.process_output import (
 )
 from vercel.sandbox._internal.process_stdin import (
     CommandInput,
-    _coerce_input,
+    _coerce_bytes,
     _validate_stdin,
 )
 from vercel.sandbox._internal.user_core import UserContext
@@ -59,8 +59,8 @@ class SandboxUser:
         sudo: bool = False,
         kill_after: float | timedelta | None = None,
         check: bool = False,
-        stdout: TextIO | int | None = None,
-        stderr: TextIO | int | None = None,
+        stdout: BinaryIO | int | None = None,
+        stderr: BinaryIO | int | None = None,
         capture_output: bool = False,
         input: CommandInput | None = None,
     ) -> CompletedCommand:
@@ -80,7 +80,7 @@ class SandboxUser:
             output_router=ProcessOutputRouter(
                 stdout=stdout, stderr=stderr, capture_output=capture_output
             ),
-            input=None if input is None else _coerce_input(input),
+            input=None if input is None else _coerce_bytes(input),
         )
         return await operation
 
@@ -94,8 +94,8 @@ class SandboxUser:
         sudo: bool = False,
         kill_after: float | timedelta | None = None,
         check: bool = False,
-        stdout: TextIO | int | None = None,
-        stderr: TextIO | int | None = None,
+        stdout: BinaryIO | int | None = None,
+        stderr: BinaryIO | int | None = None,
         capture_output: bool = False,
         input: CommandInput | None = None,
     ) -> CompletedCommand:

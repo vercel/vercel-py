@@ -9,7 +9,7 @@ from contextlib import AbstractContextManager, contextmanager
 from datetime import timedelta
 from threading import Condition
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, Literal, TextIO, overload
+from typing import TYPE_CHECKING, Any, BinaryIO, Literal, overload
 
 from vercel._internal.core.byte_stream import SyncByteStreamRuntime
 from vercel._internal.core.iter_coroutine import iter_coroutine
@@ -84,7 +84,7 @@ from vercel.sandbox._internal.process_stdin import (
     CommandInput,
     StdinMode,
     SyncCommandStdin,
-    _coerce_input,
+    _coerce_bytes,
     _sync_stdin,
     _validate_stdin,
 )
@@ -210,9 +210,9 @@ class SyncCommand(_ProcessHandleState):
         output without ending its input.
 
         Args:
-            input: Bytes, or text encoded as UTF-8, to write to stdin before
-                closing it. It is not an error if the process exits or stops
-                reading before taking all of it.
+            input: Bytes to write to stdin before closing it. It is not an
+                error if the process exits or stops reading before taking all
+                of it.
 
         Returns:
             A ``(stdout, stderr)`` tuple of bytes. A stream without a reader is
@@ -224,7 +224,7 @@ class SyncCommand(_ProcessHandleState):
             SandboxStdinError: If writing or closing stdin fails, including
                 writing to a looked-up process that has no stdin.
         """
-        data = None if input is None else _coerce_input(input)
+        data = None if input is None else _coerce_bytes(input)
         if self.stdin is not None:
             self.stdin._communicate(data)
         elif data is not None:
@@ -1068,8 +1068,8 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         sudo: bool = False,
         kill_after: float | timedelta | None = None,
         check: bool = False,
-        stdout: TextIO | int | None = None,
-        stderr: TextIO | int | None = None,
+        stdout: BinaryIO | int | None = None,
+        stderr: BinaryIO | int | None = None,
         capture_output: bool = False,
         input: CommandInput | None = None,
         on_start: Callable[[SyncCommand], None] | None = None,
@@ -1085,16 +1085,15 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
             kill_after: Duration after which the service kills the process
                 with ``SIGKILL``.
             check: Whether to raise for a nonzero exit code.
-            stdout: Writable text stream or subprocess output sentinel for
-                stdout. ``None`` inherits the local stdout stream.
-            stderr: Writable text stream or subprocess output sentinel for
-                stderr. ``None`` inherits the local stderr stream; ``STDOUT``
-                merges stderr into the stdout destination.
+            stdout: Writable binary stream or subprocess output sentinel for
+                stdout. ``None`` inherits the local stdout binary buffer.
+            stderr: Writable binary stream or subprocess output sentinel for
+                stderr. ``None`` inherits the local stderr binary buffer;
+                ``STDOUT`` merges stderr into the stdout destination.
             capture_output: Whether to capture stdout and stderr in the result.
-            input: Data written to the process's stdin, which is then closed;
-                text is encoded as UTF-8. Without it the process reads an
-                empty stdin. A process that exits or stops reading before
-                taking all of it is not an error.
+            input: Bytes written to the process's stdin, which is then closed.
+                Without it the process reads an empty stdin. A process that
+                exits or stops reading before taking all of it is not an error.
             on_start: Callable called once with a ``SyncCommand`` handle as
                 soon as the process starts, before any of its output is
                 delivered. Output is held until it returns, so keep it short.
@@ -1126,7 +1125,7 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         output_router = ProcessOutputRouter(
             stdout=stdout, stderr=stderr, capture_output=capture_output
         )
-        data = None if input is None else _coerce_input(input)
+        data = None if input is None else _coerce_bytes(input)
         start_hook = _ProcessStartHook.create(
             on_start,
             lambda payload: SyncCommand(
@@ -1178,8 +1177,8 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         sudo: bool = False,
         kill_after: float | timedelta | None = None,
         check: bool = False,
-        stdout: TextIO | int | None = None,
-        stderr: TextIO | int | None = None,
+        stdout: BinaryIO | int | None = None,
+        stderr: BinaryIO | int | None = None,
         capture_output: bool = False,
         input: CommandInput | None = None,
         on_start: Callable[[SyncCommand], None] | None = None,
@@ -1668,8 +1667,8 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         sudo: bool = False,
         kill_after: float | timedelta | None = None,
         check: bool = False,
-        stdout: TextIO | int | None = None,
-        stderr: TextIO | int | None = None,
+        stdout: BinaryIO | int | None = None,
+        stderr: BinaryIO | int | None = None,
         capture_output: bool = False,
         input: CommandInput | None = None,
         on_start: Callable[[SyncCommand], None] | None = None,
@@ -1686,7 +1685,7 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         output_router = ProcessOutputRouter(
             stdout=stdout, stderr=stderr, capture_output=capture_output
         )
-        data = None if input is None else _coerce_input(input)
+        data = None if input is None else _coerce_bytes(input)
         start_hook = _ProcessStartHook.create(
             on_start,
             lambda payload: SyncCommand(
@@ -1743,8 +1742,8 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         sudo: bool = False,
         kill_after: float | timedelta | None = None,
         check: bool = False,
-        stdout: TextIO | int | None = None,
-        stderr: TextIO | int | None = None,
+        stdout: BinaryIO | int | None = None,
+        stderr: BinaryIO | int | None = None,
         capture_output: bool = False,
         input: CommandInput | None = None,
         on_start: Callable[[SyncCommand], None] | None = None,

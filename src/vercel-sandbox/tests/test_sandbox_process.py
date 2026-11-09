@@ -3,6 +3,7 @@ import io
 import json
 import signal
 import subprocess
+import sys
 from collections.abc import AsyncIterator, Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
@@ -18,6 +19,7 @@ from sandbox_fixtures import sandbox_service_options
 import vendor.respx as respx
 from vercel import sandbox
 from vercel._internal.core.options import ServiceOptions
+from vercel._internal.core.polyfills import Buffer
 from vercel.api import session
 from vercel.errors import VercelSessionClosedError
 from vercel.sandbox import sync as sandbox_sync
@@ -94,7 +96,7 @@ def _interleaved_completed_response(returncode: int = 0) -> httpx.Response:
     return httpx.Response(200, text="".join(json.dumps(record) + "\n" for record in records))
 
 
-class _RecordingTextIO(io.StringIO):
+class _RecordingBinaryIO(io.BytesIO):
     def __init__(self) -> None:
         super().__init__()
         self.flush_count = 0
@@ -104,12 +106,12 @@ class _RecordingTextIO(io.StringIO):
         super().flush()
 
 
-class _FailingTextIO(io.StringIO):
+class _FailingBinaryIO(io.BytesIO):
     def __init__(self, *, fail_on: str) -> None:
         super().__init__()
         self._fail_on = fail_on
 
-    def write(self, value: str) -> int:
+    def write(self, value: Buffer, /) -> int:
         if self._fail_on == "write":
             raise OSError("sink write failed")
         return super().write(value)
@@ -574,14 +576,14 @@ async def test_async_run_command_explicit_and_discarded_destinations(
             _completed_response(),
         ]
     )
-    sink = _RecordingTextIO()
+    sink = _RecordingBinaryIO()
 
     async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview")
         result = await box.run_command("python", stdout=sink, stderr=subprocess.STDOUT)
         assert result.stdout is None
         assert result.stderr is None
-        assert sink.getvalue() == "out-1\nerr\nout-2\n"
+        assert sink.getvalue() == b"out-1\nerr\nout-2\n"
         assert sink.flush_count == 3
 
         discarded = await box.run_command(
@@ -836,7 +838,7 @@ def test_sync_process_readers_read_chunked_ndjson(mock_env_clear: None) -> None:
         {"stdout": 42},
         {"stderr": 42},
         {"stdout": object()},
-        {"stderr": io.BytesIO()},
+        {"stderr": io.StringIO()},
     ],
 )
 @respx.mock
@@ -871,7 +873,7 @@ async def test_async_run_command_closes_response_when_sink_write_fails(
     async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview")
         with pytest.raises(OSError, match="sink write failed"):
-            await box.run_command("python", stdout=_FailingTextIO(fail_on="write"))
+            await box.run_command("python", stdout=_FailingBinaryIO(fail_on="write"))
 
     assert stream.closed
 
@@ -891,7 +893,7 @@ def test_sync_run_command_closes_response_when_sink_flush_fails(
     with session(service_options=_session_options()):
         box = sandbox_sync.create_sandbox(name="preview")
         with pytest.raises(OSError, match="sink flush failed"):
-            box.run_command("python", stdout=_FailingTextIO(fail_on="flush"))
+            box.run_command("python", stdout=_FailingBinaryIO(fail_on="flush"))
 
     assert stream.closed
 
@@ -1834,12 +1836,33 @@ async def _run_through(sync: bool, target: str, **kwargs: Any) -> sandbox.Comple
         return await handle.run_command("python", **kwargs)
 
 
-class _EventSink(io.StringIO):
+@pytest.mark.parametrize("sync", [False, True], ids=["async", "sync"])
+@respx.mock
+async def test_run_command_with_a_text_only_console(
+    mock_env_clear: None, monkeypatch: pytest.MonkeyPatch, sync: bool
+) -> None:
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    run = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
+        side_effect=lambda _request: _completed_response()
+    )
+    monkeypatch.setattr(sys, "stdout", io.StringIO())
+
+    with pytest.raises(TypeError, match="binary"):
+        await _run_through(sync, "sandbox")
+    captured = await _run_through(sync, "sandbox", capture_output=True)
+
+    assert (captured.stdout, captured.stderr) == (b"out\n", b"err\n")
+    assert run.call_count == 1
+
+
+class _EventSink(io.BytesIO):
     def __init__(self, events: list[object]) -> None:
         super().__init__()
         self._events = events
 
-    def write(self, value: str) -> int:
+    def write(self, value: Buffer, /) -> int:
         self._events.append(value)
         return super().write(value)
 
@@ -1873,7 +1896,7 @@ async def test_run_command_on_start_receives_running_handle_before_output(
     )
 
     assert events == [("cmd_1", "sbx_1", None, None, None), *plain_events]
-    assert plain_events == ["out-1\n", "out-2\n"]
+    assert plain_events == [b"out-1\n", b"out-2\n"]
     assert hooked == plain
     assert len(handles) == 1
     assert handles[0].returncode == 3
@@ -1969,7 +1992,7 @@ async def test_run_command_on_start_error_propagates_without_kill_or_replay(
         respx.get("https://sandbox.test/v2/sandboxes/preview"),
     ]
     error = make_error()
-    sink = io.StringIO()
+    sink = io.BytesIO()
 
     def on_start(_process: object) -> None:
         raise error
@@ -1979,7 +2002,7 @@ async def test_run_command_on_start_error_propagates_without_kill_or_replay(
 
     assert raised.value is error
     assert stream.closed
-    assert sink.getvalue() == ""
+    assert sink.getvalue() == b""
     assert run.call_count == 1
     assert not any(route.called for route in untouched)
 

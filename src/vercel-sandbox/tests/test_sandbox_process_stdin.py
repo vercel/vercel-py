@@ -343,7 +343,7 @@ def test_a_looked_up_process_continues_after_input_already_written(
     [
         (b"", None, b"", False),
         (b"", b"", b"", True),
-        (b"", "x", b"x", True),
+        (b"", b"x", b"x", True),
         (b"later", None, b"later", True),
     ],
     ids=["no-input", "empty-input", "input", "written-then-no-input"],
@@ -371,7 +371,7 @@ def test_a_looked_up_process_without_stdin_refuses_input(driver: _Driver) -> Non
         with pytest.raises(sandbox.SandboxStdinError, match="stdin=subprocess.PIPE"):
             fetched.write(b"data")
     with pytest.raises(sandbox.SandboxStdinError, match="stdin=subprocess.PIPE"):
-        driver.get_command().communicate("data")
+        driver.get_command().communicate(b"data")
 
     # Nothing was attached, so there's nothing to close.
     fetched.close()
@@ -398,7 +398,7 @@ def test_stdin_is_not_attached_unless_requested(driver: _Driver) -> None:
         process = driver.create_command(stdin=stdin)
         assert process.process.stdin is None
         with pytest.raises(ValueError, match="stdin=subprocess.PIPE"):
-            process.communicate("input")
+            process.communicate(b"input")
 
     assert all("attachStdin" not in body for body in driver.api.created)
     assert driver.server.bodies == []
@@ -406,7 +406,7 @@ def test_stdin_is_not_attached_unless_requested(driver: _Driver) -> None:
 
 @pytest.mark.parametrize(
     ("input", "expected"),
-    [("héllo\n", b"h\xc3\xa9llo\n"), (b"\x00\xff", b"\x00\xff"), ("", b""), (None, b"")],
+    [("héllo\n".encode(), b"h\xc3\xa9llo\n"), (b"\x00\xff", b"\x00\xff"), (b"", b""), (None, b"")],
 )
 def test_communicate_writes_input_and_closes_stdin(
     driver: _Driver, input: object, expected: bytes
@@ -600,7 +600,7 @@ def test_writes_fail_before_writing_when_the_offset_is_unknown(driver: _Driver) 
 
 
 def test_run_command_feeds_input_while_streaming_output(driver: _Driver) -> None:
-    result = driver.run_command(input="hello\n", capture_output=True)
+    result = driver.run_command(input=b"hello\n", capture_output=True)
 
     assert result.stdout == b"hello\n"
     assert result.returncode == 0
@@ -612,7 +612,7 @@ def test_run_command_feeds_input_while_streaming_output(driver: _Driver) -> None
 def test_run_command_feeds_input_once_when_its_output_stream_drops(driver: _Driver) -> None:
     driver.api.interrupt_run = True
 
-    result = driver.run_command(input="hello\n", capture_output=True)
+    result = driver.run_command(input=b"hello\n", capture_output=True)
 
     # The command keeps running, so its output is followed from the logs
     # endpoint instead of starting it, and writing its input, again.
@@ -653,10 +653,10 @@ def test_run_command_on_start_runs_before_input_is_written(driver: _Driver, rais
 
     if raises:
         with pytest.raises(RuntimeError) as raised:
-            driver.run_command(input="hello\n", capture_output=True, on_start=on_start)
+            driver.run_command(input=b"hello\n", capture_output=True, on_start=on_start)
         assert raised.value is error
     else:
-        result = driver.run_command(input="hello\n", capture_output=True, on_start=on_start)
+        result = driver.run_command(input=b"hello\n", capture_output=True, on_start=on_start)
         assert result.stdout == b"hello\n"
 
     assert seen == [("cmd_1", b"", False)]
@@ -696,7 +696,12 @@ def test_stdin_takes_bytes_not_text(driver: _Driver) -> None:
 
     with pytest.raises(TypeError, match="bytes"):
         process.write("text")  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="bytes"):
+        process.communicate("text")
+    with pytest.raises(TypeError, match="bytes"):
+        driver.run_command(input="text", capture_output=True)
 
+    assert len(driver.api.created) == 1
     assert driver.server.writes() == []
 
 

@@ -677,44 +677,43 @@ def test_sync_byte_reader_sizes_count_bytes() -> None:
     assert reader.read() == b""
 
 
-@pytest.mark.anyio
-@pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
-@pytest.mark.parametrize("sync", [False, True], ids=["async-reader", "sync-reader"])
-async def test_output_consumers_accept_native_byte_events(anyio_backend: str, sync: bool) -> None:
-    """Replacing the wire adapter does not change readers, capture, or text sinks."""
+@given(
+    records=st.lists(
+        st.tuples(st.sampled_from(["stdout", "stderr"]), st.binary(max_size=32)), max_size=8
+    ),
+    sync=st.booleans(),
+)
+@settings(max_examples=25, deadline=None)
+async def test_command_output_preserves_bytes(records: list[tuple[str, bytes]], sync: bool) -> None:
     import io
 
     from vercel.sandbox._internal.process_output import ProcessOutputRouter
 
-    async def native_logs() -> AsyncGenerator[ProcessLog, None]:
-        # Include invalid UTF-8 and split a valid character across records.
-        for stream, data in (
-            ("stdout", b"\xc3"),
-            ("stderr", b"\x00\xff"),
-            ("stdout", b"\xa9\n\x80tail"),
-            ("stdout", b"\xe2"),
-        ):
+    async def logs() -> AsyncGenerator[ProcessLog, None]:
+        for stream, data in records:
             yield ProcessLog(stream=stream, data=data)
 
-    sink = io.StringIO()
+    stdout_sink, stderr_sink = io.BytesIO(), io.BytesIO()
     captured = ProcessOutputRouter(stdout=None, stderr=None, capture_output=True)
-    text = ProcessOutputRouter(stdout=sink, stderr=subprocess.DEVNULL, capture_output=False)
-    async for event in native_logs():
+    routed = ProcessOutputRouter(stdout=stdout_sink, stderr=stderr_sink, capture_output=False)
+    async for event in logs():
         captured.route(event)
-        text.route(event)
-    expected = (b"\xc3\xa9\n\x80tail\xe2", b"\x00\xff")
+        routed.route(event)
+    expected = tuple(
+        b"".join(data for stream, data in records if stream == target)
+        for target in ("stdout", "stderr")
+    )
     assert captured.captured() == expected
-    assert text.captured() == (None, None)
-    assert sink.getvalue() == expected[0].decode(errors="replace")
+    assert (stdout_sink.getvalue(), stderr_sink.getvalue()) == expected
 
     if sync:
-        sync_stdout, sync_stderr = byte_reader._sync_byte_readers(native_logs)
+        sync_stdout, sync_stderr = byte_reader._sync_byte_readers(logs)
         assert sync_stdout is not None and sync_stderr is not None
         assert (sync_stdout.read(), sync_stderr.read()) == expected
         sync_stdout.close()
         sync_stderr.close()
     else:
-        stdout, stderr = byte_reader._byte_readers(native_logs)
+        stdout, stderr = byte_reader._byte_readers(logs)
         assert stdout is not None and stderr is not None
         assert (await stdout.read(), await stderr.read()) == expected
         await stdout.aclose()

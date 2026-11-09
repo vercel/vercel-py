@@ -462,7 +462,7 @@ async def test_user_processes_read_stdin_through_the_launcher(driver: Any) -> No
             alice = await _call(box.create_user, "alice")
             script = 'read -r line; printf "%s:%s\\n" "$(whoami)" "$line"; cat'
 
-            result = await _run(alice, "/bin/bash", ["-c", script], input="hi\nrest\n")
+            result = await _run(alice, "/bin/bash", ["-c", script], input=b"hi\nrest\n")
             assert result.stdout == b"alice:hi\nrest\n"
 
             process = await _call(
