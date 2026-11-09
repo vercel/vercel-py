@@ -3,7 +3,7 @@
 import io
 import subprocess
 import sys
-from typing import TextIO
+from typing import BinaryIO, TextIO
 
 from pydantic import SkipValidation
 
@@ -13,18 +13,18 @@ from vercel.sandbox._internal.value_model import SandboxModel
 
 class _OutputTarget(SandboxModel):
     # _resolve_target checks the writable-stream protocol, including duck types.
-    stream: SkipValidation[TextIO | None] = None
-    chunks: list[str] | None = None
+    stream: SkipValidation[BinaryIO | None] = None
+    chunks: list[bytes] | None = None
 
-    def write(self, data: str) -> None:
+    def write(self, data: bytes) -> None:
         if self.chunks is not None:
             self.chunks.append(data)
         elif self.stream is not None:
             self.stream.write(data)
             self.stream.flush()
 
-    def captured(self) -> str | None:
-        return None if self.chunks is None else "".join(self.chunks)
+    def captured(self) -> bytes | None:
+        return None if self.chunks is None else b"".join(self.chunks)
 
 
 class ProcessOutputRouter:
@@ -35,8 +35,8 @@ class ProcessOutputRouter:
     def __init__(
         self,
         *,
-        stdout: TextIO | int | None,
-        stderr: TextIO | int | None,
+        stdout: BinaryIO | int | None,
+        stderr: BinaryIO | int | None,
         capture_output: bool,
     ) -> None:
         if capture_output and (stdout is not None or stderr is not None):
@@ -57,7 +57,7 @@ class ProcessOutputRouter:
         target = self._stdout if event.stream is ProcessLogStream.STDOUT else self._stderr
         target.write(event.data)
 
-    def captured(self) -> tuple[str | None, str | None]:
+    def captured(self) -> tuple[bytes | None, bytes | None]:
         stdout = self._stdout.captured()
         stderr = None if self._stderr is self._stdout else self._stderr.captured()
         return stdout, stderr
@@ -84,23 +84,28 @@ def _validate_reader_destination(
 
 
 def _resolve_target(
-    destination: TextIO | int | None, *, inherited: TextIO, name: str
+    destination: BinaryIO | int | None, *, inherited: TextIO, name: str
 ) -> _OutputTarget:
     if destination is None:
-        return _OutputTarget(stream=inherited)
+        destination = getattr(inherited, "buffer", None)
+        if destination is None:
+            raise TypeError(
+                f"inherited {name} has no binary buffer; "
+                "pass a binary stream or subprocess sentinel"
+            )
     if destination == subprocess.PIPE:
         return _OutputTarget(chunks=[])
     if destination == subprocess.DEVNULL:
         return _OutputTarget()
     if isinstance(destination, int):
         raise ValueError(f"unsupported {name} value: {destination}")
-    if isinstance(destination, (io.RawIOBase, io.BufferedIOBase, io.BytesIO)):
-        raise TypeError(f"{name} must be a text stream")
+    if isinstance(destination, io.TextIOBase):
+        raise TypeError(f"{name} must be a binary stream")
 
     write = getattr(destination, "write", None)
     flush = getattr(destination, "flush", None)
     if not callable(write) or not callable(flush):
-        raise TypeError(f"{name} must be a writable text stream or subprocess sentinel")
+        raise TypeError(f"{name} must be a writable binary stream or subprocess sentinel")
     writable = getattr(destination, "writable", None)
     if callable(writable) and not writable():
         raise ValueError(f"{name} must be writable")

@@ -3,6 +3,7 @@
 from collections.abc import Iterator, Mapping
 
 from vercel._internal.core.session import get_active_sync_session
+from vercel.sandbox._internal.byte_reader import SyncByteReader
 from vercel.sandbox._internal.errors import (
     SandboxApiError,
     SandboxCleanupError,
@@ -112,7 +113,6 @@ from vercel.sandbox._internal.sync_runtime import (
     query_snapshots as _query_snapshots,
     resume_sandbox as _resume_sandbox,
 )
-from vercel.sandbox._internal.text_reader import SyncTextReader
 from vercel.sandbox.protocols import SyncSandboxExecution, SyncSandboxFilesystemOperations
 from vercel.sandbox.sync.user import SyncSandboxUser
 
@@ -711,7 +711,7 @@ __all__ = [
     "SyncDrive",
     "TagFilter",
     "TarballSource",
-    "SyncTextReader",
+    "SyncByteReader",
     "create_sandbox",
     "delete_drive",
     "fork_drive",

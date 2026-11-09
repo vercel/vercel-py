@@ -2830,7 +2830,11 @@ def test_sync_get_is_plain_handle_and_create_resume_are_managed(
 
 
 @respx.mock
-async def test_closed_session_rejects_handles_and_lazy_readers(mock_env_clear: None) -> None:
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
+async def test_closed_session_rejects_handles_and_lazy_readers(
+    mock_env_clear: None, anyio_backend: str
+) -> None:
     respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
@@ -2865,10 +2869,18 @@ async def test_closed_session_rejects_handles_and_lazy_readers(mock_env_clear: N
     with pytest.raises(VercelSessionClosedError):
         await command.refresh()
     assert command.stdout is not None
+    assert command.stderr is not None
     with pytest.raises(VercelSessionClosedError):
         # The reader opens its log response lazily, so the first read observes
         # the closed session.
         await command.stdout.read()
+    with anyio.fail_after(5):
+        for reader in (command.stdout, command.stderr):
+            with pytest.raises(anyio.BrokenResourceError):
+                await reader.read()
+        await command.stdout.aclose()
+        await command.stderr.aclose()
+    assert command.stdout.closed and command.stderr.closed
     with pytest.raises(VercelSessionClosedError):
         await snapshot.delete()
     with pytest.raises(VercelSessionClosedError):

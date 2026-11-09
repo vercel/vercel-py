@@ -11,13 +11,13 @@ from vercel.api import session
 async with session():
     async with sandbox.create_sandbox() as instance:
         process = await instance.run_command("echo", ["hello"], capture_output=True)
-        print(process.stdout)
+        print(process.stdout.decode())
 
         # Pass input to run_command, or keep stdin open with stdin=subprocess.PIPE.
-        result = await instance.run_command("sort", input="b\na\n", capture_output=True)
+        result = await instance.run_command("sort", input=b"b\na\n", capture_output=True)
         server = await instance.create_command("cat", stdin=subprocess.PIPE)
         await server.stdin.send(b"ping\n")
-        print(await server.stdout.readline())
+        print((await server.stdout.readline()).decode())
         print(await server.communicate())  # Close stdin, read the rest, and wait.
 ```
 
@@ -61,8 +61,23 @@ from vercel.sandbox import sync as sandbox
 with session():
     with sandbox.create_sandbox() as instance:
         process = instance.run_command("echo", ["hello"], capture_output=True)
-        print(process.stdout)
+        print(process.stdout.decode())
 ```
+
+Command input and output use bytes: live `stdout`/`stderr` readers,
+`communicate()`, and captured `CompletedCommand` output all return bytes.
+Encode text input explicitly and use `.decode()` when you need text output.
+`run_command()` destinations must be writable binary streams, such as
+`io.BytesIO` or files opened with `"wb"`; inherited output uses the local
+stdout/stderr binary buffers. Uncaptured result streams are `None`.
+
+The async `ByteReader` implements `anyio.abc.ByteReceiveStream`:
+`await process.stdout.receive(max_bytes)` returns available bytes without
+waiting for a newline, and async iteration yields byte chunks. Wrap it with
+`anyio.streams.text.TextReceiveStream` to decode chunks, or use
+`await process.stdout.readline()` for byte lines. The sync `SyncByteReader`
+supports `read(size)`, `readline()`, and iteration over byte lines. Read sizes
+count bytes in both APIs.
 
 Command APIs follow `subprocess`. Asynchronously, `process.stdin` is an
 `anyio.abc.ByteSendStream`, so it works with `TextSendStream` under asyncio or
@@ -197,7 +212,7 @@ from vercel.api import session
 async with session():
     async with sandbox.create_sandbox(image="my-repository:latest") as instance:
         result = await instance.run_command("my-command", capture_output=True)
-        print(result.stdout)
+        print(result.stdout.decode())
         print(instance.image)  # The resolved digest-pinned image reference
 ```
 
@@ -210,7 +225,7 @@ from vercel.sandbox import sync as sandbox
 with session():
     with sandbox.create_sandbox(image="my-repository:latest") as instance:
         result = instance.run_command("my-command", capture_output=True)
-        print(result.stdout)
+        print(result.stdout.decode())
         print(instance.image)  # The resolved digest-pinned image reference
 ```
 
@@ -468,7 +483,7 @@ bob = instance.as_user("bob")  # Synchronous selection, including on the async A
 
 await alice.fs.write_text("secret.txt", "private", mode=0o600)
 result = await alice.run_command("whoami", capture_output=True, check=True)
-assert result.stdout == "alice\n"
+assert result.stdout == b"alice\n"
 assert alice.home_dir == "/home/alice"
 ```
 
@@ -540,7 +555,7 @@ from vercel.sandbox import SandboxExecution
 async def run_agent(executor: SandboxExecution) -> str:
     await executor.fs.write_text("input.txt", "hello")
     result = await executor.run_command("cat", ["input.txt"], capture_output=True, check=True)
-    return result.stdout or ""
+    return (result.stdout or b"").decode()
 
 await run_agent(instance)
 await run_agent(await instance.session())

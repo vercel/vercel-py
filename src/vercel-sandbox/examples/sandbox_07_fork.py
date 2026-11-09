@@ -47,7 +47,7 @@ async def main() -> None:
                     capture_output=True,
                     check=True,
                 )
-                assert result.stdout == "hello from the source\n"
+                assert result.stdout == b"hello from the source\n"
 
                 await forked.fs.write_text("workspace/message.txt", "fork version\n")
                 assert await source.fs.read_text("workspace/message.txt") == "source version\n"

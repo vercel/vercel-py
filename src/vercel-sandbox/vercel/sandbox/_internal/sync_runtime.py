@@ -9,12 +9,13 @@ from contextlib import AbstractContextManager, contextmanager
 from datetime import timedelta
 from threading import Condition
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, Literal, TextIO, overload
+from typing import TYPE_CHECKING, Any, BinaryIO, Literal, overload
 
 from vercel._internal.core.byte_stream import SyncByteStreamRuntime
 from vercel._internal.core.iter_coroutine import iter_coroutine
 from vercel._internal.core.polyfills import Self
 from vercel._internal.core.time import parse_duration_seconds, parse_required_duration_seconds
+from vercel.sandbox._internal.byte_reader import SyncByteReader, _sync_byte_readers
 from vercel.sandbox._internal.errors import (
     SandboxApiError,
     SandboxCleanupError,
@@ -83,7 +84,7 @@ from vercel.sandbox._internal.process_stdin import (
     CommandInput,
     StdinMode,
     SyncCommandStdin,
-    _coerce_input,
+    _coerce_bytes,
     _sync_stdin,
     _validate_stdin,
 )
@@ -124,7 +125,6 @@ from vercel.sandbox._internal.sync_filesystem_handle import (
     SyncSandboxTextReader,
     SyncSandboxTextWriter,
 )
-from vercel.sandbox._internal.text_reader import SyncTextReader, _sync_text_readers
 from vercel.sandbox._internal.value_model import SandboxModel
 
 if TYPE_CHECKING:
@@ -156,8 +156,8 @@ class SyncCommand(_ProcessHandleState):
     __slots__ = ("_service", "stderr", "stdin", "stdout")
 
     stdin: SyncCommandStdin | None
-    stdout: SyncTextReader | None
-    stderr: SyncTextReader | None
+    stdout: SyncByteReader | None
+    stderr: SyncByteReader | None
 
     def __init__(
         self,
@@ -171,8 +171,8 @@ class SyncCommand(_ProcessHandleState):
         super().__init__(payload)
         self._service = service
         self.stdin = _sync_stdin(service, payload, stdin)
-        self.stdout, self.stderr = _sync_text_readers(
-            lambda: service.process_logs_response(session_id=self._session_id, process_id=self.id),
+        self.stdout, self.stderr = _sync_byte_readers(
+            lambda: service.process_logs(session_id=self._session_id, process_id=self.id),
             stdout=stdout,
             stderr=stderr,
         )
@@ -200,7 +200,7 @@ class SyncCommand(_ProcessHandleState):
             raise SandboxResponseError("Wait response did not include a process return code")
         return self.returncode
 
-    def communicate(self, input: CommandInput | None = None) -> tuple[str | None, str | None]:
+    def communicate(self, input: CommandInput | None = None) -> tuple[bytes | None, bytes | None]:
         """Send input, read all output, and wait for the process to exit.
 
         Stdin is closed whenever ``input`` is given, even if it is empty. With
@@ -210,12 +210,12 @@ class SyncCommand(_ProcessHandleState):
         output without ending its input.
 
         Args:
-            input: Bytes, or text encoded as UTF-8, to write to stdin before
-                closing it. It is not an error if the process exits or stops
-                reading before taking all of it.
+            input: Bytes to write to stdin before closing it. It is not an
+                error if the process exits or stops reading before taking all
+                of it.
 
         Returns:
-            A ``(stdout, stderr)`` tuple. A stream without a reader is
+            A ``(stdout, stderr)`` tuple of bytes. A stream without a reader is
             ``None``, so merging with ``stderr=subprocess.STDOUT`` returns
             ``(merged, None)``.
 
@@ -224,7 +224,7 @@ class SyncCommand(_ProcessHandleState):
             SandboxStdinError: If writing or closing stdin fails, including
                 writing to a looked-up process that has no stdin.
         """
-        data = None if input is None else _coerce_input(input)
+        data = None if input is None else _coerce_bytes(input)
         if self.stdin is not None:
             self.stdin._communicate(data)
         elif data is not None:
@@ -610,8 +610,8 @@ class SyncSandboxFilesystem:
         )
 
     async def _collect_output(self, command: ProcessState) -> tuple[str, str]:
-        stdout: list[str] = []
-        stderr: list[str] = []
+        stdout: list[bytes] = []
+        stderr: list[bytes] = []
         async for event in self._service.process_logs(
             session_id=command.session_id, process_id=command.id
         ):
@@ -619,7 +619,7 @@ class SyncSandboxFilesystem:
                 stdout.append(event.data)
             else:
                 stderr.append(event.data)
-        return "".join(stdout), "".join(stderr)
+        return b"".join(stdout).decode("utf-8"), b"".join(stderr).decode("utf-8")
 
     def mkdir(
         self, path: RemotePath, *, cwd: RemotePath | None = None, recursive: bool = True
@@ -1068,8 +1068,8 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         sudo: bool = False,
         kill_after: float | timedelta | None = None,
         check: bool = False,
-        stdout: TextIO | int | None = None,
-        stderr: TextIO | int | None = None,
+        stdout: BinaryIO | int | None = None,
+        stderr: BinaryIO | int | None = None,
         capture_output: bool = False,
         input: CommandInput | None = None,
         on_start: Callable[[SyncCommand], None] | None = None,
@@ -1085,16 +1085,15 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
             kill_after: Duration after which the service kills the process
                 with ``SIGKILL``.
             check: Whether to raise for a nonzero exit code.
-            stdout: Writable text stream or subprocess output sentinel for
-                stdout. ``None`` inherits the local stdout stream.
-            stderr: Writable text stream or subprocess output sentinel for
-                stderr. ``None`` inherits the local stderr stream; ``STDOUT``
-                merges stderr into the stdout destination.
+            stdout: Writable binary stream or subprocess output sentinel for
+                stdout. ``None`` inherits the local stdout binary buffer.
+            stderr: Writable binary stream or subprocess output sentinel for
+                stderr. ``None`` inherits the local stderr binary buffer;
+                ``STDOUT`` merges stderr into the stdout destination.
             capture_output: Whether to capture stdout and stderr in the result.
-            input: Data written to the process's stdin, which is then closed;
-                text is encoded as UTF-8. Without it the process reads an
-                empty stdin. A process that exits or stops reading before
-                taking all of it is not an error.
+            input: Bytes written to the process's stdin, which is then closed.
+                Without it the process reads an empty stdin. A process that
+                exits or stops reading before taking all of it is not an error.
             on_start: Callable called once with a ``SyncCommand`` handle as
                 soon as the process starts, before any of its output is
                 delivered. Output is held until it returns, so keep it short.
@@ -1126,7 +1125,7 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         output_router = ProcessOutputRouter(
             stdout=stdout, stderr=stderr, capture_output=capture_output
         )
-        data = None if input is None else _coerce_input(input)
+        data = None if input is None else _coerce_bytes(input)
         start_hook = _ProcessStartHook.create(
             on_start,
             lambda payload: SyncCommand(
@@ -1178,8 +1177,8 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         sudo: bool = False,
         kill_after: float | timedelta | None = None,
         check: bool = False,
-        stdout: TextIO | int | None = None,
-        stderr: TextIO | int | None = None,
+        stdout: BinaryIO | int | None = None,
+        stderr: BinaryIO | int | None = None,
         capture_output: bool = False,
         input: CommandInput | None = None,
         on_start: Callable[[SyncCommand], None] | None = None,
@@ -1668,8 +1667,8 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         sudo: bool = False,
         kill_after: float | timedelta | None = None,
         check: bool = False,
-        stdout: TextIO | int | None = None,
-        stderr: TextIO | int | None = None,
+        stdout: BinaryIO | int | None = None,
+        stderr: BinaryIO | int | None = None,
         capture_output: bool = False,
         input: CommandInput | None = None,
         on_start: Callable[[SyncCommand], None] | None = None,
@@ -1686,7 +1685,7 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         output_router = ProcessOutputRouter(
             stdout=stdout, stderr=stderr, capture_output=capture_output
         )
-        data = None if input is None else _coerce_input(input)
+        data = None if input is None else _coerce_bytes(input)
         start_hook = _ProcessStartHook.create(
             on_start,
             lambda payload: SyncCommand(
@@ -1743,8 +1742,8 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         sudo: bool = False,
         kill_after: float | timedelta | None = None,
         check: bool = False,
-        stdout: TextIO | int | None = None,
-        stderr: TextIO | int | None = None,
+        stdout: BinaryIO | int | None = None,
+        stderr: BinaryIO | int | None = None,
         capture_output: bool = False,
         input: CommandInput | None = None,
         on_start: Callable[[SyncCommand], None] | None = None,

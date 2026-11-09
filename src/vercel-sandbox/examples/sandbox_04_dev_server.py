@@ -10,6 +10,7 @@ import sys
 from datetime import timedelta
 from pathlib import PurePosixPath
 
+from anyio.streams.text import TextReceiveStream
 from dotenv import load_dotenv
 
 from vercel import sandbox
@@ -234,7 +235,7 @@ async def run_entrypoint(
     # stream to EOF and ends this loop. Never cancel a pending read (e.g. via
     # asyncio.wait_for) to stop early: that marks the shared log transport as
     # broken.
-    async for line in command.stdout:
+    async for line in TextReceiveStream(command.stdout):
         sys.stdout.write(line)
         sys.stdout.flush()
     print(f"stopped command {command.id}")
