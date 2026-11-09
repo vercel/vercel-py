@@ -10,15 +10,19 @@ from __future__ import annotations
 import datetime
 import json
 from collections.abc import AsyncIterator
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
+from unittest.mock import AsyncMock, Mock
 
 import cbor2
+import pytest
 
 from vercel._internal.core.polyfills import UTC
 from vercel.queue import MessageMetadata
 from vercel.queue._internal.subscribers import infer_subscriber_transport
-from vercel.workflow._internal import world as w
+from vercel.workflow._internal import ulid, world as w
 from vercel.workflow._internal.worlds import vercel as vercel_mod
+from vercel.workflow._internal.worlds.local import LocalWorld
 
 WRAPPER = {
     "payload": {"runId": "wrun_1", "stepId": "step_1"},
@@ -103,3 +107,158 @@ def test_dispatch_resolves_the_transport_without_help_from_the_client(
     )
 
     assert infer_subscriber_transport(metadata) is vercel_mod._QUEUE_TRANSPORT
+
+
+def test_queue_client_cache_includes_region(monkeypatch):
+    constructor = Mock()
+    monkeypatch.setattr(vercel_mod.vqs, "QueueClient", constructor)
+    world = vercel_mod.VercelWorld()
+    first = world._queue_client(deployment="dpl_1", region="fra1")
+    assert world._queue_client(deployment="dpl_1", region="fra1") is first
+    world._queue_client(deployment="dpl_1", region="iad1")
+    assert constructor.call_count == 2
+    assert constructor.call_args.kwargs["region"] == "iad1"
+
+
+@pytest.mark.parametrize("using_proxy", [False, True])
+def test_queue_region_header_is_scoped_to_proxy_client(monkeypatch, using_proxy):
+    constructor = Mock()
+    monkeypatch.setattr(vercel_mod.vqs, "QueueClient", constructor)
+    world = vercel_mod.VercelWorld(
+        project_id="prj_test" if using_proxy else None,
+        team_id="team_test" if using_proxy else None,
+    )
+    for region in ("fra1", "iad1"):
+        world._queue_client(deployment="dpl_1", region=region)
+    first, second = constructor.call_args_list
+    for call, region in ((first, "fra1"), (second, "iad1")):
+        headers = call.kwargs["headers"]
+        assert headers["User-Agent"] == world._headers["User-Agent"]
+        if using_proxy:
+            assert headers["x-vercel-queue-region"] == region
+            assert headers["x-vercel-project-id"] == "prj_test"
+            assert call.kwargs["base_url"].endswith("/queues-proxy")
+        else:
+            assert "x-vercel-queue-region" not in headers
+            assert call.kwargs["base_url"] is None
+    assert "x-vercel-queue-region" not in world._headers
+
+
+def test_local_world_ignores_region():
+    world = LocalWorld()
+    assert len(world.create_run_id(region="fra1")) == 26
+
+
+async def test_queue_preserves_run_region_without_override(monkeypatch):
+    from vercel.workflow._internal import world as w
+
+    monkeypatch.setenv("VERCEL_REGION", "iad1")
+    world = vercel_mod.VercelWorld()
+    client = Mock(send=AsyncMock(return_value="msg_1"))
+    factory = Mock(return_value=client)
+    monkeypatch.setattr(world, "_queue_client", factory)
+    identifier = "wrun_" + vercel_mod._create_run_id(region="fra1")
+    assert vercel_mod._region_from_tagged_run_id(identifier) == "fra1"
+    await world.queue(
+        "__wkf_workflow_test",
+        w.WorkflowInvokePayload(run_id=identifier),
+        deployment_id="dpl_target",
+    )
+    factory.assert_called_once_with(deployment="dpl_target", region="fra1")
+
+
+def _bits(value):
+    result = 0
+    for char in value:
+        result = result * 32 + ulid.ENCODING.index(char)
+    return result
+
+
+# @lat: [[vercel-workflow#Regional routing]]
+def test_region_ids_match_ts_and_remain_monotonic(monkeypatch):
+    generate = ulid.monotonic_factory(lambda: 0.5)
+    monkeypatch.setattr(vercel_mod._run_id_state, "generate", lambda: generate(1234567890000))
+    monkeypatch.setattr(vercel_mod._run_id_state, "last", 0)
+    ids = [vercel_mod._create_run_id(region=region) for region in reversed(vercel_mod._REGIONS)]
+    assert ids == sorted(set(ids))
+    for value, region in zip(ids, reversed(vercel_mod._REGIONS), strict=True):
+        bits = _bits(value)
+        assert bits >> 127 == 1
+        assert (bits >> 74) & 63 == vercel_mod._REGIONS.index(region) + 1
+        assert (bits >> 69) & 31 == 1
+
+
+@pytest.mark.parametrize(
+    "region,environment,expected",
+    [
+        ("fra1", "sfo1", "fra1"),
+        ("invalid", "sfo1", "sfo1"),
+        (None, "invalid", "iad1"),
+        ("unknown", "", "iad1"),
+    ],
+)
+def test_region_fallback(monkeypatch, region, environment, expected):
+    monkeypatch.setenv("VERCEL_REGION", environment)
+    assert vercel_mod._resolve_region(region) == expected
+
+
+def test_run_id_state_is_isolated_between_threads(monkeypatch):
+    monkeypatch.setattr(vercel_mod._run_id_state, "last", (1 << 128) - 1)
+
+    def generate_in_thread():
+        assert vercel_mod._run_id_state.last == 0
+        ids = [vercel_mod._create_run_id(region=r) for r in reversed(vercel_mod._REGIONS)]
+        assert ids == sorted(set(ids))
+        return vercel_mod._run_id_state.last
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        assert executor.submit(generate_in_thread).result() < (1 << 128) - 1
+    assert vercel_mod._run_id_state.last == (1 << 128) - 1
+
+
+@pytest.mark.parametrize("value", ["bad", "0" * 26, "Z" * 26, "wrun_" + "!" * 26])
+def test_legacy_and_malformed_ids_have_no_region(value):
+    assert vercel_mod._region_from_tagged_run_id(value) is None
+
+
+@pytest.mark.parametrize("suffix", ["ſ", "ß"])
+def test_region_decoder_rejects_unicode_case_folding(suffix):
+    # Both normalize to valid Base32, including a length-changing uppercase.
+    value = "400000000050G" + "0" * (13 - len(suffix.upper())) + suffix
+    assert len(value.upper()) == 26
+    assert vercel_mod._region_from_tagged_run_id(value) is None
+    assert vercel_mod._region_from_tagged_run_id("wrun_" + value) is None
+
+
+def test_region_decoder_accepts_ascii_lowercase():
+    assert vercel_mod._region_from_tagged_run_id("wrun_41arz3ndek50v4rrffq69g5fav") == "fra1"
+
+
+def test_monotonic_correction_matches_typescript(monkeypatch):
+    raw = iter(["01ARZ3NDEKTSV4RRFFQ69G5FAV", "01ARZ3NDEKTSV4RRFFQ69G5FAW"])
+    monkeypatch.setattr(vercel_mod._run_id_state, "generate", lambda: next(raw))
+    monkeypatch.setattr(vercel_mod._run_id_state, "last", 0)
+    assert vercel_mod._create_run_id(region="syd1") == "41ARZ3NDEKBGV4RRFFQ69G5FAV"
+    assert vercel_mod._create_run_id(region="iad1") == "41ARZ3NDEM0GV4RRFFQ69G5FAV"
+
+
+# Produced by world-vercel/run-id at TS commit 11a904fe197483278c2eceb625c13d3c72933b41.
+@pytest.mark.parametrize(
+    "raw,region,expected",
+    [
+        ("00000000000000000000000000", "iad1", "40000000000GG0000000000000"),
+        ("00000000000000000000000000", "fra1", "400000000050G0000000000000"),
+        ("00000000000000000000000000", "syd1", "4000000000BGG0000000000000"),
+        ("01ARZ3NDEKTSV4RRFFQ69G5FAV", "iad1", "41ARZ3NDEK0GV4RRFFQ69G5FAV"),
+        ("01ARZ3NDEKTSV4RRFFQ69G5FAV", "fra1", "41ARZ3NDEK50V4RRFFQ69G5FAV"),
+        ("01ARZ3NDEKTSV4RRFFQ69G5FAV", "syd1", "41ARZ3NDEKBGV4RRFFQ69G5FAV"),
+        ("7ZZZZZZZZZZZZZZZZZZZZZZZZZ", "iad1", "7ZZZZZZZZZ0GZZZZZZZZZZZZZZ"),
+        ("7ZZZZZZZZZZZZZZZZZZZZZZZZZ", "fra1", "7ZZZZZZZZZ50ZZZZZZZZZZZZZZ"),
+        ("7ZZZZZZZZZZZZZZZZZZZZZZZZZ", "syd1", "7ZZZZZZZZZBGZZZZZZZZZZZZZZ"),
+    ],
+)
+def test_region_tag_encoding_matches_typescript_vectors(monkeypatch, raw, region, expected):
+    monkeypatch.setattr(vercel_mod._run_id_state, "generate", lambda: raw)
+    monkeypatch.setattr(vercel_mod._run_id_state, "last", 0)
+    assert vercel_mod._create_run_id(region=region) == expected
+    assert vercel_mod._region_from_tagged_run_id("wrun_" + expected) == region

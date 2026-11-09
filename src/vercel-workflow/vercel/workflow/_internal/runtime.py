@@ -964,7 +964,7 @@ class WorkflowOrchestratorContext:
             if fut and fut.done() and not fut.cancelled() and fut.exception():
                 continue
 
-            task.cancel()
+            task.cancel("workflow: suspending workflow execution")
 
     def run_workflow(self: Self, workflow_run: w.WorkflowRun) -> bytes | None:
         """Run the body inside the sandbox, returning its result serialized there.

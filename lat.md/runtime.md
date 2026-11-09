@@ -28,7 +28,7 @@ Each service contributes its own [[src/vercel-internal-core/vercel/_internal/cor
 
 Function helpers read the incoming Vercel request headers from one context-local store, registered once per request.
 
-[[src/vercel-headers/vercel/headers/__init__.py#set_headers]] stores the headers in a context variable and [[src/vercel-headers/vercel/headers/__init__.py#get_headers]] reads them back. OIDC, cache, and geolocation helpers such as [[src/vercel-headers/vercel/headers/__init__.py#geolocation]] all consume this store, so frameworks only need to register headers in one place.
+[[src/vercel-headers/vercel/headers/__init__.py#set_headers]] stores the headers in a context variable and [[src/vercel-headers/vercel/headers/__init__.py#get_headers]] reads them back. OIDC, cache, [[vercel-passport]], and geolocation helpers such as [[src/vercel-headers/vercel/headers/__init__.py#geolocation]] all consume this store, so frameworks only need to register headers in one place.
 
 ## OIDC credentials
 

@@ -23,6 +23,7 @@ from vercel._internal.core.session import get_active_session
 from vercel.api import session
 from vercel.errors import VercelSessionClosedError
 from vercel.sandbox import (
+    CURRENT_REGION,
     DriveMount,
     DriveQuery,
     DriveQueryByCreatedAt,
@@ -41,6 +42,7 @@ from vercel.sandbox import (
     NetworkPolicyRule,
     NetworkPolicySubnets,
     NetworkPolicyTransform,
+    RegionInput,
     SandboxApiError,
     SandboxCleanupError,
     SandboxMount,
@@ -334,6 +336,30 @@ def _network_policy_matcher() -> NetworkPolicyRequestMatcher:
             )
         ],
     )
+
+
+@pytest.mark.parametrize(
+    "build_allow",
+    [
+        lambda rule: {"a.example.com": [rule], "b.example.com": ()},
+        lambda rule: [("a.example.com", [rule]), ("b.example.com", ())],
+        lambda rule: iter([("a.example.com", iter([rule])), ("b.example.com", iter(()))]),
+        lambda rule: {
+            "a.example.com": (r for r in [rule]),
+            "b.example.com": (r for r in [rule][:0]),
+        },
+    ],
+    ids=["mapping", "pairs", "pair-iterator", "generator-rules"],
+)
+def test_network_policy_custom_accepts_iterable_shapes(build_allow) -> None:
+    rule = NetworkPolicyRule(transform=[NetworkPolicyTransform(headers={"X-A": "1"})])
+    policy = NetworkPolicy.custom(allow=build_allow(rule))
+
+    assert policy == NetworkPolicy.custom(allow={"a.example.com": (rule,), "b.example.com": ()})
+    assert policy.allow["a.example.com"] == (rule,)
+    assert policy.allow["b.example.com"] == ()
+    with pytest.raises(TypeError):
+        policy.allow["c.example.com"] = ()  # type: ignore[index]
 
 
 def _authored_network_policy() -> NetworkPolicy:
@@ -775,8 +801,270 @@ async def test_service_region_defaults_placement_operations_and_allows_call_over
     }
     assert json.loads(update_route.calls.last.request.content) == {
         "tags": {"updated": "true"},
-        "region": "iad1",
     }
+
+
+@respx.mock
+@pytest.mark.parametrize("sync", [False, True])
+@pytest.mark.parametrize("standalone", [False, True])
+@pytest.mark.parametrize("operation", ["create", "fork", "get_or_create", "drive"])
+@pytest.mark.parametrize(
+    "service_region, call_kwargs, env_region, expected_region",
+    [
+        (None, {}, "cle1", None),
+        (None, {"region": None}, "cle1", None),
+        (None, {"region": "sfo1"}, "cle1", "sfo1"),
+        (None, {"region": CURRENT_REGION}, "cle1", "cle1"),
+        (None, {"region": CURRENT_REGION}, None, None),
+        (None, {"region": CURRENT_REGION}, "", ""),
+        ("iad1", {}, "cle1", "iad1"),
+        (CURRENT_REGION, {}, "cle1", "cle1"),
+        (CURRENT_REGION, {}, None, None),
+        (CURRENT_REGION, {}, "", ""),
+        (CURRENT_REGION, {"region": "sfo1"}, "cle1", "sfo1"),
+        ("iad1", {"region": CURRENT_REGION}, "cle1", "cle1"),
+        ("iad1", {"region": CURRENT_REGION}, None, None),
+        ("iad1", {"region": CURRENT_REGION}, "", ""),
+    ],
+    ids=[
+        "default",
+        "none",
+        "explicit",
+        "current",
+        "current-unset",
+        "current-empty",
+        "option",
+        "current-option",
+        "current-option-unset",
+        "current-option-empty",
+        "override-current-option",
+        "override-explicit-option",
+        "override-option-unset",
+        "override-option-empty",
+    ],
+)
+async def test_region_placement_is_explicit(
+    mock_env_clear: None,
+    monkeypatch: pytest.MonkeyPatch,
+    sync: bool,
+    standalone: bool,
+    operation: str,
+    service_region: RegionInput,
+    call_kwargs: dict[str, Any],
+    env_region: str | None,
+    expected_region: str | None,
+) -> None:
+    # Construct options before setting the runtime environment: CURRENT_REGION
+    # must be resolved when the operation is called, not when options are created.
+    options = _session_options(sync=sync, region=service_region)
+    if env_region is not None:
+        monkeypatch.setenv("VERCEL_REGION", env_region)
+    create_route = respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    fork_route = respx.post("https://sandbox.test/v2/sandboxes/source/fork").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    drive_route = respx.post("https://sandbox.test/v2/sandboxes/drives/cache").mock(
+        return_value=httpx.Response(201, json=_drive_response())
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(404, json={"error": {"code": "not_found"}})
+    )
+
+    def invoke(api: Any) -> Any:
+        if operation == "create":
+            return api.create_sandbox(**call_kwargs)
+        if operation == "fork":
+            return api.fork_sandbox(source_sandbox="source", **call_kwargs)
+        if operation == "get_or_create":
+            return api.get_or_create_sandbox(name="preview", **call_kwargs)
+        return api.get_or_create_drive(name="cache", **call_kwargs)
+
+    if standalone:
+        if sync:
+            client = sandbox_sync.SyncSandboxClient.create(options=options[0])
+            try:
+                invoke(client)
+            finally:
+                client.close()
+        else:
+            async_client = sandbox.SandboxClient.create(options=options[0])
+            try:
+                await invoke(async_client)
+            finally:
+                await async_client.aclose()
+    elif sync:
+        with session(service_options=options):
+            invoke(sandbox_sync)
+    else:
+        async with session(service_options=options):
+            await invoke(sandbox)
+
+    route = (
+        drive_route if operation == "drive" else fork_route if operation == "fork" else create_route
+    )
+    body = json.loads(route.calls.last.request.content)
+    if expected_region is None:
+        assert "region" not in body
+    else:
+        assert body["region"] == expected_region
+
+
+@respx.mock
+@pytest.mark.parametrize("sync", [False, True])
+@pytest.mark.parametrize("operation", ["create", "fork", "get_or_create", "drive"])
+@pytest.mark.parametrize("region_source", ["call", "options"])
+@pytest.mark.parametrize("env_region", [None, "", "cle1"])
+async def test_region_is_captured_before_service_io(
+    mock_env_clear: None,
+    monkeypatch: pytest.MonkeyPatch,
+    sync: bool,
+    operation: str,
+    region_source: str,
+    env_region: str | None,
+) -> None:
+    credentials = sandbox.SandboxCredentials("token", "team_123", "prj_123")
+
+    def credentials_factory() -> sandbox.SandboxCredentials:
+        # Resolving credentials happens inside the service. Changing the
+        # environment here must not change the region already passed to it.
+        monkeypatch.setenv("VERCEL_REGION", "sfo1")
+        return credentials
+
+    async def async_credentials_factory() -> sandbox.SandboxCredentials:
+        return credentials_factory()
+
+    service_region = CURRENT_REGION if region_source == "options" else "iad1"
+    options = (
+        sandbox_sync.SandboxServiceOptions(
+            base_url="https://sandbox.test",
+            credentials_factory=credentials_factory,
+            region=service_region,
+        )
+        if sync
+        else sandbox.SandboxServiceOptions(
+            base_url="https://sandbox.test",
+            credentials_factory=async_credentials_factory,
+            region=service_region,
+        )
+    )
+    if env_region is not None:
+        monkeypatch.setenv("VERCEL_REGION", env_region)
+    create_route = respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    fork_route = respx.post("https://sandbox.test/v2/sandboxes/source/fork").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    drive_route = respx.post("https://sandbox.test/v2/sandboxes/drives/cache").mock(
+        return_value=httpx.Response(201, json=_drive_response())
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(404, json={"error": {"code": "not_found"}})
+    )
+    call_kwargs = {"region": CURRENT_REGION} if region_source == "call" else {}
+
+    def invoke(api: Any) -> Any:
+        if operation == "create":
+            return api.create_sandbox(**call_kwargs)
+        if operation == "fork":
+            return api.fork_sandbox(source_sandbox="source", **call_kwargs)
+        if operation == "get_or_create":
+            return api.get_or_create_sandbox(name="preview", **call_kwargs)
+        return api.get_or_create_drive(name="cache", **call_kwargs)
+
+    if sync:
+        with session(service_options=[options]):
+            invoke(sandbox_sync)
+    else:
+        async with session(service_options=[options]):
+            pending = invoke(sandbox)
+            if operation in {"create", "fork"}:
+                # Deferred operations also capture the region before awaiting.
+                monkeypatch.setenv("VERCEL_REGION", "sfo1")
+            await pending
+
+    route = (
+        drive_route if operation == "drive" else fork_route if operation == "fork" else create_route
+    )
+    body = json.loads(route.calls.last.request.content)
+    if env_region is None:
+        assert "region" not in body
+    else:
+        assert body["region"] == env_region
+
+
+@respx.mock
+@pytest.mark.parametrize("sync", [False, True])
+@pytest.mark.parametrize("region_source", ["options", "environment"])
+@pytest.mark.parametrize(
+    "kwargs, expected_body",
+    [
+        ({}, {}),
+        ({"tags": {"updated": "true"}}, {"tags": {"updated": "true"}}),
+        ({"region": "sfo1"}, {"region": "sfo1"}),
+        ({"region": CURRENT_REGION}, {"region": "cle1"}),
+        ({"region": None}, {}),
+        (
+            {
+                "ports": [],
+                "persistent": False,
+                "env": {},
+                "tags": {},
+                "mounts": {},
+                "failover_regions": [],
+                "network_id": None,
+                "snapshot_retention": None,
+            },
+            {
+                "ports": [],
+                "persistent": False,
+                "env": {},
+                "tags": {},
+                "mounts": {},
+                "failoverRegions": [],
+                "networkId": None,
+                "keepLastSnapshots": None,
+            },
+        ),
+    ],
+    ids=[
+        "omitted",
+        "tags",
+        "explicit-region",
+        "current-region",
+        "none-region",
+        "empty-false-and-null",
+    ],
+)
+async def test_update_sends_only_explicit_configuration(
+    mock_env_clear: None,
+    monkeypatch: pytest.MonkeyPatch,
+    sync: bool,
+    region_source: str,
+    kwargs: dict[str, Any],
+    expected_body: dict[str, Any],
+) -> None:
+    monkeypatch.setenv("VERCEL_REGION", "cle1")
+    service_region = "cle1" if region_source == "options" else CURRENT_REGION
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    update_route = respx.patch("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(200, json={"sandbox": _sandbox_response()["sandbox"]})
+    )
+
+    if sync:
+        with session(service_options=_session_options(sync=True, region=service_region)):
+            handle = sandbox_sync.get_sandbox(name="preview")
+            handle.update(**kwargs)
+    else:
+        async with session(service_options=_session_options(region=service_region)):
+            async_handle = await sandbox.get_sandbox(name="preview")
+            await async_handle.update(**kwargs)
+
+    assert json.loads(update_route.calls.last.request.content) == expected_body
 
 
 def _recorded_response(
@@ -1019,7 +1307,7 @@ def _mock_update_superseded_by_recovery(
         )
     )
     respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_new/cmd").mock(
-        return_value=_recovery_success_response("query_processes", session_id="sbx_new")
+        return_value=_recovery_success_response("query_commands", session_id="sbx_new")
     )
     patch_route = respx.patch("https://sandbox.test/v2/sandboxes/preview").mock(
         return_value=httpx.Response(200, json={"sandbox": _sandbox_response()["sandbox"]})
@@ -1062,7 +1350,7 @@ async def test_async_update_step_superseded_by_recovery_keeps_current_session(
         async with anyio.create_task_group() as tasks:
             tasks.start_soon(run_update)
             await extend_started.wait()
-            assert len(await handle.query_processes()) == 1
+            assert len(await handle.query_commands()) == 1
             allow_extend.set()
 
     assert len(errors) == 1
@@ -1096,7 +1384,7 @@ def test_sync_update_step_superseded_by_recovery_keeps_current_session(
                 network_policy=_authored_network_policy(),
             )
             assert extend_started.wait(timeout=5)
-            assert len(handle.query_processes()) == 1
+            assert len(handle.query_commands()) == 1
             allow_extend.set()
             with pytest.raises(SandboxApiError):
                 update.result(timeout=5)
@@ -1253,7 +1541,7 @@ async def test_update_skips_extend_without_running_growth(
 
 
 @respx.mock
-def test_sync_service_region_defaults_fork_from_environment(
+def test_sync_service_region_can_opt_into_environment_for_fork(
     mock_env_clear: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1264,7 +1552,7 @@ def test_sync_service_region_defaults_fork_from_environment(
         )
     )
 
-    with session(service_options=_session_options(sync=True)):
+    with session(service_options=_session_options(sync=True, region=CURRENT_REGION)):
         sandbox_sync.fork_sandbox(source_sandbox="source")
 
     assert json.loads(fork_route.calls.last.request.content) == {
@@ -1459,12 +1747,17 @@ async def test_network_policy_structural_validation(mock_env_clear: None) -> Non
         NetworkPolicyResponse(status_code=204, body="blocked", content_type="text/plain")
     with pytest.raises(ValueError, match="proxy-managed headers"):
         NetworkPolicyResponse(status_code=403, headers={"Content-Length": "0"})
-    with pytest.raises(TypeError, match="headers must map strings to strings"):
-        NetworkPolicyResponse(status_code=403, headers={"X-Count": 1})  # type: ignore[dict-item]
-    with pytest.raises(TypeError, match="body must be a string"):
-        NetworkPolicyResponse(status_code=403, body=1)  # type: ignore[arg-type]
-    with pytest.raises(TypeError, match="content_type must be a string"):
-        NetworkPolicyResponse(status_code=403, content_type=1)  # type: ignore[arg-type]
+    for kwargs, message in (
+        ({"body": b"blocked", "content_type": "text/plain"}, "response body must be a string"),
+        ({"body": 1, "content_type": "text/plain"}, "response body must be a string"),
+        ({"body": "ok", "content_type": b"text/plain"}, "response content_type must be a string"),
+        ({"content_type": 1}, "response content_type must be a string"),
+        ({"headers": {"X-Count": 1}}, "response headers must map strings to strings"),
+        ({"headers": {"X-Count": b"1"}}, "response headers must map strings to strings"),
+        ({"headers": {1: "x"}}, "response headers must map strings to strings"),
+    ):
+        with pytest.raises(TypeError, match=message):
+            NetworkPolicyResponse(status_code=403, **kwargs)  # type: ignore[arg-type]
 
     headers = {"X-Secret": "value"}
     rules = [NetworkPolicyRule(transform=[NetworkPolicyTransform(headers=headers)])]
@@ -1753,6 +2046,7 @@ async def test_service_returns_neutral_state_and_async_runtime_binds_handles(
             delete_evicted=False,
         )
         assert state.raw is not None
+        assert state.raw["failover_regions"] == ["sfo1", "cle1"]
         assert state.raw["timeout"] == 300000
         assert state.raw["snapshotExpiration"] == 0
         assert state.raw["keepLastSnapshots"] == {
@@ -1767,7 +2061,7 @@ async def test_service_returns_neutral_state_and_async_runtime_binds_handles(
         handle = await sandbox.get_sandbox(name="preview")
         assert isinstance(handle, sandbox.Sandbox)
         assert isinstance(handle.current_session, sandbox.SandboxRuntimeSession)
-        assert isinstance(await handle.create_process("python"), sandbox.Process)
+        assert isinstance(await handle.create_command("python"), sandbox.Command)
         updated_session = await handle.extend_execution_time_limit(2.5)
         assert isinstance(updated_session, sandbox.SandboxRuntimeSession)
         assert updated_session.execution_time_limit == timedelta(minutes=5)
@@ -1781,7 +2075,7 @@ async def test_service_returns_neutral_state_and_async_runtime_binds_handles(
 
 @respx.mock
 def test_sync_runtime_binds_only_sync_handles(mock_env_clear: None) -> None:
-    assert not hasattr(sandbox_sync, "Process")
+    assert not hasattr(sandbox_sync, "Command")
     update_requests: list[httpx.Request] = []
 
     def update_handler(request: httpx.Request) -> httpx.Response:
@@ -1809,7 +2103,7 @@ def test_sync_runtime_binds_only_sync_handles(mock_env_clear: None) -> None:
         handle = sandbox_sync.get_sandbox(name="preview")
         assert isinstance(handle, sandbox_sync.SyncSandbox)
         assert isinstance(handle.current_session, sandbox_sync.SyncSandboxRuntimeSession)
-        assert isinstance(handle.create_process("python"), sandbox_sync.SyncProcess)
+        assert isinstance(handle.create_command("python"), sandbox_sync.SyncCommand)
         assert isinstance(handle.snapshot(expiration=timedelta(days=1)), sandbox_sync.SyncSnapshot)
         handle.update(tags={})
         handle.update(snapshot_retention=None)
@@ -1848,10 +2142,10 @@ async def test_async_command_kill_after_encodes_seconds_and_timedelta(
 
     async with session(service_options=_session_options()):
         handle = await sandbox.get_sandbox(name="preview")
-        await handle.run_process("sleep", ["60"], kill_after=2.5)
-        await handle.create_process("sleep", ["60"], kill_after=timedelta(seconds=3.25))
+        await handle.run_command("sleep", ["60"], kill_after=2.5)
+        await handle.create_command("sleep", ["60"], kill_after=timedelta(seconds=3.25))
         assert handle.current_session is not None
-        await handle.current_session.create_process("sleep", ["60"], kill_after=4)
+        await handle.current_session.create_command("sleep", ["60"], kill_after=4)
 
     assert [json.loads(request.content) for request in requests] == [
         {
@@ -1884,9 +2178,9 @@ def test_sync_command_kill_after_encodes_seconds_and_omits_none(mock_env_clear: 
 
     with session(service_options=_session_options()):
         handle = sandbox_sync.get_sandbox(name="preview")
-        handle.create_process("echo", ["hello"])
+        handle.create_command("echo", ["hello"])
         assert handle.current_session is not None
-        handle.current_session.create_process("sleep", ["60"], kill_after=1.5)
+        handle.current_session.create_command("sleep", ["60"], kill_after=1.5)
 
     assert [json.loads(request.content) for request in requests] == [
         {"command": "echo", "args": ["hello"], "sudo": False},
@@ -2080,6 +2374,23 @@ async def test_query_sandboxes_rejects_invalid_page_size(mock_env_clear: None) -
 
 
 @respx.mock
+@pytest.mark.parametrize("bad_page_size", ["5", 5.0, True])
+@pytest.mark.parametrize(
+    "query_name", ["query_sandboxes", "query_sessions", "query_snapshots", "query_drives"]
+)
+async def test_query_rejects_non_integer_page_size_before_any_request(
+    mock_env_clear: None, query_name: str, bad_page_size: Any
+) -> None:
+    route = respx.route().mock(return_value=httpx.Response(200, json={}))
+
+    async with session(service_options=_session_options()):
+        with pytest.raises(TypeError, match="page_size must be an integer"):
+            [item async for item in getattr(sandbox, query_name)(page_size=bad_page_size)]
+
+    assert not route.called
+
+
+@respx.mock
 async def test_public_api_error_propagates_status_code_code_and_data(mock_env_clear: None) -> None:
     data = {"error": {"code": "bad_request", "message": "unsupported filter"}}
     respx.get("https://sandbox.test/v2/sandboxes").mock(return_value=httpx.Response(400, json=data))
@@ -2091,6 +2402,27 @@ async def test_public_api_error_propagates_status_code_code_and_data(mock_env_cl
     assert exc_info.value.status_code == 400
     assert exc_info.value.code == "bad_request"
     assert exc_info.value.data == data
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("operation", "kwargs"),
+    [
+        ("create", {"name": 123}),
+        ("fork", {"source_sandbox": "source", "name": 123}),
+        ("fork", {"source_sandbox": 123}),
+    ],
+)
+async def test_deferred_sandbox_inputs_validate_on_construction(
+    mock_env_clear: None, operation: str, kwargs: dict[str, Any]
+) -> None:
+    route = respx.route().mock(return_value=httpx.Response(500))
+
+    async with session(service_options=_session_options()):
+        with pytest.raises(ValidationError):
+            getattr(sandbox, f"{operation}_sandbox")(**kwargs)
+
+    assert not route.called
 
 
 @respx.mock
@@ -2521,15 +2853,15 @@ async def test_closed_session_rejects_handles_and_lazy_readers(mock_env_clear: N
         resumed = await sandbox.resume_sandbox(name="preview")
         assert resumed.current_session is not None
         runtime_session = resumed.current_session
-        command = await handle.create_process("sleep", ["30"])
+        command = await handle.create_command("sleep", ["30"])
         snapshot = await handle.snapshot()
         assert snapshot.region == "iad1"
         assert snapshot.regions == ("iad1", "sfo1", "cle1")
 
     with pytest.raises(VercelSessionClosedError):
-        await handle.create_process("true")
+        await handle.create_command("true")
     with pytest.raises(VercelSessionClosedError):
-        await runtime_session.create_process("true")
+        await runtime_session.create_command("true")
     with pytest.raises(VercelSessionClosedError):
         await command.refresh()
     assert command.stdout is not None
@@ -2864,7 +3196,7 @@ async def test_stopped_async_sandbox_recovers_one_public_operation(
 
     async with session(service_options=_session_options()):
         handle = await sandbox.get_sandbox(name="preview")
-        process = await handle.create_process("python", ["--version"])
+        process = await handle.create_command("python", ["--version"])
 
     assert process.session_id == handle.current_session_id == "sbx_new"
     assert events == ["lookup", "resume", "replay"]
@@ -2878,7 +3210,7 @@ def test_stopped_sync_sandbox_recovers_one_public_operation(
 
     with session(service_options=_session_options()):
         handle = sandbox_sync.get_sandbox(name="preview")
-        process = handle.create_process("python", ["--version"])
+        process = handle.create_command("python", ["--version"])
 
     assert process.session_id == handle.current_session_id == "sbx_new"
     assert events == ["lookup", "resume", "replay"]
@@ -2886,13 +3218,13 @@ def test_stopped_sync_sandbox_recovers_one_public_operation(
 
 _RECOVERABLE_SANDBOX_OPERATIONS = (
     (
-        "get_process",
+        "get_command",
         "get",
         "v2/sandboxes/sessions/sbx_old/cmd/cmd_123",
         "v2/sandboxes/sessions/sbx_new/cmd/cmd_123",
     ),
     (
-        "query_processes",
+        "query_commands",
         "get",
         "v2/sandboxes/sessions/sbx_old/cmd",
         "v2/sandboxes/sessions/sbx_new/cmd",
@@ -2920,9 +3252,9 @@ _RECOVERABLE_SANDBOX_OPERATIONS = (
 
 def _recovery_success_response(operation: str, *, session_id: str) -> httpx.Response:
     session = _sandbox_response(session_id=session_id)["session"]
-    if operation in {"get_process", "query_processes"}:
+    if operation in {"get_command", "query_commands"}:
         command = _command_response(session_id=session_id)["command"]
-        if operation == "get_process":
+        if operation == "get_command":
             return httpx.Response(200, json={"command": command})
         return httpx.Response(200, json={"commands": [command]})
     if operation == "snapshot":
@@ -2937,10 +3269,10 @@ def _recovery_success_response(operation: str, *, session_id: str) -> httpx.Resp
 
 
 async def _run_async_recoverable_operation(handle: sandbox.Sandbox, operation: str) -> object:
-    if operation == "get_process":
-        return await handle.get_process("cmd_123")
-    if operation == "query_processes":
-        return await handle.query_processes()
+    if operation == "get_command":
+        return await handle.get_command("cmd_123")
+    if operation == "query_commands":
+        return await handle.query_commands()
     if operation == "extend_execution_time_limit":
         return await handle.extend_execution_time_limit(2)
     if operation == "update_network_policy":
@@ -2951,10 +3283,10 @@ async def _run_async_recoverable_operation(handle: sandbox.Sandbox, operation: s
 
 
 def _run_sync_recoverable_operation(handle: sandbox_sync.SyncSandbox, operation: str) -> object:
-    if operation == "get_process":
-        return handle.get_process("cmd_123")
-    if operation == "query_processes":
-        return handle.query_processes()
+    if operation == "get_command":
+        return handle.get_command("cmd_123")
+    if operation == "query_commands":
+        return handle.query_commands()
     if operation == "extend_execution_time_limit":
         return handle.extend_execution_time_limit(2)
     if operation == "update_network_policy":
@@ -3089,7 +3421,7 @@ async def test_async_sparse_sandbox_lookup_targets_current_session_without_resum
         handle = await sandbox.get_sandbox(name="preview")
         assert handle.current_session_id == "sbx_sparse"
         assert handle.current_session is None
-        process = await handle.create_process("python")
+        process = await handle.create_command("python")
 
     assert process.session_id == "sbx_sparse"
     assert lookup_route.call_count == operation_route.call_count == 1
@@ -3132,7 +3464,7 @@ async def test_async_sandbox_recovery_preserves_route_projection(
             name="preview",
             include_system_routes=include_system_routes,
         )
-        await handle.create_process("python")
+        await handle.create_command("python")
 
     assert [request.url.params["resume"] for request in requests] == ["false", "true"]
     for request in requests:
@@ -3194,10 +3526,12 @@ async def test_mutating_handles_reject_mismatched_response_identity(mock_env_cle
 
     async with session(service_options=_session_options()):
         handle = await sandbox.create_sandbox(name="preview")
-        with pytest.raises(SandboxResponseError):
+        with pytest.raises(SandboxResponseError) as raised:
             await handle.update(ports=[3001])
+        data = cast(SandboxState, raised.value.data)
+        assert json.loads(data.model_dump_json())["name"] == "other"
 
-        command = await handle.create_process("python", ["--version"])
+        command = await handle.create_command("python", ["--version"])
         with pytest.raises(SandboxResponseError):
             await command.refresh()
 
@@ -3600,7 +3934,7 @@ async def test_async_managed_session_cleanup_never_rolls_back_replacement(
     async with session(service_options=_session_options()):
         box = await sandbox.get_sandbox(name="preview")
         async with box.session() as acquired:
-            assert await box.query_processes() == []
+            assert await box.query_commands() == []
             replacement = box.current_session
             assert replacement is not None and replacement.id == "sbx_new"
         assert acquired.status is SandboxStatus.STOPPED
@@ -3948,12 +4282,12 @@ async def test_async_session_acquisition_shares_implicit_resume(
 
     async with session(service_options=_session_options()):
         box = await sandbox.get_sandbox(name="preview")
-        processes: list[sandbox.Process] | None = None
+        processes: list[sandbox.Command] | None = None
         acquired: sandbox.SandboxRuntimeSession | None = None
 
         async def query() -> None:
             nonlocal processes
-            processes = await box.query_processes()
+            processes = await box.query_commands()
 
         async def acquire() -> None:
             nonlocal acquired
@@ -4009,7 +4343,7 @@ def test_sync_managed_session_cleanup_never_rolls_back_replacement(
     with session(service_options=_session_options()):
         box = sandbox_sync.get_sandbox(name="preview")
         with box.session() as acquired:
-            assert box.query_processes() == []
+            assert box.query_commands() == []
             replacement = box.current_session
             assert replacement is not None and replacement.id == "sbx_new"
 
@@ -4197,7 +4531,7 @@ def test_sync_session_acquisition_shares_implicit_resume(
         box = sandbox_sync.get_sandbox(name="preview")
         box._recovery_condition = ObservedCondition()
         with ThreadPoolExecutor(max_workers=2) as executor:
-            implicit = executor.submit(box.query_processes)
+            implicit = executor.submit(box.query_commands)
             assert resume_started.wait(timeout=5)
             explicit = executor.submit(box.session)
             assert acquire_joined.wait(timeout=5)
@@ -4241,7 +4575,7 @@ def test_sync_managed_resume_sandbox_stops_adopted_replacement(
 
     with session(service_options=_session_options()):
         with sandbox_sync.resume_sandbox(name="preview") as box:
-            assert box.query_processes() == []
+            assert box.query_commands() == []
             assert box.current_session_id == "sbx_new"
 
     assert old_stop.call_count == 0
@@ -4284,7 +4618,7 @@ async def test_managed_create_sandbox_stops_replacement_before_destroy(
 
     async with session(service_options=_session_options()):
         async with sandbox.create_sandbox(name="preview") as box:
-            assert await box.query_processes() == []
+            assert await box.query_commands() == []
 
     assert old_stop.call_count == 0
     assert new_stop.call_count == 1
@@ -4327,7 +4661,7 @@ async def test_async_managed_exit_does_not_wait_for_racing_recovery(
 
     async with session(service_options=_session_options()):
         async with sandbox.resume_sandbox(name="preview") as box:
-            operation = asyncio.create_task(box.query_processes())
+            operation = asyncio.create_task(box.query_commands())
             await resume_started.wait()
         assert old_stop.call_count == 1
         release_resume.set()
@@ -4386,7 +4720,7 @@ async def test_async_sparse_stop_ignores_concurrent_recovery(
     async with session(service_options=_session_options()):
         box = await sandbox.get_sandbox(name="preview")
         assert box.current_session is None
-        operation = asyncio.create_task(box.query_processes())
+        operation = asyncio.create_task(box.query_commands())
         await resume_started.wait()
         stopping = asyncio.create_task(box.stop())
         await stop_started.wait()
@@ -4437,7 +4771,7 @@ def test_sync_managed_exit_does_not_wait_for_racing_recovery(
     with session(service_options=_session_options()):
         with ThreadPoolExecutor(max_workers=1) as executor:
             with sandbox_sync.resume_sandbox(name="preview") as box:
-                operation = executor.submit(box.query_processes)
+                operation = executor.submit(box.query_commands)
                 assert resume_started.wait(timeout=5)
             assert old_stop.call_count == 1
             release_resume.set()
@@ -4879,6 +5213,19 @@ async def test_async_update_mounts_omit_clear_and_replace(
     assert bodies[1]["mounts"] == {}
     assert bodies[2]["mounts"] == {"/cache": {"drive": "cache", "mode": "snapshot"}}
     assert box.mounts == {"/cache": SandboxMount(drive="cache", mode="snapshot")}
+
+
+def test_drive_mount_accepts_duck_typed_drive_reference_without_reading_other_attrs() -> None:
+    class NameOnly:
+        name = "duck-cache"
+
+        def __getattr__(self, attr: str) -> str:
+            raise AssertionError(f"unexpected attribute access: {attr}")
+
+    mount = DriveMount(cast(Any, NameOnly()), mode="snapshot")
+
+    assert mount.to_api_dict() == {"drive": "duck-cache", "mode": "snapshot"}
+    assert mount.model_dump() == {"drive": "duck-cache", "mode": "snapshot"}
 
 
 @pytest.mark.parametrize("mount_mode", ["snapshot", "read-write", None])
@@ -5403,3 +5750,34 @@ def test_sync_drive_fork_errors_by_name(
     assert request.headers["authorization"] == "Bearer token"
     assert json.loads(request.content) == {"name": "cache-fork"}
     assert len(respx.calls) == 1
+
+
+@respx.mock
+@pytest.mark.parametrize("sync", [False, True])
+@pytest.mark.parametrize("operation", ["create", "fork"])
+@pytest.mark.parametrize(
+    "network_policy",
+    [{"mode": "deny-all", "allow": {}}, "deny-all", NetworkPolicyReadback(mode="deny-all")],
+    ids=["dict", "str", "readback"],
+)
+async def test_create_and_fork_reject_non_network_policy(
+    mock_env_clear: None,
+    sync: bool,
+    operation: str,
+    network_policy: Any,
+) -> None:
+    route = respx.route().mock(return_value=httpx.Response(500))
+    kwargs: dict[str, Any] = (
+        {"name": "x"} if operation == "create" else {"source_sandbox": "source"}
+    )
+    kwargs["network_policy"] = network_policy
+
+    with pytest.raises(TypeError, match="network_policy must be a NetworkPolicy"):
+        if sync:
+            with session(service_options=_session_options(sync=True)):
+                getattr(sandbox_sync, f"{operation}_sandbox")(**kwargs)
+        else:
+            async with session(service_options=_session_options()):
+                getattr(sandbox, f"{operation}_sandbox")(**kwargs)
+
+    assert route.call_count == 0

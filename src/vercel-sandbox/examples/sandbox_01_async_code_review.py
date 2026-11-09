@@ -65,9 +65,9 @@ async def review_code(
                 batch.write_text(path, content)
             batch.write_text("workspace/review_agent.py", review_agent)
 
-        # `run_process` streams output to this process by default and waits for
-        # completion. Use `create_process` when a live process handle is needed.
-        await box.run_process(
+        # `run_command` streams output to this process by default and waits for
+        # completion. Use `create_command` when a live process handle is needed.
+        await box.run_command(
             "python",
             ["workspace/review_agent.py", "workspace"],
             kill_after=timedelta(seconds=30),

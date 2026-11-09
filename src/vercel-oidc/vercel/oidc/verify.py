@@ -6,8 +6,9 @@ vulnerability in this space is an algorithm- or key-confusion bug:
 - ``RS256`` is the only accepted algorithm, passed explicitly. The token's own
   ``alg`` header is never consulted to select a verifier, so ``alg: none`` and
   HMAC confusion are structurally impossible.
-- The issuer is pinned to Vercel's OIDC service and is not configurable. The
-  JWKS URL is a constant, so a token can never influence where keys come from.
+- The issuer is pinned to one of Vercel's own issuers, chosen from a closed set
+  (`VercelIssuer`) rather than given as a URL. The JWKS URL is a constant, so a
+  token can never influence where keys come from.
 - Key material is an RSA public key object resolved by ``kid`` from Vercel's
   JWKS, never a string that could be reinterpreted as an HMAC secret. An unknown
   ``kid`` is rejected; there is no "try every key" fallback.
@@ -32,7 +33,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from datetime import timedelta
 from types import ModuleType
-from typing import TYPE_CHECKING, Any, TypeAlias, cast
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias, cast
 
 import httpx2 as httpx
 
@@ -47,6 +48,10 @@ JwksDocument: TypeAlias = dict[str, Any]
 """A parsed JWKS document. JSON, so its values stay dynamic."""
 
 VERCEL_OIDC_ISSUER = "https://oidc.vercel.com"
+# Passport identity tokens are minted by Vercel's edge after it authenticates a
+# visitor. They are signed by the same global key as every other Vercel OIDC
+# token, so they verify against the same pinned JWKS; only the issuer differs.
+VERCEL_PASSPORT_ISSUER = "https://passport.vercel.com"
 JWKS_PATH = "/.well-known/jwks"
 # Fixed, never derived from the token: one global key signs every Vercel OIDC
 # token, including the team-scoped issuers, so there is nothing to discover and
@@ -54,6 +59,18 @@ JWKS_PATH = "/.well-known/jwks"
 JWKS_URL = f"{VERCEL_OIDC_ISSUER}{JWKS_PATH}"
 # Rejects traversal, extra path segments and query strings.
 _TEAM_SLUG = re.compile(r"[A-Za-z0-9_-]+")
+
+VercelIssuer: TypeAlias = Literal["oidc", "passport"]
+"""A Vercel issuer family a token may be accepted from.
+
+A closed set rather than a URL, so the issuer stays pinned to a constant and a
+caller can never widen verification to an issuer outside Vercel.
+"""
+
+_ISSUER_ROOTS: Mapping[str, str] = {
+    "oidc": VERCEL_OIDC_ISSUER,
+    "passport": VERCEL_PASSPORT_ISSUER,
+}
 
 ALLOWED_ALGORITHMS = ("RS256",)
 DEFAULT_LEEWAY = timedelta(seconds=60)
@@ -358,49 +375,67 @@ def _decode(
         raise VercelOidcVerificationError("token failed verification", exc) from exc
 
 
-def _check_issuer(claims: Mapping[str, Any]) -> None:
-    """Pin the issuer to Vercel's OIDC service, root or team-scoped.
+def _issuer_root(issuer: VercelIssuer) -> str:
+    # Checked at runtime too: an untyped caller passing an unrecognized family
+    # must fail closed rather than fall through to some default.
+    root = _ISSUER_ROOTS.get(issuer)
+    if root is None:
+        raise VercelOidcVerificationError(f"unrecognized issuer family {issuer!r}")
+    return root
 
-    Vercel mints both `https://oidc.vercel.com` and `https://oidc.vercel.com/<team>`,
-    signed by the same global key. The accepted prefix includes the host and the
-    next character must be `/`, so a lookalike host such as
-    `https://oidc.vercel.com.evil.example` cannot match.
+
+def _check_issuer(claims: Mapping[str, Any], root: str) -> None:
+    """Pin the issuer to one Vercel issuer, root or team-scoped.
+
+    Vercel mints both `<root>` and `<root>/<team>`, signed by the same global key.
+    The accepted prefix includes the host and the next character must be `/`, so
+    a lookalike host such as `https://oidc.vercel.com.evil.example` cannot match.
     """
     issuer = claims.get("iss")
     if not isinstance(issuer, str):
         raise VercelOidcVerificationError("token has no 'iss' claim")
-    if issuer == VERCEL_OIDC_ISSUER:
+    if issuer == root:
         return
-    prefix = f"{VERCEL_OIDC_ISSUER}/"
+    prefix = f"{root}/"
     if issuer.startswith(prefix) and _TEAM_SLUG.fullmatch(issuer[len(prefix) :]):
         return
     raise VercelOidcVerificationError(
-        f"token issuer {issuer!r} is not {VERCEL_OIDC_ISSUER} or a team-scoped issuer under it"
+        f"token issuer {issuer!r} is not {root} or a team-scoped issuer under it"
     )
 
 
 def _verified_claims_sync(
-    token: str, *, audience: str | Sequence[str] | None, leeway: timedelta
+    token: str,
+    *,
+    audience: str | Sequence[str] | None,
+    leeway: timedelta,
+    issuer: VercelIssuer = "oidc",
 ) -> dict[str, Any]:
     """Resolve the signing key, verify the signature, and pin the issuer."""
+    root = _issuer_root(issuer)
     kid = _unverified_kid(token)
     key = _resolve_key_sync(JWKS_URL, kid)
     if key is None:
         raise VercelOidcVerificationError(f"no signing key matches kid {kid!r}")
     claims = _decode(token, key, audience=audience, leeway=leeway)
-    _check_issuer(claims)
+    _check_issuer(claims, root)
     return claims
 
 
 async def _verified_claims_async(
-    token: str, *, audience: str | Sequence[str] | None, leeway: timedelta
+    token: str,
+    *,
+    audience: str | Sequence[str] | None,
+    leeway: timedelta,
+    issuer: VercelIssuer = "oidc",
 ) -> dict[str, Any]:
+    root = _issuer_root(issuer)
     kid = _unverified_kid(token)
     key = await _resolve_key_async(JWKS_URL, kid)
     if key is None:
         raise VercelOidcVerificationError(f"no signing key matches kid {kid!r}")
     claims = _decode(token, key, audience=audience, leeway=leeway)
-    _check_issuer(claims)
+    _check_issuer(claims, root)
     return claims
 
 
@@ -492,12 +527,15 @@ def verify_vercel_oidc_token(
     owner_id: str | None = None,
     audience: str | Sequence[str] | None = None,
     leeway: timedelta = DEFAULT_LEEWAY,
+    issuer: VercelIssuer = "oidc",
 ) -> dict[str, Any]:
     """Verify a Vercel OIDC token and return its claims.
 
     The issuer is pinned to Vercel's OIDC service, which mints both
     ``https://oidc.vercel.com`` and the team-scoped
-    ``https://oidc.vercel.com/<team>``.
+    ``https://oidc.vercel.com/<team>``. Pass ``issuer="passport"`` to pin it to
+    Vercel Passport (``https://passport.vercel.com`` and its owner-scoped
+    issuers) instead; the signing key and every other check are the same.
 
     Args:
         token: The encoded JWT.
@@ -508,6 +546,7 @@ def verify_vercel_oidc_token(
         owner_id: Expected ``owner_id`` claim.
         audience: Expected ``aud`` claim.
         leeway: Clock-skew allowance for time-based claims.
+        issuer: The Vercel issuer family to accept.
 
     Returns:
         The verified claims.
@@ -518,7 +557,7 @@ def verify_vercel_oidc_token(
             resolved.
     """
     expected_project, expected_environment = _resolve_expectations(project_id, environment)
-    claims = _verified_claims_sync(token, audience=audience, leeway=leeway)
+    claims = _verified_claims_sync(token, audience=audience, leeway=leeway, issuer=issuer)
     _check_claims(
         claims,
         project_id=expected_project,
@@ -536,12 +575,15 @@ async def verify_vercel_oidc_token_async(
     owner_id: str | None = None,
     audience: str | Sequence[str] | None = None,
     leeway: timedelta = DEFAULT_LEEWAY,
+    issuer: VercelIssuer = "oidc",
 ) -> dict[str, Any]:
     """Verify a Vercel OIDC token and return its claims.
 
     The issuer is pinned to Vercel's OIDC service, which mints both
     ``https://oidc.vercel.com`` and the team-scoped
-    ``https://oidc.vercel.com/<team>``.
+    ``https://oidc.vercel.com/<team>``. Pass ``issuer="passport"`` to pin it to
+    Vercel Passport (``https://passport.vercel.com`` and its owner-scoped
+    issuers) instead; the signing key and every other check are the same.
 
     Args:
         token: The encoded JWT.
@@ -552,6 +594,7 @@ async def verify_vercel_oidc_token_async(
         owner_id: Expected ``owner_id`` claim.
         audience: Expected ``aud`` claim.
         leeway: Clock-skew allowance for time-based claims.
+        issuer: The Vercel issuer family to accept.
 
     Returns:
         The verified claims.
@@ -562,7 +605,7 @@ async def verify_vercel_oidc_token_async(
             resolved.
     """
     expected_project, expected_environment = _resolve_expectations(project_id, environment)
-    claims = await _verified_claims_async(token, audience=audience, leeway=leeway)
+    claims = await _verified_claims_async(token, audience=audience, leeway=leeway, issuer=issuer)
     _check_claims(
         claims,
         project_id=expected_project,
@@ -669,6 +712,8 @@ __all__ = [
     "ALLOWED_ALGORITHMS",
     "JWKS_URL",
     "VERCEL_OIDC_ISSUER",
+    "VERCEL_PASSPORT_ISSUER",
+    "VercelIssuer",
     "VercelOidcVerificationError",
     "clear_jwks_cache",
     "extract_bearer_token",

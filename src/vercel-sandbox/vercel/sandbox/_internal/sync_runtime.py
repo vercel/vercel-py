@@ -6,7 +6,6 @@ import subprocess
 import warnings
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager
-from dataclasses import dataclass
 from datetime import timedelta
 from threading import Condition
 from types import TracebackType
@@ -41,7 +40,8 @@ from vercel.sandbox._internal.interactive_session import (
 from vercel.sandbox._internal.models import (
     _OMITTED,
     NO_PRIVATE_PARAMETERS,
-    CompletedProcess,
+    CommandSignal,
+    CompletedCommand,
     DirectoryEntry,
     DriveMount,
     DriveMountsInput,
@@ -52,7 +52,6 @@ from vercel.sandbox._internal.models import (
     NetworkPolicy,
     PrivateSandboxParameters,
     ProcessLog,
-    ProcessSignal,
     RemotePath,
     SandboxQuery,
     SandboxResources,
@@ -81,9 +80,9 @@ from vercel.sandbox._internal.process_output import (
     _validate_reader_destination,
 )
 from vercel.sandbox._internal.process_stdin import (
-    ProcessInput,
+    CommandInput,
     StdinMode,
-    SyncProcessStdin,
+    SyncCommandStdin,
     _coerce_input,
     _sync_stdin,
     _validate_stdin,
@@ -93,6 +92,7 @@ from vercel.sandbox._internal.recovery import (
     classify_sandbox_lifecycle_error,
     execute_with_sandbox_recovery,
 )
+from vercel.sandbox._internal.region import RegionInput, resolve_region
 from vercel.sandbox._internal.runtime_common import (
     DriveHandleBase,
     RuntimeSessionHandleBase,
@@ -125,6 +125,7 @@ from vercel.sandbox._internal.sync_filesystem_handle import (
     SyncSandboxTextWriter,
 )
 from vercel.sandbox._internal.text_reader import SyncTextReader, _sync_text_readers
+from vercel.sandbox._internal.value_model import SandboxModel
 
 if TYPE_CHECKING:
     from _typeshed import ReadableBuffer, WriteableBuffer
@@ -140,8 +141,8 @@ def _terminal_error(error: _SandboxTerminalState, sandbox: object) -> SandboxTer
     )
 
 
-class SyncProcess(_ProcessHandleState):
-    """Control and inspect a synchronously running sandbox process.
+class SyncCommand(_ProcessHandleState):
+    """Control and inspect a synchronously running sandbox command.
 
     The ``stdout`` and ``stderr`` readers each consume their process log
     stream once; reads make forward progress through the stream and cannot
@@ -154,7 +155,7 @@ class SyncProcess(_ProcessHandleState):
 
     __slots__ = ("_service", "stderr", "stdin", "stdout")
 
-    stdin: SyncProcessStdin | None
+    stdin: SyncCommandStdin | None
     stdout: SyncTextReader | None
     stderr: SyncTextReader | None
 
@@ -199,7 +200,7 @@ class SyncProcess(_ProcessHandleState):
             raise SandboxResponseError("Wait response did not include a process return code")
         return self.returncode
 
-    def communicate(self, input: ProcessInput | None = None) -> tuple[str | None, str | None]:
+    def communicate(self, input: CommandInput | None = None) -> tuple[str | None, str | None]:
         """Send input, read all output, and wait for the process to exit.
 
         Stdin is closed whenever ``input`` is given, even if it is empty. With
@@ -233,16 +234,16 @@ class SyncProcess(_ProcessHandleState):
         self.wait()
         return stdout, stderr
 
-    def send_signal(self, signal: int | str | signal_module.Signals | ProcessSignal) -> None:
+    def send_signal(self, signal: int | str | signal_module.Signals | CommandSignal) -> None:
         """Send a signal to the running process.
 
         Args:
-            signal: Numeric signal, ``ProcessSignal`` member, or name such as
+            signal: Numeric signal, ``CommandSignal`` member, or name such as
                 ``"TERM"`` or ``"SIGTERM"``.
 
         Note:
             Passing ``signal.Signals`` directly is deprecated. Use
-            ``ProcessSignal`` so signal availability does not depend on the
+            ``CommandSignal`` so signal availability does not depend on the
             SDK host platform.
         """
         payload = iter_coroutine(
@@ -256,11 +257,11 @@ class SyncProcess(_ProcessHandleState):
 
     def terminate(self) -> None:
         """Request graceful process termination with ``SIGTERM``."""
-        self.send_signal(ProcessSignal.SIGTERM)
+        self.send_signal(CommandSignal.SIGTERM)
 
     def kill(self) -> None:
         """Terminate the process immediately with ``SIGKILL``."""
-        self.send_signal(ProcessSignal.SIGKILL)
+        self.send_signal(CommandSignal.SIGKILL)
 
 
 class SyncInteractiveStream(io.RawIOBase):
@@ -1057,7 +1058,7 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         iter_coroutine(user._context.provision())
         return user
 
-    def run_process(
+    def run_command(
         self,
         command: str,
         args: Sequence[str] | None = None,
@@ -1070,15 +1071,15 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         stdout: TextIO | int | None = None,
         stderr: TextIO | int | None = None,
         capture_output: bool = False,
-        input: ProcessInput | None = None,
-        on_start: Callable[[SyncProcess], None] | None = None,
-    ) -> CompletedProcess:
-        """Run a process to completion.
+        input: CommandInput | None = None,
+        on_start: Callable[[SyncCommand], None] | None = None,
+    ) -> CompletedCommand:
+        """Run a command to completion.
 
         Args:
             command: Executable or command name.
             args: Command arguments, excluding the executable.
-            cwd: Process working directory.
+            cwd: Command working directory.
             env: Environment variables added to the process.
             sudo: Whether to run with elevated privileges.
             kill_after: Duration after which the service kills the process
@@ -1094,7 +1095,7 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
                 text is encoded as UTF-8. Without it the process reads an
                 empty stdin. A process that exits or stops reading before
                 taking all of it is not an error.
-            on_start: Callable called once with a ``SyncProcess`` handle as
+            on_start: Callable called once with a ``SyncCommand`` handle as
                 soon as the process starts, before any of its output is
                 delivered. Output is held until it returns, so keep it short.
                 It may call handle methods such as ``kill()`` or
@@ -1128,7 +1129,7 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         data = None if input is None else _coerce_input(input)
         start_hook = _ProcessStartHook.create(
             on_start,
-            lambda payload: SyncProcess(
+            lambda payload: SyncCommand(
                 payload=payload,
                 service=self._service,
                 stdout=subprocess.DEVNULL,
@@ -1152,7 +1153,7 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         if start_hook is not None:
             start_hook.complete(state.process)
         assert state.process.returncode is not None
-        result = CompletedProcess(
+        result = CompletedCommand(
             id=state.process.id,
             name=state.process.name,
             args=(state.process.name, *state.process.args),
@@ -1167,7 +1168,49 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
             result.check_returncode()
         return result
 
-    def create_process(
+    def run_process(
+        self,
+        command: str,
+        args: Sequence[str] | None = None,
+        *,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        sudo: bool = False,
+        kill_after: float | timedelta | None = None,
+        check: bool = False,
+        stdout: TextIO | int | None = None,
+        stderr: TextIO | int | None = None,
+        capture_output: bool = False,
+        input: CommandInput | None = None,
+        on_start: Callable[[SyncCommand], None] | None = None,
+    ) -> CompletedCommand:
+        """Deprecated alias for ``run_command()``.
+
+        .. deprecated::
+            Use ``run_command()`` instead.
+        """
+        warnings.warn(
+            "SyncSandboxRuntimeSession.run_process() is deprecated; use "
+            "SyncSandboxRuntimeSession.run_command() instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.run_command(
+            command,
+            args,
+            cwd=cwd,
+            env=env,
+            sudo=sudo,
+            kill_after=kill_after,
+            check=check,
+            stdout=stdout,
+            stderr=stderr,
+            capture_output=capture_output,
+            input=input,
+            on_start=on_start,
+        )
+
+    def create_command(
         self,
         command: str,
         args: Sequence[str] | None = None,
@@ -1179,13 +1222,13 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         stdin: int | None = None,
         stdout: int = subprocess.PIPE,
         stderr: int = subprocess.PIPE,
-    ) -> SyncProcess:
-        """Start a process without waiting for it to exit.
+    ) -> SyncCommand:
+        """Start a command without waiting for it to exit.
 
         Args:
             command: Executable or command name.
             args: Command arguments, excluding the executable.
-            cwd: Process working directory.
+            cwd: Command working directory.
             env: Environment variables added to the process.
             sudo: Whether to run with elevated privileges.
             kill_after: Duration after which the service kills the process
@@ -1216,10 +1259,46 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
                 attach_stdin=attach_stdin,
             )
         )
-        return SyncProcess(
+        return SyncCommand(
             payload=state,
             service=self._service,
             stdin="attached" if attach_stdin else None,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+    def create_process(
+        self,
+        command: str,
+        args: Sequence[str] | None = None,
+        *,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        sudo: bool = False,
+        kill_after: float | timedelta | None = None,
+        stdin: int | None = None,
+        stdout: int = subprocess.PIPE,
+        stderr: int = subprocess.PIPE,
+    ) -> SyncCommand:
+        """Deprecated alias for ``create_command()``.
+
+        .. deprecated::
+            Use ``create_command()`` instead.
+        """
+        warnings.warn(
+            "SyncSandboxRuntimeSession.create_process() is deprecated; use "
+            "SyncSandboxRuntimeSession.create_command() instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.create_command(
+            command,
+            args,
+            cwd=cwd,
+            env=env,
+            sudo=sudo,
+            kill_after=kill_after,
+            stdin=stdin,
             stdout=stdout,
             stderr=stderr,
         )
@@ -1246,7 +1325,7 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         Args:
             command: Executable or command name.
             args: Command arguments, excluding the executable.
-            cwd: Process working directory.
+            cwd: Command working directory.
             env: Environment variables added to the process. ``TERM`` defaults
                 to ``xterm-256color`` so full-screen programs render correctly.
             sudo: Whether to run with elevated privileges.
@@ -1269,30 +1348,50 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
             )
         )
 
-    def get_process(self, process_id: str, *, wait: bool = False) -> SyncProcess:
-        """Get a process in this session.
+    def get_command(self, command_id: str, *, wait: bool = False) -> SyncCommand:
+        """Get a command in this session.
 
         Args:
-            process_id: Process identifier.
+            command_id: Command identifier.
             wait: Whether the API call should wait for process completion.
 
         Returns:
-            A process handle populated with the latest state. Its ``stdin``
+            A command handle populated with the latest state. Its ``stdin``
             writer continues after any input already written, so it can take
             over from the handle that started the process; only one handle
             should write at a time.
         """
         state = iter_coroutine(
-            self._service.get_process(session_id=self.id, process_id=process_id, wait=wait)
+            self._service.get_process(session_id=self.id, process_id=command_id, wait=wait)
         )
-        return SyncProcess(payload=state, service=self._service, stdin="fetched")
+        return SyncCommand(payload=state, service=self._service, stdin="fetched")
 
-    def query_processes(self) -> list[SyncProcess]:
-        """Return handles for the processes in this session."""
+    def get_process(self, process_id: str, *, wait: bool = False) -> SyncCommand:
+        """Deprecated alias for ``get_command()``."""
+        warnings.warn(
+            "SyncSandboxRuntimeSession.get_process() is deprecated; use "
+            "SyncSandboxRuntimeSession.get_command() instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.get_command(process_id, wait=wait)
+
+    def query_commands(self) -> list[SyncCommand]:
+        """Return handles for the commands in this session."""
         states = iter_coroutine(self._service.query_processes(session_id=self.id))
         return [
-            SyncProcess(payload=state, service=self._service, stdin="fetched") for state in states
+            SyncCommand(payload=state, service=self._service, stdin="fetched") for state in states
         ]
+
+    def query_processes(self) -> list[SyncCommand]:
+        """Deprecated alias for ``query_commands()``."""
+        warnings.warn(
+            "SyncSandboxRuntimeSession.query_processes() is deprecated; use "
+            "SyncSandboxRuntimeSession.query_commands() instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.query_commands()
 
     def refresh(self, *, include_system_routes: bool | None = None) -> Self:
         """Refresh this session's state and return the same handle."""
@@ -1374,8 +1473,7 @@ def _cleanup_exact_sync_session(handle: SyncSandboxRuntimeSession) -> None:
         ) from error
 
 
-@dataclass(slots=True)
-class _SyncRecoveryAttempt:
+class _SyncRecoveryAttempt(SandboxModel):
     status: Literal["in_flight", "succeeded", "failed", "abandoned"] = "in_flight"
     error: BaseException | None = None
 
@@ -1383,7 +1481,7 @@ class _SyncRecoveryAttempt:
 class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
     """Control a synchronous Vercel Sandbox.
 
-    A sandbox has at most one active current session. Process and filesystem
+    A sandbox has at most one active current session. Command and filesystem
     session-bound operations lazily resume when needed and update this handle's
     canonical current session. Use ``session`` for an explicit exact-session
     lifecycle, ``stop`` to stop the current session, and ``destroy`` to
@@ -1560,7 +1658,7 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         iter_coroutine(user._context.provision())
         return user
 
-    def run_process(
+    def run_command(
         self,
         command: str,
         args: Sequence[str] | None = None,
@@ -1573,12 +1671,12 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         stdout: TextIO | int | None = None,
         stderr: TextIO | int | None = None,
         capture_output: bool = False,
-        input: ProcessInput | None = None,
-        on_start: Callable[[SyncProcess], None] | None = None,
-    ) -> CompletedProcess:
-        """Run a process to completion in the current session.
+        input: CommandInput | None = None,
+        on_start: Callable[[SyncCommand], None] | None = None,
+    ) -> CompletedCommand:
+        """Run a command to completion in the current session.
 
-        See ``SyncSandboxRuntimeSession.run_process`` for argument behavior.
+        See ``SyncSandboxRuntimeSession.run_command`` for argument behavior.
 
         A stopped sandbox is resumed and the run replayed only if the process
         never started, so ``on_start`` runs at most once, against the session
@@ -1591,7 +1689,7 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         data = None if input is None else _coerce_input(input)
         start_hook = _ProcessStartHook.create(
             on_start,
-            lambda payload: SyncProcess(
+            lambda payload: SyncCommand(
                 payload=payload,
                 service=self._service,
                 stdout=subprocess.DEVNULL,
@@ -1620,7 +1718,7 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         if start_hook is not None:
             start_hook.complete(state.process)
         assert state.process.returncode is not None
-        result = CompletedProcess(
+        result = CompletedCommand(
             id=state.process.id,
             name=state.process.name,
             args=(state.process.name, *state.process.args),
@@ -1635,7 +1733,48 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
             result.check_returncode()
         return result
 
-    def create_process(
+    def run_process(
+        self,
+        command: str,
+        args: Sequence[str] | None = None,
+        *,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        sudo: bool = False,
+        kill_after: float | timedelta | None = None,
+        check: bool = False,
+        stdout: TextIO | int | None = None,
+        stderr: TextIO | int | None = None,
+        capture_output: bool = False,
+        input: CommandInput | None = None,
+        on_start: Callable[[SyncCommand], None] | None = None,
+    ) -> CompletedCommand:
+        """Deprecated alias for ``run_command()``.
+
+        .. deprecated::
+            Use ``run_command()`` instead.
+        """
+        warnings.warn(
+            "SyncSandbox.run_process() is deprecated; use SyncSandbox.run_command() instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.run_command(
+            command,
+            args,
+            cwd=cwd,
+            env=env,
+            sudo=sudo,
+            kill_after=kill_after,
+            check=check,
+            stdout=stdout,
+            stderr=stderr,
+            capture_output=capture_output,
+            input=input,
+            on_start=on_start,
+        )
+
+    def create_command(
         self,
         command: str,
         args: Sequence[str] | None = None,
@@ -1647,10 +1786,10 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         stdin: int | None = None,
         stdout: int = subprocess.PIPE,
         stderr: int = subprocess.PIPE,
-    ) -> SyncProcess:
-        """Start a process in the current session without waiting for it.
+    ) -> SyncCommand:
+        """Start a command in the current session without waiting for it.
 
-        See ``SyncSandboxRuntimeSession.create_process`` for argument behavior.
+        See ``SyncSandboxRuntimeSession.create_command`` for argument behavior.
 
         Returns:
             A handle for monitoring and controlling the process.
@@ -1675,10 +1814,45 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
                 coordinator=self,
             )
         )
-        return SyncProcess(
+        return SyncCommand(
             payload=state,
             service=self._service,
             stdin="attached" if attach_stdin else None,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+    def create_process(
+        self,
+        command: str,
+        args: Sequence[str] | None = None,
+        *,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        sudo: bool = False,
+        kill_after: float | timedelta | None = None,
+        stdin: int | None = None,
+        stdout: int = subprocess.PIPE,
+        stderr: int = subprocess.PIPE,
+    ) -> SyncCommand:
+        """Deprecated alias for ``create_command()``.
+
+        .. deprecated::
+            Use ``create_command()`` instead.
+        """
+        warnings.warn(
+            "SyncSandbox.create_process() is deprecated; use SyncSandbox.create_command() instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.create_command(
+            command,
+            args,
+            cwd=cwd,
+            env=env,
+            sudo=sudo,
+            kill_after=kill_after,
+            stdin=stdin,
             stdout=stdout,
             stderr=stderr,
         )
@@ -1720,22 +1894,31 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
             )
         )
 
-    def get_process(self, process_id: str, *, wait: bool = False) -> SyncProcess:
-        """Get a process from the current session."""
+    def get_command(self, command_id: str, *, wait: bool = False) -> SyncCommand:
+        """Get a command from the current session."""
         state = iter_coroutine(
             execute_with_sandbox_recovery(
                 lambda session_id: self._service.get_process(
                     session_id=session_id,
-                    process_id=process_id,
+                    process_id=command_id,
                     wait=wait,
                 ),
                 coordinator=self,
             )
         )
-        return SyncProcess(payload=state, service=self._service, stdin="fetched")
+        return SyncCommand(payload=state, service=self._service, stdin="fetched")
 
-    def query_processes(self) -> list[SyncProcess]:
-        """Return handles for processes in the current session."""
+    def get_process(self, process_id: str, *, wait: bool = False) -> SyncCommand:
+        """Deprecated alias for ``get_command()``."""
+        warnings.warn(
+            "SyncSandbox.get_process() is deprecated; use SyncSandbox.get_command() instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.get_command(process_id, wait=wait)
+
+    def query_commands(self) -> list[SyncCommand]:
+        """Return handles for commands in the current session."""
         states = iter_coroutine(
             execute_with_sandbox_recovery(
                 lambda session_id: self._service.query_processes(session_id=session_id),
@@ -1743,7 +1926,7 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
             )
         )
         return [
-            SyncProcess(payload=state, service=self._service, stdin="fetched") for state in states
+            SyncCommand(payload=state, service=self._service, stdin="fetched") for state in states
         ]
 
     def query_sessions(
@@ -1797,6 +1980,15 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
             cursor=cursor,
             sort_order=sort_order,
         )
+
+    def query_processes(self) -> list[SyncCommand]:
+        """Deprecated alias for ``query_commands()``."""
+        warnings.warn(
+            "SyncSandbox.query_processes() is deprecated; use SyncSandbox.query_commands() instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.query_commands()
 
     def list_sessions(
         self,
@@ -1930,7 +2122,7 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
                     return self
                 self._apply_current_session_payload(result.session)
                 if (
-                    result._sandbox_attached
+                    result.sandbox_attached
                     and result.sandbox is not None
                     and result.sandbox.current_session_id == result.session.id
                 ):
@@ -1970,7 +2162,7 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         snapshot_expiration: SnapshotExpirationInput = None,
         snapshot_retention: SnapshotRetentionUpdate = _OMITTED,
         current_snapshot_id: str | None = None,
-        region: str | None = None,
+        region: RegionInput = None,
         failover_regions: FailoverRegionsInput = None,
     ) -> Self:
         """Update mutable sandbox configuration.
@@ -1987,6 +2179,8 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
             mounts: Complete Drive mount replacement for the next session.
                 Pass ``None`` to leave mounts unchanged or ``{}`` to remove all
                 mounts.
+            region: Region override. Pass ``CURRENT_REGION`` to use the current
+                function's region when available; no service default is applied.
             current_snapshot_id: Snapshot the sandbox restores from on its
                 next resume.
 
@@ -2012,7 +2206,7 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
                     snapshot_expiration=_parse_snapshot_expiration(snapshot_expiration),
                     snapshot_retention=snapshot_retention,
                     current_snapshot_id=current_snapshot_id,
-                    region=region,
+                    region=resolve_region(region),
                     failover_regions=normalize_failover_regions(failover_regions),
                 )
             )
@@ -2091,7 +2285,7 @@ def create_sandbox(
     mounts: DriveMountsInput[_RemotePathT] | None = None,
     snapshot_expiration: SnapshotExpirationInput = None,
     snapshot_retention: SnapshotRetention | None = None,
-    region: str | None = None,
+    region: RegionInput = None,
     failover_regions: FailoverRegionsInput = None,
     destroy: bool = True,
     private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
@@ -2114,7 +2308,7 @@ def create_sandbox(
                 mounts=mounts,
                 snapshot_expiration=_parse_snapshot_expiration(snapshot_expiration),
                 snapshot_retention=snapshot_retention,
-                region=region,
+                region=resolve_region(region, fallback=service.options.region),
                 failover_regions=normalize_failover_regions(failover_regions),
                 private_parameters=private_parameters,
             )
@@ -2146,7 +2340,7 @@ def fork_sandbox(
     mounts: DriveMountsInput[_RemotePathT] | None = None,
     snapshot_expiration: SnapshotExpirationInput = None,
     snapshot_retention: SnapshotRetention | None = None,
-    region: str | None = None,
+    region: RegionInput = None,
     failover_regions: FailoverRegionsInput = None,
     destroy: bool = True,
     private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
@@ -2169,7 +2363,7 @@ def fork_sandbox(
                 mounts=mounts,
                 snapshot_expiration=_parse_snapshot_expiration(snapshot_expiration),
                 snapshot_retention=snapshot_retention,
-                region=region,
+                region=resolve_region(region, fallback=service.options.region),
                 failover_regions=normalize_failover_regions(failover_regions),
                 private_parameters=private_parameters,
             )
@@ -2227,7 +2421,7 @@ def get_or_create_sandbox(
     mounts: DriveMountsInput[_RemotePathT] | None = None,
     snapshot_expiration: SnapshotExpirationInput = None,
     snapshot_retention: SnapshotRetention | None = None,
-    region: str | None = None,
+    region: RegionInput = None,
     failover_regions: FailoverRegionsInput = None,
     private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
 ) -> tuple[SyncSandbox, bool]:
@@ -2251,7 +2445,7 @@ def get_or_create_sandbox(
                 mounts=mounts,
                 snapshot_expiration=_parse_snapshot_expiration(snapshot_expiration),
                 snapshot_retention=snapshot_retention,
-                region=region,
+                region=resolve_region(region, fallback=service.options.region),
                 failover_regions=normalize_failover_regions(failover_regions),
                 private_parameters=private_parameters,
             )
@@ -2317,13 +2511,13 @@ def get_or_create_drive(
     *,
     name: str,
     max_size_bytes: int | None = None,
-    region: str | None = None,
+    region: RegionInput = None,
 ) -> tuple[SyncDrive, bool]:
     state, created = iter_coroutine(
         service.get_or_create_drive(
             name=name,
             max_size_bytes=max_size_bytes,
-            region=region,
+            region=resolve_region(region, fallback=service.options.region),
         )
     )
     return SyncDrive(payload=state, service=service), created
@@ -2490,3 +2684,7 @@ def _process_logs(
                 return
     finally:
         iter_coroutine(stream.aclose())
+
+
+# Compatibility aliases for the former public process names.
+SyncProcess = SyncCommand

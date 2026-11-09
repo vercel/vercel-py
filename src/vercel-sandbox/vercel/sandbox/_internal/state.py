@@ -1,8 +1,9 @@
 """Neutral domain state for Sandbox operations."""
 
-from dataclasses import dataclass
 from datetime import timedelta
 from typing import Literal, TypeAlias
+
+from pydantic import SkipValidation
 
 from vercel.sandbox._internal.models import (
     JSONObject,
@@ -10,18 +11,17 @@ from vercel.sandbox._internal.models import (
     SandboxMount,
     SandboxStatus,
 )
+from vercel.sandbox._internal.value_model import SandboxValueModel
 
 
-@dataclass(frozen=True, slots=True)
-class SandboxRouteState:
+class SandboxRouteState(SandboxValueModel):
     url: str
     port: int
     subdomain: str
     system: bool = False
 
 
-@dataclass(frozen=True, slots=True)
-class ProcessState:
+class ProcessState(SandboxValueModel):
     id: str
     name: str
     args: tuple[str, ...]
@@ -31,21 +31,18 @@ class ProcessState:
     started_at: int
 
 
-@dataclass(frozen=True, slots=True)
-class CompletedProcessState:
+class CompletedProcessState(SandboxValueModel):
     process: ProcessState
     stdout: str | None
     stderr: str | None
 
 
-@dataclass(frozen=True, slots=True)
-class InteractiveSessionState:
+class InteractiveSessionState(SandboxValueModel):
     url: str
     token: str
 
 
-@dataclass(frozen=True, slots=True)
-class SandboxRuntimeSessionState:
+class SandboxRuntimeSessionState(SandboxValueModel):
     id: str
     sandbox_name: str | None = None
     project_id: str | None = None
@@ -62,8 +59,7 @@ class SandboxRuntimeSessionState:
     stopped_at: int | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class SnapshotRetentionState:
+class SnapshotRetentionState(SandboxValueModel):
     """Describe the snapshot retention policy returned by the service."""
 
     count: int
@@ -71,8 +67,7 @@ class SnapshotRetentionState:
     delete_evicted: bool = True
 
 
-@dataclass(frozen=True, slots=True)
-class SandboxState:
+class SandboxState(SandboxValueModel):
     name: str
     current_session_id: str
     image: str | None = None
@@ -97,27 +92,25 @@ class SandboxState:
     mounts: dict[str, SandboxMount] | None = None
     routes: tuple[SandboxRouteState, ...] = ()
     current_session: SandboxRuntimeSessionState | None = None
-    raw: JSONObject | None = None
-    _mounts_attached: bool = True
-    _routes_attached: bool = True
-    _current_session_attached: bool = True
+    raw: SkipValidation[JSONObject | None] = None
+    mounts_attached: bool = True
+    routes_attached: bool = True
+    current_session_attached: bool = True
 
 
 UpdateSandboxStep: TypeAlias = SandboxRuntimeSessionState | SandboxState
 """A live current-session result or the final saved sandbox configuration."""
 
 
-@dataclass(frozen=True, slots=True)
-class RuntimeSessionStopState:
+class RuntimeSessionStopState(SandboxValueModel):
     """State returned after stopping one exact runtime session."""
 
     session: SandboxRuntimeSessionState
     sandbox: SandboxState | None = None
-    _sandbox_attached: bool = False
+    sandbox_attached: bool = False
 
 
-@dataclass(frozen=True, slots=True)
-class SnapshotState:
+class SnapshotState(SandboxValueModel):
     id: str
     source_session_id: str
     region: str
@@ -132,8 +125,7 @@ class SnapshotState:
     parent_id: str | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class DriveState:
+class DriveState(SandboxValueModel):
     id: str
     name: str
     project_id: str
@@ -147,31 +139,26 @@ class DriveState:
     root_drive_id: str | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class SandboxesPageState:
+class SandboxesPageState(SandboxValueModel):
     sandboxes: tuple[SandboxState, ...]
     next_cursor: str | None
 
 
-@dataclass(frozen=True, slots=True)
-class RuntimeSessionsPageState:
+class RuntimeSessionsPageState(SandboxValueModel):
     sessions: tuple[SandboxRuntimeSessionState, ...]
     next_cursor: str | None
 
 
-@dataclass(frozen=True, slots=True)
-class SnapshotsPageState:
+class SnapshotsPageState(SandboxValueModel):
     snapshots: tuple[SnapshotState, ...]
     next_cursor: str | None
 
 
-@dataclass(frozen=True, slots=True)
-class DrivesPageState:
+class DrivesPageState(SandboxValueModel):
     drives: tuple[DriveState, ...]
     next_cursor: str | None
 
 
-@dataclass(frozen=True, slots=True)
-class SnapshotSessionState:
+class SnapshotSessionState(SandboxValueModel):
     snapshot: SnapshotState
     session: SandboxRuntimeSessionState

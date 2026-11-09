@@ -43,9 +43,9 @@ def run_script(input_text: str, script: str) -> str:
         # the policy to the running session and saves it for future sessions.
         box.update(network_policy=sandbox.NetworkPolicy.deny_all())
 
-        # `run_process` streams output to this process while waiting. Use
-        # `create_process` when signaling or separate readers are needed.
-        box.run_process(
+        # `run_command` streams output to this process while waiting. Use
+        # `create_command` when signaling or separate readers are needed.
+        box.run_command(
             "python",
             [
                 "workspace/tool.py",

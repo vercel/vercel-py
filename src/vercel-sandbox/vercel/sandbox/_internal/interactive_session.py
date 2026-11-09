@@ -6,7 +6,6 @@ import time
 from collections import deque
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import ExitStack, asynccontextmanager
-from dataclasses import dataclass
 from typing import cast
 
 import anyio
@@ -21,6 +20,7 @@ from wsproto.utilities import LocalProtocolError
 from vercel.sandbox._internal.errors import SandboxInteractiveError
 from vercel.sandbox._internal.models import JSONObject, JSONValue
 from vercel.sandbox._internal.state import InteractiveSessionState
+from vercel.sandbox._internal.value_model import SandboxValueModel
 
 DEFAULT_COLS = 80
 DEFAULT_ROWS = 24
@@ -36,8 +36,7 @@ _RELEASE_SECONDS = 5.0
 _RELEASE_PAUSE_SECONDS = 0.02
 
 
-@dataclass(frozen=True, slots=True)
-class Frame:
+class Frame(SandboxValueModel):
     """One decoded websocket frame: terminal output, or the end of the stream."""
 
     data: bytes | None = None

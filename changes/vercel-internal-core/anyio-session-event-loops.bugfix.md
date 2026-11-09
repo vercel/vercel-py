@@ -1,0 +1,1 @@
+Track async SDK session clients per AnyIO event loop, so successive or concurrent Trio runs no longer share one HTTP client, and close a rejected async client from a sync session without relying on asyncio.

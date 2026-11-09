@@ -10,18 +10,32 @@ from vercel.api import session
 
 async with session():
     async with sandbox.create_sandbox() as instance:
-        process = await instance.run_process("echo", ["hello"], capture_output=True)
+        process = await instance.run_command("echo", ["hello"], capture_output=True)
         print(process.stdout)
 
-        # Pass input to run_process, or keep stdin open with stdin=subprocess.PIPE.
-        result = await instance.run_process("sort", input="b\na\n", capture_output=True)
-        server = await instance.create_process("cat", stdin=subprocess.PIPE)
+        # Pass input to run_command, or keep stdin open with stdin=subprocess.PIPE.
+        result = await instance.run_command("sort", input="b\na\n", capture_output=True)
+        server = await instance.create_command("cat", stdin=subprocess.PIPE)
         await server.stdin.send(b"ping\n")
         print(await server.stdout.readline())
         print(await server.communicate())  # Close stdin, read the rest, and wait.
 ```
 
 The package can be installed independently with `pip install vercel-sandbox`.
+
+Use `run_command()` to run a command to completion and `create_command()` to
+start one and return a `Command` handle (`SyncCommand` synchronously).
+`run_command()` returns a `CompletedCommand`. Use `get_command(command_id)`
+or `query_commands()` on a sandbox or runtime session to retrieve commands.
+`CommandStatus`, `CommandSignal`, `CommandStdin`, and `SyncCommandStdin`
+describe their status, signals, and input streams.
+
+The execution names apply to sandbox, runtime session, and user handles in
+both APIs. The former `Process`, `SyncProcess`, `CompletedProcess`,
+`ProcessStatus`, `ProcessSignal`, `ProcessStdin`, and `SyncProcessStdin` names
+remain aliases of the corresponding command classes. `run_process()`,
+`create_process()`, `get_process()`, and `query_processes()` remain available
+as deprecated wrappers and emit `DeprecationWarning`.
 
 To attach a sandbox to a Secure Compute private network, pass its connect
 network ID at creation:
@@ -46,15 +60,50 @@ from vercel.sandbox import sync as sandbox
 
 with session():
     with sandbox.create_sandbox() as instance:
-        process = instance.run_process("echo", ["hello"], capture_output=True)
+        process = instance.run_command("echo", ["hello"], capture_output=True)
         print(process.stdout)
 ```
 
-Process APIs follow `subprocess`. Asynchronously, `process.stdin` is an
+Command APIs follow `subprocess`. Asynchronously, `process.stdin` is an
 `anyio.abc.ByteSendStream`, so it works with `TextSendStream` under asyncio or
 Trio. Synchronously it is a writable `io.RawIOBase`; wrap it in
 `io.TextIOWrapper` for text. For a long-running stdio server, see
 [`examples/sandbox_10_mcp_everything.py`](examples/sandbox_10_mcp_everything.py).
+
+## Inputs and outputs
+
+The SDK uses Pydantic models for configuration and returned data. Pass
+configuration objects to SDK methods, then use the results directly in your
+application logic:
+
+```python
+from vercel import sandbox
+from vercel.sandbox import SandboxResources
+
+async with sandbox.create_sandbox(
+    resources=SandboxResources(vcpus=2, memory=4096),
+) as instance:
+    result = await instance.run_command(
+        "echo", ["hello"], capture_output=True,
+    )
+
+    if result.returncode == 0:
+        output = result.stdout
+
+    # Prepare the result for a JSON response.
+    response_data = result.model_dump(mode="json")
+```
+
+Returned data objects such as process results and directory entries are
+read-only. To change sandbox configuration, call `await instance.update(...)`.
+
+Sandbox, process, and user handles provide methods for further operations,
+such as running commands and accessing files. Keep the handle while working
+with the resource. To retrieve a sandbox in a later request, save its name
+and call `await sandbox.get_sandbox(name=...)`. Serialized data does not
+recreate a working handle.
+
+The synchronous API follows the same conventions.
 
 ## Standalone clients
 
@@ -94,6 +143,46 @@ finally:
 Standalone clients expose the same service operations as their module-level
 counterparts. They do not read or modify the active SDK session.
 
+## Region placement
+
+Sandbox and Drive creation omit `region` by default, leaving placement to the
+API, as in the TypeScript SDK. Setting `VERCEL_REGION` alone does not change
+this behavior. Pass a region string such as `"iad1"` to choose a region.
+
+To place resources in the same region as the current Vercel Function, pass
+`CURRENT_REGION` explicitly:
+
+```python
+from vercel import sandbox
+from vercel.api import session
+from vercel.sandbox import CURRENT_REGION, SandboxServiceOptions
+
+async with session():
+    instance = await sandbox.create_sandbox(region=CURRENT_REGION)
+    cache, created = await sandbox.get_or_create_drive(name="cache", region=CURRENT_REGION)
+
+# Opt in for all creation calls in a session or standalone client instead.
+async with session(service_options=[SandboxServiceOptions(region=CURRENT_REGION)]):
+    instance = await sandbox.create_sandbox()
+```
+
+`CURRENT_REGION` is a sentinel object, distinct from region strings. It reads
+`VERCEL_REGION` once at the public API boundary, before the internal service
+runs. Deferred creation and fork operations capture the region when the
+operation is created. Outside a Vercel Function, where the variable is unset,
+it omits `region` and leaves placement to the API. Environment values are passed
+through unchanged, including an empty string.
+This replaces the previous automatic environment fallback; use the sentinel
+to retain that placement behavior.
+
+The same sentinel and `RegionInput` type are exported from
+`vercel.sandbox.sync`. Both APIs and standalone clients accept it for
+`create_sandbox`, `get_or_create_sandbox`, `fork_sandbox`,
+`get_or_create_drive`, and explicit `Sandbox.update(region=...)` calls.
+Call-level regions override `SandboxServiceOptions.region`; passing `None`
+uses the service option for creation. Updates only send an explicitly supplied
+region and do not use the service option.
+
 ## Custom images
 
 Create a sandbox from a Vercel Container Registry (VCR) image with the
@@ -107,7 +196,7 @@ from vercel.api import session
 
 async with session():
     async with sandbox.create_sandbox(image="my-repository:latest") as instance:
-        result = await instance.run_process("my-command", capture_output=True)
+        result = await instance.run_command("my-command", capture_output=True)
         print(result.stdout)
         print(instance.image)  # The resolved digest-pinned image reference
 ```
@@ -120,7 +209,7 @@ from vercel.sandbox import sync as sandbox
 
 with session():
     with sandbox.create_sandbox(image="my-repository:latest") as instance:
-        result = instance.run_process("my-command", capture_output=True)
+        result = instance.run_command("my-command", capture_output=True)
         print(result.stdout)
         print(instance.image)  # The resolved digest-pinned image reference
 ```
@@ -176,7 +265,7 @@ automatic stop and destroy. The synchronous mirror uses the same arguments:
 from vercel.sandbox import sync as sandbox
 
 with sandbox.fork_sandbox(source_sandbox="production-agent") as forked:
-    result = forked.run_process("python", ["script.py"], capture_output=True)
+    result = forked.run_command("python", ["script.py"], capture_output=True)
 ```
 
 ## Querying sessions and snapshots
@@ -318,8 +407,8 @@ The SDK canonicalizes repeated slashes, trailing slashes, and `.` components.
 Paths must be absolute and non-overlapping. They cannot contain `..` or NUL
 characters, target `/`, or exceed 256 characters after canonicalization. Each
 Drive name may appear only once. Mounted sandboxes cannot use failover regions,
-and each Drive must use the sandbox region. Drives default to `iad1` when
-`region` is omitted.
+and each Drive must use the sandbox region. The API defaults new Drives to
+`iad1` when no region is requested by the call or service options.
 
 ## Interactive PTY sessions
 
@@ -386,7 +475,7 @@ lazily. The original sandbox handle adopts the replacement current session:
 
 ```python
 box = await sandbox.get_sandbox(name="workspace")
-result = await box.run_process("python", ["script.py"])
+result = await box.run_command("python", ["script.py"])
 ```
 
 Use `box.session()` when the session boundary should be explicit. Direct
@@ -397,7 +486,7 @@ stops exactly the session it yielded:
 active = await box.session()
 
 async with box.session() as exact_session:
-    await exact_session.run_process("python", ["script.py"])
+    await exact_session.run_command("python", ["script.py"])
 ```
 
 The synchronous forms are `active = box.session()` and
@@ -420,13 +509,13 @@ alice = await instance.create_user("alice")
 bob = instance.as_user("bob")  # Synchronous selection, including on the async API
 
 await alice.fs.write_text("secret.txt", "private", mode=0o600)
-result = await alice.run_process("whoami", capture_output=True, check=True)
+result = await alice.run_command("whoami", capture_output=True, check=True)
 assert result.stdout == "alice\n"
 assert alice.home_dir == "/home/alice"
 ```
 
-`SandboxUser` and `SyncSandboxUser` are immutable handles exposing `username`,
-`home_dir`, `run_process()`, `create_process()`, and `.fs`. Their command and
+`SandboxUser` and `SyncSandboxUser` expose read-only `username`, `home_dir`,
+and `.fs` properties, plus `run_command()` and `create_command()`. Their command and
 filesystem options match the session APIs. Usernames must match
 `[a-z_][a-z0-9_-]*` and contain at most 32 characters; invalid names fail
 immediately. `create_user()` raises `SandboxUserAlreadyExistsError` if the account
@@ -492,7 +581,7 @@ from vercel.sandbox import SandboxExecution
 
 async def run_agent(executor: SandboxExecution) -> str:
     await executor.fs.write_text("input.txt", "hello")
-    result = await executor.run_process("cat", ["input.txt"], capture_output=True, check=True)
+    result = await executor.run_command("cat", ["input.txt"], capture_output=True, check=True)
     return result.stdout or ""
 
 await run_agent(instance)

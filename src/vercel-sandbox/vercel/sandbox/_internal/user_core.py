@@ -5,7 +5,6 @@ import posixpath
 import re
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import replace
 from datetime import timedelta
 from typing import Literal, TypeVar
 
@@ -20,10 +19,10 @@ from vercel.sandbox._internal.errors import (
 )
 from vercel.sandbox._internal.filesystem_handle_core import FilesystemOperationBinding
 from vercel.sandbox._internal.models import (
-    CompletedProcess,
+    CommandSignal,
+    CompletedCommand,
     DirectoryEntry,
     ProcessLog,
-    ProcessSignal,
     RemotePath,
 )
 from vercel.sandbox._internal.process_output import ProcessOutputRouter
@@ -290,7 +289,7 @@ class UserContext:
         output_router: ProcessOutputRouter,
         check: bool,
         input: bytes | None = None,
-    ) -> CompletedProcess:
+    ) -> CompletedCommand:
         state = await self.execute(
             lambda session_id: self.service.run_process(
                 session_id=session_id,
@@ -305,7 +304,7 @@ class UserContext:
             )
         )
         assert state.process.returncode is not None
-        result = CompletedProcess(
+        result = CompletedCommand(
             id=state.process.id,
             name=command,
             args=(command, *(args or ())),
@@ -527,8 +526,12 @@ class UserService(SandboxService):
             kill_after=kill_after,
             attach_stdin=attach_stdin,
         )
-        state = replace(
-            state, name=command, args=tuple(args or ()), cwd=self._context.write_files_cwd(cwd)
+        state = state.model_copy(
+            update={
+                "name": command,
+                "args": tuple(args or ()),
+                "cwd": self._context.write_files_cwd(cwd),
+            }
         )
         self._process_metadata[(session_id, state.id)] = state
         return state
@@ -548,20 +551,22 @@ class UserService(SandboxService):
         return (
             state
             if metadata is None
-            else replace(state, name=metadata.name, args=metadata.args, cwd=metadata.cwd)
+            else state.model_copy(
+                update={"name": metadata.name, "args": metadata.args, "cwd": metadata.cwd}
+            )
         )
 
     async def send_process_signal(
         self, *, session_id: str, process_id: str, signal: int
     ) -> ProcessState:
         if signal in (
-            ProcessSignal.SIGSTOP,
-            ProcessSignal.SIGTSTP,
-            ProcessSignal.SIGTTIN,
-            ProcessSignal.SIGTTOU,
+            CommandSignal.SIGSTOP,
+            CommandSignal.SIGTSTP,
+            CommandSignal.SIGTTIN,
+            CommandSignal.SIGTTOU,
         ):
             raise NotImplementedError(
-                f"{ProcessSignal(signal).name} is not supported for user processes: "
+                f"{CommandSignal(signal).name} is not supported for user processes: "
                 "the launcher cannot safely pause the command's process group"
             )
         state = await super().send_process_signal(

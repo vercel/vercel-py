@@ -281,7 +281,7 @@ async def test_drive_persists_files_for_a_mounted_sandbox() -> None:
             )
             creating_name = None
             known_sandboxes[first_sandbox_name] = first_box
-            result = await first_box.run_process(
+            result = await first_box.run_command(
                 "sh",
                 ["-lc", f"printf %s {probe_content} > {probe_path}"],
                 capture_output=True,
@@ -299,7 +299,7 @@ async def test_drive_persists_files_for_a_mounted_sandbox() -> None:
             )
             creating_name = None
             known_sandboxes[second_sandbox_name] = second_box
-            result = await second_box.run_process(
+            result = await second_box.run_command(
                 "cat",
                 [probe_path],
                 capture_output=True,
@@ -371,7 +371,7 @@ async def test_fork_does_not_inherit_a_running_source_drive() -> None:
             known_sandboxes[fork_name] = fork
 
             assert not fork.mounts
-            result = await fork.run_process(
+            result = await fork.run_command(
                 "sh",
                 ["-lc", "test ! -e /mnt/cache"],
                 capture_output=True,
@@ -435,7 +435,7 @@ async def test_snapshot_mount_and_next_session_mount_updates() -> None:
             creating_name = None
             known_sandboxes[snapshot_name] = snapshot_reader
             assert await snapshot_reader.fs.read_text(probe_path) == "persisted\n"
-            write_result = await snapshot_reader.run_process(
+            write_result = await snapshot_reader.run_command(
                 "sh",
                 ["-lc", f"printf blocked > {probe_path}"],
                 capture_output=True,
@@ -454,7 +454,7 @@ async def test_snapshot_mount_and_next_session_mount_updates() -> None:
             creating_name = None
             known_sandboxes[update_name] = updated
             await updated.update(mounts={"/mnt/cache": drive})
-            result = await updated.run_process(
+            result = await updated.run_command(
                 "sh", ["-lc", "test ! -e /mnt/cache"], capture_output=True
             )
             assert result.returncode == 0
@@ -470,7 +470,7 @@ async def test_snapshot_mount_and_next_session_mount_updates() -> None:
             unmounted = await sandbox.resume_sandbox(name=update_name)
             known_sandboxes[update_name] = unmounted
             assert not unmounted.mounts
-            result = await unmounted.run_process(
+            result = await unmounted.run_command(
                 "sh", ["-lc", f"test ! -e {probe_path}"], capture_output=True
             )
             assert result.returncode == 0

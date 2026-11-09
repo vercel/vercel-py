@@ -31,7 +31,7 @@ SERVER = "@modelcontextprotocol/server-everything@1.0.0"
 
 @asynccontextmanager
 async def sandbox_stdio(
-    process: sandbox.Process,
+    process: sandbox.Command,
 ) -> AsyncIterator[
     tuple[
         MemoryObjectReceiveStream[SessionMessage | Exception],
@@ -89,7 +89,7 @@ async def _main() -> None:
         execution_time_limit=timedelta(minutes=5),
     ) as box:
         # The server only logs to stderr, so drop it.
-        server = await box.create_process(
+        server = await box.create_command(
             "npx", ["-y", SERVER, "stdio"], stdin=subprocess.PIPE, stderr=subprocess.DEVNULL
         )
 

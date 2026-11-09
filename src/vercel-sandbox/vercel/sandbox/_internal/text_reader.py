@@ -1,4 +1,4 @@
-"""Process log readers backed by one async-shaped streaming core."""
+"""Command log readers backed by one async-shaped streaming core."""
 
 import inspect
 import subprocess

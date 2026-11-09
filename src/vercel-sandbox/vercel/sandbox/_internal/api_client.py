@@ -7,7 +7,6 @@ import platform
 import sys
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
-from dataclasses import dataclass
 from datetime import timedelta
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from typing import Literal, TypeVar, cast
@@ -80,6 +79,7 @@ from vercel.sandbox._internal.options import (
     SandboxCredentialsFactory,
 )
 from vercel.sandbox._internal.process_output import ProcessOutputRouter
+from vercel.sandbox._internal.region import ResolvedRegion
 from vercel.sandbox._internal.state import (
     CompletedProcessState,
     DrivesPageState,
@@ -98,6 +98,7 @@ from vercel.sandbox._internal.state import (
     SnapshotsPageState,
     SnapshotState,
 )
+from vercel.sandbox._internal.value_model import SandboxValueModel
 
 try:
     VERSION = _pkg_version("vercel-sandbox")
@@ -110,8 +111,7 @@ except PackageNotFoundError:
 PLATFORM = platform.uname()
 
 
-@dataclass(frozen=True, slots=True)
-class _SandboxUserAgent:
+class _SandboxUserAgent(SandboxValueModel):
     client_version: str
     python_version: str
     platform_system: str
@@ -684,6 +684,7 @@ class _RuntimeSessionResponse(_ApiModel):
                     raw=cast(
                         JSONObject,
                         sandbox.model_dump(
+                            mode="json",
                             by_alias=True,
                             exclude_none=True,
                             exclude={"routes", "current_session", "raw"},
@@ -695,7 +696,7 @@ class _RuntimeSessionResponse(_ApiModel):
                     current_session_attached=False,
                 )
             ),
-            _sandbox_attached="sandbox" in self.model_fields_set,
+            sandbox_attached="sandbox" in self.model_fields_set,
         )
 
 
@@ -721,7 +722,10 @@ class _SandboxResponse(_ApiModel):
         raw = cast(
             JSONObject,
             self.sandbox.model_dump(
-                by_alias=True, exclude_none=True, exclude={"routes", "current_session", "raw"}
+                mode="json",
+                by_alias=True,
+                exclude_none=True,
+                exclude={"routes", "current_session", "raw"},
             ),
         )
         payload = self.sandbox
@@ -907,9 +911,9 @@ def _sandbox_state(
         routes=routes,
         current_session=current_session,
         raw=raw,
-        _mounts_attached=mounts_attached,
-        _routes_attached=routes_attached,
-        _current_session_attached=current_session_attached,
+        mounts_attached=mounts_attached,
+        routes_attached=routes_attached,
+        current_session_attached=current_session_attached,
     )
 
 
@@ -1023,8 +1027,7 @@ def _completed_process_state(
     return CompletedProcessState(process=final, stdout=stdout, stderr=stderr)
 
 
-@dataclass(frozen=True, slots=True)
-class _PreparedSandboxCreation:
+class _PreparedSandboxCreation(SandboxValueModel):
     credentials: SandboxCredentials
     project_id: str
     body: bytes
@@ -1181,18 +1184,16 @@ class SandboxApiClient:
         mounts: DriveMountsInput[_RemotePathT] | None = None,
         snapshot_expiration: SnapshotExpiration | None = None,
         snapshot_retention: SnapshotRetention | None = None,
-        region: str | None = None,
-        fallback_region: str | None = None,
+        region: ResolvedRegion | None = None,
         failover_regions: tuple[str, ...] | None = None,
         private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
     ) -> _PreparedSandboxCreation:
         credentials = await self._credentials_factory()
         resolved_project_id = project_id or credentials.project_id
-        resolved_region = region or fallback_region
         serialized_mounts = _serialize_drive_mounts(
             mounts,
             project_id=resolved_project_id,
-            region=resolved_region,
+            region=region,
             failover_regions=failover_regions,
         )
         if not serialized_mounts:
@@ -1213,7 +1214,7 @@ class SandboxApiClient:
             mounts=serialized_mounts,
             snapshot_expiration=snapshot_expiration,
             keep_last_snapshots=snapshot_retention,
-            region=resolved_region,
+            region=region,
             failover_regions=None if failover_regions is None else list(failover_regions),
         )
         body = request.to_api_dict()
@@ -1276,8 +1277,7 @@ class SandboxApiClient:
         mounts: DriveMountsInput[_RemotePathT] | None = None,
         snapshot_expiration: SnapshotExpiration | None = None,
         snapshot_retention: SnapshotRetention | None = None,
-        region: str | None = None,
-        fallback_region: str | None = None,
+        region: ResolvedRegion | None = None,
         failover_regions: tuple[str, ...] | None = None,
         private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
     ) -> SandboxState:
@@ -1298,7 +1298,6 @@ class SandboxApiClient:
             snapshot_expiration=snapshot_expiration,
             snapshot_retention=snapshot_retention,
             region=region,
-            fallback_region=fallback_region,
             failover_regions=failover_regions,
             private_parameters=private_parameters,
         )
@@ -1322,18 +1321,16 @@ class SandboxApiClient:
         mounts: DriveMountsInput[_RemotePathT] | None = None,
         snapshot_expiration: SnapshotExpiration | None = None,
         snapshot_retention: SnapshotRetention | None = None,
-        region: str | None = None,
-        fallback_region: str | None = None,
+        region: ResolvedRegion | None = None,
         failover_regions: tuple[str, ...] | None = None,
         private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
     ) -> SandboxState:
         credentials = await self._credentials_factory()
         effective_project_id = project_id or credentials.project_id
-        resolved_region = region or fallback_region
         serialized_mounts = _serialize_drive_mounts(
             {} if mounts is None else mounts,
             project_id=effective_project_id,
-            region=resolved_region,
+            region=region,
             failover_regions=failover_regions,
         )
         request = _ForkSandboxRequest(
@@ -1350,7 +1347,7 @@ class SandboxApiClient:
             mounts=serialized_mounts,
             snapshot_expiration=snapshot_expiration,
             keep_last_snapshots=snapshot_retention,
-            region=resolved_region,
+            region=region,
             failover_regions=None if failover_regions is None else list(failover_regions),
         )
         data = await self._request_json(
@@ -1458,7 +1455,7 @@ class SandboxApiClient:
         snapshot_expiration: SnapshotExpiration | None = None,
         snapshot_retention: SnapshotRetentionUpdate = _OMITTED,
         current_snapshot_id: str | None = None,
-        region: str | None = None,
+        region: ResolvedRegion | None = None,
         failover_regions: tuple[str, ...] | None = None,
     ) -> SandboxState:
         credentials = await self._credentials_factory()
@@ -1674,7 +1671,7 @@ class SandboxApiClient:
         *,
         name: str,
         max_size_bytes: int | None = None,
-        region: str | None = None,
+        region: ResolvedRegion | None = None,
     ) -> tuple[DriveState, bool]:
         credentials = await self._credentials_factory()
         request = _GetOrCreateDriveRequest(

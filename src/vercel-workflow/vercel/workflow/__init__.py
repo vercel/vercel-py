@@ -1,5 +1,7 @@
 from vercel.workflow._internal.core import (
     BaseHook,
+    Configuration,
+    ConfiguredWorkflow,
     Hook,
     HookEvent,
     Workflows,
@@ -73,6 +75,8 @@ __all__ = [
     "Run",
     "WorkflowRunStatus",
     "BaseHook",
+    "Configuration",
+    "ConfiguredWorkflow",
     "Hook",
     "HookEvent",
     "get_hook_by_token",

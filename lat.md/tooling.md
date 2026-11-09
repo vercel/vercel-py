@@ -18,6 +18,12 @@ Repo-managed hooks run the same checks against exactly what is being committed o
 
 `uv run poe setup` installs hooks from `scripts/githooks/`. Pre-commit runs against a snapshot of the staged index and pre-push against the pushed commit tree, selected with `WORKSPACE_POE_GIT_SCOPE`. CI uses the pull request's base commit and remains authoritative.
 
+### AnyIO compatibility matrix
+
+CI tests the lowest and latest AnyIO versions allowed by the queue SDK's declared dependency range and the workspace's uv configuration.
+
+[[scripts/anyio_version.py#resolve_boundary]] runs `uv pip compile` from the repository root, preserving `exclude-newer`, package-specific exceptions, and index settings from [[pyproject.toml]]. Both the test matrix and bundled-wheel checks use this resolver. [[tests/unit/test_anyio_version.py#test_boundary_respects_project_config|Regression tests]] resolve against a local index with upload timestamps to cover recent releases, exceptions, range bounds, and unsatisfiable cutoffs independently of PyPI.
+
 ## Releases
 
 Packages are released independently, with version bumps derived from news fragments and workspace dependency cascades.
@@ -47,6 +53,8 @@ Merged release PRs are published by GitHub Actions through PyPI trusted publishi
 [[scripts/publish.py]] has `detect`, `build`, and `publish` stages that communicate through a JSON plan. Every package builds and passes installed-wheel checks before any upload. Release PRs carry the `release` label, which makes CI run the same stages with `--dry-run`.
 
 Most packages also publish a `-bundle` variant with their third-party dependencies vendored, assembled by [[scripts/bundle_release.py#build_bundle_package]]. The common HTTP stack is vendored once into a shared `vercel-internal-shared-vendored-deps` distribution so bundles do not each carry a copy. AnyIO and the integrated frameworks stay ordinary peer dependencies because they share state with application code.
+
+[[.github/scripts/test_installed_wheel.sh]] detects vendored HTTP clients in the package and its local bundle dependency wheels. It adapts test imports and excludes respx-dependent tests because respx patches only unvendored transports; workspace tests retain that coverage.
 
 ## Knowledge graph checks
 

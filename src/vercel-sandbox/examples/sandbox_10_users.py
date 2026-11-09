@@ -18,7 +18,7 @@ load_dotenv()
 async def greet(executor: SandboxExecution) -> str:
     """A consumer only needs command and file capabilities."""
     await executor.fs.write_text("greeting.txt", "hello from a generic consumer\n")
-    result = await executor.run_process("cat", ["greeting.txt"], capture_output=True, check=True)
+    result = await executor.run_command("cat", ["greeting.txt"], capture_output=True, check=True)
     assert result.stdout == await executor.fs.read_text("greeting.txt")
     return result.stdout or ""
 
@@ -26,7 +26,7 @@ async def greet(executor: SandboxExecution) -> str:
 def greet_sync(executor: SyncSandboxExecution) -> str:
     """The same capability contract is available to synchronous applications."""
     executor.fs.write_text("greeting.txt", "hello from a generic consumer\n")
-    result = executor.run_process("cat", ["greeting.txt"], capture_output=True, check=True)
+    result = executor.run_command("cat", ["greeting.txt"], capture_output=True, check=True)
     assert result.stdout == executor.fs.read_text("greeting.txt")
     return result.stdout or ""
 
@@ -44,7 +44,7 @@ async def main() -> None:
                 print((await greet(executor)).strip())
 
             await alice.fs.write_text("secret.txt", "alice only", mode=0o600)
-            denied = await bob.run_process(
+            denied = await bob.run_command(
                 "cat",
                 ["/home/alice/secret.txt"],
                 capture_output=True,
@@ -57,11 +57,11 @@ async def main() -> None:
             else:
                 raise AssertionError("user filesystem isolation failed")
 
-            identity = await alice.run_process("whoami", capture_output=True, check=True)
+            identity = await alice.run_command("whoami", capture_output=True, check=True)
             assert identity.stdout == "alice\n"
             root = box.as_user("root")
             assert root.home_dir == "/root"
-            privileged = await root.run_process("pwd", capture_output=True, check=True)
+            privileged = await root.run_command("pwd", capture_output=True, check=True)
             assert privileged.stdout == "/root\n"
             print(f"{alice.username} works in {alice.home_dir}")
 

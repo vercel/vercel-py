@@ -194,7 +194,9 @@ class TestBodyIterators:
                 await super().write(chunk)
 
         request = ObservingRequest()
-        entries = _sync_entries([_UploadFileEntry("remote.bin", len(data), reader)])
+        entries = _sync_entries(
+            [_UploadFileEntry(path="remote.bin", size=len(data), source=reader)]
+        )
 
         async def upload_entry() -> None:
             upload = SandboxArchiveUpload(
@@ -228,7 +230,7 @@ class TestBodyIterators:
                 return bytearray(b"x")  # type: ignore[return-value]
 
         with pytest.raises(TypeError, match="expected bytes"):
-            list(sync_archive_body([_UploadFileEntry("f", 1, BadReader())], 4))
+            list(sync_archive_body([_UploadFileEntry(path="f", size=1, source=BadReader())], 4))
 
         failure = RuntimeError("source failed")
 
@@ -237,5 +239,5 @@ class TestBodyIterators:
                 raise failure
 
         with pytest.raises(RuntimeError) as exc_info:
-            list(sync_archive_body([_UploadFileEntry("f", 1, FailingReader())], 4))
+            list(sync_archive_body([_UploadFileEntry(path="f", size=1, source=FailingReader())], 4))
         assert exc_info.value is failure

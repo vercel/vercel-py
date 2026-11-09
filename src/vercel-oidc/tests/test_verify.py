@@ -346,6 +346,79 @@ def test_team_scoped_issuer_still_uses_the_pinned_jwks_url(
     assert scoped.call_count == 0
 
 
+# --------------------------------------------------------------------------
+# Passport issuer family
+# --------------------------------------------------------------------------
+
+PASSPORT_ISSUER = "https://passport.vercel.com"
+
+
+@pytest.mark.parametrize("issuer", [PASSPORT_ISSUER, f"{PASSPORT_ISSUER}/acme"])
+@respx.mock
+def test_accepts_passport_issuers_when_requested(
+    signing_key: rsa.RSAPrivateKey, issuer: str
+) -> None:
+    root = jwks_route(signing_key)
+    token = sign(signing_key, claims(iss=issuer))
+
+    assert verify_vercel_oidc_token(token, issuer="passport", **EXPECTATIONS)["iss"] == issuer
+    # Passport tokens share the global key, so the pinned JWKS URL is unchanged.
+    assert root.call_count == 1
+
+
+@respx.mock
+async def test_accepts_passport_issuers_when_requested_async(
+    signing_key: rsa.RSAPrivateKey,
+) -> None:
+    jwks_route(signing_key)
+    token = sign(signing_key, claims(iss=f"{PASSPORT_ISSUER}/acme"))
+
+    verified = await verify_vercel_oidc_token_async(token, issuer="passport", **EXPECTATIONS)
+
+    assert verified["iss"] == f"{PASSPORT_ISSUER}/acme"
+
+
+@respx.mock
+def test_rejects_passport_issuers_by_default(signing_key: rsa.RSAPrivateKey) -> None:
+    """Adding the passport family must not widen the default OIDC verifier."""
+    jwks_route(signing_key)
+    token = sign(signing_key, claims(iss=f"{PASSPORT_ISSUER}/acme"))
+
+    with pytest.raises(VercelOidcVerificationError):
+        verify_vercel_oidc_token(token, **EXPECTATIONS)
+
+
+@pytest.mark.parametrize(
+    "issuer",
+    [
+        ISSUER,
+        f"{ISSUER}/acme",
+        "https://passport.vercel.com.evil.example/acme",
+        "https://passport.vercel.comevil",
+        "https://passport.vercel.com/acme/extra",
+        "http://passport.vercel.com/acme",
+    ],
+)
+@respx.mock
+def test_passport_family_rejects_other_issuers(signing_key: rsa.RSAPrivateKey, issuer: str) -> None:
+    jwks_route(signing_key)
+    token = sign(signing_key, claims(iss=issuer))
+
+    with pytest.raises(VercelOidcVerificationError):
+        verify_vercel_oidc_token(token, issuer="passport", **EXPECTATIONS)
+
+
+@respx.mock
+def test_rejects_an_unrecognized_issuer_family(signing_key: rsa.RSAPrivateKey) -> None:
+    """An untyped caller cannot fall through to a default issuer."""
+    route = jwks_route(signing_key)
+    token = sign(signing_key)
+
+    with pytest.raises(VercelOidcVerificationError, match="unrecognized issuer family"):
+        verify_vercel_oidc_token(token, issuer="https://evil.example", **EXPECTATIONS)  # type: ignore[arg-type]
+    assert route.call_count == 0
+
+
 @respx.mock
 def test_reads_expectations_from_the_environment(
     signing_key: rsa.RSAPrivateKey,

@@ -5,12 +5,12 @@ import subprocess
 import warnings
 from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from dataclasses import dataclass, field
 from datetime import timedelta
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Literal, TextIO, overload
 
 import anyio
+from pydantic import Field, SkipValidation, field_validator
 
 from vercel._internal.core.byte_stream import AsyncByteStreamRuntime
 from vercel._internal.core.polyfills import Self
@@ -47,7 +47,8 @@ from vercel.sandbox._internal.interactive_session import (
 from vercel.sandbox._internal.models import (
     _OMITTED,
     NO_PRIVATE_PARAMETERS,
-    CompletedProcess,
+    CommandSignal,
+    CompletedCommand,
     DirectoryEntry,
     DriveMount,
     DriveMountInput,
@@ -59,7 +60,6 @@ from vercel.sandbox._internal.models import (
     NetworkPolicy,
     PrivateSandboxParameters,
     ProcessLog,
-    ProcessSignal,
     RemotePath,
     SandboxQuery,
     SandboxResources,
@@ -89,8 +89,8 @@ from vercel.sandbox._internal.process_output import (
     _validate_reader_destination,
 )
 from vercel.sandbox._internal.process_stdin import (
-    ProcessInput,
-    ProcessStdin,
+    CommandInput,
+    CommandStdin,
     StdinMode,
     _async_stdin,
     _coerce_input,
@@ -101,6 +101,7 @@ from vercel.sandbox._internal.recovery import (
     classify_sandbox_lifecycle_error,
     execute_with_sandbox_recovery,
 )
+from vercel.sandbox._internal.region import RegionInput, ResolvedRegion, resolve_region
 from vercel.sandbox._internal.runtime_common import (
     DriveHandleBase,
     RuntimeSessionHandleBase,
@@ -126,6 +127,7 @@ from vercel.sandbox._internal.state import (
     SnapshotState,
 )
 from vercel.sandbox._internal.text_reader import TextReader, _text_readers
+from vercel.sandbox._internal.value_model import SandboxModel, SandboxValueModel
 
 if TYPE_CHECKING:
     from vercel.sandbox.user import SandboxUser
@@ -139,8 +141,8 @@ def _terminal_error(error: _SandboxTerminalState, sandbox: object) -> SandboxTer
     )
 
 
-class Process(_ProcessHandleState):
-    """Control and inspect an asynchronously running sandbox process.
+class Command(_ProcessHandleState):
+    """Control and inspect an asynchronously running sandbox command.
 
     The ``stdout`` and ``stderr`` readers each consume their process log
     stream once; reads make forward progress through the stream and cannot
@@ -153,7 +155,7 @@ class Process(_ProcessHandleState):
 
     __slots__ = ("_service", "stderr", "stdin", "stdout")
 
-    stdin: ProcessStdin | None
+    stdin: CommandStdin | None
     stdout: TextReader | None
     stderr: TextReader | None
 
@@ -196,7 +198,7 @@ class Process(_ProcessHandleState):
             raise SandboxResponseError("Wait response did not include a process return code")
         return self.returncode
 
-    async def communicate(self, input: ProcessInput | None = None) -> tuple[str | None, str | None]:
+    async def communicate(self, input: CommandInput | None = None) -> tuple[str | None, str | None]:
         """Send input, read all output, and wait for the process to exit.
 
         Stdin is closed whenever ``input`` is given, even if it is empty. With
@@ -230,16 +232,16 @@ class Process(_ProcessHandleState):
         await self.wait()
         return stdout, stderr
 
-    async def send_signal(self, signal: int | str | signal_module.Signals | ProcessSignal) -> None:
+    async def send_signal(self, signal: int | str | signal_module.Signals | CommandSignal) -> None:
         """Send a signal to the running process.
 
         Args:
-            signal: Numeric signal, ``ProcessSignal`` member, or name such as
+            signal: Numeric signal, ``CommandSignal`` member, or name such as
                 ``"TERM"`` or ``"SIGTERM"``.
 
         Note:
             Passing ``signal.Signals`` directly is deprecated. Use
-            ``ProcessSignal`` so signal availability does not depend on the
+            ``CommandSignal`` so signal availability does not depend on the
             SDK host platform.
         """
         payload = await self._service.send_process_signal(
@@ -251,11 +253,11 @@ class Process(_ProcessHandleState):
 
     async def terminate(self) -> None:
         """Request graceful process termination with ``SIGTERM``."""
-        await self.send_signal(ProcessSignal.SIGTERM)
+        await self.send_signal(CommandSignal.SIGTERM)
 
     async def kill(self) -> None:
         """Terminate the process immediately with ``SIGKILL``."""
-        await self.send_signal(ProcessSignal.SIGKILL)
+        await self.send_signal(CommandSignal.SIGKILL)
 
 
 class InteractiveStream(anyio.abc.ByteStream):
@@ -994,7 +996,7 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         await user._context.provision()
         return user
 
-    async def run_process(
+    async def run_command(
         self,
         command: str,
         args: Sequence[str] | None = None,
@@ -1007,15 +1009,15 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         stdout: TextIO | int | None = None,
         stderr: TextIO | int | None = None,
         capture_output: bool = False,
-        input: ProcessInput | None = None,
-        on_start: Callable[[Process], None] | None = None,
-    ) -> CompletedProcess:
-        """Run a process to completion.
+        input: CommandInput | None = None,
+        on_start: Callable[[Command], None] | None = None,
+    ) -> CompletedCommand:
+        """Run a command to completion.
 
         Args:
             command: Executable or command name.
             args: Command arguments, excluding the executable.
-            cwd: Process working directory.
+            cwd: Command working directory.
             env: Environment variables added to the process.
             sudo: Whether to run with elevated privileges.
             kill_after: Duration after which the service kills the process
@@ -1031,11 +1033,11 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
                 text is encoded as UTF-8. Without it the process reads an
                 empty stdin. A process that exits or stops reading before
                 taking all of it is not an error.
-            on_start: Synchronous callable called once with a ``Process``
+            on_start: Synchronous callable called once with a ``Command``
                 handle as soon as the process starts, before any of its
                 output is delivered. Output is held until it returns, so keep
                 it short. It runs on the event loop and must not block it, and
-                it cannot await ``Process`` methods: record the ID or state,
+                it cannot await ``Command`` methods: record the ID or state,
                 or schedule work on a task group you own, such as
                 ``tg.start_soon(proc.kill)``. The handle has no ``stdout`` or
                 ``stderr`` readers; output still goes to ``stdout`` and
@@ -1067,7 +1069,7 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         data = None if input is None else _coerce_input(input)
         start_hook = _ProcessStartHook.create(
             on_start,
-            lambda payload: Process(
+            lambda payload: Command(
                 payload=payload,
                 service=self._service,
                 stdout=subprocess.DEVNULL,
@@ -1089,7 +1091,7 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         if start_hook is not None:
             start_hook.complete(state.process)
         assert state.process.returncode is not None
-        result = CompletedProcess(
+        result = CompletedCommand(
             id=state.process.id,
             name=state.process.name,
             args=(state.process.name, *state.process.args),
@@ -1104,7 +1106,49 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
             result.check_returncode()
         return result
 
-    async def create_process(
+    async def run_process(
+        self,
+        command: str,
+        args: Sequence[str] | None = None,
+        *,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        sudo: bool = False,
+        kill_after: float | timedelta | None = None,
+        check: bool = False,
+        stdout: TextIO | int | None = None,
+        stderr: TextIO | int | None = None,
+        capture_output: bool = False,
+        input: CommandInput | None = None,
+        on_start: Callable[[Command], None] | None = None,
+    ) -> CompletedCommand:
+        """Deprecated alias for ``run_command()``.
+
+        .. deprecated::
+            Use ``run_command()`` instead.
+        """
+        warnings.warn(
+            "SandboxRuntimeSession.run_process() is deprecated; use "
+            "SandboxRuntimeSession.run_command() instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return await self.run_command(
+            command,
+            args,
+            cwd=cwd,
+            env=env,
+            sudo=sudo,
+            kill_after=kill_after,
+            check=check,
+            stdout=stdout,
+            stderr=stderr,
+            capture_output=capture_output,
+            input=input,
+            on_start=on_start,
+        )
+
+    async def create_command(
         self,
         command: str,
         args: Sequence[str] | None = None,
@@ -1116,13 +1160,13 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         stdin: int | None = None,
         stdout: int = subprocess.PIPE,
         stderr: int = subprocess.PIPE,
-    ) -> Process:
-        """Start a process without waiting for it to exit.
+    ) -> Command:
+        """Start a command without waiting for it to exit.
 
         Args:
             command: Executable or command name.
             args: Command arguments, excluding the executable.
-            cwd: Process working directory.
+            cwd: Command working directory.
             env: Environment variables added to the process.
             sudo: Whether to run with elevated privileges.
             kill_after: Duration after which the service kills the process
@@ -1151,10 +1195,46 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
             kill_after=parse_duration_seconds(kill_after),
             attach_stdin=attach_stdin,
         )
-        return Process(
+        return Command(
             payload=state,
             service=self._service,
             stdin="attached" if attach_stdin else None,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+    async def create_process(
+        self,
+        command: str,
+        args: Sequence[str] | None = None,
+        *,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        sudo: bool = False,
+        kill_after: float | timedelta | None = None,
+        stdin: int | None = None,
+        stdout: int = subprocess.PIPE,
+        stderr: int = subprocess.PIPE,
+    ) -> Command:
+        """Deprecated alias for ``create_command()``.
+
+        .. deprecated::
+            Use ``create_command()`` instead.
+        """
+        warnings.warn(
+            "SandboxRuntimeSession.create_process() is deprecated; use "
+            "SandboxRuntimeSession.create_command() instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return await self.create_command(
+            command,
+            args,
+            cwd=cwd,
+            env=env,
+            sudo=sudo,
+            kill_after=kill_after,
+            stdin=stdin,
             stdout=stdout,
             stderr=stderr,
         )
@@ -1181,7 +1261,7 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         Args:
             command: Executable or command name.
             args: Command arguments, excluding the executable.
-            cwd: Process working directory.
+            cwd: Command working directory.
             env: Environment variables added to the process. ``TERM`` defaults
                 to ``xterm-256color`` so full-screen programs render correctly.
             sudo: Whether to run with elevated privileges.
@@ -1204,28 +1284,48 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
             )
         )
 
-    async def get_process(self, process_id: str, *, wait: bool = False) -> Process:
-        """Get a process in this session.
+    async def get_command(self, command_id: str, *, wait: bool = False) -> Command:
+        """Get a command in this session.
 
         Args:
-            process_id: Process identifier.
+            command_id: Command identifier.
             wait: Whether the API call should wait for process completion.
 
         Returns:
-            A process handle populated with the latest state. Its ``stdin``
+            A command handle populated with the latest state. Its ``stdin``
             writer continues after any input already written, so it can take
             over from the handle that started the process; only one handle
             should write at a time.
         """
         state = await self._service.get_process(
-            session_id=self.id, process_id=process_id, wait=wait
+            session_id=self.id, process_id=command_id, wait=wait
         )
-        return Process(payload=state, service=self._service, stdin="fetched")
+        return Command(payload=state, service=self._service, stdin="fetched")
 
-    async def query_processes(self) -> list[Process]:
-        """Return handles for the processes in this session."""
+    async def get_process(self, process_id: str, *, wait: bool = False) -> Command:
+        """Deprecated alias for ``get_command()``."""
+        warnings.warn(
+            "SandboxRuntimeSession.get_process() is deprecated; use "
+            "SandboxRuntimeSession.get_command() instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return await self.get_command(process_id, wait=wait)
+
+    async def query_commands(self) -> list[Command]:
+        """Return handles for the commands in this session."""
         states = await self._service.query_processes(session_id=self.id)
-        return [Process(payload=state, service=self._service, stdin="fetched") for state in states]
+        return [Command(payload=state, service=self._service, stdin="fetched") for state in states]
+
+    async def query_processes(self) -> list[Command]:
+        """Deprecated alias for ``query_commands()``."""
+        warnings.warn(
+            "SandboxRuntimeSession.query_processes() is deprecated; use "
+            "SandboxRuntimeSession.query_commands() instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return await self.query_commands()
 
     async def refresh(self, *, include_system_routes: bool | None = None) -> Self:
         """Refresh this session's state and return the same handle."""
@@ -1281,8 +1381,7 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         return self
 
 
-@dataclass(slots=True)
-class _AsyncRecoveryAttempt:
+class _AsyncRecoveryAttempt(SandboxModel):
     completed: anyio.Event
     status: Literal["in_flight", "succeeded", "failed", "abandoned"] = "in_flight"
     error: BaseException | None = None
@@ -1291,7 +1390,7 @@ class _AsyncRecoveryAttempt:
 class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
     """Control an asynchronous Vercel Sandbox.
 
-    A sandbox has at most one active current session. Process and filesystem
+    A sandbox has at most one active current session. Command and filesystem
     session-bound operations lazily resume when needed and update this handle's
     canonical current session. Use ``session`` for an explicit exact-session
     lifecycle, ``stop`` to stop the current session, and ``destroy`` to
@@ -1435,7 +1534,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         await user._context.provision()
         return user
 
-    async def run_process(
+    async def run_command(
         self,
         command: str,
         args: Sequence[str] | None = None,
@@ -1448,12 +1547,12 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         stdout: TextIO | int | None = None,
         stderr: TextIO | int | None = None,
         capture_output: bool = False,
-        input: ProcessInput | None = None,
-        on_start: Callable[[Process], None] | None = None,
-    ) -> CompletedProcess:
-        """Run a process to completion in the current session.
+        input: CommandInput | None = None,
+        on_start: Callable[[Command], None] | None = None,
+    ) -> CompletedCommand:
+        """Run a command to completion in the current session.
 
-        See ``SandboxRuntimeSession.run_process`` for argument behavior.
+        See ``SandboxRuntimeSession.run_command`` for argument behavior.
 
         A stopped sandbox is resumed and the run replayed only if the process
         never started, so ``on_start`` runs at most once, against the session
@@ -1467,7 +1566,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         data = None if input is None else _coerce_input(input)
         start_hook = _ProcessStartHook.create(
             on_start,
-            lambda payload: Process(
+            lambda payload: Command(
                 payload=payload,
                 service=self._service,
                 stdout=subprocess.DEVNULL,
@@ -1494,7 +1593,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         if start_hook is not None:
             start_hook.complete(state.process)
         assert state.process.returncode is not None
-        result = CompletedProcess(
+        result = CompletedCommand(
             id=state.process.id,
             name=state.process.name,
             args=(state.process.name, *state.process.args),
@@ -1509,7 +1608,48 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
             result.check_returncode()
         return result
 
-    async def create_process(
+    async def run_process(
+        self,
+        command: str,
+        args: Sequence[str] | None = None,
+        *,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        sudo: bool = False,
+        kill_after: float | timedelta | None = None,
+        check: bool = False,
+        stdout: TextIO | int | None = None,
+        stderr: TextIO | int | None = None,
+        capture_output: bool = False,
+        input: CommandInput | None = None,
+        on_start: Callable[[Command], None] | None = None,
+    ) -> CompletedCommand:
+        """Deprecated alias for ``run_command()``.
+
+        .. deprecated::
+            Use ``run_command()`` instead.
+        """
+        warnings.warn(
+            "Sandbox.run_process() is deprecated; use Sandbox.run_command() instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return await self.run_command(
+            command,
+            args,
+            cwd=cwd,
+            env=env,
+            sudo=sudo,
+            kill_after=kill_after,
+            check=check,
+            stdout=stdout,
+            stderr=stderr,
+            capture_output=capture_output,
+            input=input,
+            on_start=on_start,
+        )
+
+    async def create_command(
         self,
         command: str,
         args: Sequence[str] | None = None,
@@ -1521,10 +1661,10 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         stdin: int | None = None,
         stdout: int = subprocess.PIPE,
         stderr: int = subprocess.PIPE,
-    ) -> Process:
-        """Start a process in the current session without waiting for it.
+    ) -> Command:
+        """Start a command in the current session without waiting for it.
 
-        See ``SandboxRuntimeSession.create_process`` for argument behavior.
+        See ``SandboxRuntimeSession.create_command`` for argument behavior.
 
         Returns:
             A handle for monitoring and controlling the process.
@@ -1547,10 +1687,45 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
             ),
             coordinator=self,
         )
-        return Process(
+        return Command(
             payload=state,
             service=self._service,
             stdin="attached" if attach_stdin else None,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+    async def create_process(
+        self,
+        command: str,
+        args: Sequence[str] | None = None,
+        *,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        sudo: bool = False,
+        kill_after: float | timedelta | None = None,
+        stdin: int | None = None,
+        stdout: int = subprocess.PIPE,
+        stderr: int = subprocess.PIPE,
+    ) -> Command:
+        """Deprecated alias for ``create_command()``.
+
+        .. deprecated::
+            Use ``create_command()`` instead.
+        """
+        warnings.warn(
+            "Sandbox.create_process() is deprecated; use Sandbox.create_command() instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return await self.create_command(
+            command,
+            args,
+            cwd=cwd,
+            env=env,
+            sudo=sudo,
+            kill_after=kill_after,
+            stdin=stdin,
             stdout=stdout,
             stderr=stderr,
         )
@@ -1589,25 +1764,43 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
             )
         )
 
-    async def get_process(self, process_id: str, *, wait: bool = False) -> Process:
-        """Get a process from the current session."""
+    async def get_command(self, command_id: str, *, wait: bool = False) -> Command:
+        """Get a command from the current session."""
         state = await execute_with_sandbox_recovery(
             lambda session_id: self._service.get_process(
                 session_id=session_id,
-                process_id=process_id,
+                process_id=command_id,
                 wait=wait,
             ),
             coordinator=self,
         )
-        return Process(payload=state, service=self._service, stdin="fetched")
+        return Command(payload=state, service=self._service, stdin="fetched")
 
-    async def query_processes(self) -> list[Process]:
-        """Return handles for processes in the current session."""
+    async def get_process(self, process_id: str, *, wait: bool = False) -> Command:
+        """Deprecated alias for ``get_command()``."""
+        warnings.warn(
+            "Sandbox.get_process() is deprecated; use Sandbox.get_command() instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return await self.get_command(process_id, wait=wait)
+
+    async def query_commands(self) -> list[Command]:
+        """Return handles for commands in the current session."""
         states = await execute_with_sandbox_recovery(
             lambda session_id: self._service.query_processes(session_id=session_id),
             coordinator=self,
         )
-        return [Process(payload=state, service=self._service, stdin="fetched") for state in states]
+        return [Command(payload=state, service=self._service, stdin="fetched") for state in states]
+
+    async def query_processes(self) -> list[Command]:
+        """Deprecated alias for ``query_commands()``."""
+        warnings.warn(
+            "Sandbox.query_processes() is deprecated; use Sandbox.query_commands() instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return await self.query_commands()
 
     def query_sessions(
         self,
@@ -1787,7 +1980,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
                 return self
             self._apply_current_session_payload(result.session)
             if (
-                result._sandbox_attached
+                result.sandbox_attached
                 and result.sandbox is not None
                 and result.sandbox.current_session_id == result.session.id
             ):
@@ -1826,7 +2019,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         snapshot_expiration: SnapshotExpirationInput = None,
         snapshot_retention: SnapshotRetentionUpdate = _OMITTED,
         current_snapshot_id: str | None = None,
-        region: str | None = None,
+        region: RegionInput = None,
         failover_regions: FailoverRegionsInput = None,
     ) -> Self:
         """Update mutable sandbox configuration.
@@ -1843,6 +2036,8 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
             mounts: Complete Drive mount replacement for the next session.
                 Pass ``None`` to leave mounts unchanged or ``{}`` to remove all
                 mounts.
+            region: Region override. Pass ``CURRENT_REGION`` to use the current
+                function's region when available; no service default is applied.
             current_snapshot_id: Snapshot the sandbox restores from on its
                 next resume.
 
@@ -1867,7 +2062,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
                 snapshot_expiration=_parse_snapshot_expiration(snapshot_expiration),
                 snapshot_retention=snapshot_retention,
                 current_snapshot_id=current_snapshot_id,
-                region=region,
+                region=resolve_region(region),
                 failover_regions=normalize_failover_regions(failover_regions),
             )
         )
@@ -1961,8 +2156,7 @@ class SandboxSessionOperation:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class _CreateSandboxParams:
+class _CreateSandboxParams(SandboxValueModel):
     project_id: str | None = None
     name: str | None = None
     image: str | None = None
@@ -1975,14 +2169,21 @@ class _CreateSandboxParams:
     network_id: str | None = None
     env: Mapping[str, str] | None = None
     tags: Mapping[str, str] | None = None
-    mounts: Mapping[Any, DriveMountInput] | None = None
+    mounts: Mapping[Any, SkipValidation[DriveMountInput]] | None = None
     snapshot_expiration: SnapshotExpiration | None = None
     snapshot_retention: SnapshotRetention | None = None
-    region: str | None = None
+    region: ResolvedRegion | None = Field(default=None, strict=True)
     failover_regions: tuple[str, ...] | None = None
-    private_parameters: PrivateSandboxParameters = field(
+    private_parameters: PrivateSandboxParameters = Field(
         default_factory=lambda: NO_PRIVATE_PARAMETERS
     )
+
+    @field_validator("network_policy", mode="before")
+    @classmethod
+    def _validate_network_policy(cls, value: object) -> NetworkPolicy | None:
+        if value is None or isinstance(value, NetworkPolicy):
+            return value
+        raise TypeError("network_policy must be a NetworkPolicy")
 
 
 class CreateSandboxOperation:
@@ -2065,8 +2266,7 @@ class CreateSandboxOperation:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class _ForkSandboxParams:
+class _ForkSandboxParams(SandboxValueModel):
     source_sandbox: str
     project_id: str | None = None
     name: str | None = None
@@ -2079,14 +2279,21 @@ class _ForkSandboxParams:
     network_id: str | None = None
     env: Mapping[str, str] | None = None
     tags: Mapping[str, str] | None = None
-    mounts: Mapping[Any, DriveMountInput] | None = None
+    mounts: Mapping[Any, SkipValidation[DriveMountInput]] | None = None
     snapshot_expiration: SnapshotExpiration | None = None
     snapshot_retention: SnapshotRetention | None = None
-    region: str | None = None
+    region: ResolvedRegion | None = Field(default=None, strict=True)
     failover_regions: tuple[str, ...] | None = None
-    private_parameters: PrivateSandboxParameters = field(
+    private_parameters: PrivateSandboxParameters = Field(
         default_factory=lambda: NO_PRIVATE_PARAMETERS
     )
+
+    @field_validator("network_policy", mode="before")
+    @classmethod
+    def _validate_network_policy(cls, value: object) -> NetworkPolicy | None:
+        if value is None or isinstance(value, NetworkPolicy):
+            return value
+        raise TypeError("network_policy must be a NetworkPolicy")
 
 
 class ForkSandboxOperation:
@@ -2168,12 +2375,11 @@ class ForkSandboxOperation:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class _ResumeSandboxParams:
+class _ResumeSandboxParams(SandboxValueModel):
     name: str
     project_id: str | None = None
     include_system_routes: bool | None = None
-    private_parameters: PrivateSandboxParameters = field(
+    private_parameters: PrivateSandboxParameters = Field(
         default_factory=lambda: NO_PRIVATE_PARAMETERS
     )
 
@@ -2292,7 +2498,7 @@ def create_sandbox_operation(
     mounts: DriveMountsInput[_RemotePathT] | None = None,
     snapshot_expiration: SnapshotExpirationInput = None,
     snapshot_retention: SnapshotRetention | None = None,
-    region: str | None = None,
+    region: RegionInput = None,
     failover_regions: FailoverRegionsInput = None,
     destroy: bool = True,
     private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
@@ -2315,7 +2521,7 @@ def create_sandbox_operation(
             mounts=mounts,
             snapshot_expiration=_parse_snapshot_expiration(snapshot_expiration),
             snapshot_retention=snapshot_retention,
-            region=region,
+            region=resolve_region(region, fallback=service.options.region),
             failover_regions=normalize_failover_regions(failover_regions),
             private_parameters=private_parameters,
         ),
@@ -2341,7 +2547,7 @@ def fork_sandbox_operation(
     mounts: DriveMountsInput[_RemotePathT] | None = None,
     snapshot_expiration: SnapshotExpirationInput = None,
     snapshot_retention: SnapshotRetention | None = None,
-    region: str | None = None,
+    region: RegionInput = None,
     failover_regions: FailoverRegionsInput = None,
     destroy: bool = True,
     private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
@@ -2364,7 +2570,7 @@ def fork_sandbox_operation(
             mounts=mounts,
             snapshot_expiration=_parse_snapshot_expiration(snapshot_expiration),
             snapshot_retention=snapshot_retention,
-            region=region,
+            region=resolve_region(region, fallback=service.options.region),
             failover_regions=normalize_failover_regions(failover_regions),
             private_parameters=private_parameters,
         ),
@@ -2414,7 +2620,7 @@ async def get_or_create_sandbox(
     mounts: DriveMountsInput[_RemotePathT] | None = None,
     snapshot_expiration: SnapshotExpirationInput = None,
     snapshot_retention: SnapshotRetention | None = None,
-    region: str | None = None,
+    region: RegionInput = None,
     failover_regions: FailoverRegionsInput = None,
     private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
 ) -> tuple[Sandbox, bool]:
@@ -2437,7 +2643,7 @@ async def get_or_create_sandbox(
             mounts=mounts,
             snapshot_expiration=_parse_snapshot_expiration(snapshot_expiration),
             snapshot_retention=snapshot_retention,
-            region=region,
+            region=resolve_region(region, fallback=service.options.region),
             failover_regions=normalize_failover_regions(failover_regions),
             private_parameters=private_parameters,
         )
@@ -2518,12 +2724,12 @@ async def get_or_create_drive(
     *,
     name: str,
     max_size_bytes: int | None = None,
-    region: str | None = None,
+    region: RegionInput = None,
 ) -> tuple[Drive, bool]:
     state, created = await service.get_or_create_drive(
         name=name,
         max_size_bytes=max_size_bytes,
-        region=region,
+        region=resolve_region(region, fallback=service.options.region),
     )
     return Drive(payload=state, service=service), created
 
@@ -2691,3 +2897,7 @@ def _process_logs(
     service: SandboxService, *, session_id: str, process_id: str
 ) -> AsyncIterator[ProcessLog]:
     return service.process_logs(session_id=session_id, process_id=process_id)
+
+
+# Compatibility aliases for the former public process names.
+Process = Command

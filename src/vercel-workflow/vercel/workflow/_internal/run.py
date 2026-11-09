@@ -15,7 +15,6 @@ from . import (
     serialization as ser,
     signature_codec,
     streams,
-    ulid,
     utils,
     world as w,
 )
@@ -24,7 +23,6 @@ P = ParamSpec("P")
 T = TypeVar("T")
 Chunk = TypeVar("Chunk")
 logger = logging.getLogger("vercel.workflow")
-_generate_run_ulid = ulid.monotonic_factory()
 
 
 @dataclass
@@ -264,7 +262,13 @@ async def _failure(run: w.WorkflowRun, *, world: w.World) -> Exception:
         return RuntimeError(f"cannot read {what}: {error}")
 
 
-async def start(wf: core.Workflow[P, T], *args: P.args, **kwargs: P.kwargs) -> Run[T]:
+async def start(
+    wf: core.Workflow[P, T] | core.ConfiguredWorkflow[P, T],
+    *args: P.args,
+    **kwargs: P.kwargs,
+) -> Run[T]:
+    config = wf.get_config()
+    wf = wf.configure(config).workflow
     # Bound before anything is written, so an arity mistake raises here instead
     # of leaving a run behind that fails when its body is invoked.
     bound_args, bound_kwargs = wf.bind_arguments(args, kwargs)
@@ -272,15 +276,13 @@ async def start(wf: core.Workflow[P, T], *args: P.args, **kwargs: P.kwargs) -> R
     world = w.get_world()
     deployment_id = await world.get_deployment_id()
     namespace = wf._resolve_queue_namespace()
-    # TODO: add and prefer world.create_run_id()
-    run_id = f"wrun_{_generate_run_ulid()}"
+    run_id = f"wrun_{world.create_run_id(region=config.region)}"
     run_key = await world.run_key(run_id, deployment_id=deployment_id)
     encryption_public_key = (
         encryption.derive_run_public_key(run_key) if run_key is not None else None
     )
-    input_data = ser.PayloadEncoder(compression=True, encryption_key=run_key).encode(
-        ser.argument_array(dumped_args, dumped_kwargs)
-    )
+    encoder = ser.PayloadEncoder(compression=config.compress_arguments, encryption_key=run_key)
+    input_data = encoder.encode(ser.argument_array(dumped_args, dumped_kwargs))
     execution_context: dict[str, Any] = {
         "workflowCoreVersion": w.WORKFLOW_CORE_COMPAT_VERSION,
         "hookResumeInputVersion": w.HOOK_RESUME_INPUT_VERSION,
@@ -311,6 +313,7 @@ async def start(wf: core.Workflow[P, T], *args: P.args, **kwargs: P.kwargs) -> R
             ),
         ),
         deployment_id=deployment_id,
+        region=config.region,
     )
 
     return Run(run_id, output_validator=wf.codec.validate_return)

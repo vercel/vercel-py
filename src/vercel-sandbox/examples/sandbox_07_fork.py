@@ -41,7 +41,7 @@ async def main() -> None:
             ) as forked:
                 assert await forked.fs.read_text("workspace/message.txt") == "source version\n"
 
-                result = await forked.run_process(
+                result = await forked.run_command(
                     "python",
                     ["-c", "import os; print(os.environ['INHERITED_MESSAGE'])"],
                     capture_output=True,

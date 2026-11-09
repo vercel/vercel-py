@@ -576,7 +576,7 @@ async def test_stop_runtime_session_retains_sparse_sandbox_metadata() -> None:
     result = await client.stop_runtime_session(session_id="sbx_123")
 
     assert result.session.status == "stopped"
-    assert result._sandbox_attached
+    assert result.sandbox_attached
     assert result.sandbox is not None
     assert result.sandbox.current_session_id == "sbx_123"
     assert result.sandbox.project_id == "prj_123"
@@ -585,8 +585,8 @@ async def test_stop_runtime_session_retains_sparse_sandbox_metadata() -> None:
         "currentSessionId": "sbx_123",
         "status": "stopped",
     }
-    assert not result.sandbox._routes_attached
-    assert not result.sandbox._current_session_attached
+    assert not result.sandbox.routes_attached
+    assert not result.sandbox.current_session_attached
 
 
 async def test_stop_runtime_session_distinguishes_omitted_metadata() -> None:
@@ -595,7 +595,7 @@ async def test_stop_runtime_session_distinguishes_omitted_metadata() -> None:
     result = await client.stop_runtime_session(session_id="sbx_123")
 
     assert result.sandbox is None
-    assert not result._sandbox_attached
+    assert not result.sandbox_attached
 
 
 async def test_stop_runtime_session_rejects_replacement_identity() -> None:

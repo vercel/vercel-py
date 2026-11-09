@@ -751,6 +751,68 @@ async def test_async_filesystem_native_operations_and_write_composition(
     }
 
 
+@pytest.mark.parametrize(
+    ("mode", "error_type"),
+    [
+        ("420", TypeError),
+        (True, TypeError),
+        (1.5, TypeError),
+        (0o1000, ValueError),
+        (-1, ValueError),
+    ],
+)
+@respx.mock
+async def test_async_filesystem_write_bytes_rejects_invalid_mode(
+    mock_env_clear: None, mode: Any, error_type: type[Exception]
+) -> None:
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    writes = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/write").mock(
+        return_value=httpx.Response(204)
+    )
+
+    async with session(service_options=_session_options()):
+        box = await sandbox.create_sandbox(name="preview")
+        with pytest.raises(error_type):
+            await box.fs.write_bytes("data.bin", b"x", mode=mode)
+
+    assert writes.call_count == 0
+
+
+@pytest.mark.parametrize("wrap", [memoryview, bytearray, lambda data: memoryview(bytearray(data))])
+@respx.mock
+async def test_async_filesystem_write_bytes_accepts_bytes_like(
+    mock_env_clear: None, wrap: Any
+) -> None:
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    writes = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/write").mock(
+        return_value=httpx.Response(204)
+    )
+
+    async with session(service_options=_session_options()):
+        box = await sandbox.create_sandbox(name="preview")
+        await box.fs.write_bytes("data.bin", wrap(b"payload"))
+
+    assert _tar_entries(writes.calls[0].request.content) == {
+        "vercel/sandbox/data.bin": (b"payload", 0o644)
+    }
+
+
+@respx.mock
+async def test_async_filesystem_write_bytes_rejects_str(mock_env_clear: None) -> None:
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+
+    async with session(service_options=_session_options()):
+        box = await sandbox.create_sandbox(name="preview")
+        with pytest.raises(ValueError):
+            await box.fs.write_bytes("data.bin", "text")  # type: ignore[arg-type]
+
+
 @respx.mock
 async def test_async_unknown_size_writer_publishes_temporary_spool(
     mock_env_clear: None,
