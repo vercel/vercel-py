@@ -26,7 +26,7 @@ Transports are the only place HTTP requests are built and sent, so service code 
 
 Finishing a request stream returns the server's response even when the server stopped reading early and a prior write failed, so callers can map the real error instead of a broken pipe. A success response that arrives before the body is complete raises `anyio.BrokenResourceError` rather than looking like a finished upload.
 
-[[src/vercel-internal-core/vercel/_internal/core/http/retry.py#RetryPolicy]] describes retry behavior. [[src/vercel-internal-core/vercel/_internal/core/http/transport.py#extract_structured_error]] normalizes Vercel API error bodies for the services that wrap them.
+[[src/vercel-internal-core/vercel/_internal/core/http/retry.py#RetryPolicy]] describes retry behavior. [[src/vercel-internal-core/vercel/_internal/core/http/transport.py#NO_READ_TIMEOUT]] disables only the request read timeout, preserving client connection, write, and pool limits without mutating client defaults. [[src/vercel-internal-core/vercel/_internal/core/http/transport.py#extract_structured_error]] normalizes Vercel API error bodies for the services that wrap them.
 
 ### Legacy httpx compatibility
 
