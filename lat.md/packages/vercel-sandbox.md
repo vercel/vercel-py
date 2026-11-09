@@ -54,6 +54,8 @@ Existing lifecycle, pagination, streaming, process-output, and user-context test
 
 Sandbox configuration comes from the active SDK session, or from a standalone client that never touches the session.
 
+Public Sandbox functions and methods must not expose a `project_id` keyword argument: OAuth scopes access to a single team/project. Apply this rule to async and sync module functions, handles, and standalone clients; resolve project scope from the configured credentials.
+
 [[src/vercel-sandbox/vercel/sandbox/_internal/service.py#get_sandbox_service]] builds one service per session from [[src/vercel-sandbox/vercel/sandbox/_internal/options.py#SandboxServiceOptions]]: base URL, credentials factory, file-transfer timeout, and optional default region. The sync and async options classes share one registry key. Supplying options replaces the whole Sandbox configuration for that session scope. Default credentials come from [[vercel-oidc#Credentials]].
 
 Creation omits region unless a call or service option requests one, matching the TypeScript SDK. [[src/vercel-sandbox/vercel/sandbox/_internal/region.py#CURRENT_REGION]] explicitly opts into the current function's region. This non-string sentinel and [[src/vercel-sandbox/vercel/sandbox/_internal/region.py#RegionInput]] are exported by both public APIs. [[src/vercel-sandbox/vercel/sandbox/_internal/region.py#resolve_region]] selects the call override or service option and reads `VERCEL_REGION` at the public API boundary, omitting region when it is unset. Environment values, including an empty string, pass through unchanged. A call overrides the service option before resolution, so an unavailable current region does not fall back to an explicit service region. The thin runtime entry points resolve inputs once, alongside duration and policy normalization. Deferred creation and fork operations capture that result in their Pydantic parameter models; the service, HTTP client, and mount validation accept only [[src/vercel-sandbox/vercel/sandbox/_internal/region.py#ResolvedRegion]] or `None` and perform no fallback or environment resolution. The resolver is the only constructor of this internal `NewType`, so type checking rejects plain strings or sentinels that bypass the boundary without adding a runtime wrapper. Strict region fields keep Pydantic's generated parameter constructors typed.
@@ -71,6 +73,16 @@ Operations through a `Sandbox` handle that fail because the sandbox is stopped, 
 `box.session()` pins operations to one session identity, which never auto-resumes; its managed form stops exactly the session it yielded. Exiting a managed sandbox or session does not wait for concurrent operations.
 
 Sandboxes can be created from a runtime, image, Git repository, tarball, or snapshot. Forking copies a named sandbox's configuration and current snapshot, but never its drive mounts.
+
+## History queries
+
+Sandbox handles expose lazy session and snapshot iterators scoped to the credentials' project and the handle's name, following cursors until the API returns no cursor or an empty page.
+
+The async [[src/vercel-sandbox/vercel/sandbox/_internal/async_runtime.py#Sandbox#query_sessions|query_sessions]] and [[src/vercel-sandbox/vercel/sandbox/_internal/async_runtime.py#Sandbox#query_snapshots|query_snapshots]] methods delegate to the existing runtime iterators. Their [[src/vercel-sandbox/vercel/sandbox/_internal/sync_runtime.py#SyncSandbox#query_sessions|sync session]] and [[src/vercel-sandbox/vercel/sandbox/_internal/sync_runtime.py#SyncSandbox#query_snapshots|sync snapshot]] counterparts return regular iterators. All accept a page size, initial cursor, and creation-time sort order, matching the module-level query functions.
+
+The async [[src/vercel-sandbox/vercel/sandbox/_internal/async_runtime.py#Sandbox#list_sessions|list_sessions]] and [[src/vercel-sandbox/vercel/sandbox/_internal/async_runtime.py#Sandbox#list_snapshots|list_snapshots]] methods and their sync counterparts emit `DeprecationWarning` and retain their one-page list results for compatibility.
+
+[[src/vercel-sandbox/tests/test_sandbox_public_flow.py#test_async_sandbox_history_queries_paginate|Async pagination tests]] and [[src/vercel-sandbox/tests/test_sandbox_public_flow.py#test_sync_sandbox_history_queries_paginate|sync pagination tests]] verify lazy requests, credential-derived project scope even when handle metadata differs, name binding, option forwarding across several pages, and termination on a missing cursor or an empty page with a cursor. Deprecation tests cover warning emission and one-page compatibility in both modes.
 
 ## Sandbox updates
 
