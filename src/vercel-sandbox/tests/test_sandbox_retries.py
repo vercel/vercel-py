@@ -124,7 +124,7 @@ async def test_requests_share_status_policy(sync: bool, status: int, delays: lis
 @pytest.mark.parametrize("sync", [False, True])
 @pytest.mark.parametrize(
     "retry_after",
-    [None, "", "0", "-1", "invalid", "Wed, 21 Oct 2026 07:28:00 GMT", "0.25", "20", "20.1"],
+    [None, "", "0", "-1", "NaN", "invalid", "Wed, 21 Oct 2026 07:28:00 GMT", "0.25", "20", "20.1"],
 )
 @respx.mock
 async def test_rate_limits_include_server_wait_and_jitter(
