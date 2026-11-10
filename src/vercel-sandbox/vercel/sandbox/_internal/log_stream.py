@@ -11,29 +11,25 @@ import json
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from typing import TypeVar
 
-import httpx2 as httpx
 from pydantic import BaseModel
 
 from vercel._internal.core.http import StreamingResponse
+from vercel._internal.core.http._compat import transport_errors
 from vercel.sandbox._internal.errors import (
     SandboxApiError,
     SandboxResponseError,
     SandboxStreamError,
 )
 from vercel.sandbox._internal.models import ProcessLog, ProcessLogStream
+from vercel.sandbox._internal.retry import _RETRIES, AsyncSleep, _retry_delay, _with_request_retries
 
-AsyncSleep = Callable[[float], Awaitable[None]]
-
-# Retries after the first attempt, with exponential backoff between attempts.
-_RETRIES = 2
+_ResultT = TypeVar("_ResultT")
 _RETRY_BACKOFF_SECONDS = 0.2
 
 # Reported when the API loses its connection to the sandbox, whether or not
 # the sandbox itself stopped. It arrives as an in-band stream record, or as an
 # HTTP 410 when it happens before the first record.
 STREAM_CLOSED_ERROR_CODE = "sandbox_stream_closed"
-
-_ResultT = TypeVar("_ResultT")
 
 
 class _CommandLogPayload(BaseModel):
@@ -60,7 +56,7 @@ def _is_transient_error(error: BaseException) -> bool:
     If the sandbox did stop, the retried request reports that instead.
     Cancellation is never an ``Exception`` and so is never retried.
     """
-    if isinstance(error, httpx.TransportError | _TruncatedStreamError):
+    if isinstance(error, (*transport_errors(), _TruncatedStreamError)):
         return True
     if (
         isinstance(error, SandboxApiError | SandboxStreamError)
@@ -68,29 +64,15 @@ def _is_transient_error(error: BaseException) -> bool:
     ):
         return True
     return isinstance(error, SandboxApiError) and (
-        error.status_code == 429 or error.status_code >= 500
+        error.status_code == 429 or 500 <= error.status_code < 600
     )
 
 
-def _retry_delay(failures: int) -> float:
-    return _RETRY_BACKOFF_SECONDS * 2**failures
-
-
 async def _with_transient_retries(
-    operation: Callable[[], Awaitable[_ResultT]],
-    *,
-    sleep: AsyncSleep,
+    operation: Callable[[], Awaitable[_ResultT]], *, sleep: AsyncSleep
 ) -> _ResultT:
-    """Run an idempotent request, retrying transient failures a bounded number of times."""
-    failures = 0
-    while True:
-        try:
-            return await operation()
-        except Exception as error:
-            if failures >= _RETRIES or not _is_transient_error(error):
-                raise
-        await sleep(_retry_delay(failures))
-        failures += 1
+    """Retry command reads, including the service losing its sandbox connection."""
+    return await _with_request_retries(operation, sleep=sleep, is_retryable=_is_transient_error)
 
 
 async def _ndjson_lines(response: StreamingResponse) -> AsyncIterator[tuple[str, bool]]:
@@ -186,8 +168,10 @@ async def _iter_command_logs(
     while True:
         replay = delivered.copy()
         progressed = False
+        opened = False
         try:
             response = await open_response()
+            opened = True
             try:
                 async for line, terminated in _ndjson_lines(response):
                     if not line.strip():
@@ -211,5 +195,12 @@ async def _iter_command_logs(
                 failures = 0
             if failures >= _RETRIES or not _is_transient_error(error):
                 raise
-        await sleep(_retry_delay(failures))
+            # HTTP opening failures follow request policy; interrupted bodies
+            # retain the TypeScript stream reconnection delay.
+            delay = (
+                _RETRY_BACKOFF_SECONDS * 2**failures if opened else _retry_delay(error, failures)
+            )
+            if delay is None:
+                raise
+        await sleep(delay)
         failures += 1

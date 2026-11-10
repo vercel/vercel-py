@@ -94,7 +94,8 @@ def _is_input_not_accepted(error: BaseException) -> bool:
 
 def _retry_after(error: SandboxApiError) -> float | None:
     try:
-        return float(error.response.headers.get("retry-after", ""))
+        retry_after = float(error.response.headers.get("retry-after", ""))
+        return retry_after if retry_after > 0 else None
     except ValueError:
         return None
 

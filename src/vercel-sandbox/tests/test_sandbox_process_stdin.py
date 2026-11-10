@@ -452,6 +452,48 @@ def test_transient_failures_resend_the_same_request(
     assert len(sleeps) == 1
 
 
+@pytest.mark.parametrize(
+    ("retry_after", "expected_delay"),
+    [
+        (None, 0.4),
+        ("invalid", 0.4),
+        ("NaN", 0.4),
+        ("0", 0.4),
+        ("-1", 0.4),
+        ("0.25", 0.25),
+        ("20", 20.0),
+        ("20.1", None),
+    ],
+)
+def test_stdin_rate_limits_use_short_server_waits_or_backoff(
+    driver: _Driver, sleeps: list[float], retry_after: str | None, expected_delay: float | None
+) -> None:
+    process = driver.create_command(stdin=subprocess.PIPE)
+    process.write(b"a")
+
+    def rate_limited(
+        server: _StdinServer, request: httpx.Request, body: dict[str, Any]
+    ) -> httpx.Response:
+        headers = {} if retry_after is None else {"Retry-After": retry_after}
+        return _json({"error": {"code": "rate_limited", "message": "try later"}}, 429, headers)
+
+    driver.server.faults.append(rate_limited)
+    if expected_delay is None:
+        with pytest.raises(sandbox.SandboxStdinError):
+            process.write(b"bc")
+        assert driver.server.data == b"a"
+        assert len(driver.server.writes()) == 2
+        assert sleeps == []
+    else:
+        process.write(b"bc")
+        assert driver.server.data == b"abc"
+        assert (
+            driver.server.writes()[1:]
+            == [{"data": base64.b64encode(b"bc").decode(), "offset": 1}] * 2
+        )
+        assert sleeps == [expected_delay]
+
+
 def test_a_write_that_may_have_landed_breaks_the_stream_until_closed(
     driver: _Driver, sleeps: list[float]
 ) -> None:
