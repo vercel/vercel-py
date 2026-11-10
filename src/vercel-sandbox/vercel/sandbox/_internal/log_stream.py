@@ -8,10 +8,8 @@ reconnecting and skipping the output that was already delivered.
 
 import codecs
 import json
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
 from typing import TypeVar
-
-from pydantic import BaseModel
 
 from vercel._internal.core.http import StreamingResponse
 from vercel._internal.core.http._compat import transport_errors
@@ -32,15 +30,19 @@ _RETRY_BACKOFF_SECONDS = 0.2
 STREAM_CLOSED_ERROR_CODE = "sandbox_stream_closed"
 
 
-class _CommandLogPayload(BaseModel):
-    """Adapt the current text wire format to the byte output contract."""
+_OUTPUT_STREAMS = {stream.value: stream for stream in ProcessLogStream}
 
-    stream: ProcessLogStream
-    data: str
 
-    def to_log(self) -> ProcessLog:
-        # Temporary compatibility shim until the service provides native bytes.
-        return ProcessLog(stream=self.stream, data=self.data.encode("utf-8"))
+def _output_chunk(record: Mapping[str, object]) -> tuple[ProcessLogStream, bytes] | None:
+    """Return the output carried by a wire record, or ``None`` for other records."""
+    data = record.get("data")
+    if not isinstance(data, str):
+        return None
+    stream = record.get("stream")
+    if stream != "stdout" and stream != "stderr":
+        return None
+    # Temporary compatibility shim until the service provides native bytes.
+    return _OUTPUT_STREAMS[stream], data.encode("utf-8")
 
 
 class _TruncatedStreamError(SandboxResponseError):
@@ -85,10 +87,13 @@ async def _ndjson_lines(response: StreamingResponse) -> AsyncIterator[tuple[str,
     pending: list[str] = []
     async for chunk in response:
         *lines, rest = decoder.decode(chunk).split("\n")
-        for line in lines:
-            pending.append(line)
-            yield "".join(pending), True
-            pending.clear()
+        if lines:
+            if pending:
+                pending.append(lines[0])
+                lines[0] = "".join(pending)
+                pending.clear()
+            for line in lines:
+                yield line, True
         if rest:
             pending.append(rest)
     pending.append(decoder.decode(b"", final=True))
@@ -114,11 +119,11 @@ def _parse_command_log_record(line: str, *, terminated: bool = True) -> ProcessL
     if not isinstance(record, dict):
         return None
 
-    stream = record.get("stream")
+    output = _output_chunk(record)
+    if output is not None:
+        return ProcessLog(stream=output[0], data=output[1])
     data = record.get("data")
-    if stream in {"stdout", "stderr"} and isinstance(data, str):
-        return _CommandLogPayload.model_validate(record).to_log()
-    if stream != "error" or not isinstance(data, dict):
+    if record.get("stream") != "error" or not isinstance(data, dict):
         return None
 
     code = data.get("code")

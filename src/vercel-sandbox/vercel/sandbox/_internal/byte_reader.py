@@ -154,21 +154,32 @@ class _SyncPumpCondition:
 class _AsyncPumpCondition:
     def __init__(self) -> None:
         self._condition = anyio.Condition()
+        self._waiting = 0
 
     async def acquire(self) -> None:
-        # The lock is never held across stream reads, so acquiring it is brief,
-        # and shielding lets a cancelled pump take it back to record the break.
-        with anyio.CancelScope(shield=True):
-            await self._condition.acquire()
+        # The pump takes the lock back after every record, so a free lock is
+        # taken without the trip through the event loop that waiting implies.
+        try:
+            self._condition.acquire_nowait()
+        except anyio.WouldBlock:
+            # The lock is never held across stream reads, so waiting is brief,
+            # and shielding lets a cancelled pump take it back to record the break.
+            with anyio.CancelScope(shield=True):
+                await self._condition.acquire()
 
     def release(self) -> None:
         self._condition.release()
 
     async def wait(self) -> None:
-        await self._condition.wait()
+        self._waiting += 1
+        try:
+            await self._condition.wait()
+        finally:
+            self._waiting -= 1
 
     def notify_all(self) -> None:
-        self._condition.notify_all()
+        if self._waiting:
+            self._condition.notify_all()
 
 
 class _ByteTransportCore:

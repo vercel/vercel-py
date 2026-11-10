@@ -177,10 +177,27 @@ class BaseTransport(abc.ABC):
             case RawBody():
                 content = body.data
 
+        path = _normalize_path(path)
+        if (
+            params
+            and isinstance(client, (httpx.Client, httpx.AsyncClient))
+            and not client.params
+            and "?" not in path
+            and "#" not in path
+        ):
+            # HTTPX parses the URL a second time to attach params, which costs
+            # more than the rest of building the request. Putting its own
+            # encoding of them in the URL has them parsed along with the path.
+            # Legacy clients keep attaching params themselves, because their
+            # encoding differs between releases.
+            if query := str(httpx.QueryParams(params)):
+                path = f"{path}?{query}"
+                params = None
+
         if timeout is NO_READ_TIMEOUT:
             request = client.build_request(
                 method,
-                _normalize_path(path),
+                path,
                 params=params,
                 headers=headers,
                 json=json,
@@ -192,7 +209,7 @@ class BaseTransport(abc.ABC):
         if timeout is NO_TIMEOUT:
             return client.build_request(
                 method,
-                _normalize_path(path),
+                path,
                 params=params,
                 timeout=None,
                 headers=headers,
@@ -203,7 +220,7 @@ class BaseTransport(abc.ABC):
         if isinstance(timeout, timedelta):
             return client.build_request(
                 method,
-                _normalize_path(path),
+                path,
                 params=params,
                 timeout=to_seconds_float(timeout),
                 headers=headers,
@@ -213,7 +230,7 @@ class BaseTransport(abc.ABC):
 
         return client.build_request(
             method,
-            _normalize_path(path),
+            path,
             params=params,
             headers=headers,
             json=json,

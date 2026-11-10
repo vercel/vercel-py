@@ -46,10 +46,10 @@ from vercel.sandbox._internal.errors import (
     SandboxStreamError,
 )
 from vercel.sandbox._internal.log_stream import (
-    _CommandLogPayload,
     _is_transient_error,
     _iter_command_logs,
     _ndjson_lines,
+    _output_chunk,
     _OutputOffsets,
     _TruncatedStreamError,
 )
@@ -1921,19 +1921,19 @@ class SandboxApiClient:
                             )
                         continue
 
-                    stream = record.get("stream")
-                    data = record.get("data")
-                    if (stream == "stdout" or stream == "stderr") and isinstance(data, str):
+                    output = _output_chunk(record)
+                    if output is not None:
                         if initial is None or final is not None:
                             raise SandboxResponseError(
                                 "Sandbox process response included output outside process metadata",
                                 data=record,
                             )
-                        event = _CommandLogPayload.model_validate(record).to_log()
-                        output_router.route(event)
-                        delivered.advance(event.stream, len(event.data))
+                        stream, chunk = output
+                        output_router.write(stream, chunk)
+                        delivered.advance(stream, len(chunk))
                         continue
-                    if stream == "error" and isinstance(data, dict):
+                    data = record.get("data")
+                    if record.get("stream") == "error" and isinstance(data, dict):
                         code = data.get("code")
                         message = data.get("message")
                         if isinstance(code, str) and isinstance(message, str):
