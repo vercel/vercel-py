@@ -87,7 +87,7 @@ jobs:
             runner: windows-latest
             redis-image: ""
             redis-url: ""
-        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
         anyio: [lowest, latest]
     services:
       # The vercel-apscheduler driver tests exercise their Lua scripts against
@@ -166,10 +166,8 @@ jobs:
         env:
           VERCEL_DEVALUE_JS: ${{ runner.temp }}/devalue
           VERCEL_WORKFLOW_CLI: ${{ runner.temp }}/workflow-cli/node_modules/workflow
-          # Where tests run under pytest (Python 3.10, which ggt does not
-          # support), dump every thread's stack once a test runs this long, so
-          # a hang shows where it is stuck instead of idling silently until
-          # the job timeout. ggt does not read this variable.
+          # For tests using pytest, dump thread stacks after 120 seconds to
+          # diagnose hangs before the job timeout. ggt ignores this variable.
           PYTEST_ADDOPTS: -o faulthandler_timeout=120
 
       - name: Test examples

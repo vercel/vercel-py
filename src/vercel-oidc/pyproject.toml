@@ -7,7 +7,7 @@ name = "vercel-oidc"
 dynamic = ["version", "dependencies"]
 description = "OIDC helpers for Vercel Python applications"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE", "LICENSE.*"]
 

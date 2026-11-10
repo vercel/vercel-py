@@ -7,7 +7,7 @@ name = "vercel-workflow"
 dynamic = ["version", "dependencies"]
 description = "Python SDK for Vercel Workflows"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE", "LICENSE.*"]
 

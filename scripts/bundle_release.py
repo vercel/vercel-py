@@ -581,7 +581,7 @@ name = "{SHARED_VENDORED_PACKAGE}"
 dynamic = ["version"]
 description = "Shared vendored dependencies for Vercel Python packages"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = ["{ANYIO_REQUIREMENT}"]
 license = "MIT"
 license-files = ["LICENSE", "LICENSE.*"]

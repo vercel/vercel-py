@@ -7,7 +7,7 @@ name = "vercel-internal-core"
 dynamic = ["version", "dependencies"]
 description = "Shared internal runtime for Vercel Python packages"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE", "LICENSE.*"]
 

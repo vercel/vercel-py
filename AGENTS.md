@@ -26,7 +26,7 @@ scopes but intentionally rejects tool-specific arguments after `--`.
 
 Example: `uv run poe test tests/unit/test_time.py -- -k coerce_duration`
 Or by package name: `uv run poe test vercel-oidc`.
-Matrix example: `./scripts/test-python-matrix.sh -e py310,py314 -- vercel-queue -- -k subscriptions`.
+Matrix example: `./scripts/test-python-matrix.sh -e py311,py314 -- vercel-queue -- -k subscriptions`.
 
 Example tests use the same scope and pytest passthrough conventions:
 

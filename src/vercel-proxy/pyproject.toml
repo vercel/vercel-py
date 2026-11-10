@@ -7,7 +7,7 @@ name = "vercel-proxy"
 dynamic = ["version", "dependencies"]
 description = "Proxy routing API for Vercel Python middleware"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE", "LICENSE.*"]
 
