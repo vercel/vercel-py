@@ -1027,13 +1027,13 @@ class SandboxService:
             path=path,
             cwd=cwd,
         )
-        data = bytearray()
+        chunks: list[bytes] = []
         try:
             async for chunk in response:
-                data.extend(chunk)
+                chunks.append(chunk)
         finally:
             await response.aclose()
-        return bytes(data)
+        return b"".join(chunks)
 
     async def _filesystem_command(
         self,

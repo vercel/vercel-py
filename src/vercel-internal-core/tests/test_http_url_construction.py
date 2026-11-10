@@ -10,10 +10,13 @@ without leading slash - the result will be the same.
 """
 
 from datetime import timedelta
+from typing import Any
 
+import httpx as legacy_httpx
 import httpx2 as httpx
 import pytest
 from httpx2 import Response
+from hypothesis import given, strategies as st
 
 import vendor.respx as respx
 from vercel._internal.core.http import (
@@ -304,6 +307,57 @@ class TestApiUrlPatterns:
             assert route.called
         finally:
             transport.close()
+
+
+_param_values = st.one_of(
+    st.none(), st.booleans(), st.integers(), st.floats(allow_nan=False), st.text(max_size=12)
+)
+
+
+class TestQueryParams:
+    @given(
+        params=st.dictionaries(
+            st.text(max_size=8),
+            st.one_of(_param_values, st.lists(_param_values, max_size=3)),
+            max_size=4,
+        ),
+        path=st.sampled_from(
+            [
+                "https://api.example.com/v1/items",
+                "v1/items",
+                "/v1/items?existing=1",
+                "v1/items#fragment",
+            ]
+        ),
+        client_params=st.sampled_from([None, {"client": "1"}]),
+        family=st.sampled_from([httpx, legacy_httpx]),
+    )
+    def test_params_are_attached_as_the_client_attaches_them(
+        self,
+        params: dict[str, Any],
+        path: str,
+        client_params: dict[str, str] | None,
+        family: Any,
+    ) -> None:
+        sent: list[Any] = []
+
+        def handler(request: Any) -> Any:
+            sent.append(request.url)
+            return family.Response(200)
+
+        client = family.Client(
+            base_url="https://base.example.com/api/",
+            params=client_params,
+            transport=family.MockTransport(handler),
+        )
+        transport = SyncTransport(client)
+        try:
+            iter_coroutine(transport.send("GET", path, params=params))
+            expected = client.build_request("GET", path.lstrip("/"), params=params).url
+        finally:
+            transport.close()
+
+        assert sent == [expected]
 
 
 class TestFollowRedirects:

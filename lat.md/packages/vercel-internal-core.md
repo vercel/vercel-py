@@ -28,6 +28,8 @@ Finishing a request stream returns the server's response even when the server st
 
 [[src/vercel-internal-core/vercel/_internal/core/http/retry.py#RetryPolicy]] describes retry behavior. [[src/vercel-internal-core/vercel/_internal/core/http/transport.py#NO_READ_TIMEOUT]] disables only the request read timeout, preserving client connection, write, and pool limits without mutating client defaults. [[src/vercel-internal-core/vercel/_internal/core/http/transport.py#extract_structured_error]] normalizes Vercel API error bodies for the services that wrap them.
 
+[[src/vercel-internal-core/vercel/_internal/core/http/transport.py#BaseTransport#_build_request]] puts query parameters into the URL before handing it to an HTTPX2 client, in HTTPX2's own encoding, because a client given them separately parses the URL twice. Clients with default parameters, URLs that already carry a query or fragment, and legacy clients keep the client's own merging. [[src/vercel-internal-core/tests/test_http_url_construction.py#TestQueryParams#test_params_are_attached_as_the_client_attaches_them|A property test]] checks that the URL sent is the one the client builds itself.
+
 ### Legacy httpx compatibility
 
 HTTPX2 is the only HTTP family the SDK installs, but a session factory may return a legacy `httpx` client as a runtime-only migration path.
