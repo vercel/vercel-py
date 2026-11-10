@@ -6,9 +6,9 @@ Lives in [[src/vercel-internal-core]]. Most of it is under `vercel._internal.cor
 
 ## Versioning contract
 
-Dependents pin this package to a single minor series because its internal API carries no compatibility promise.
+Dependents explicitly bound compatible minor versions because this package's internal API carries no compatibility promise.
 
-Every consumer declares a dependency like `vercel-internal-core>=0.2.0,<0.3.0`. A breaking internal change therefore ships as a new minor version, and each dependent opts in by widening its bound in the same release.
+A breaking internal change ships as a new minor version, and each dependent opts in by widening its upper bound in the same release. [[tooling#Releases#Dynamic dependencies|Build-time metadata]] raises the lower bound to the current sibling version.
 
 ## Sessions and service options
 

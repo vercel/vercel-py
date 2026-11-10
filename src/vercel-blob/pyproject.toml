@@ -21,7 +21,7 @@ previous-version = "0.4.2"
 
 [tool.vercel.release.dependencies]
 dependencies = [
-    "vercel-internal-core>=0.2.0,<0.3.0",
+    "vercel-internal-core>=0.2.0,<0.4.0",
     "vercel-oidc>=0.8.0",
     "anyio>=4.0.0,<5",
     "httpx2>=2",
