@@ -30,8 +30,7 @@ Lease renewal invariants:
 
 from __future__ import annotations
 
-from typing import Any, NewType, Protocol, TypeAlias
-from typing_extensions import Self
+from typing import Any, NewType, Protocol, Self, TypeAlias
 
 import logging
 import math

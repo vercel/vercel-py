@@ -1,16 +1,10 @@
 import asyncio
 import contextvars
 import datetime
-import sys
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, NoReturn, Protocol
+from typing import TYPE_CHECKING, Any, NoReturn, Protocol, TypeVarTuple, Unpack
 
 from vercel._internal.core.polyfills import UTC
-
-if sys.version_info >= (3, 11):
-    from typing import TypeVarTuple, Unpack
-else:
-    from typing_extensions import TypeVarTuple, Unpack
 
 if TYPE_CHECKING:
     import collections
@@ -92,7 +86,7 @@ class WorkflowLoop(asyncio.BaseEventLoop):
         self,
         delay: float,
         callback: Callable[[Unpack[_Ts]], object],
-        *args: Unpack[_Ts],
+        *args: *_Ts,
         context: contextvars.Context | None = None,
     ) -> asyncio.TimerHandle:
         # Note: the "when" on the TimerHandle is kind of a fib. We
@@ -107,7 +101,7 @@ class WorkflowLoop(asyncio.BaseEventLoop):
         self,
         when: float,
         callback: Callable[[Unpack[_Ts]], object],
-        *args: Unpack[_Ts],
+        *args: *_Ts,
         context: contextvars.Context | None = None,
     ) -> asyncio.TimerHandle:
         timestamp = datetime.datetime.fromtimestamp(when, tz=UTC)

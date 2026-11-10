@@ -24,13 +24,13 @@ from collections.abc import (
 )
 from datetime import datetime
 from itertools import chain
-from typing import Any, Generic, ParamSpec, TypeVar, overload
+from typing import Any, Generic, ParamSpec, Self, TypeVar, overload
 from urllib.parse import parse_qsl, urlsplit
 
 import anyio
 import pydantic
 
-from vercel._internal.core.polyfills import UTC, Self
+from vercel._internal.core.polyfills import UTC
 
 from . import (
     attributes as attrs,

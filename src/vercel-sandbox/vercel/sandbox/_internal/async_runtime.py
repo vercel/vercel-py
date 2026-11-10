@@ -7,13 +7,12 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Mappi
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import timedelta
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, BinaryIO, Literal, overload
+from typing import TYPE_CHECKING, Any, BinaryIO, Literal, Self, overload
 
 import anyio
 from pydantic import Field, SkipValidation, field_validator
 
 from vercel._internal.core.byte_stream import AsyncByteStreamRuntime
-from vercel._internal.core.polyfills import Self
 from vercel._internal.core.time import parse_duration_seconds, parse_required_duration_seconds
 from vercel.sandbox._internal.async_filesystem_handle import (
     SandboxBinaryReader,

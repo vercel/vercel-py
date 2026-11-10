@@ -1,9 +1,9 @@
 """Standalone Sandbox service clients."""
 
 from collections.abc import AsyncIterator, Mapping
+from typing import Self
 
 from vercel._internal.core.options import collect_service_options
-from vercel._internal.core.polyfills import Self
 from vercel._internal.core.session import HttpxClientFactory, SdkSession
 from vercel.sandbox._internal.async_runtime import (
     CreateSandboxOperation,

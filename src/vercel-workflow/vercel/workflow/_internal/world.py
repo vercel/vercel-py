@@ -4,7 +4,6 @@ import json
 import os
 import pathlib
 import re
-import sys
 from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
 from datetime import datetime
 from typing import (
@@ -14,20 +13,16 @@ from typing import (
     Generic,
     Literal,
     Protocol,
+    Self,
     TypeAlias,
     TypeVar,
     overload,
 )
 
-if sys.version_info >= (3, 11):
-    from typing import Self
-else:
-    from typing_extensions import Self
-
 import pydantic
 import semver
 
-from vercel._internal.core.polyfills import UTC, Self
+from vercel._internal.core.polyfills import UTC
 from vercel.queue import SanitizedName
 
 from . import ulid

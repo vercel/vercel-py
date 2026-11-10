@@ -71,7 +71,7 @@ class Address:
     zip_code: str
 
 
-class Tier(str, enum.Enum):
+class Tier(enum.StrEnum):
     BASIC = "basic"
     PRO = "pro"
 

@@ -1,10 +1,9 @@
 """Pagination helpers for Sandbox APIs."""
 
-from typing import ClassVar, Generic, TypeVar
+from typing import ClassVar, Generic, Self, TypeVar
 
 from pydantic import field_validator
 
-from vercel._internal.core.polyfills import Self
 from vercel.sandbox._internal.value_model import SandboxValueModel
 
 MAX_QUERY_SANDBOXES_PAGE_SIZE = 50
