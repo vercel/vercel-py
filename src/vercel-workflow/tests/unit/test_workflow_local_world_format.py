@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import base64
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 import pydantic
 import pytest
@@ -88,7 +88,7 @@ def test_dumps_js_matches_json_stringify_conventions() -> None:
     payload = {
         "note": "你好",
         "blob": b"\x00\xff\x80",
-        "at": datetime(2026, 7, 30, 17, 6, 33, 759000, tzinfo=timezone.utc),
+        "at": datetime(2026, 7, 30, 17, 6, 33, 759000, tzinfo=UTC),
         "count": 1.0,
         "ratio": 0.25,
         "empty": {},
@@ -115,7 +115,7 @@ def test_to_js_iso_matches_date_to_iso_string() -> None:
     # digits. Sub-millisecond precision is truncated (a JS Date never had it),
     # a naive datetime is read as UTC, and an offset-aware one is converted.
     assert (
-        local_mod.to_js_iso(datetime(2026, 7, 30, 17, 6, 33, 759876, tzinfo=timezone.utc))
+        local_mod.to_js_iso(datetime(2026, 7, 30, 17, 6, 33, 759876, tzinfo=UTC))
         == "2026-07-30T17:06:33.759Z"
     )
     assert local_mod.to_js_iso(datetime(2026, 1, 2, 3, 4, 5)) == "2026-01-02T03:04:05.000Z"

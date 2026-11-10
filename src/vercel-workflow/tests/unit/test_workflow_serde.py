@@ -99,7 +99,7 @@ def test_datetime_stays_a_native_date_not_an_instance() -> None:
     """`datetime` is a `date` subclass, so the `date` registration must not
     capture it -- devalue carries it as a JS `Date`, which JavaScript can read
     without knowing anything about this SDK."""
-    value = datetime.datetime(2026, 7, 30, 17, 6, 33, tzinfo=datetime.timezone.utc)
+    value = datetime.datetime(2026, 7, 30, 17, 6, 33, tzinfo=datetime.UTC)
 
     assert _wire(value) == '[["Date","2026-07-30T17:06:33.000Z"]]'
     assert _round_trip(value) == value
@@ -390,7 +390,7 @@ def test_datetime_stays_native_inside_a_sandbox() -> None:
     with py_sandbox.Sandbox().enter():
         import datetime as sandboxed  # noqa: PLC0415
 
-        value = sandboxed.datetime(2026, 7, 30, tzinfo=datetime.timezone.utc)
+        value = sandboxed.datetime(2026, 7, 30, tzinfo=sandboxed.UTC)
         assert "Instance" not in _wire(value)
 
 

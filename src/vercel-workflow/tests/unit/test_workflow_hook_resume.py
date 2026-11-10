@@ -12,7 +12,7 @@ from __future__ import annotations
 import base64
 import dataclasses
 import decimal
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pydantic
 import pytest
@@ -117,7 +117,7 @@ async def test_pydantic_hook_round_trips_through_resume(tmp_path, monkeypatch) -
     world = _RecordingLocalWorld(tmp_path)
     monkeypatch.setattr(w, "the_world", world)
     run_id = await _run_with_hook(world)
-    at = datetime(2026, 7, 30, 17, 6, 33, tzinfo=timezone.utc)
+    at = datetime(2026, 7, 30, 17, 6, 33, tzinfo=UTC)
 
     await Approval(approved=True, reviewer="ada", at=at).resume(TOKEN)
 
@@ -243,7 +243,7 @@ async def test_json_mode_is_the_way_back_to_json_shaped_values(tmp_path, monkeyp
     world = _RecordingLocalWorld(tmp_path)
     monkeypatch.setattr(w, "the_world", world)
     run_id = await _run_with_hook(world)
-    at = datetime(2026, 7, 30, 17, 6, 33, tzinfo=timezone.utc)
+    at = datetime(2026, 7, 30, 17, 6, 33, tzinfo=UTC)
 
     await Approval(approved=True, reviewer="ada", at=at).resume(TOKEN, mode="json")
 

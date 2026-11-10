@@ -10,7 +10,7 @@ import asyncio
 import contextvars
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx2 as httpx
@@ -37,7 +37,7 @@ from vercel.connect._internal.cache import build_cache_key
 from vercel.connect._internal.service import get_connect_service
 from vercel.connect._internal.state import ConnectTokenRequest
 
-NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
+NOW = datetime(2026, 1, 1, tzinfo=UTC)
 TOKEN_URL = f"{TEST_BASE_URL}/v1/connect/token/slack%2Fmy-bot"
 
 

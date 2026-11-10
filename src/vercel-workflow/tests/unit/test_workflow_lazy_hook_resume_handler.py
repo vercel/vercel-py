@@ -11,13 +11,12 @@ with nothing left to wake it -- the resume is lost, not delayed.
 from __future__ import annotations
 
 import dataclasses
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 
 from tests.payloads import PLAIN_ENCODER
-from vercel._internal.core.polyfills import UTC
 from vercel.workflow._internal import core, runtime, world as w
 
 from ..world_stubs import NoStreams

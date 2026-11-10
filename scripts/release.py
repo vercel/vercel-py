@@ -12,7 +12,7 @@ import tempfile
 import tomllib
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 try:
@@ -866,10 +866,10 @@ def write_news_fragment(
 
 def fragment_timestamp(value: datetime | None = None) -> str:
     if value is None:
-        value = datetime.now(timezone.utc)
+        value = datetime.now(UTC)
     if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc).strftime("%Y%m%d%H%M%S")
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(UTC).strftime("%Y%m%d%H%M%S")
 
 
 def check_fragments(base: str | None = None) -> int:

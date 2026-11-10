@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, cast
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -297,7 +297,7 @@ def test_name_helpers_are_public() -> None:
 
 def test_raw_json_transport_default_encoder_requires_json_serializable_payload() -> None:
     with pytest.raises(TypeError):
-        RawJsonTransport[dict[str, object]]().serialize({"ts": datetime.now(timezone.utc)})
+        RawJsonTransport[dict[str, object]]().serialize({"ts": datetime.now(UTC)})
 
 
 def test_raw_json_transport_accepts_explicit_custom_encoder() -> None:
@@ -307,7 +307,7 @@ def test_raw_json_transport_accepts_explicit_custom_encoder() -> None:
                 return o.isoformat()
             return super().default(o)
 
-    dt = datetime.now(timezone.utc)
+    dt = datetime.now(UTC)
     serialized = RawJsonTransport[dict[str, object]](json_encoder=CustomEncoder).serialize({
         "ts": dt
     })
@@ -326,7 +326,7 @@ async def test_raw_json_transport_accepts_explicit_custom_decoder() -> None:
                 value["ts"] = datetime.fromisoformat(cast("str", value["ts"]))
             return value
 
-    dt = datetime.now(timezone.utc)
+    dt = datetime.now(UTC)
     payload = await RawJsonTransport[dict[str, object]](json_decoder=CustomDecoder).deserialize(
         one_chunk(json.dumps({"ts": dt.isoformat()}).encode()), content_type=""
     )

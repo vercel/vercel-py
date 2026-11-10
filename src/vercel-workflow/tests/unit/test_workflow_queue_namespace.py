@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 
-from vercel._internal.core.polyfills import UTC
 from vercel.workflow import Workflows, start
 from vercel.workflow._internal import core, runtime, world as w
 

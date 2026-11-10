@@ -6,7 +6,7 @@ import base64
 import math
 import re as re_module
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from .constants import (
@@ -187,7 +187,7 @@ def stringify(value: Any, reducers: dict[str, Callable] | None = None) -> str:
         # --- datetime → Date ---
         if isinstance(thing, datetime):
             if thing.tzinfo is not None:
-                utc_dt = thing.astimezone(timezone.utc)
+                utc_dt = thing.astimezone(UTC)
             else:
                 utc_dt = thing
             ms = utc_dt.microsecond // 1000

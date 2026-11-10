@@ -5,7 +5,7 @@ from typing import Any, ClassVar, cast
 import json
 import logging
 from collections.abc import AsyncIterator, Iterator
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import httpx2 as httpx
 import pytest
@@ -91,7 +91,7 @@ def test_accept_parses_json_push_delivery() -> None:
     assert message.metadata.created_at == CREATED_AT_DT
     assert message.metadata.expires_at == EXPIRES_AT_DT
     assert message.metadata.region == "sfo1"
-    assert message.metadata.visibility_deadline == datetime(2026, 1, 1, 0, 5, tzinfo=timezone.utc)
+    assert message.metadata.visibility_deadline == datetime(2026, 1, 1, 0, 5, tzinfo=UTC)
 
 
 @pytest.mark.anyio

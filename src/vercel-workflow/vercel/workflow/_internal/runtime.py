@@ -21,15 +21,13 @@ from collections.abc import (
     Mapping,
     Sequence,
 )
-from datetime import datetime
+from datetime import UTC, datetime
 from itertools import chain
 from typing import Any, Generic, ParamSpec, Self, TypeVar, overload
 from urllib.parse import parse_qsl, urlsplit
 
 import anyio
 import pydantic
-
-from vercel._internal.core.polyfills import UTC
 
 from . import (
     attributes as attrs,

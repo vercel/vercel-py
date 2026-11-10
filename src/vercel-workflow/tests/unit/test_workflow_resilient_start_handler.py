@@ -7,13 +7,12 @@ path must never read the run.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 
 from tests.payloads import PLAIN_ENCODER
-from vercel._internal.core.polyfills import UTC
 from vercel.workflow._internal import core, runtime, world as w
 
 from ..world_stubs import NoStreams

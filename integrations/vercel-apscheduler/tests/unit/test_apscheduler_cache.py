@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from sys import modules
 from types import ModuleType
 from unittest.mock import patch
@@ -46,7 +46,6 @@ from vercel.integrations.apscheduler._types import (
 from vercel.queue import Message, MessageMetadata, SanitizedName, get_subscriptions
 from vercel.queue.testing import clear_subscriptions
 
-UTC = timezone.utc
 CACHE_SCHEDULER_MODULE = "cache_test_scheduler"
 # No subscriber id env: cache identity falls back to the declared mapping.
 CACHE_SCHEDULER_ID = "default"

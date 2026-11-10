@@ -21,13 +21,13 @@ import enum
 import pathlib
 import typing
 import uuid
+from datetime import UTC
 from typing import TYPE_CHECKING, Any
 
 import pydantic
 import pytest
 
 from tests.payloads import PLAIN_ENCODER
-from vercel._internal.core.polyfills import UTC
 from vercel.workflow import FatalError, TypeValidationError, get_run, register_serializable, start
 from vercel.workflow._internal import (
     core,

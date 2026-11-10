@@ -10,7 +10,7 @@ import sys
 import threading
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from weakref import ref
 
@@ -86,7 +86,7 @@ class FakeMessage(Message[dict[str, Any]]):
             metadata=MessageMetadata(
                 message_id="msg_1",
                 delivery_count=1,
-                created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                created_at=datetime(2026, 1, 1, tzinfo=UTC),
                 topic=topic,
                 consumer_group=SanitizedName(consumer_group),
                 receipt_handle="rh_1",

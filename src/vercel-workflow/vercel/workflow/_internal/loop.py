@@ -2,9 +2,8 @@ import asyncio
 import contextvars
 import datetime
 from collections.abc import Callable
+from datetime import UTC
 from typing import TYPE_CHECKING, Any, NoReturn, Protocol, TypeVarTuple, Unpack
-
-from vercel._internal.core.polyfills import UTC
 
 if TYPE_CHECKING:
     import collections

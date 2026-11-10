@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import math
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -102,7 +102,7 @@ class TestStringifyBasics:
         assert result == '[["RegExp","regexp"]]'
 
     def test_date(self):
-        dt = datetime(2001, 9, 9, 1, 46, 40, tzinfo=timezone.utc)
+        dt = datetime(2001, 9, 9, 1, 46, 40, tzinfo=UTC)
         assert stringify(dt) == '[["Date","2001-09-09T01:46:40.000Z"]]'
 
     def test_list(self):
@@ -255,7 +255,7 @@ class TestStringifyRepetition:
         assert result == '[[1,1],["RegExp","regexp"]]'
 
     def test_date_repetition(self):
-        dt = datetime(2001, 9, 9, 1, 46, 40, tzinfo=timezone.utc)
+        dt = datetime(2001, 9, 9, 1, 46, 40, tzinfo=UTC)
         result = stringify([dt, dt])
         assert result == '[[1,1],["Date","2001-09-09T01:46:40.000Z"]]'
 
@@ -422,7 +422,7 @@ class TestParseBasics:
     def test_date(self):
         result = parse('[["Date","2001-09-09T01:46:40.000Z"]]')
         assert isinstance(result, datetime)
-        assert result == datetime(2001, 9, 9, 1, 46, 40, tzinfo=timezone.utc)
+        assert result == datetime(2001, 9, 9, 1, 46, 40, tzinfo=UTC)
 
     def test_invalid_date(self):
         result = parse('[["Date",""]]')
@@ -823,7 +823,7 @@ class TestRoundTrip:
         assert parse(stringify({1, 2, 3})) == {1, 2, 3}
 
     def test_date(self):
-        dt = datetime(2024, 1, 15, 12, 30, 0, tzinfo=timezone.utc)
+        dt = datetime(2024, 1, 15, 12, 30, 0, tzinfo=UTC)
         result = parse(stringify(dt))
         assert isinstance(result, datetime)
         assert result == dt

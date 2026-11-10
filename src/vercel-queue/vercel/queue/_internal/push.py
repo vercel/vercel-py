@@ -5,7 +5,7 @@ from typing import Generic, TypeGuard, TypeVar, cast
 import json
 from collections.abc import AsyncIterable, AsyncIterator
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from .asynctools import iter_bytes_async
 from .config import validate_region
@@ -131,7 +131,7 @@ def _parse_push_delivery_metadata(headers: Headers) -> MessageMetadata:
         return MessageMetadata(
             message_id=message_id,
             delivery_count=1,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             topic=topic,
             consumer_group=SanitizedName(consumer_group),
             receipt_handle=None,

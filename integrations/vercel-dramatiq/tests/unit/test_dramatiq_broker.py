@@ -7,7 +7,7 @@ import threading
 import time
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import dramatiq
 import dramatiq.broker as dramatiq_broker
@@ -220,7 +220,7 @@ def fake_vqs_message(
         metadata=MessageMetadata(
             message_id="vqs_1",
             delivery_count=1,
-            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
             topic=topic,
             consumer_group=vqs_dramatiq.vqs.sanitize_name(consumer_group),
             receipt_handle="rh_1",

@@ -5,7 +5,7 @@ import os
 import pathlib
 import re
 from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import (
     TYPE_CHECKING,
     Annotated,
@@ -22,7 +22,6 @@ from typing import (
 import pydantic
 import semver
 
-from vercel._internal.core.polyfills import UTC
 from vercel.queue import SanitizedName
 
 from . import ulid

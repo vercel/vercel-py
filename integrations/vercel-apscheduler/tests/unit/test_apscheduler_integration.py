@@ -4,7 +4,7 @@ from typing import Any
 
 import logging
 from contextlib import nullcontext
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from itertools import starmap
 from operator import itemgetter
 from sys import modules
@@ -50,7 +50,6 @@ from vercel.queue import (
 )
 from vercel.queue.testing import clear_subscriptions
 
-UTC = timezone.utc
 TEST_SCHEDULER_MODULE = "test_scheduler"
 # Identity is the builder-assigned subscriber id from the declared mapping.
 TEST_SCHEDULER_ID = "test-scheduler"
