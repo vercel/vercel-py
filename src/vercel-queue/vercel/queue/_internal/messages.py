@@ -4,7 +4,7 @@ from typing import TypeVar, cast
 
 from collections.abc import AsyncIterator
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from .constants import (
     HEADER_CONTENT_TYPE,
@@ -118,5 +118,5 @@ def parse_optional_datetime(value: str | None, header_name: str) -> datetime | N
     except ValueError as exc:
         raise ValueError(f"invalid {header_name} header: {value!r}") from exc
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)

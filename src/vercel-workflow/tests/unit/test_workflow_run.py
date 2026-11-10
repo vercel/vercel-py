@@ -863,7 +863,7 @@ async def test_configuration_is_reusable_and_start_remains_a_native_coroutine(st
 
 
 if TYPE_CHECKING:
-    from typing_extensions import assert_type
+    from typing import assert_type
 
     async def _check_configuration_types(
         workflow: core.Workflow[[str], int], other_workflow: core.Workflow[[int], str]

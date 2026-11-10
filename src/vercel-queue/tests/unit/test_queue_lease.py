@@ -11,7 +11,7 @@ from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import anyio
 import anyio.from_thread
@@ -163,7 +163,7 @@ def test_sync_run_lease_renewal_extends_on_enter_and_stops_on_exit(
     client = eqs.get_sync_client()
     message = _sync_leased_message(
         client,
-        visibility_deadline=datetime.now(timezone.utc) - timedelta(seconds=1),
+        visibility_deadline=datetime.now(UTC) - timedelta(seconds=1),
     )
 
     with client.run_lease_renewal(message, lease_duration=30) as renewal:
@@ -182,7 +182,7 @@ async def test_lease_extension_does_not_install_captured_headers_context() -> No
         payload=None,
         metadata=replace(
             make_leased_metadata("emails"),
-            visibility_deadline=datetime.now(timezone.utc) - timedelta(seconds=1),
+            visibility_deadline=datetime.now(UTC) - timedelta(seconds=1),
         ),
     )
     set_headers({"x-vercel-oidc-token": "delivery-token"})
@@ -239,7 +239,7 @@ def test_lease_debug_logs_worker_start_extension_success_and_stop(
     client = eqs.get_sync_client()
     message = _sync_leased_message(
         client,
-        visibility_deadline=datetime.now(timezone.utc) - timedelta(seconds=1),
+        visibility_deadline=datetime.now(UTC) - timedelta(seconds=1),
     )
 
     with client.run_lease_renewal(message, lease_duration=30):
@@ -271,7 +271,7 @@ def test_sync_run_lease_renewal_extends_immediately_when_deadline_is_near(
     client = eqs.get_sync_client()
     message = _sync_leased_message(
         client,
-        visibility_deadline=datetime.now(timezone.utc) + timedelta(seconds=5),
+        visibility_deadline=datetime.now(UTC) + timedelta(seconds=5),
     )
 
     with client.run_lease_renewal(message, lease_duration=30):
@@ -313,9 +313,9 @@ def test_sync_lease_renewal_uses_default_duration(
         metadata=replace(
             _sync_leased_message(
                 client,
-                visibility_deadline=datetime.now(timezone.utc) - timedelta(seconds=1),
+                visibility_deadline=datetime.now(UTC) - timedelta(seconds=1),
             ).metadata,
-            visibility_deadline=datetime.now(timezone.utc) - timedelta(seconds=1),
+            visibility_deadline=datetime.now(UTC) - timedelta(seconds=1),
         ),
     )
 
@@ -333,7 +333,7 @@ def test_sync_lease_renewal_floors_short_duration(
     client = eqs.get_sync_client()
     message = _sync_leased_message(
         client,
-        visibility_deadline=datetime.now(timezone.utc) - timedelta(seconds=1),
+        visibility_deadline=datetime.now(UTC) - timedelta(seconds=1),
     )
 
     with client.run_lease_renewal(message, lease_duration=1):
@@ -410,7 +410,7 @@ async def test_async_run_lease_renewal_starts_on_enter_and_stops(
     client = eqs.get_async_client(base_url=eqs.base_url)
     message = await _async_leased_message(
         client,
-        visibility_deadline=datetime.now(timezone.utc) - timedelta(seconds=1),
+        visibility_deadline=datetime.now(UTC) - timedelta(seconds=1),
     )
 
     renewal = client.run_lease_renewal(message, lease_duration=30)
@@ -463,11 +463,11 @@ def test_sync_lease_start_reuses_worker_async_client_by_config(
     )
     first_message = _sync_leased_message(
         client,
-        visibility_deadline=datetime.now(timezone.utc) - timedelta(seconds=1),
+        visibility_deadline=datetime.now(UTC) - timedelta(seconds=1),
     )
     second_message = _sync_leased_message(
         client,
-        visibility_deadline=datetime.now(timezone.utc) - timedelta(seconds=1),
+        visibility_deadline=datetime.now(UTC) - timedelta(seconds=1),
     )
     created = 0
     queue_httpx = queue_httpx_module()
@@ -512,11 +512,11 @@ async def test_async_client_reuses_worker_runtime_for_background_lease_extension
     )
     first_message = await _async_leased_message(
         client,
-        visibility_deadline=datetime.now(timezone.utc) - timedelta(seconds=1),
+        visibility_deadline=datetime.now(UTC) - timedelta(seconds=1),
     )
     second_message = await _async_leased_message(
         client,
-        visibility_deadline=datetime.now(timezone.utc) - timedelta(seconds=1),
+        visibility_deadline=datetime.now(UTC) - timedelta(seconds=1),
     )
     created = 0
     queue_httpx = queue_httpx_module()

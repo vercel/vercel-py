@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import vercel.queue as vqs
@@ -15,7 +15,6 @@ from ._options import VercelAPSchedulerOptions
 from ._payload import StartPayload, WakeupPayload
 
 LOGGER = logging.getLogger("vercel.integrations.apscheduler")
-UTC = timezone.utc
 BUSY_RETRY_SECONDS = 5
 
 # Registrations live for the process: the queue registry holds only weak

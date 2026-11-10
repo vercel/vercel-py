@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, ClassVar, Generic, Protocol, TypeAlias, TypeGuard, TypeVar, cast
+from typing import Any, ClassVar, Generic, Protocol, Self, TypeAlias, TypeGuard, TypeVar, cast
 
 from collections.abc import (
     AsyncIterable,
@@ -11,8 +11,6 @@ from collections.abc import (
 )
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-
-from vercel._internal.core.polyfills import Self
 
 from .constants import DEFAULT_RETRY_AFTER_SECONDS
 from .names import (

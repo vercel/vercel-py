@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 import pytest
 
 from tests.payloads import PLAIN_ENCODER
-from vercel._internal.core.polyfills import UTC
 from vercel.workflow import (
     FatalError,
     HookConflictError,

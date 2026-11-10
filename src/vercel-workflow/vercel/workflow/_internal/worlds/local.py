@@ -15,7 +15,7 @@ import threading
 import traceback
 from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from contextlib import AbstractAsyncContextManager
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, TypeVar, cast
 from uuid import uuid4
 
@@ -24,7 +24,6 @@ import pydantic
 
 import vercel.queue as vqs
 import vercel.queue.embedded as vqs_embedded
-from vercel._internal.core.polyfills import UTC
 
 from .. import attributes as attrs, world as w
 from ..ulid import monotonic_factory

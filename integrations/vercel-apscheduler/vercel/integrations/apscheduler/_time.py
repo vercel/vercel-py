@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-
-UTC = timezone.utc
+from datetime import UTC, datetime, timedelta
 
 __all__ = [
     "as_utc",

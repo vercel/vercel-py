@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -10,7 +10,7 @@ from vercel.functions import get_deadline
 
 
 def test_get_deadline_reads_runtime_context(monkeypatch) -> None:
-    expected = datetime(2026, 8, 18, 12, 30, tzinfo=timezone.utc)
+    expected = datetime(2026, 8, 18, 12, 30, tzinfo=UTC)
     runtime = SimpleNamespace(get_deadline=lambda: expected)
     monkeypatch.setitem(sys.modules, "vercel_runtime", runtime)
 

@@ -35,7 +35,7 @@ import subprocess
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -278,7 +278,7 @@ def _cyclic_list() -> list:
 
 _SHARED = {"x": 1}
 
-_AWARE = datetime(2024, 1, 2, 3, 4, 5, 678000, tzinfo=timezone.utc)
+_AWARE = datetime(2024, 1, 2, 3, 4, 5, 678000, tzinfo=UTC)
 
 ROUND_TRIP_CASES: list[Case] = [
     # ── scalars ────────────────────────────────────────────────────────────
@@ -327,7 +327,7 @@ ROUND_TRIP_CASES: list[Case] = [
     Case(
         "datetime_epoch",
         'new Date("1970-01-01T00:00:00.000Z")',
-        datetime(1970, 1, 1, tzinfo=timezone.utc),
+        datetime(1970, 1, 1, tzinfo=UTC),
     ),
     # A Python pattern is accepted going out, but lands as the container.
     Case("regex_no_flags", "/a+b/", re.compile("a+b"), expected=JsRegExp("a+b", "")),

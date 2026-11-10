@@ -6,7 +6,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from functools import partial
 
 import anyio
@@ -50,8 +50,8 @@ T = TypeVar("T")
 
 CREATED_AT = "2026-01-01T00:00:00Z"
 EXPIRES_AT = "2026-01-02T00:00:00Z"
-CREATED_AT_DT = datetime(2026, 1, 1, tzinfo=timezone.utc)
-EXPIRES_AT_DT = datetime(2026, 1, 2, tzinfo=timezone.utc)
+CREATED_AT_DT = datetime(2026, 1, 1, tzinfo=UTC)
+EXPIRES_AT_DT = datetime(2026, 1, 2, tzinfo=UTC)
 
 
 @dataclass(frozen=True)

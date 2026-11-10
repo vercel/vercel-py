@@ -1,9 +1,9 @@
 """Standalone synchronous Sandbox service client."""
 
 from collections.abc import Iterator, Mapping
+from typing import Self
 
 from vercel._internal.core.options import collect_service_options
-from vercel._internal.core.polyfills import Self
 from vercel._internal.core.session import HttpxClientFactory, SyncSdkSession
 from vercel.sandbox._internal.models import (
     DriveMountsInput,

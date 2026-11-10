@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -151,7 +151,7 @@ def test_parse_required_duration_seconds_rejects_none() -> None:
 
 
 EPOCH_SECONDS = 1_800_000_000
-EPOCH = datetime(2027, 1, 15, 8, 0, tzinfo=timezone.utc)
+EPOCH = datetime(2027, 1, 15, 8, 0, tzinfo=UTC)
 
 
 def test_from_epoch_reads_utc() -> None:

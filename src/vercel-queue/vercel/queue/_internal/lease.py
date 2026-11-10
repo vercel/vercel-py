@@ -30,8 +30,7 @@ Lease renewal invariants:
 
 from __future__ import annotations
 
-from typing import Any, NewType, Protocol, TypeAlias
-from typing_extensions import Self
+from typing import Any, NewType, Protocol, Self, TypeAlias
 
 import logging
 import math
@@ -40,7 +39,7 @@ import time
 from collections import OrderedDict
 from collections.abc import Callable, Coroutine, Iterator, MutableMapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import TracebackType
 
 import anyio
@@ -203,7 +202,7 @@ def processing_lease_seconds(duration: Duration | None, *, name: str = "lease_du
 
 def _next_extension_delay(metadata: MessageMetadata, lease_seconds: int) -> float:
     if metadata.visibility_deadline is not None:
-        remaining = (metadata.visibility_deadline - datetime.now(timezone.utc)).total_seconds()
+        remaining = (metadata.visibility_deadline - datetime.now(UTC)).total_seconds()
         if remaining <= _IMMEDIATE_RENEWAL_GRACE_SECONDS:
             return 0.0
         return max(0.0, remaining - _IMMEDIATE_RENEWAL_GRACE_SECONDS)

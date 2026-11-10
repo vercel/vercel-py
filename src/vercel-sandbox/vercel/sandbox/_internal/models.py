@@ -2,7 +2,7 @@
 
 from collections.abc import Iterable, Mapping
 from datetime import timedelta
-from enum import IntEnum
+from enum import IntEnum, StrEnum
 from pathlib import PurePosixPath
 from subprocess import CalledProcessError
 from types import MappingProxyType
@@ -12,6 +12,7 @@ from typing import (
     Final,
     Literal,
     Protocol,
+    Self,
     TypeAlias,
     TypeVar,
     cast,
@@ -32,7 +33,6 @@ from pydantic import (
     model_validator,
 )
 
-from vercel._internal.core.polyfills import Self, StrEnum
 from vercel._internal.core.time import SECOND, coerce_duration, to_ms_int
 from vercel.sandbox._internal.region import ResolvedRegion
 from vercel.sandbox._internal.value_model import SandboxValueModel

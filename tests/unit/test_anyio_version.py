@@ -1,5 +1,5 @@
 import subprocess
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 from zipfile import ZipFile
@@ -35,7 +35,7 @@ def package_index(tmp_path: Path) -> str:
     package = index / "anyio"
     package.mkdir(parents=True)
     links = []
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     for version, age in [("4.12.0", 10), ("4.12.1", 3), ("4.13.0", 0), ("4.14.0", 10)]:
         filename = f"anyio-{version}-py3-none-any.whl"
         with ZipFile(package / filename, "w") as wheel:

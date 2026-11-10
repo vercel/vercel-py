@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from apscheduler.schedulers.blocking import BlockingScheduler
-
-UTC = timezone.utc
 
 scheduler = BlockingScheduler(timezone=UTC)
 

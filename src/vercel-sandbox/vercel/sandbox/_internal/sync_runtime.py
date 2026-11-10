@@ -9,11 +9,10 @@ from contextlib import AbstractContextManager, contextmanager
 from datetime import timedelta
 from threading import Condition
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, BinaryIO, Literal, overload
+from typing import TYPE_CHECKING, Any, BinaryIO, Literal, Self, overload
 
 from vercel._internal.core.byte_stream import SyncByteStreamRuntime
 from vercel._internal.core.iter_coroutine import iter_coroutine
-from vercel._internal.core.polyfills import Self
 from vercel._internal.core.time import parse_duration_seconds, parse_required_duration_seconds
 from vercel.sandbox._internal.byte_reader import SyncByteReader, _sync_byte_readers
 from vercel.sandbox._internal.errors import (

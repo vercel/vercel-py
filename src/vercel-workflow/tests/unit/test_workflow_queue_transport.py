@@ -11,13 +11,13 @@ import datetime
 import json
 from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC
 from typing import Any
 from unittest.mock import AsyncMock, Mock
 
 import cbor2
 import pytest
 
-from vercel._internal.core.polyfills import UTC
 from vercel.queue import MessageMetadata
 from vercel.queue._internal.subscribers import infer_subscriber_transport
 from vercel.workflow._internal import ulid, world as w

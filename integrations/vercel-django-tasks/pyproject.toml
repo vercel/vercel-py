@@ -7,7 +7,7 @@ name = "vercel-django-tasks"
 dynamic = ["version"]
 description = "Django task backend backed by Vercel Queue Service"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE", "LICENSE.*"]
 dependencies = [

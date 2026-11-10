@@ -14,7 +14,7 @@ woken again.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import cbor2
@@ -23,7 +23,6 @@ import pytest
 
 import vendor.respx as respx
 from tests.payloads import PLAIN_ENCODER
-from vercel._internal.core.polyfills import UTC
 from vercel.workflow import start
 from vercel.workflow._internal import core, world as w
 from vercel.workflow._internal.worlds.local import LocalWorld

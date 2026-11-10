@@ -10,7 +10,7 @@ from typing import Any
 
 import logging
 from contextlib import AbstractContextManager, nullcontext
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 from vercel.cache import get_cache
 
@@ -24,8 +24,6 @@ from ..._types import (
     WakeToken,
 )
 from ._doc import DOC_TTL_SECONDS, from_iso, iso
-
-UTC = timezone.utc
 
 LOGGER = logging.getLogger("vercel.integrations.apscheduler")
 

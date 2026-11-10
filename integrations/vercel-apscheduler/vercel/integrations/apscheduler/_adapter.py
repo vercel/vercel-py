@@ -7,7 +7,7 @@ import math
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from os import environ
 from sys import modules
 from types import MethodType
@@ -53,7 +53,6 @@ from ._types import (
 )
 
 LOGGER = logging.getLogger("vercel.integrations.apscheduler")
-UTC = timezone.utc
 ADAPTER_ATTR = "_vercel_apscheduler_adapter"
 DEPLOYMENT_ENV = "VERCEL_DEPLOYMENT_ID"
 WAKEUP_KEY_PREFIX = "aps"

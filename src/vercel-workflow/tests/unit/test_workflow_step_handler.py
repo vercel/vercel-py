@@ -12,7 +12,7 @@ the parent workflow and acks.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -22,7 +22,6 @@ import pytest
 
 import vendor.respx as respx
 from tests.payloads import PLAIN_ENCODER
-from vercel._internal.core.polyfills import UTC
 from vercel.workflow import FatalError, StepNotRegisteredError
 from vercel.workflow._internal import core, runtime, serialization as ser, world as w
 

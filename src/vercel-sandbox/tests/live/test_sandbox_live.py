@@ -38,8 +38,6 @@ def _name(scenario: str, mode: str) -> str:
 
 
 def _exception_notes(error: BaseException) -> tuple[str, ...]:
-    if not hasattr(BaseException, "add_note"):
-        return ()
     return tuple(getattr(error, "__notes__", ()))
 
 

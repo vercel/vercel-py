@@ -10,7 +10,7 @@ order sane.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import anyio
@@ -18,7 +18,6 @@ import pydantic
 import pytest
 
 from tests.payloads import PLAIN_ENCODER
-from vercel._internal.core.polyfills import UTC
 from vercel.workflow import TypeValidationError
 from vercel.workflow._internal import core, runtime, serialization as ser, streams, world as w
 

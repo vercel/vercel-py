@@ -171,16 +171,13 @@ from __future__ import annotations
 
 import ast
 import sys
+import tomllib
 from pathlib import Path
 from typing import Any
 
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
-    import tomli as tomllib  # type: ignore[no-redef]
 
 from scripts import workspace
 

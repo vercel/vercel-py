@@ -9,7 +9,7 @@ loudly rather than silently returning the wrong value.
 import asyncio
 import dataclasses
 import traceback
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -109,9 +109,7 @@ async def test_wait_step_swap_raises_nondeterminism() -> None:
         w.StepCreatedEventData(step_name=step.name, input=_args(name="a")).into_event("step_1")
     ]
     ctx = _context(events)
-    wait = runtime.Wait(
-        correlation_id="wait_1", resume_at=datetime(2026, 1, 1, tzinfo=timezone.utc)
-    )
+    wait = runtime.Wait(correlation_id="wait_1", resume_at=datetime(2026, 1, 1, tzinfo=UTC))
     ctx.suspensions["wait_1"] = wait
 
     _resume_isolated(ctx)
@@ -436,7 +434,7 @@ async def _unawaited_record(fail: bool = False) -> str:
 async def _unawaited_wait_and_attributes() -> str:
     ctx = runtime.WorkflowOrchestratorContext.current()
     pending = [
-        ctx.run_wait(datetime(2026, 1, 1, tzinfo=timezone.utc)),
+        ctx.run_wait(datetime(2026, 1, 1, tzinfo=UTC)),
         ctx.set_attributes([w.AttributeChange(key="phase", value="done")], allow_reserved=False),
     ]
     for future in pending:
@@ -477,7 +475,7 @@ async def _unawaited_hook(token: str) -> str:
 
 
 def _running_run(workflow_id: str) -> w.WorkflowRun:
-    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    now = datetime(2026, 1, 1, tzinfo=UTC)
     return w.NonFinalWorkflowRun(
         run_id="wrun_test",
         status="running",
@@ -590,9 +588,7 @@ async def test_terminal_replay_applies_waits_and_validates_attributes(diverged) 
     wait_id = f"wait_{probe.generate_ulid()}"
     attr_id = f"attr_{probe.generate_ulid()}"
     events: list[w.Event] = [
-        w.WaitCreatedEventData(resume_at=datetime(2026, 1, 1, tzinfo=timezone.utc)).into_event(
-            wait_id
-        ),
+        w.WaitCreatedEventData(resume_at=datetime(2026, 1, 1, tzinfo=UTC)).into_event(wait_id),
         w.WaitCompletedEvent(correlation_id=wait_id),
         w.AttrSetEventData(
             changes=[w.AttributeChange(key="phase", value="other" if diverged else "done")],
@@ -776,8 +772,8 @@ async def test_now_uses_first_event_before_any_replay() -> None:
     everything from prior invocations, so `events[-1]` would leak a later
     invocation's timestamp into a call site reached before any of it happened.
     """
-    t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    t1 = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    t0 = datetime(2026, 1, 1, tzinfo=UTC)
+    t1 = datetime(2026, 1, 2, tzinfo=UTC)
     step = core.Step(_greet)
     events: list[w.Event] = [
         _stamp(_created(step, "step_1"), t0, event_id="evt_1"),
@@ -791,9 +787,9 @@ async def test_now_uses_first_event_before_any_replay() -> None:
 async def test_now_advances_with_replay_index() -> None:
     """Once resume() has delivered a completion, now() reflects that event's
     timestamp, not a later, not-yet-consumed event further down the log."""
-    t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    t1 = datetime(2026, 1, 2, tzinfo=timezone.utc)
-    t2 = datetime(2026, 1, 3, tzinfo=timezone.utc)
+    t0 = datetime(2026, 1, 1, tzinfo=UTC)
+    t1 = datetime(2026, 1, 2, tzinfo=UTC)
+    t2 = datetime(2026, 1, 3, tzinfo=UTC)
     step = core.Step(_greet)
     events: list[w.Event] = [
         _stamp(_created(step, "step_1"), t0, event_id="evt_1"),
@@ -826,7 +822,7 @@ async def test_core_now_raises_outside_workflow() -> None:
 
 
 async def test_time_ns_matches_now_as_nanoseconds() -> None:
-    t0 = datetime(2026, 1, 1, 12, 30, 45, 123456, tzinfo=timezone.utc)
+    t0 = datetime(2026, 1, 1, 12, 30, 45, 123456, tzinfo=UTC)
     events: list[w.Event] = [_stamp(_created(core.Step(_greet), "step_1"), t0, event_id="evt_1")]
     ctx = _context(events)
 

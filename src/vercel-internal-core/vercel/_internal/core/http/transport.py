@@ -10,6 +10,7 @@ from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from datetime import timedelta
+from enum import StrEnum
 from types import TracebackType
 from typing import Any, Final, TypeAlias, cast, final
 
@@ -18,7 +19,6 @@ import httpx2 as httpx
 from anyio.abc import ObjectReceiveStream, ObjectSendStream
 
 from vercel._internal.core.http._compat import is_async_http_client
-from vercel._internal.core.polyfills import StrEnum
 from vercel._internal.core.time import to_seconds_float
 
 PrimitiveData: TypeAlias = str | int | float | bool | None

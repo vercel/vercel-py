@@ -8,6 +8,7 @@ import threading
 import traceback
 import urllib.parse
 from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
+from datetime import UTC
 from typing import Any, TypeVar, overload
 
 import cbor2
@@ -15,7 +16,6 @@ import httpx2 as httpx
 import pydantic
 
 import vercel.queue as vqs
-from vercel._internal.core.polyfills import UTC
 from vercel.headers import REQUEST_ID_HEADER_NAME, get_headers
 from vercel.oidc import VercelOidcTokenError
 from vercel.oidc.aio import get_vercel_oidc_token

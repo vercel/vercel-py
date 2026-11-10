@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta
-
-from vercel._internal.core.polyfills import UTC
+from datetime import UTC, datetime, timedelta
 
 duration_re = re.compile(
     r"(-?\d+(?:\.\d+)?)\s*(ms|s|seconds?|m|minutes?|h|hours?|d|days?|w|weeks?)",

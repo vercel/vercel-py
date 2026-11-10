@@ -8,11 +8,9 @@ import functools
 import inspect
 import random as _random
 from collections.abc import AsyncIterator, Callable, Coroutine, Generator, Iterator
-from typing import TYPE_CHECKING, Any, Generic, ParamSpec, TypeVar, overload
+from typing import TYPE_CHECKING, Any, Generic, ParamSpec, Self, TypeVar, overload
 
 import pydantic
-
-from vercel._internal.core.polyfills import Self
 
 from . import errors, py_sandbox, signature_codec, world as w
 from .duration import DurationParam

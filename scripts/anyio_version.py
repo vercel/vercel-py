@@ -5,14 +5,10 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 from packaging.requirements import Requirement
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
-    import tomli as tomllib  # type: ignore[no-redef]
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 PYPROJECT = PROJECT_ROOT / "src/vercel-queue/pyproject.toml"

@@ -5,7 +5,7 @@ import importlib.util
 import subprocess
 import tempfile
 from collections.abc import Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
@@ -983,12 +983,12 @@ def test_release_stages_commits_pushes_and_opens_pr(
     )
     package = workspace.Package("pkg", package_path, package_path / "version.py", ())
     calls: list[list[str]] = []
-    fixed_now = datetime(2026, 7, 10, 12, 34, 56, tzinfo=timezone.utc)
+    fixed_now = datetime(2026, 7, 10, 12, 34, 56, tzinfo=UTC)
 
     class FakeDatetime(datetime):
         @classmethod
         def now(cls, tz: object = None) -> FakeDatetime:  # noqa: ANN401
-            assert tz is timezone.utc
+            assert tz is UTC
             return cast("FakeDatetime", fixed_now)
 
     monkeypatch.setattr(release, "ROOT", root)
@@ -1539,7 +1539,7 @@ def test_validate_fragment_kind_rejects_unknown_type() -> None:
 
 
 def test_write_news_fragment_uses_utc_timestamp_and_collision_suffix(tmp_path: Path) -> None:
-    timestamp = datetime(2026, 7, 10, 12, 34, 56, tzinfo=timezone.utc)
+    timestamp = datetime(2026, 7, 10, 12, 34, 56, tzinfo=UTC)
     package_dir = tmp_path / "changes/pkg"
     package_dir.mkdir(parents=True)
     (package_dir / "20260710123456.bugfix.md").write_text("Existing.\n", encoding="utf-8")

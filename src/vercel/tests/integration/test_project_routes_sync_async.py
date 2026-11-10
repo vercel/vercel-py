@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx2 as httpx
 import pytest
-import vendor.respx as respx
 
+import vendor.respx as respx
 from vercel.client import AsyncVercel, Vercel
 from vercel.project_routes import (
     GeneratedPathCondition,
@@ -34,7 +34,7 @@ VERSION_JSON = {
 }
 VERSION = RouteVersion(
     id="version_123",
-    last_modified=datetime.fromtimestamp(1_722_000_000, tz=timezone.utc),
+    last_modified=datetime.fromtimestamp(1_722_000_000, tz=UTC),
     created_by="user_123",
     s3_key="project-routes/prj_123/version_123.json",
     is_staging=True,

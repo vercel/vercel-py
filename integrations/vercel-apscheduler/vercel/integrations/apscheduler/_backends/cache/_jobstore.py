@@ -10,7 +10,7 @@ import operator
 import pickle
 import random
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from apscheduler.job import Job  # type: ignore[import-untyped]
 from apscheduler.jobstores.base import (  # type: ignore[import-untyped]
@@ -34,7 +34,6 @@ from ._doc import _INDEX_MERGE_ATTEMPTS, DOC_TTL_SECONDS
 from ._driver import CacheDriver
 
 LOGGER = logging.getLogger("vercel.integrations.apscheduler")
-UTC = timezone.utc
 
 _UNCHANGED = object()
 

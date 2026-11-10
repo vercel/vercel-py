@@ -25,14 +25,13 @@ Ports the client half of vercel/workflow#3634.
 from __future__ import annotations
 
 import typing
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pydantic
 import pytest
 
 from tests.payloads import PLAIN_ENCODER
-from vercel._internal.core.polyfills import UTC
 from vercel.workflow._internal import core, runtime, serialization as ser, world as w
 from vercel.workflow._internal.worlds import local as local_mod
 
