@@ -9,6 +9,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import tomllib
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -18,11 +19,6 @@ try:
     from scripts import workspace
 except ImportError:  # pragma: no cover - script execution path
     import workspace  # type: ignore[no-redef]
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
-    import tomli as tomllib  # type: ignore[no-redef]
 
 
 ROOT = Path(__file__).resolve().parent.parent

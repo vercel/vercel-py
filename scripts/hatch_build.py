@@ -3,17 +3,13 @@
 from __future__ import annotations
 
 import ast
+import tomllib
 from pathlib import Path
 from typing import Any
 
 from hatchling.metadata.plugin.interface import MetadataHookInterface
 from packaging.requirements import Requirement
 from packaging.specifiers import SpecifierSet
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
-    import tomli as tomllib  # type: ignore[no-redef]
 
 
 class WorkspaceDependenciesMetadataHook(MetadataHookInterface):

@@ -3,13 +3,9 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import tomllib
 from collections import OrderedDict
 from collections.abc import Iterable
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
-    import tomli as tomllib
 
 
 def uv_no_color(*args: str) -> list[str]:
