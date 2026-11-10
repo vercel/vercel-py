@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import sys
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -71,7 +70,7 @@ async def wait_for_sleep_to_finish() -> str:
 async def wait_for_sleep_to_time_out() -> str:
     try:
         await asyncio.wait_for(asyncio.sleep(20), timeout=1)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return "timed out"
     return "unexpectedly finished"
 
@@ -213,7 +212,6 @@ async def test_asyncio_wait_for_times_out_a_workflow_sleep(tmp_path, monkeypatch
         assert result == "timed out"
 
 
-@pytest.mark.skipif(sys.version_info < (3, 11), reason="asyncio.timeout requires Python 3.11")
 async def test_asyncio_timeout_times_out_a_never_signaled_hook(tmp_path, monkeypatch) -> None:
     async with running_world(tmp_path, monkeypatch) as world:
         run_id, result = await _run(world, wait_for_never_signaled_hook)

@@ -400,9 +400,7 @@ def test_a_name_that_never_resolves_passes_through_rather_than_erroring_late() -
     unreadable annotation to the pass-through this module promises everywhere
     else.
 
-    `list["Order"]` is the same shape on Python 3.10, where `get_type_hints`
-    leaves the inner string alone; 3.11 resolves it and the adapter is real.
-    Either way no `PydanticUserError` reaches the caller.
+    Nested forward references that resolve still produce typed models.
     """
     registry = _registry()
 
@@ -420,10 +418,7 @@ def test_a_name_that_never_resolves_passes_through_rather_than_erroring_late() -
 
     args, kwargs = nested.codec.validate_arguments([], {"items": [_ORDER_DICT]})
     assert args == []
-    if nested.codec._codec("items")._adapter is None:
-        assert kwargs == {"items": [_ORDER_DICT]}  # 3.10: unresolved, passed through
-    else:
-        assert kwargs == {"items": [Order.model_validate(_ORDER_DICT)]}
+    assert kwargs == {"items": [Order.model_validate(_ORDER_DICT)]}
 
 
 class Dangling(pydantic.BaseModel):

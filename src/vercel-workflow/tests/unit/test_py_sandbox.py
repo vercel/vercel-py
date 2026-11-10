@@ -599,7 +599,6 @@ class TestAsyncioRestrictions:
         assert callable(asyncio.run)
 
     @pytest.mark.asyncio
-    @pytest.mark.skipif(sys.version_info < (3, 11), reason="TaskGroup requires Python 3.11+")
     async def test_taskgroup_works_in_sandbox(self):
         """asyncio.TaskGroup must work inside the sandbox."""
         with workflow_sandbox():
@@ -617,7 +616,6 @@ class TestAsyncioRestrictions:
             assert sorted(results) == [1, 2]
 
     @pytest.mark.asyncio
-    @pytest.mark.skipif(sys.version_info < (3, 11), reason="TaskGroup requires Python 3.11+")
     async def test_taskgroup_cancels_siblings_on_error(self):
         """TaskGroup must correctly cancel siblings when one task fails."""
         with workflow_sandbox():

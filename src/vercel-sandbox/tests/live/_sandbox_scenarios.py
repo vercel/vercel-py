@@ -131,12 +131,10 @@ async def reconcile_sandbox_drive_cleanup(
         owner = original_error if original_error is not None else cancellation
         assert owner is not None
         try:
-            add_note = getattr(owner, "add_note", None)
-            if callable(add_note):
-                add_note(
-                    f"Sandbox Drive cleanup had {len(errors)} failure(s); "
-                    f"first was {type(errors[0]).__name__}"
-                )
+            owner.add_note(
+                f"Sandbox Drive cleanup had {len(errors)} failure(s); "
+                f"first was {type(errors[0]).__name__}"
+            )
         except Exception:
             pass
 

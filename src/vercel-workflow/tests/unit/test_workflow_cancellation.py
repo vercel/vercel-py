@@ -15,7 +15,6 @@ way out.
 from __future__ import annotations
 
 import asyncio
-import sys
 from collections.abc import AsyncGenerator
 from typing import Any, TypeVar
 
@@ -360,10 +359,6 @@ async def test_closed_cancellation_stream_is_still_recorded(tmp_path, monkeypatc
     assert len(_of_type(await _events(world, run_id), w.HookReceivedEvent)) == 1
 
 
-@pytest.mark.skipif(
-    sys.version_info[:2] == (3, 10),
-    reason="Python 3.10 drops CancelledError messages propagated through tasks",
-)
 async def test_cancelled_step_shuts_down_and_body_gets_its_error(tmp_path, monkeypatch) -> None:
     world = _world(tmp_path, monkeypatch)
     run_id = await _create_run(world, cancel_and_wait.workflow_id)
