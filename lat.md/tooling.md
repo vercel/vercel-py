@@ -20,7 +20,7 @@ Repo-managed hooks run the same checks against exactly what is being committed o
 
 ### AnyIO compatibility matrix
 
-CI tests the lowest and latest AnyIO versions allowed by the queue SDK's declared dependency range and the workspace's uv configuration.
+CI tests Python 3.11 through 3.15 against the lowest and latest AnyIO versions allowed by the queue SDK's declared dependency range and the workspace's uv configuration.
 
 [[scripts/anyio_version.py#resolve_boundary]] runs `uv pip compile` from the repository root, preserving `exclude-newer`, package-specific exceptions, and index settings from [[pyproject.toml]]. Both the test matrix and bundled-wheel checks use this resolver. [[tests/unit/test_anyio_version.py#test_boundary_respects_project_config|Regression tests]] resolve against a local index with upload timestamps to cover recent releases, exceptions, range bounds, and unsatisfiable cutoffs independently of PyPI.
 

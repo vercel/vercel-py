@@ -23,7 +23,7 @@ dev = [
     "ty==0.0.55",
     "zizmor>=1.24.1,<2",
     "hatchling>=1.27.0,<2",
-    "time-machine>=2.16,<3",
+    "time-machine>=3.4,<4",
     "textual>=8.0.0,<9",
     "mcp>=2.3.0,<3",
     "trio>=0.33.0,<1",
@@ -73,7 +73,7 @@ markers = [
 
 [tool.tox]
 requires = ["tox>=4", "tox-uv-bare"]
-env_list = ["py311", "py312", "py313", "py314"]
+env_list = ["py311", "py312", "py313", "py314", "py315"]
 
 [tool.tox.env_run_base]
 runner = "uv-venv-lock-runner"
