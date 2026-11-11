@@ -53,6 +53,7 @@ from vercel.sandbox._internal.models import (
     NetworkPolicyRule,
     NetworkPolicySubnets,
     NetworkPolicyTransform,
+    SandboxManagedCredentials,
     SandboxMount,
     SandboxQuery,
     SandboxQueryByCreatedAt,
@@ -132,6 +133,7 @@ def create_sandbox(
     execution_time_limit: DurationInput = None,
     resources: SandboxResources | None = None,
     persistent: bool | None = None,
+    credentials: SandboxManagedCredentials | None = None,
     network_policy: NetworkPolicy | None = None,
     network_id: str | None = None,
     env: Mapping[str, str] | None = None,
@@ -161,6 +163,8 @@ def create_sandbox(
             duration.
         resources: Requested CPU and memory resources.
         persistent: Whether the sandbox persists beyond its current session.
+        credentials: Vercel-managed credentials to inject into the sandbox's
+            network policy.
         network_policy: Network access policy sent to the Sandbox API.
         network_id: Secure Compute network ID to attach to the sandbox.
         env: Environment variables for the sandbox.
@@ -190,6 +194,7 @@ def create_sandbox(
         execution_time_limit=execution_time_limit,
         resources=resources,
         persistent=persistent,
+        credentials=credentials,
         network_policy=network_policy,
         network_id=network_id,
         env=env,
@@ -300,6 +305,7 @@ def get_or_create_sandbox(
     execution_time_limit: DurationInput = None,
     resources: SandboxResources | None = None,
     persistent: bool | None = None,
+    credentials: SandboxManagedCredentials | None = None,
     network_policy: NetworkPolicy | None = None,
     network_id: str | None = None,
     env: Mapping[str, str] | None = None,
@@ -330,6 +336,8 @@ def get_or_create_sandbox(
             duration.
         resources: Requested CPU and memory resources.
         persistent: Whether the sandbox persists beyond its current session.
+        credentials: Vercel-managed credentials used only when creating the
+            sandbox.
         network_policy: Network access policy sent to the Sandbox API.
         network_id: Secure Compute network ID to attach to the sandbox.
         env: Environment variables for the sandbox.
@@ -358,6 +366,7 @@ def get_or_create_sandbox(
         execution_time_limit=execution_time_limit,
         resources=resources,
         persistent=persistent,
+        credentials=credentials,
         network_policy=network_policy,
         network_id=network_id,
         env=env,
@@ -679,6 +688,7 @@ __all__ = [
     "SandboxQueryByStatusUpdatedAt",
     "SandboxResponseError",
     "SandboxInteractiveError",
+    "SandboxManagedCredentials",
     "SandboxStdinError",
     "SandboxStreamError",
     "SandboxServiceOptions",

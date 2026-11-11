@@ -64,6 +64,7 @@ from vercel.sandbox._internal.models import (
     NetworkPolicyReadback,
     PrivateSandboxParameters,
     ProcessLog,
+    SandboxManagedCredentials,
     SandboxResources,
     SandboxSource,
     SandboxStatus,
@@ -199,6 +200,7 @@ class _SandboxCreationOverridesRequest(_ApiRequestModel):
     timeout: timedelta | None = None
     resources: SandboxResources | None = None
     persistent: bool | None = None
+    credentials: SandboxManagedCredentials | None = None
     network_policy: NetworkPolicy | None = Field(default=None, serialization_alias="networkPolicy")
     network_id: str | None = Field(default=None, serialization_alias="networkId")
     env: dict[str, str] | None = None
@@ -1197,6 +1199,7 @@ class SandboxApiClient:
         execution_time_limit: timedelta | None = None,
         resources: SandboxResources | None = None,
         persistent: bool | None = None,
+        credentials: SandboxManagedCredentials | None = None,
         network_policy: NetworkPolicy | None = None,
         network_id: str | None = None,
         env: Mapping[str, str] | None = None,
@@ -1208,8 +1211,8 @@ class SandboxApiClient:
         failover_regions: tuple[str, ...] | None = None,
         private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
     ) -> _PreparedSandboxCreation:
-        credentials = await self._credentials_factory()
-        resolved_project_id = project_id or credentials.project_id
+        api_credentials = await self._credentials_factory()
+        resolved_project_id = project_id or api_credentials.project_id
         serialized_mounts = _serialize_drive_mounts(
             mounts,
             project_id=resolved_project_id,
@@ -1227,6 +1230,7 @@ class SandboxApiClient:
             timeout=execution_time_limit,
             resources=resources,
             persistent=persistent,
+            credentials=credentials,
             network_policy=network_policy,
             network_id=network_id,
             env=dict(env) if env is not None else None,
@@ -1243,7 +1247,7 @@ class SandboxApiClient:
             body, ensure_ascii=False, separators=(",", ":"), allow_nan=False
         ).encode("utf-8")
         return _PreparedSandboxCreation(
-            credentials=credentials,
+            credentials=api_credentials,
             project_id=resolved_project_id,
             body=encoded_body,
         )
@@ -1290,6 +1294,7 @@ class SandboxApiClient:
         execution_time_limit: timedelta | None = None,
         resources: SandboxResources | None = None,
         persistent: bool | None = None,
+        credentials: SandboxManagedCredentials | None = None,
         network_policy: NetworkPolicy | None = None,
         network_id: str | None = None,
         env: Mapping[str, str] | None = None,
@@ -1310,6 +1315,7 @@ class SandboxApiClient:
             execution_time_limit=execution_time_limit,
             resources=resources,
             persistent=persistent,
+            credentials=credentials,
             network_policy=network_policy,
             network_id=network_id,
             env=env,

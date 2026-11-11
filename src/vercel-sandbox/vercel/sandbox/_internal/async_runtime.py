@@ -61,6 +61,7 @@ from vercel.sandbox._internal.models import (
     PrivateSandboxParameters,
     ProcessLog,
     RemotePath,
+    SandboxManagedCredentials,
     SandboxQuery,
     SandboxResources,
     SandboxSource,
@@ -2095,6 +2096,7 @@ class _CreateSandboxParams(SandboxValueModel):
     execution_time_limit: timedelta | None = None
     resources: SandboxResources | None = None
     persistent: bool | None = None
+    credentials: SandboxManagedCredentials | None = None
     network_policy: NetworkPolicy | None = None
     network_id: str | None = None
     env: Mapping[str, str] | None = None
@@ -2155,6 +2157,7 @@ class CreateSandboxOperation:
             execution_time_limit=self._params.execution_time_limit,
             resources=self._params.resources,
             persistent=self._params.persistent,
+            credentials=self._params.credentials,
             network_policy=self._params.network_policy,
             network_id=self._params.network_id,
             env=self._params.env,
@@ -2421,6 +2424,7 @@ def create_sandbox_operation(
     execution_time_limit: DurationInput = None,
     resources: SandboxResources | None = None,
     persistent: bool | None = None,
+    credentials: SandboxManagedCredentials | None = None,
     network_policy: NetworkPolicy | None = None,
     network_id: str | None = None,
     env: Mapping[str, str] | None = None,
@@ -2444,6 +2448,7 @@ def create_sandbox_operation(
             execution_time_limit=parse_duration_seconds(execution_time_limit),
             resources=resources,
             persistent=persistent,
+            credentials=credentials,
             network_policy=network_policy,
             network_id=network_id,
             env=env,
@@ -2543,6 +2548,7 @@ async def get_or_create_sandbox(
     execution_time_limit: DurationInput = None,
     resources: SandboxResources | None = None,
     persistent: bool | None = None,
+    credentials: SandboxManagedCredentials | None = None,
     network_policy: NetworkPolicy | None = None,
     network_id: str | None = None,
     env: Mapping[str, str] | None = None,
@@ -2566,6 +2572,7 @@ async def get_or_create_sandbox(
             execution_time_limit=parse_duration_seconds(execution_time_limit),
             resources=resources,
             persistent=persistent,
+            credentials=credentials,
             network_policy=network_policy,
             network_id=network_id,
             env=env,

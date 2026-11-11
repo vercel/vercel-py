@@ -985,6 +985,17 @@ class SandboxResources(_InputModel):
     memory: int | None = None
 
 
+class SandboxManagedCredentials(_InputModel):
+    """Configure Vercel-managed credential providers for a sandbox."""
+
+    npm: Literal[True] | None = Field(
+        default=None,
+        description=(
+            "Allow the sandbox to install private packages using the team's npm credentials."
+        ),
+    )
+
+
 class SnapshotRetention(_InputModel):
     """Configure automatic snapshot retention.
 

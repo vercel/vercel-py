@@ -84,6 +84,14 @@ Operations through a `Sandbox` handle that fail because the sandbox is stopped, 
 
 Sandboxes can be created from a runtime, image, Git repository, tarball, or snapshot. Forking copies a named sandbox's configuration and current snapshot, but never its drive mounts.
 
+## Managed credentials
+
+Sandbox creation can opt into Vercel-managed npm credentials without exposing tokens inside the sandbox.
+
+[[src/vercel-sandbox/vercel/sandbox/_internal/models.py#SandboxManagedCredentials]] accepts `npm=True`. The async and sync `create_sandbox` and `get_or_create_sandbox` APIs, including standalone clients, send it as the creation request's `credentials` object. Existing sandboxes returned by get-or-create are unchanged.
+
+Vercel injects team `NPM_RC` or `NPM_TOKEN` credentials into matching `GET` and `HEAD` requests, supporting private package installs while leaving publishing unauthenticated. [[src/vercel-sandbox/tests/test_sandbox_public_flow.py#test_public_create_sandbox_encodes_protocol_and_observed_state|Creation tests]] and [[src/vercel-sandbox/tests/test_public_models.py#test_managed_credentials_require_an_enabled_provider|model tests]] cover wire serialization and the enabled-only provider value.
+
 ## Sandbox updates
 
 `Sandbox.update()` changes the live current session before saving sandbox configuration, and does not resume a stopped session.
