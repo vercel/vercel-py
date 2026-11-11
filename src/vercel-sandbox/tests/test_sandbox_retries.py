@@ -262,23 +262,90 @@ async def test_timeout_policy_preserves_transfer_and_wait_overrides(
 
 
 @pytest.mark.parametrize("sync", [False, True])
-@pytest.mark.parametrize("operation", ["run", "upload"])
+@pytest.mark.parametrize("operation", ["run", "upload", "remove", "rename"])
 @respx.mock
 async def test_streaming_side_effects_are_not_replayed(
     sync: bool, operation: str, delays: list[float]
 ) -> None:
     respx.get(f"{_BASE}/preview").respond(200, json=_SANDBOX)
-    endpoint = "cmd" if operation == "run" else "fs/write"
+    endpoint = "fs/write" if operation == "upload" else "cmd"
     route = respx.post(f"{_BASE}/sessions/sbx_1/{endpoint}").respond(503)
     async with _client(sync) as client:
         box = await _resolve(client.get_sandbox(name="preview"))
-        with pytest.raises(SandboxApiError if operation == "run" else SandboxFilesystemWriteError):
+        with pytest.raises(
+            SandboxFilesystemWriteError if operation == "upload" else SandboxApiError
+        ):
             if operation == "run":
                 await _resolve(box.run_command("echo"))
-            else:
+            elif operation == "upload":
                 await _resolve(box.fs.write_bytes("hello.txt", b"hello"))
+            elif operation == "remove":
+                await _resolve(box.fs.remove("hello.txt"))
+            else:
+                await _resolve(box.fs.rename("hello.txt", "moved.txt"))
     assert route.call_count == 1
     assert delays == []
+
+
+@pytest.mark.parametrize("sync", [False, True])
+@pytest.mark.parametrize(
+    ("operation", "as_user"),
+    [
+        ("exists", False),
+        ("is_file", False),
+        ("is_dir", False),
+        ("listdir", False),
+        ("exists", True),
+        ("listdir", True),
+    ],
+)
+@respx.mock
+async def test_read_only_filesystem_checks_retry_their_start(
+    sync: bool, operation: str, as_user: bool, delays: list[float]
+) -> None:
+    respx.get(f"{_BASE}/preview").respond(200, json=_SANDBOX)
+    command = {
+        "id": "cmd_1",
+        "sessionId": "sbx_1",
+        "name": "sh",
+        "args": [],
+        "cwd": "/vercel/sandbox",
+        "startedAt": 1,
+    }
+
+    def finished(stdout: str = "") -> httpx.Response:
+        records: list[object] = [
+            {"command": command},
+            {"stream": "stdout", "data": stdout},
+            {"command": {**command, "exitCode": 0}},
+        ]
+        return httpx.Response(200, text="".join(json.dumps(record) + "\n" for record in records))
+
+    starts: list[Exception | httpx.Response] = [
+        httpx.ConnectError("reset"),
+        httpx.Response(503),
+        finished(),
+    ]
+    checks: list[httpx.Request] = []
+
+    def run(request: httpx.Request) -> httpx.Response:
+        if json.loads(request.content)["command"] == "getent":
+            return finished("alice:x:1001:1002::/home/alice:/bin/bash\n")
+        outcome = starts[len(checks)]
+        checks.append(request)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    respx.post(f"{_BASE}/sessions/sbx_1/cmd").mock(side_effect=run)
+    async with _client(sync) as client:
+        box = await _resolve(client.get_sandbox(name="preview"))
+        filesystem = box.as_user("alice").fs if as_user else box.fs
+        result = await _resolve(getattr(filesystem, operation)("path"))
+    assert result == ([] if operation == "listdir" else True)
+    assert len(checks) == 3
+    assert len({request.content for request in checks}) == 1
+    assert len(delays) == 2
 
 
 @pytest.mark.anyio

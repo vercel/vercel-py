@@ -1851,6 +1851,7 @@ class SandboxApiClient:
         output_router: ProcessOutputRouter,
         on_started: Callable[[ProcessState], Awaitable[None]] | None = None,
         on_start: Callable[[ProcessState], None] | None = None,
+        start_retries: int = 0,
     ) -> CompletedProcessState:
         """Run a process and stream its output until it exits.
 
@@ -1858,6 +1859,11 @@ class SandboxApiClient:
         calls it with the initial process metadata, before any output is
         routed, so it can write the process's input. ``on_start`` is the
         caller's callback, called first with the same metadata.
+
+        The request that starts the process is sent once unless
+        ``start_retries`` allows more attempts. A failed attempt may still
+        have started the process, so only a command that is safe to run
+        twice may ask for retries.
         """
         credentials = await self._credentials_factory()
         request = _RunCommandRequest(
@@ -1879,7 +1885,7 @@ class SandboxApiClient:
             body=JSONBody(request.to_api_dict()),
             headers={"connection": "close"},
             timeout=NO_TIMEOUT,
-            retries=0,
+            retries=start_retries,
         )
 
         initial: ProcessState | None = None

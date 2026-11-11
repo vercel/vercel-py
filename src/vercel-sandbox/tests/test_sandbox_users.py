@@ -22,8 +22,10 @@ from vercel import sandbox
 from vercel._internal.core.session import get_active_sync_session
 from vercel.api import session
 from vercel.sandbox import (
+    DirectoryEntry,
     SandboxError,
     SandboxExecution,
+    SandboxFilesystemCommandError,
     SandboxFilesystemOperations,
     SandboxFilesystemWriteError,
     SandboxUserAlreadyExistsError,
@@ -220,6 +222,98 @@ async def test_user_upload_keeps_payload_out_of_commands(
         assert events == ["getent", "upload"]
     else:
         assert events.index("upload") < events.index("chown")
+
+
+@pytest.mark.parametrize("sync", [False, True], ids=["async", "sync"])
+@respx.mock
+async def test_user_filesystem_commands_run_as_the_account_in_one_request(
+    mock_env_clear: None, sync: bool
+) -> None:
+    commands: list[dict[str, Any]] = []
+
+    def command(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        commands.append(body)
+        args = body.get("args", [])
+        stdout, stderr, status = "", "", 0
+        if body["command"] == "getent":
+            stdout = "alice:x:1001:1002::/home/alice:/bin/bash\n"
+        elif "vercel-fs-listdir" in args:
+            stdout = "notes.txt\0f\0nested\0d\0"
+        elif "vercel-fs-remove" in args:
+            stderr, status = "rm: cannot remove '/root/secret': Permission denied\n", 1
+        state = {
+            "id": f"cmd_{len(commands)}",
+            "name": body["command"],
+            "sessionId": "sbx_test",
+            "args": args,
+            "cwd": "/",
+            "startedAt": 1,
+        }
+        records = [
+            {"command": state},
+            {"stream": "stdout", "data": stdout},
+            {"stream": "stderr", "data": stderr},
+            {"command": {**state, "exitCode": status}},
+        ]
+        return httpx.Response(200, text="\n".join(json.dumps(record) for record in records))
+
+    # Only the run request is mocked, so each operation has to finish in it.
+    route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_test/cmd").mock(
+        side_effect=command
+    )
+
+    async def call(method: Any, *args: str) -> Any:
+        result = method(*args)
+        return await result if isawaitable(result) else result
+
+    async def exercise() -> None:
+        if sync:
+            handle = _handles()[3]
+        else:
+            from vercel._internal.core.session import get_active_session
+            from vercel.sandbox._internal.service import get_sandbox_service
+
+            handle = sandbox.SandboxRuntimeSession(
+                payload=SandboxRuntimeSessionState(id="sbx_test"),
+                service=get_sandbox_service(get_active_session()),
+            )
+        alice = handle.as_user("alice")
+        assert await call(alice.fs.exists, "notes.txt")
+        assert await call(alice.fs.listdir, "workspace") == [
+            DirectoryEntry(path="notes.txt", kind="file"),
+            DirectoryEntry(path="nested", kind="directory"),
+        ]
+        with pytest.raises(SandboxFilesystemCommandError) as denied:
+            await call(alice.fs.remove, "/root/secret")
+        assert denied.value.exit_code == 1
+        assert "Permission denied" in denied.value.stderr
+
+    if sync:
+        with session(service_options=sandbox_service_options(sync=True)):
+            await exercise()
+    else:
+        async with session(service_options=sandbox_service_options(sync=False)):
+            await exercise()
+
+    lookup, *scripts = commands
+    assert lookup["command"] == "getent"
+    assert route.call_count == 4
+    for body, tail in zip(
+        scripts,
+        (
+            ["vercel-fs-exists", "notes.txt", "-e"],
+            ["vercel-fs-listdir", "workspace"],
+            ["vercel-fs-remove", "/root/secret", "false", "false"],
+        ),
+        strict=True,
+    ):
+        args = body["args"]
+        assert (body["command"], body["sudo"]) == ("/usr/bin/setpriv", True)
+        assert args[args.index("--reuid") + 1] == "alice"
+        launched = args[args.index("run-as-user") + 1 :]
+        assert launched[:3] == ["/home/alice", "sh", "-c"]
+        assert launched[4:] == tail
 
 
 @respx.mock

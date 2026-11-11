@@ -5,6 +5,10 @@ the numbers: what remains is the SDK and HTTPX building requests and decoding
 responses. Each scenario reports the median and fastest of its iterations, and
 bulk scenarios also report throughput.
 
+Each scenario also reports how many requests one call makes. Against the real
+API every request is a network round trip, which costs far more than the SDK
+time measured here, so that count is the first thing to keep low.
+
 Run it from this package's directory::
 
     uv run python -m benchmarks.sdk_overhead
@@ -51,6 +55,7 @@ class Workload:
 @dataclass(frozen=True)
 class Result:
     name: str
+    requests: int
     median_seconds: float
     fastest_seconds: float
     megabytes_per_second: float | None
@@ -149,8 +154,10 @@ class _FakeSandboxApi:
         self._long_logs = _network_chunks(_ndjson(output))
         self._file = _network_chunks(bytes(range(256)) * (workload.file_bytes // 256))
         self.output_bytes = sum(len(chunk) for chunk in self._long_logs)
+        self.requests = 0
 
     def _respond(self, request: httpx.Request) -> bytes | list[bytes]:
+        self.requests += 1
         path = request.url.path
         if path.endswith("/fs/read"):
             return self._file
@@ -249,10 +256,11 @@ def _selected(scenarios: list[_Scenario], only: str | None) -> list[_Scenario]:
     return [scenario for scenario in scenarios if only is None or only in scenario.name]
 
 
-def _result(scenario: _Scenario, mode: str, samples: list[float]) -> Result:
+def _result(scenario: _Scenario, mode: str, samples: list[float], requests: int) -> Result:
     median = statistics.median(samples)
     return Result(
         name=f"{mode} {scenario.name}",
+        requests=requests // len(samples),
         median_seconds=median,
         fastest_seconds=min(samples),
         megabytes_per_second=(
@@ -287,6 +295,7 @@ async def run_async(
         for scenario in _selected(_scenarios(workload, api), only):
             await scenario.run_async(box)
             samples = []
+            requests_before = api.requests
             profiler = cProfile.Profile() if scenario.name == profile else None
             for _ in range(_iterations(scenario, workload)):
                 if profiler is not None:
@@ -298,7 +307,7 @@ async def run_async(
                     profiler.disable()
             if profiler is not None:
                 pstats.Stats(profiler).sort_stats("tottime").print_stats(30)
-            results.append(_result(scenario, "async", samples))
+            results.append(_result(scenario, "async", samples, api.requests - requests_before))
     return results
 
 
@@ -318,16 +327,17 @@ def run_sync(workload: Workload | None = None, *, only: str | None = None) -> li
         for scenario in _selected(_scenarios(workload, api), only):
             scenario.run_sync(box)
             samples = []
+            requests_before = api.requests
             for _ in range(_iterations(scenario, workload)):
                 started = time.perf_counter()
                 scenario.run_sync(box)
                 samples.append(time.perf_counter() - started)
-            results.append(_result(scenario, "sync", samples))
+            results.append(_result(scenario, "sync", samples, api.requests - requests_before))
     return results
 
 
 def format_results(results: list[Result]) -> str:
-    lines = [f"{'scenario':<34}{'median':>12}{'fastest':>12}{'throughput':>14}"]
+    lines = [f"{'scenario':<34}{'requests':>9}{'median':>12}{'fastest':>12}{'throughput':>14}"]
     for result in results:
         throughput = (
             ""
@@ -336,6 +346,7 @@ def format_results(results: list[Result]) -> str:
         )
         lines.append(
             f"{result.name:<34}"
+            f"{result.requests:>9}"
             f"{result.median_seconds * 1e3:>9.3f} ms"
             f"{result.fastest_seconds * 1e3:>9.3f} ms"
             f"{throughput:>14}"

@@ -1,6 +1,6 @@
 """Neutral orchestration for Sandbox operations."""
 
-from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from contextlib import aclosing, asynccontextmanager
 from datetime import timedelta
 from typing import TYPE_CHECKING, Literal, cast
@@ -64,6 +64,7 @@ from vercel.sandbox._internal.process_output import ProcessOutputRouter
 from vercel.sandbox._internal.process_stdin import feed_process_input
 from vercel.sandbox._internal.recovery import _lifecycle_stream_error
 from vercel.sandbox._internal.region import ResolvedRegion
+from vercel.sandbox._internal.retry import _RETRIES
 from vercel.sandbox._internal.runtime_common import (
     _StreamUploadFileEntry,
 )
@@ -100,7 +101,6 @@ _SESSION_STATUSES_WITHOUT_LIVE_POLICY = frozenset(
     {SandboxStatus.STOPPED, SandboxStatus.STOPPING, SandboxStatus.ABORTED, SandboxStatus.FAILED}
 )
 _READY_POLL_INTERVAL_SECONDS = 0.5
-ProcessOutputCollector = Callable[[ProcessState], Awaitable[tuple[str, str]]]
 _MISSING_PATH_ERROR_CODES = frozenset({"not_found", "path_not_found", "file_not_found", "ENOENT"})
 _PREDICATE_SCRIPT = """\
 case "$1" in
@@ -828,6 +828,7 @@ class SandboxService:
         output_router: ProcessOutputRouter,
         input: bytes | None = None,
         on_start: Callable[[ProcessState], None] | None = None,
+        start_retries: int = 0,
     ) -> CompletedProcessState:
         self._ensure_open()
         on_started = None
@@ -848,6 +849,7 @@ class SandboxService:
                 output_router=output_router,
                 on_started=on_started,
                 on_start=on_start,
+                start_retries=start_retries,
             )
         except _RunProcessInterrupted as interrupted:
             started, delivered = interrupted.process, interrupted.delivered
@@ -1043,16 +1045,31 @@ class SandboxService:
         script: str,
         args: list[str],
         cwd: str | None,
-        collect_output: ProcessOutputCollector,
+        read_only: bool,
     ) -> tuple[ProcessState, str, str]:
-        command = await self._wait_process(
+        """Run a filesystem script and return its exit state and decoded output.
+
+        The script runs through ``run_process``, so one request starts it and
+        carries its output and exit status. A ``read_only`` script changes
+        nothing in the sandbox, so starting it is retried like an ordinary
+        request; any other script is started once, because a retry could run
+        it a second time after the first run took effect. Once a script has
+        started, ``run_process`` reports a lifecycle failure as a stream
+        error, which sandbox recovery never replays.
+        """
+        result = await self.run_process(
             session_id=session_id,
             command="sh",
             args=["-c", script, f"vercel-fs-{operation}", *args],
             cwd=cwd,
+            output_router=ProcessOutputRouter(stdout=None, stderr=None, capture_output=True),
+            start_retries=_RETRIES if read_only else 0,
         )
-        stdout, stderr = await collect_output(command)
-        return command, stdout, stderr
+        return (
+            result.process,
+            (result.stdout or b"").decode("utf-8"),
+            (result.stderr or b"").decode("utf-8"),
+        )
 
     async def _predicate(
         self,
@@ -1062,7 +1079,6 @@ class SandboxService:
         session_id: str,
         path: str,
         cwd: str | None,
-        collect_output: ProcessOutputCollector,
     ) -> bool:
         command, stdout, stderr = await self._filesystem_command(
             operation=operation,
@@ -1070,7 +1086,7 @@ class SandboxService:
             script=_PREDICATE_SCRIPT,
             args=[path, operator],
             cwd=cwd,
-            collect_output=collect_output,
+            read_only=True,
         )
         if command.returncode == 0:
             return True
@@ -1090,7 +1106,6 @@ class SandboxService:
         session_id: str,
         path: str,
         cwd: str | None,
-        collect_output: ProcessOutputCollector,
     ) -> bool:
         return await self._predicate(
             operation="exists",
@@ -1098,7 +1113,6 @@ class SandboxService:
             session_id=session_id,
             path=path,
             cwd=cwd,
-            collect_output=collect_output,
         )
 
     async def is_file(
@@ -1107,7 +1121,6 @@ class SandboxService:
         session_id: str,
         path: str,
         cwd: str | None,
-        collect_output: ProcessOutputCollector,
     ) -> bool:
         return await self._predicate(
             operation="is_file",
@@ -1115,7 +1128,6 @@ class SandboxService:
             session_id=session_id,
             path=path,
             cwd=cwd,
-            collect_output=collect_output,
         )
 
     async def is_dir(
@@ -1124,7 +1136,6 @@ class SandboxService:
         session_id: str,
         path: str,
         cwd: str | None,
-        collect_output: ProcessOutputCollector,
     ) -> bool:
         return await self._predicate(
             operation="is_dir",
@@ -1132,7 +1143,6 @@ class SandboxService:
             session_id=session_id,
             path=path,
             cwd=cwd,
-            collect_output=collect_output,
         )
 
     async def listdir(
@@ -1141,7 +1151,6 @@ class SandboxService:
         session_id: str,
         path: str,
         cwd: str | None,
-        collect_output: ProcessOutputCollector,
     ) -> list[DirectoryEntry]:
         command, stdout, stderr = await self._filesystem_command(
             operation="listdir",
@@ -1149,7 +1158,7 @@ class SandboxService:
             script=_LISTDIR_SCRIPT,
             args=[path],
             cwd=cwd,
-            collect_output=collect_output,
+            read_only=True,
         )
         if command.returncode != 0:
             raise SandboxFilesystemCommandError(
@@ -1169,7 +1178,6 @@ class SandboxService:
         cwd: str | None,
         recursive: bool,
         missing_ok: bool,
-        collect_output: ProcessOutputCollector,
     ) -> None:
         command, stdout, stderr = await self._filesystem_command(
             operation="remove",
@@ -1177,7 +1185,7 @@ class SandboxService:
             script=_REMOVE_SCRIPT,
             args=[path, str(recursive).lower(), str(missing_ok).lower()],
             cwd=cwd,
-            collect_output=collect_output,
+            read_only=False,
         )
         if command.returncode != 0:
             raise SandboxFilesystemCommandError(
@@ -1195,7 +1203,6 @@ class SandboxService:
         source: str,
         destination: str,
         cwd: str | None,
-        collect_output: ProcessOutputCollector,
     ) -> None:
         command, stdout, stderr = await self._filesystem_command(
             operation="rename",
@@ -1203,7 +1210,7 @@ class SandboxService:
             script=_RENAME_SCRIPT,
             args=[source, destination],
             cwd=cwd,
-            collect_output=collect_output,
+            read_only=False,
         )
         if command.returncode != 0:
             raise SandboxFilesystemCommandError(
