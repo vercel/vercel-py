@@ -585,18 +585,6 @@ class SandboxFilesystem:
             )
         return SandboxTextWriter(TextWriterCore(binding, encoding, errors, newline, permissions))
 
-    async def _collect_output(self, command: ProcessState) -> tuple[str, str]:
-        stdout: list[bytes] = []
-        stderr: list[bytes] = []
-        async for event in self._service.process_logs(
-            session_id=command.session_id, process_id=command.id
-        ):
-            if event.stream == "stdout":
-                stdout.append(event.data)
-            else:
-                stderr.append(event.data)
-        return b"".join(stdout).decode("utf-8"), b"".join(stderr).decode("utf-8")
-
     async def mkdir(
         self, path: RemotePath, *, cwd: RemotePath | None = None, recursive: bool = True
     ) -> None:
@@ -787,7 +775,6 @@ class SandboxFilesystem:
                 session_id=session_id,
                 path=remote_path,
                 cwd=remote_cwd,
-                collect_output=self._collect_output,
             )
         )
 
@@ -804,7 +791,6 @@ class SandboxFilesystem:
                 session_id=session_id,
                 path=remote_path,
                 cwd=remote_cwd,
-                collect_output=self._collect_output,
             )
         )
 
@@ -821,7 +807,6 @@ class SandboxFilesystem:
                 session_id=session_id,
                 path=remote_path,
                 cwd=remote_cwd,
-                collect_output=self._collect_output,
             )
         )
 
@@ -848,7 +833,6 @@ class SandboxFilesystem:
                 session_id=session_id,
                 path=remote_path,
                 cwd=remote_cwd,
-                collect_output=self._collect_output,
             )
         )
 
@@ -881,7 +865,6 @@ class SandboxFilesystem:
                 cwd=remote_cwd,
                 recursive=recursive,
                 missing_ok=missing_ok,
-                collect_output=self._collect_output,
             )
         )
 
@@ -911,7 +894,6 @@ class SandboxFilesystem:
                 source=remote_source,
                 destination=remote_destination,
                 cwd=remote_cwd,
-                collect_output=self._collect_output,
             )
         )
 

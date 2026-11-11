@@ -5,7 +5,7 @@ _TINY = Workload(output_lines=40, file_bytes=128 * 1024, request_iterations=1, b
 
 
 def _scenario_names(results: list[Result], mode: str) -> list[str]:
-    assert all(result.fastest_seconds > 0 for result in results)
+    assert all(result.fastest_seconds > 0 and result.requests > 0 for result in results)
     return [result.name.removeprefix(f"{mode} ") for result in results]
 
 

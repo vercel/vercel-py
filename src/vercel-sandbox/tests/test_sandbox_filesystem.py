@@ -1,3 +1,4 @@
+import inspect
 import io
 import json
 import tarfile
@@ -19,6 +20,7 @@ from vercel.sandbox import (
     SandboxFilesystemCommandError,
     SandboxFilesystemWriteError,
     SandboxPathNotFoundError,
+    SandboxStreamError,
     SandboxUploadSizeMismatchError,
     sync as sandbox_sync,
 )
@@ -59,6 +61,10 @@ class _SyncByteWriter:
         self.closed = True
 
 
+async def _resolve(value: object) -> object:
+    return await value if inspect.isawaitable(value) else value
+
+
 def _sandbox_response(session_id: str = "sbx_1") -> dict[str, object]:
     return {
         "sandbox": {
@@ -92,13 +98,29 @@ def _command_response(
     }
 
 
-def _logs_response(stdout: str = "", stderr: str = "") -> httpx.Response:
-    records = []
-    if stdout:
-        records.append({"stream": "stdout", "data": stdout})
-    if stderr:
-        records.append({"stream": "stderr", "data": stderr})
-    return httpx.Response(200, text="".join(json.dumps(item) + "\n" for item in records))
+def _ndjson_response(*records: object) -> httpx.Response:
+    return httpx.Response(200, text="".join(json.dumps(record) + "\n" for record in records))
+
+
+def _run_response(
+    command_id: str,
+    session_id: str = "sbx_1",
+    *,
+    exit_code: int = 0,
+    stdout: str = "",
+    stderr: str = "",
+) -> httpx.Response:
+    """Answer a command the way the API streams one that ran to completion."""
+    output = [
+        {"stream": stream, "data": data}
+        for stream, data in (("stdout", stdout), ("stderr", stderr))
+        if data
+    ]
+    return _ndjson_response(
+        _command_response(command_id, session_id),
+        *output,
+        _command_response(command_id, session_id, exit_code=exit_code),
+    )
 
 
 def _tar_entries(content: bytes) -> dict[str, tuple[bytes, int]]:
@@ -197,17 +219,14 @@ def _install_filesystem_recovery_routes(
         old_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_old/cmd").mock(
             side_effect=stopped_handler
         )
-        command_id = f"{operation}_new"
         replacement_route = respx.post(
             "https://sandbox.test/v2/sandboxes/sessions/sbx_new/cmd"
-        ).mock(return_value=httpx.Response(200, json=_command_response(command_id, "sbx_new")))
-        respx.get(f"https://sandbox.test/v2/sandboxes/sessions/sbx_new/cmd/{command_id}").mock(
-            return_value=httpx.Response(
-                200, json=_command_response(command_id, "sbx_new", exit_code=0)
+        ).mock(
+            return_value=_run_response(
+                f"{operation}_new",
+                "sbx_new",
+                stdout="listed\0file\0" if operation == "listdir" else "",
             )
-        )
-        respx.get(f"https://sandbox.test/v2/sandboxes/sessions/sbx_new/cmd/{command_id}/logs").mock(
-            return_value=_logs_response("listed\0file\0" if operation == "listdir" else "")
         )
 
     return events, resume_route, (old_route, replacement_route)
@@ -263,6 +282,43 @@ def test_sync_sandbox_filesystem_replays_recoverable_operations(
         assert result == [DirectoryEntry(path="listed", kind="file")]
     else:
         assert result is None
+
+
+@pytest.mark.parametrize("sync", [False, True], ids=["async", "sync"])
+@pytest.mark.parametrize(
+    "operation", ["exists", "is_file", "is_dir", "listdir", "remove", "rename"]
+)
+@respx.mock
+async def test_filesystem_command_is_not_replayed_once_it_has_started(
+    mock_env_clear: None, sync: bool, operation: str
+) -> None:
+    lookup = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    command = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
+        return_value=_ndjson_response(
+            _command_response(operation),
+            {"stream": "error", "data": {"code": "sandbox_stopped", "message": "stopped"}},
+        )
+    )
+    paths = ("before.txt", "after.txt") if operation == "rename" else ("path",)
+
+    async def run() -> None:
+        get_sandbox = sandbox_sync.get_sandbox if sync else sandbox.get_sandbox
+        box: Any = await _resolve(get_sandbox(name="preview"))
+        with pytest.raises(SandboxStreamError, match="stopped") as failure:
+            await _resolve(getattr(box.fs, operation)(*paths))
+        assert failure.value.code == "sandbox_stopped"
+
+    if sync:
+        with session(service_options=_session_options(sync=True)):
+            await run()
+    else:
+        async with session(service_options=_session_options(sync=False)):
+            await run()
+
+    # The sandbox was looked up once and never resumed to run the script again.
+    assert (command.call_count, lookup.call_count) == (1, 1)
 
 
 @respx.mock
@@ -612,11 +668,15 @@ async def test_async_runtime_session_filesystem_and_lazy_handle_do_not_resume(
     sandbox_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
         return_value=httpx.Response(200, json=_sandbox_response("sbx_stopped"))
     )
+    stopped = httpx.Response(
+        409,
+        json={"error": {"code": "sandbox_stopped", "message": "session is stopped"}},
+    )
     read_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_stopped/fs/read").mock(
-        return_value=httpx.Response(
-            409,
-            json={"error": {"code": "sandbox_stopped", "message": "session is stopped"}},
-        )
+        return_value=stopped
+    )
+    command_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_stopped/cmd").mock(
+        return_value=stopped
     )
 
     async with session(service_options=_session_options()):
@@ -632,8 +692,11 @@ async def test_async_runtime_session_filesystem_and_lazy_handle_do_not_resume(
         with pytest.raises(SandboxApiError, match="session is stopped"):
             async with lazy_reader:
                 pass
+        with pytest.raises(SandboxApiError, match="session is stopped"):
+            await runtime_session.fs.exists("message.txt")
 
     assert read_route.call_count == 2
+    assert command_route.call_count == 1
     assert sandbox_route.call_count == 1
 
 
@@ -644,11 +707,15 @@ def test_sync_runtime_session_filesystem_and_lazy_handle_do_not_resume(
     sandbox_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
         return_value=httpx.Response(200, json=_sandbox_response("sbx_stopped"))
     )
+    stopped = httpx.Response(
+        409,
+        json={"error": {"code": "sandbox_stopped", "message": "session is stopped"}},
+    )
     read_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_stopped/fs/read").mock(
-        return_value=httpx.Response(
-            409,
-            json={"error": {"code": "sandbox_stopped", "message": "session is stopped"}},
-        )
+        return_value=stopped
+    )
+    command_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_stopped/cmd").mock(
+        return_value=stopped
     )
 
     with session(service_options=_session_options()):
@@ -664,8 +731,11 @@ def test_sync_runtime_session_filesystem_and_lazy_handle_do_not_resume(
         with pytest.raises(SandboxApiError, match="session is stopped"):
             with lazy_reader:
                 pass
+        with pytest.raises(SandboxApiError, match="session is stopped"):
+            runtime_session.fs.exists("message.txt")
 
     assert read_route.call_count == 2
+    assert command_route.call_count == 1
     assert sandbox_route.call_count == 1
 
 
@@ -998,32 +1068,36 @@ async def test_command_backed_filesystem_operations_parse_output_and_pass_paths_
         return_value=httpx.Response(200, json=_sandbox_response())
     )
     requested: list[dict[str, object]] = []
-    command_ids = iter(["exists", "is_file", "listdir", "remove", "rename"])
+    responses = iter(
+        [
+            _run_response("exists"),
+            _run_response("is_file", exit_code=1),
+            _run_response("is_dir"),
+            _run_response("listdir", stdout="z name\0file\0.dot\nname\0directory\0"),
+            _run_response("remove"),
+            _run_response("rename"),
+        ]
+    )
 
-    def start(request: httpx.Request) -> httpx.Response:
+    def run(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
         assert isinstance(payload, dict)
         requested.append(payload)
-        return httpx.Response(200, json=_command_response(next(command_ids)))
+        return next(responses)
 
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(side_effect=start)
-    exit_codes = {"exists": 0, "is_file": 1, "listdir": 0, "remove": 0, "rename": 0}
-    output = {"listdir": "z name\0file\0.dot\nname\0directory\0"}
-    for command_id, exit_code in exit_codes.items():
-        respx.get(f"https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/{command_id}").mock(
-            return_value=httpx.Response(
-                200, json=_command_response(command_id, exit_code=exit_code)
-            )
-        )
-        respx.get(f"https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/{command_id}/logs").mock(
-            return_value=_logs_response(output.get(command_id, ""))
-        )
+    # Only the run request is mocked: each operation is answered by that one
+    # response, so asking for the command's exit or logs separately would fail.
+    commands = respx.post(
+        "https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd",
+        params={"wait": "true", "logs": "true"},
+    ).mock(side_effect=run)
 
     unsafe_path = "-a; printf injected"
     async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview")
         assert await box.fs.exists(unsafe_path)
         assert not await box.fs.is_file("missing")
+        assert await box.fs.is_dir("directory")
         assert await box.fs.listdir("directory") == [
             DirectoryEntry(path=".dot\nname", kind="directory"),
             DirectoryEntry(path="z name", kind="file"),
@@ -1031,12 +1105,13 @@ async def test_command_backed_filesystem_operations_parse_output_and_pass_paths_
         await box.fs.remove(unsafe_path, recursive=True, missing_ok=True)
         await box.fs.rename(unsafe_path, "destination")
 
+    assert commands.call_count == 6
     request_args = [cast(list[str], item["args"]) for item in requested]
     scripts = [args[1] for args in request_args]
     assert all(unsafe_path not in script for script in scripts)
     assert request_args[0][3:] == [unsafe_path, "-e"]
-    assert request_args[3][3:] == [unsafe_path, "true", "true"]
-    assert request_args[4][3:] == [unsafe_path, "destination"]
+    assert request_args[4][3:] == [unsafe_path, "true", "true"]
+    assert request_args[5][3:] == [unsafe_path, "destination"]
 
 
 @respx.mock
@@ -1052,13 +1127,7 @@ async def test_filesystem_failures_use_filesystem_error_contract(mock_env_clear:
         ]
     )
     respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
-        return_value=httpx.Response(200, json=_command_response("listdir"))
-    )
-    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/listdir").mock(
-        return_value=httpx.Response(200, json=_command_response("listdir", exit_code=2))
-    )
-    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/listdir/logs").mock(
-        return_value=_logs_response("partial", "cannot list")
+        return_value=_run_response("listdir", exit_code=2, stdout="partial", stderr="cannot list")
     )
 
     async with session(service_options=_session_options()):
@@ -1087,13 +1156,7 @@ def test_sync_filesystem_capability_uses_sync_boundary(mock_env_clear: None) -> 
         return_value=httpx.Response(200, json=_sandbox_response())
     )
     respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
-        return_value=httpx.Response(200, json=_command_response("exists"))
-    )
-    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/exists").mock(
-        return_value=httpx.Response(200, json=_command_response("exists", exit_code=0))
-    )
-    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/exists/logs").mock(
-        return_value=_logs_response()
+        return_value=_run_response("exists")
     )
 
     with session(service_options=_session_options()):

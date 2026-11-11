@@ -27,11 +27,7 @@ from vercel.sandbox._internal.models import (
 )
 from vercel.sandbox._internal.process_output import ProcessOutputRouter
 from vercel.sandbox._internal.runtime_common import _resolve_write_files_cwd
-from vercel.sandbox._internal.service import (
-    ProcessOutputCollector,
-    SandboxArchiveUpload,
-    SandboxService,
-)
+from vercel.sandbox._internal.service import SandboxArchiveUpload, SandboxService
 from vercel.sandbox._internal.state import CompletedProcessState, ProcessState
 
 _ResultT = TypeVar("_ResultT")
@@ -471,6 +467,7 @@ class UserService(SandboxService):
         output_router: ProcessOutputRouter,
         input: bytes | None = None,
         on_start: Callable[[ProcessState], None] | None = None,
+        start_retries: int = 0,
     ) -> CompletedProcessState:
         wrapped = await self._wrap(session_id, command, args, cwd, env, sudo, kill_after)
         return await self._parent.run_process(
@@ -483,6 +480,7 @@ class UserService(SandboxService):
             output_router=output_router,
             input=input,
             on_start=on_start,
+            start_retries=start_retries,
         )
 
     async def _run_process(
@@ -611,7 +609,6 @@ class UserService(SandboxService):
         session_id: str,
         path: str,
         cwd: str | None,
-        collect_output: ProcessOutputCollector,
     ) -> list[DirectoryEntry]:
         # Unlike shell globbing, find reports an inaccessible directory as an error.
         script = (
@@ -625,7 +622,7 @@ class UserService(SandboxService):
             script=script,
             args=[path],
             cwd=cwd,
-            collect_output=collect_output,
+            read_only=True,
         )
         if state.returncode != 0:
             raise SandboxFilesystemCommandError(
