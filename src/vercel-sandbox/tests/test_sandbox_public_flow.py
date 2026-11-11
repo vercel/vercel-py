@@ -56,6 +56,7 @@ from vercel.sandbox import (
     SandboxSource,
     SandboxStatus,
     SandboxTerminalStateError,
+    SessionStopReason,
     SnapshotExpiration,
     SnapshotRetention,
     SnapshotRetentionState,
@@ -5725,12 +5726,16 @@ async def test_expiry_notification_lead_time_is_omitted_by_default(
     assert "expiryNotificationLeadTime" not in json.loads(create_route.calls.last.request.content)
 
 
+def _stopped_sandbox_response(stop_reason: str) -> dict[str, Any]:
+    response = _sandbox_response(status="stopped", session_status="stopped")
+    response["session"]["stopReason"] = stop_reason
+    return response
+
+
 @respx.mock
 async def test_session_stop_reason_is_read_back(mock_env_clear: None) -> None:
-    stopped = _sandbox_response(status="stopped", session_status="stopped")
-    stopped["session"]["stopReason"] = "timeout"
     respx.get("https://sandbox.test/v2/sandboxes/stopped").mock(
-        return_value=httpx.Response(200, json=stopped)
+        return_value=httpx.Response(200, json=_stopped_sandbox_response("timeout"))
     )
     respx.get("https://sandbox.test/v2/sandboxes/running").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
@@ -5741,6 +5746,29 @@ async def test_session_stop_reason_is_read_back(mock_env_clear: None) -> None:
         running_handle = await sandbox.get_sandbox(name="running")
 
     assert stopped_handle.current_session is not None
-    assert stopped_handle.current_session.stop_reason == "timeout"
+    assert stopped_handle.current_session.stop_reason is SessionStopReason.TIMEOUT
     assert running_handle.current_session is not None
     assert running_handle.current_session.stop_reason is None
+
+
+@respx.mock
+def test_sync_session_stop_reason_accepts_unknown_reasons(mock_env_clear: None) -> None:
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(200, json=_stopped_sandbox_response("evicted"))
+    )
+
+    with session(service_options=_session_options()):
+        handle = sandbox_sync.get_sandbox(name="preview")
+
+    assert handle.current_session is not None
+    reason = handle.current_session.stop_reason
+    assert isinstance(reason, SessionStopReason)
+    assert reason == "evicted"
+    assert reason.value == "evicted"
+    assert reason not in set(SessionStopReason)
+    assert SessionStopReason("evicted") == reason
+
+
+def test_session_stop_reason_rejects_non_string_values() -> None:
+    with pytest.raises(ValueError):
+        SessionStopReason(1)  # type: ignore[arg-type]

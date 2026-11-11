@@ -67,6 +67,7 @@ from vercel.sandbox._internal.models import (
     SandboxResources,
     SandboxSource,
     SandboxStatus,
+    SessionStopReason,
     SnapshotExpiration,
     SnapshotRetention,
     SnapshotRetentionUpdate,
@@ -878,7 +879,9 @@ def _runtime_session_state(payload: _RuntimeSessionPayload) -> SandboxRuntimeSes
         requested_at=payload.requested_at,
         started_at=payload.started_at,
         stopped_at=payload.stopped_at,
-        stop_reason=payload.stop_reason,
+        stop_reason=(
+            None if payload.stop_reason is None else SessionStopReason(payload.stop_reason)
+        ),
     )
 
 

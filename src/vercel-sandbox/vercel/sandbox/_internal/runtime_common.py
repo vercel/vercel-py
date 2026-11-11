@@ -24,6 +24,7 @@ from vercel.sandbox._internal.models import (
     RemotePath,
     SandboxMount,
     SandboxStatus,
+    SessionStopReason,
     _WriteFile,
 )
 from vercel.sandbox._internal.state import (
@@ -513,12 +514,12 @@ class RuntimeSessionHandleBase:
         return self._payload.stopped_at
 
     @property
-    def stop_reason(self) -> str | None:
+    def stop_reason(self) -> SessionStopReason | None:
         """Why the session stopped, when the service reports it.
 
-        Known values are ``"requested"``, ``"snapshot"``, ``"timeout"``,
-        ``"exited"``, and ``"error"``. ``None`` while the session is running
-        and for sessions that stopped before the service recorded reasons.
+        ``None`` while the session is running and for sessions that stopped
+        before the service recorded reasons. Reasons this SDK doesn't know
+        yet are returned as ``SessionStopReason`` pseudo-members.
         """
         return self._payload.stop_reason
 
