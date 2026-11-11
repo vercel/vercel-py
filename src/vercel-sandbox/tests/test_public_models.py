@@ -95,6 +95,7 @@ def test_managed_credentials_require_an_enabled_provider() -> None:
     credentials = sandbox.SandboxManagedCredentials(npm=True)
 
     assert credentials.to_api_dict() == {"npm": True}
+    assert "private packages" in credentials.model_json_schema()["properties"]["npm"]["description"]
     assert sandbox.sync.SandboxManagedCredentials is sandbox.SandboxManagedCredentials
     with pytest.raises(ValidationError):
         sandbox.SandboxManagedCredentials.model_validate({"npm": False})
