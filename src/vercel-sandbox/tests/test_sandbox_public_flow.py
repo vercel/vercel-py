@@ -56,6 +56,7 @@ from vercel.sandbox import (
     SandboxSource,
     SandboxStatus,
     SandboxTerminalStateError,
+    SessionStopReason,
     SnapshotExpiration,
     SnapshotRetention,
     SnapshotRetentionState,
@@ -5633,3 +5634,141 @@ async def test_create_and_fork_reject_non_network_policy(
                 getattr(sandbox, f"{operation}_sandbox")(**kwargs)
 
     assert route.call_count == 0
+
+
+def _lifecycle_sandbox_response(**kwargs: Any) -> dict[str, Any]:
+    response = _sandbox_response(**kwargs)
+    response["sandbox"]["expiryNotificationLeadTime"] = 300000
+    return response
+
+
+@respx.mock
+async def test_expiry_notification_lead_time_is_sent_and_read_back(
+    mock_env_clear: None,
+) -> None:
+    create_route = respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_lifecycle_sandbox_response())
+    )
+    update_route = respx.patch("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "sandbox": {
+                    "name": "preview",
+                    "currentSessionId": "sbx_123",
+                    "expiryNotificationLeadTime": 600000,
+                }
+            },
+        )
+    )
+    fork_route = respx.post("https://sandbox.test/v2/sandboxes/preview/fork").mock(
+        return_value=httpx.Response(
+            200, json=_lifecycle_sandbox_response(name="forked", session_id="sbx_fork")
+        )
+    )
+
+    async with session(service_options=_session_options()):
+        handle = await sandbox.create_sandbox(name="preview", expiry_notification_lead_time=300)
+        assert handle.expiry_notification_lead_time == timedelta(minutes=5)
+
+        await handle.update(expiry_notification_lead_time=timedelta(minutes=10))
+        assert handle.expiry_notification_lead_time == timedelta(minutes=10)
+
+        forked = await sandbox.fork_sandbox(
+            source_sandbox="preview",
+            name="forked",
+            expiry_notification_lead_time=timedelta(minutes=2),
+        )
+        assert forked.expiry_notification_lead_time == timedelta(minutes=5)
+
+    assert json.loads(create_route.calls.last.request.content)["expiryNotificationLeadTime"] == (
+        300000
+    )
+    assert json.loads(update_route.calls.last.request.content) == {
+        "expiryNotificationLeadTime": 600000
+    }
+    assert json.loads(fork_route.calls.last.request.content)["expiryNotificationLeadTime"] == (
+        120000
+    )
+
+
+@respx.mock
+def test_sync_expiry_notification_lead_time_is_sent_and_read_back(
+    mock_env_clear: None,
+) -> None:
+    create_route = respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_lifecycle_sandbox_response())
+    )
+
+    with session(service_options=_session_options()):
+        handle = sandbox_sync.create_sandbox(
+            name="preview", expiry_notification_lead_time=timedelta(minutes=5)
+        )
+        assert handle.expiry_notification_lead_time == timedelta(minutes=5)
+
+    assert json.loads(create_route.calls.last.request.content)["expiryNotificationLeadTime"] == (
+        300000
+    )
+
+
+@respx.mock
+async def test_expiry_notification_lead_time_is_omitted_by_default(
+    mock_env_clear: None,
+) -> None:
+    create_route = respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+
+    async with session(service_options=_session_options()):
+        handle = await sandbox.create_sandbox(name="preview")
+        assert handle.expiry_notification_lead_time is None
+
+    assert "expiryNotificationLeadTime" not in json.loads(create_route.calls.last.request.content)
+
+
+def _stopped_sandbox_response(stop_reason: str) -> dict[str, Any]:
+    response = _sandbox_response(status="stopped", session_status="stopped")
+    response["session"]["stopReason"] = stop_reason
+    return response
+
+
+@respx.mock
+async def test_session_stop_reason_is_read_back(mock_env_clear: None) -> None:
+    respx.get("https://sandbox.test/v2/sandboxes/stopped").mock(
+        return_value=httpx.Response(200, json=_stopped_sandbox_response("timeout"))
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/running").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+
+    async with session(service_options=_session_options()):
+        stopped_handle = await sandbox.get_sandbox(name="stopped")
+        running_handle = await sandbox.get_sandbox(name="running")
+
+    assert stopped_handle.current_session is not None
+    assert stopped_handle.current_session.stop_reason is SessionStopReason.TIMEOUT
+    assert running_handle.current_session is not None
+    assert running_handle.current_session.stop_reason is None
+
+
+@respx.mock
+def test_sync_session_stop_reason_accepts_unknown_reasons(mock_env_clear: None) -> None:
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(200, json=_stopped_sandbox_response("evicted"))
+    )
+
+    with session(service_options=_session_options()):
+        handle = sandbox_sync.get_sandbox(name="preview")
+
+    assert handle.current_session is not None
+    reason = handle.current_session.stop_reason
+    assert isinstance(reason, SessionStopReason)
+    assert reason == "evicted"
+    assert reason.value == "evicted"
+    assert reason not in set(SessionStopReason)
+    assert SessionStopReason("evicted") == reason
+
+
+def test_session_stop_reason_rejects_non_string_values() -> None:
+    with pytest.raises(ValueError):
+        SessionStopReason(1)  # type: ignore[arg-type]
