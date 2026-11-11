@@ -517,6 +517,7 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
             },
             "timeout": 120000,
             "resources": {"vcpus": 2, "memory": 4096},
+            "credentials": {"npm": True},
             "snapshotExpiration": 86400000,
             "keepLastSnapshots": {
                 "count": 3,
@@ -582,6 +583,7 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
             ),
             execution_time_limit=120,
             resources=SandboxResources(vcpus=2, memory=4096),
+            credentials=sandbox.SandboxManagedCredentials(npm=True),
             snapshot_expiration=SnapshotExpiration(timedelta(days=1)),
             snapshot_retention=SnapshotRetention(
                 count=3,
@@ -2507,6 +2509,7 @@ async def test_async_get_or_create_returns_existing_or_created_sandbox(
             "projectId": "prj_other",
             "name": "missing",
             "persistent": True,
+            "credentials": {"npm": True},
             "tags": {"purpose": "test"},
         }
         return httpx.Response(
@@ -2524,6 +2527,7 @@ async def test_async_get_or_create_returns_existing_or_created_sandbox(
         created, was_created = await sandbox.get_or_create_sandbox(
             name="missing",
             persistent=True,
+            credentials=sandbox.SandboxManagedCredentials(npm=True),
             tags={"purpose": "test"},
         )
 
@@ -2710,6 +2714,7 @@ def test_sync_get_or_create_defaults_to_resume_and_returns_created_flag(
             "projectId": "prj_123",
             "name": "missing",
             "image": "missing-repository:latest",
+            "credentials": {"npm": True},
         }
         return httpx.Response(
             200,
@@ -2723,7 +2728,9 @@ def test_sync_get_or_create_defaults_to_resume_and_returns_created_flag(
             name="existing", image="existing-repository:latest"
         )
         created, was_created = sandbox_sync.get_or_create_sandbox(
-            name="missing", image="missing-repository:latest"
+            name="missing",
+            image="missing-repository:latest",
+            credentials=sandbox_sync.SandboxManagedCredentials(npm=True),
         )
 
     assert existing.name == "existing"

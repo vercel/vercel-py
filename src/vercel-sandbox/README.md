@@ -49,6 +49,25 @@ async with session():
 
 `network_id` is also accepted by `fork_sandbox()` and the synchronous APIs.
 
+To install private npm packages with your team's managed credentials, opt in
+when creating the sandbox:
+
+```python
+from vercel import sandbox
+
+instance = await sandbox.create_sandbox(
+    credentials=sandbox.SandboxManagedCredentials(npm=True),
+)
+await instance.run_command("npm", ["install"])
+```
+
+Vercel injects credentials from the team's shared `NPM_RC` or `NPM_TOKEN`
+environment variables into matching `GET` and `HEAD` requests. The token is
+not exposed inside the sandbox. This supports installs with npm, pnpm, and
+Yarn 1; publishing remains unauthenticated. If the team has no npm
+credentials, the sandbox is created without them. The option is also accepted
+by `get_or_create_sandbox()` and the synchronous and standalone APIs.
+
 When no image is provided, the Sandbox API uses
 `vercel/sandbox/universal:latest`.
 
