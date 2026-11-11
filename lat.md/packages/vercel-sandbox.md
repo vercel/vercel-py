@@ -84,6 +84,12 @@ Operations through a `Sandbox` handle that fail because the sandbox is stopped, 
 
 Sandboxes can be created from a runtime, image, Git repository, tarball, or snapshot. Forking copies a named sandbox's configuration and current snapshot, but never its drive mounts.
 
+### Lifecycle webhook settings
+
+The service delivers `sandbox.session.started`, `stopped`, and `expiring` team webhooks itself; the SDK only carries the related sandbox and session fields.
+
+Creation, forking, get-or-create, and updates accept `expiry_notification_lead_time` as seconds or a duration, sent in milliseconds as `expiryNotificationLeadTime`, and [[src/vercel-sandbox/vercel/sandbox/_internal/runtime_common.py#SandboxHandleBase#expiry_notification_lead_time]] reads it back. The service owns the allowed range and default. [[src/vercel-sandbox/vercel/sandbox/_internal/runtime_common.py#RuntimeSessionHandleBase#stop_reason]] reports why a session stopped as an open string, so reasons the service adds later still parse. [[src/vercel-sandbox/tests/test_sandbox_public_flow.py#test_expiry_notification_lead_time_is_sent_and_read_back|Public API tests]] cover the request encoding and readback.
+
 ## Sandbox updates
 
 `Sandbox.update()` changes the live current session before saving sandbox configuration, and does not resume a stopped session.

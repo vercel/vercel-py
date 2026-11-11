@@ -512,6 +512,16 @@ class RuntimeSessionHandleBase:
     def stopped_at(self) -> int | None:
         return self._payload.stopped_at
 
+    @property
+    def stop_reason(self) -> str | None:
+        """Why the session stopped, when the service reports it.
+
+        Known values are ``"requested"``, ``"snapshot"``, ``"timeout"``,
+        ``"exited"``, and ``"error"``. ``None`` while the session is running
+        and for sessions that stopped before the service recorded reasons.
+        """
+        return self._payload.stop_reason
+
     def _apply_payload(self, payload: SandboxRuntimeSessionState) -> None:
         if payload.id != self._payload.id:
             raise SandboxResponseError(
@@ -647,6 +657,11 @@ class SandboxHandleBase(Generic[RuntimeSessionHandleT]):
     @property
     def snapshot_retention(self) -> SnapshotRetentionState | None:
         return self._payload.snapshot_retention
+
+    @property
+    def expiry_notification_lead_time(self) -> timedelta | None:
+        """How long before a session times out the expiring webhook is sent."""
+        return self._payload.expiry_notification_lead_time
 
     @property
     def status_updated_at(self) -> int | None:

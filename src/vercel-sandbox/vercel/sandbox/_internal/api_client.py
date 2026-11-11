@@ -212,8 +212,11 @@ class _SandboxCreationOverridesRequest(_ApiRequestModel):
     )
     region: str | None = None
     failover_regions: list[str] | None = Field(default=None, serialization_alias="failoverRegions")
+    expiry_notification_lead_time: timedelta | None = Field(
+        default=None, serialization_alias="expiryNotificationLeadTime"
+    )
 
-    @field_serializer("timeout")
+    @field_serializer("timeout", "expiry_notification_lead_time")
     def _serialize_duration(self, value: timedelta | None) -> int | None:
         return None if value is None else to_ms_int(value)
 
@@ -263,8 +266,11 @@ class _UpdateSandboxRequest(_ApiRequestModel):
     current_snapshot_id: str | None = Field(default=None, serialization_alias="currentSnapshotId")
     region: str | None = None
     failover_regions: list[str] | None = Field(default=None, serialization_alias="failoverRegions")
+    expiry_notification_lead_time: timedelta | None = Field(
+        default=None, serialization_alias="expiryNotificationLeadTime"
+    )
 
-    @field_serializer("timeout")
+    @field_serializer("timeout", "expiry_notification_lead_time")
     def _serialize_duration(self, value: timedelta | None) -> int | None:
         return None if value is None else to_ms_int(value)
 
@@ -457,6 +463,11 @@ class _RuntimeSessionPayload(_ApiModel):
         validation_alias=AliasChoices("stopped_at", "stoppedAt"),
         serialization_alias="stoppedAt",
     )
+    stop_reason: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("stop_reason", "stopReason"),
+        serialization_alias="stopReason",
+    )
 
 
 class _SnapshotRetentionPayload(_ApiModel):
@@ -520,6 +531,13 @@ class _SandboxPayload(_ApiModel):
         default=None,
         validation_alias=AliasChoices("snapshot_retention", "keepLastSnapshots"),
         serialization_alias="keepLastSnapshots",
+    )
+    expiry_notification_lead_time: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "expiry_notification_lead_time", "expiryNotificationLeadTime"
+        ),
+        serialization_alias="expiryNotificationLeadTime",
     )
     status_updated_at: int | None = Field(
         default=None,
@@ -860,6 +878,7 @@ def _runtime_session_state(payload: _RuntimeSessionPayload) -> SandboxRuntimeSes
         requested_at=payload.requested_at,
         started_at=payload.started_at,
         stopped_at=payload.stopped_at,
+        stop_reason=payload.stop_reason,
     )
 
 
@@ -899,6 +918,9 @@ def _sandbox_state(
                 expiration=parse_duration(payload.snapshot_retention.expiration, MILLISECOND),
                 delete_evicted=payload.snapshot_retention.delete_evicted,
             )
+        ),
+        expiry_notification_lead_time=parse_duration(
+            payload.expiry_notification_lead_time, MILLISECOND
         ),
         status_updated_at=payload.status_updated_at,
         created_at=payload.created_at,
@@ -1206,6 +1228,7 @@ class SandboxApiClient:
         snapshot_retention: SnapshotRetention | None = None,
         region: ResolvedRegion | None = None,
         failover_regions: tuple[str, ...] | None = None,
+        expiry_notification_lead_time: timedelta | None = None,
         private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
     ) -> _PreparedSandboxCreation:
         credentials = await self._credentials_factory()
@@ -1236,6 +1259,7 @@ class SandboxApiClient:
             keep_last_snapshots=snapshot_retention,
             region=region,
             failover_regions=None if failover_regions is None else list(failover_regions),
+            expiry_notification_lead_time=expiry_notification_lead_time,
         )
         body = request.to_api_dict()
         body.update(private_parameters)
@@ -1299,6 +1323,7 @@ class SandboxApiClient:
         snapshot_retention: SnapshotRetention | None = None,
         region: ResolvedRegion | None = None,
         failover_regions: tuple[str, ...] | None = None,
+        expiry_notification_lead_time: timedelta | None = None,
         private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
     ) -> SandboxState:
         prepared = await self.prepare_sandbox_creation(
@@ -1319,6 +1344,7 @@ class SandboxApiClient:
             snapshot_retention=snapshot_retention,
             region=region,
             failover_regions=failover_regions,
+            expiry_notification_lead_time=expiry_notification_lead_time,
             private_parameters=private_parameters,
         )
         return await self.send_prepared_sandbox_creation(prepared)
@@ -1343,6 +1369,7 @@ class SandboxApiClient:
         snapshot_retention: SnapshotRetention | None = None,
         region: ResolvedRegion | None = None,
         failover_regions: tuple[str, ...] | None = None,
+        expiry_notification_lead_time: timedelta | None = None,
         private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
     ) -> SandboxState:
         credentials = await self._credentials_factory()
@@ -1369,6 +1396,7 @@ class SandboxApiClient:
             keep_last_snapshots=snapshot_retention,
             region=region,
             failover_regions=None if failover_regions is None else list(failover_regions),
+            expiry_notification_lead_time=expiry_notification_lead_time,
         )
         data = await self._request_json(
             "POST",
@@ -1477,6 +1505,7 @@ class SandboxApiClient:
         current_snapshot_id: str | None = None,
         region: ResolvedRegion | None = None,
         failover_regions: tuple[str, ...] | None = None,
+        expiry_notification_lead_time: timedelta | None = None,
     ) -> SandboxState:
         credentials = await self._credentials_factory()
         effective_project_id = project_id or credentials.project_id
@@ -1500,6 +1529,7 @@ class SandboxApiClient:
             current_snapshot_id=current_snapshot_id,
             region=region,
             failover_regions=None if failover_regions is None else list(failover_regions),
+            expiry_notification_lead_time=expiry_notification_lead_time,
         )
         body = request.to_api_dict()
         if not isinstance(network_id, _Omitted):
