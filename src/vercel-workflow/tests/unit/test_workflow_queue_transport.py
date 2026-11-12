@@ -1,4 +1,4 @@
-"""Tests for the CBOR queue transport VercelWorld sends and receives with.
+"""Tests for VercelWorld queue transport, delivery handling, and routing.
 
 Mirrors ``DualTransport`` in ``@workflow/world-vercel``: every producer at
 ``specVersion >= 3`` puts workflow messages on the queue as CBOR, so the
@@ -16,8 +16,11 @@ from typing import Any
 from unittest.mock import AsyncMock, Mock
 
 import cbor2
+import httpx2 as httpx
 import pytest
+from hypothesis import given, strategies as st
 
+import vercel.queue as vqs
 from vercel.queue import MessageMetadata
 from vercel.queue._internal.subscribers import infer_subscriber_transport
 from vercel.workflow._internal import ulid, world as w
@@ -107,6 +110,79 @@ def test_dispatch_resolves_the_transport_without_help_from_the_client(
     )
 
     assert infer_subscriber_transport(metadata) is vercel_mod._QUEUE_TRANSPORT
+
+
+def _handler_for(world: vercel_mod.VercelWorld, error: BaseException) -> Any:
+    async def handler(message, *, queue_name, attempt, message_id):  # noqa: ANN001, ANN202
+        del message, queue_name, attempt, message_id
+        raise error
+
+    world.create_queue_handler("__wkf_workflow_", handler)
+    return world._queue_callbacks[-1]
+
+
+def _message(delivery_count: int) -> vqs.Message[Any]:
+    metadata = MessageMetadata(
+        message_id="m1",
+        delivery_count=delivery_count,
+        created_at=datetime.datetime(2026, 1, 1, tzinfo=UTC),
+        topic="__wkf_workflow_greet",
+        consumer_group=w.QUEUE_CONSUMER_GROUP,
+        content_type="application/cbor",
+    )
+    return vqs.Message(
+        payload=WRAPPER,
+        metadata=metadata,
+    )
+
+
+# @lat: [[vercel-workflow#Worlds#Queue handler failures]]
+@pytest.mark.usefixtures("isolated_subscriptions")
+async def test_failed_delivery_requests_a_short_retry() -> None:
+    world = vercel_mod.VercelWorld(token="test-token")
+    callback = _handler_for(world, httpx.ConnectTimeout("connect timed out"))
+
+    with pytest.raises(vqs.RetryAfter) as raised:
+        await callback(_message(delivery_count=1))
+
+    assert raised.value.timeout_seconds == 1
+    assert isinstance(raised.value.__cause__, httpx.ConnectTimeout)
+
+
+@pytest.mark.usefixtures("isolated_subscriptions")
+@pytest.mark.parametrize("directive", [vqs.RetryAfter(42), vqs.Handoff()])
+async def test_handler_directives_pass_through(directive: vqs.QueueDirective) -> None:
+    world = vercel_mod.VercelWorld(token="test-token")
+    callback = _handler_for(world, directive)
+
+    with pytest.raises(type(directive)) as raised:
+        await callback(_message(delivery_count=3))
+
+    assert raised.value is directive
+
+
+@given(delivery_count=st.integers(min_value=0, max_value=200))
+def test_redelivery_backoff_ramps_with_jitter_and_stays_in_bounds(delivery_count: int) -> None:
+    delay = vercel_mod._handler_error_retry_after_seconds(RuntimeError("x"), delivery_count)
+    backoff = min(max(1, 2 ** max(0, delivery_count - 1)), 900)
+
+    assert 1 <= delay <= backoff
+    assert delay >= backoff - (backoff + 3) // 4
+
+
+@given(
+    delivery_count=st.integers(min_value=0, max_value=200),
+    retry_after=st.integers(min_value=1, max_value=10_000),
+)
+def test_server_retry_delay_is_respected_up_to_the_queue_limit(
+    delivery_count: int, retry_after: int
+) -> None:
+    error = w.ThrottleError("slow down", status=429, retry_after=retry_after)
+
+    delay = vercel_mod._handler_error_retry_after_seconds(error, delivery_count)
+
+    assert delay >= min(retry_after, 900)
+    assert delay <= 900
 
 
 def test_queue_client_cache_includes_region(monkeypatch):

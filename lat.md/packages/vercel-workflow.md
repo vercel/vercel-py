@@ -37,6 +37,14 @@ A World is the storage and queueing backend for runs, chosen once per process.
 - [[src/vercel-workflow/vercel/workflow/_internal/worlds/vercel.py#VercelWorld]] talks to the hosted Workflow service and sends through [[vercel-queue]].
 - [[src/vercel-workflow/vercel/workflow/_internal/worlds/local.py#LocalWorld]] writes JSON files that the `workflow` CLI can inspect, and delivers through the embedded queue from [[vercel-queue#Local emulation]]. Event and step files live one directory per run (`events/<runId>/`, `steps/<runId>/`), matching `@workflow/world-local`. On startup [[src/vercel-workflow/vercel/workflow/_internal/worlds/local.py#_wipe_flat_layout]] deletes a data directory holding only the old flat layout and raises [[src/vercel-workflow/vercel/workflow/_internal/worlds/local.py#DataDirLayoutError]] for mixed or unknown contents.
 
+### Queue handler failures
+
+Failed Vercel workflow deliveries request a retry after a short delay instead of waiting for the default five-minute processing lease to expire.
+
+[[src/vercel-workflow/vercel/workflow/_internal/worlds/vercel.py#VercelWorld#create_queue_handler]] turns handler exceptions into the queue SDK's `RetryAfter` directive. Explicit queue directives pass through unchanged. [[src/vercel-workflow/vercel/workflow/_internal/worlds/vercel.py#_handler_error_retry_after_seconds]] starts at one second and increases the delay with the delivery count, with jitter and a 900-second cap. A positive server retry delay sets a lower bound, also capped at 900 seconds. The queue SDK retries the visibility update; if those attempts fail, the existing lease remains the fallback.
+
+[[src/vercel-workflow/tests/unit/test_workflow_queue_transport.py#test_failed_delivery_requests_a_short_retry|Queue delivery tests]] cover short failure retries, explicit directive passthrough, bounded jitter, and server retry delays.
+
 ## Payloads and encryption
 
 Inputs, results, hook payloads, and stream chunks use `@workflow/core`'s encoding, so data round-trips between the Python and TypeScript SDKs.
