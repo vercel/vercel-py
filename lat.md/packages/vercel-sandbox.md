@@ -158,6 +158,20 @@ Public API regressions verify native HTTP payload transport, ownership, binary r
 
 [[src/vercel-sandbox/tests/test_sandbox_users.py#test_create_user_distinguishes_existing_accounts_from_provisioning_errors|Provisioning error tests]] verify both public APIs expose a recoverable existing-username error while preserving other failures. [[src/vercel-sandbox/tests/test_sandbox_users.py#test_user_upload_keeps_payload_out_of_commands|Wire tests]] cover both APIs, ensure the payload appears in the archive rather than command arguments, and propagate HTTP or metadata failures. [[src/vercel-sandbox/tests/live/test_sandbox_users_live.py#test_user_identity_and_permission_enforcement|Live tests]] cover binary eager, batched, and streamed writes; explicit close; file and directory ownership; private reads and command denial; and existing accounts with different homes and groups.
 
+## Linux groups
+
+Group handles create Linux groups with a shared directory and change which accounts belong to them.
+
+[[src/vercel-sandbox/vercel/sandbox/_internal/group_core.py#GroupContext#provision|Group provisioning]] creates the group and a setgid directory under `/shared`, owned by the sandbox default account and the new group. The setgid bit gives entries that members' commands create inside the group, so only members reach them. Uploads and directory creation through a user handle keep the [[vercel-sandbox#Linux user contexts|user ownership policy]] instead, so shared files are written with commands. Existing group names raise [[src/vercel-sandbox/vercel/sandbox/_internal/errors.py#SandboxGroupAlreadyExistsError]] with the name for recovery through group selection. Occupied shared paths, including symlinks, are rejected before the group is created; they and other failures remain generic Sandbox errors.
+
+[[src/vercel-sandbox/vercel/sandbox/_internal/group_core.py#set_group_membership|Membership changes]] run as root and are reachable from both a group handle and a user handle, each accepting the other's handle or a plain name. User commands initialize supplementary groups at launch, so a change applies to commands and reads started afterwards. Selecting a group performs no I/O and never creates it; a missing group or account fails when membership changes. Group handles created from sandboxes follow lazy resume; session handles remain pinned.
+
+### Group tests
+
+Public API tests verify provisioning errors, membership failures, and that shared directories admit members only.
+
+[[src/vercel-sandbox/tests/test_sandbox_groups.py#test_create_group_distinguishes_existing_groups_from_provisioning_errors|Provisioning error tests]] verify both public APIs expose a recoverable existing-group error while preserving other failures. [[src/vercel-sandbox/tests/test_sandbox_groups.py#test_membership_changes_run_privileged_and_report_failures|Membership tests]] cover both directions, handles and names, and failure reporting. [[src/vercel-sandbox/tests/live/test_sandbox_groups_live.py#test_group_members_share_a_directory|Live tests]] cover shared directory ownership, group inheritance for files written by commands, reads by members, denial for non-members, and access revoked by removal.
+
 ## Drives
 
 Drives are named persistent filesystems scoped to one project and region and mounted into sandboxes at creation.

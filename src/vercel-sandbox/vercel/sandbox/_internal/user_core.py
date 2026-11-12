@@ -280,6 +280,17 @@ class UserContext:
 
         await self.execution.execute(create)
 
+    async def set_group_membership(self, groupname: str, *, member: bool) -> None:
+        from vercel.sandbox._internal.group_core import set_group_membership
+
+        await set_group_membership(
+            self.service._parent,
+            self.execution,
+            username=self.username,
+            groupname=groupname,
+            member=member,
+        )
+
     async def run(
         self,
         command: str,
