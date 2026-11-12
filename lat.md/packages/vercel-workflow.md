@@ -37,6 +37,24 @@ A World is the storage and queueing backend for runs, chosen once per process.
 - [[src/vercel-workflow/vercel/workflow/_internal/worlds/vercel.py#VercelWorld]] talks to the hosted Workflow service and sends through [[vercel-queue]].
 - [[src/vercel-workflow/vercel/workflow/_internal/worlds/local.py#LocalWorld]] writes JSON files that the `workflow` CLI can inspect, and delivers through the embedded queue from [[vercel-queue#Local emulation]]. Event and step files live one directory per run (`events/<runId>/`, `steps/<runId>/`), matching `@workflow/world-local`. On startup [[src/vercel-workflow/vercel/workflow/_internal/worlds/local.py#_wipe_flat_layout]] deletes a data directory holding only the old flat layout and raises [[src/vercel-workflow/vercel/workflow/_internal/worlds/local.py#DataDirLayoutError]] for mixed or unknown contents.
 
+### HTTP request retries
+
+The Vercel world retries safe Workflow API requests after transport failures so a brief network interruption can recover within the current call.
+
+[[src/vercel-workflow/vercel/workflow/_internal/worlds/vercel.py#_send_with_transport_retries]] makes at most three attempts, waiting between retries with exponential backoff and jitter. [[src/vercel-workflow/vercel/workflow/_internal/worlds/vercel.py#_is_retryable_transport_error]] allows GET, HEAD, and OPTIONS requests to retry after any transport error. Other methods retry only connection errors, connection timeouts, or pool timeouts, which occur before the request is sent. An uncertain write is left to the caller because repeating a step start can increment its attempt counter twice. HTTP error responses are not retried.
+
+[[src/vercel-workflow/vercel/workflow/_internal/worlds/vercel.py#VercelWorld#_cbor_request]] owns the HTTP client lifetime and passes one client to the retry helper, so all attempts within a call share its connection pool.
+
+[[src/vercel-workflow/tests/unit/test_workflow_queue_transport.py#test_step_start_retries_before_the_request_is_sent|HTTP transport tests]] cover client reuse, safe write retries, uncertain writes, read retries, the attempt limit, and HTTP error responses.
+
+### Queue handler failures
+
+Failed Vercel workflow deliveries request a retry after a short delay instead of waiting for the default five-minute processing lease to expire.
+
+[[src/vercel-workflow/vercel/workflow/_internal/worlds/vercel.py#VercelWorld#create_queue_handler]] turns handler exceptions into the queue SDK's `RetryAfter` directive. Explicit queue directives pass through unchanged. [[src/vercel-workflow/vercel/workflow/_internal/worlds/vercel.py#_handler_error_retry_after_seconds]] starts at one second and increases the delay with the delivery count, with jitter and a 900-second cap. Large delivery counts select the capped delay before exponentiation, so the calculation cannot allocate an unbounded integer. A positive server retry delay sets a lower bound, also capped at 900 seconds. The queue SDK retries the visibility update; if those attempts fail, the existing lease remains the fallback.
+
+[[src/vercel-workflow/tests/unit/test_workflow_queue_transport.py#test_failed_delivery_requests_a_short_retry|Queue delivery tests]] cover short failure retries, explicit directive passthrough, bounded jitter, and server retry delays. [[src/vercel-workflow/tests/unit/test_workflow_queue_transport.py#test_redelivery_backoff_caps_large_counts_before_exponentiation]] checks the cap boundary and extremely large counts.
+
 ## Payloads and encryption
 
 Inputs, results, hook payloads, and stream chunks use `@workflow/core`'s encoding, so data round-trips between the Python and TypeScript SDKs.
