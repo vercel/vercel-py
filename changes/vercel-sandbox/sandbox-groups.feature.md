@@ -1,0 +1,1 @@
+Add `create_group()` and `as_group()` to sandbox and runtime session handles, with `add_user()`/`remove_user()` on group handles and `add_to_group()`/`remove_from_group()` on user handles, so selected users can collaborate through a shared `/shared/<groupname>` directory. Uploads and directories created through user handles in a setgid directory now keep its group.

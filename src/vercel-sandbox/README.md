@@ -523,7 +523,10 @@ Upload contents never appear in command arguments. Successful uploads belong
 to the selected user and its actual primary group. Directories created by
 `mkdir`, and ancestors below the selected user's home, belong to that user
 and the sandbox default group with mode `0770` so later HTTP uploads can reach
-them. File access modes come from the upload request.
+them. Inside a setgid directory, such as a
+[group's shared directory](#groups-and-shared-directories), uploads and
+directories keep that directory's group instead. File access modes come from
+the upload request.
 
 These SDK write operations can access paths that the selected user's commands
 cannot, including another user's home when the HTTP account has access. Do not
@@ -535,11 +538,11 @@ files, and ownership is assigned only after the HTTP upload succeeds.
 
 User handles obtained from a sandbox follow its lazy resume; handles obtained
 from a runtime session stay pinned to that session. No lifecycle, configuration,
-or process lookup/listing methods are exposed by user handles. Group management
-is not included. Custom images need Bash with coprocess support, getent,
-useradd, setpriv with `--pdeathsig` support (util-linux), GNU find, and coreutils
-(including env's `--default-signal`), with setpriv, env, and sleep available
-under `/usr/bin`. User file reads use base64 command output to preserve binary
+or process lookup/listing methods are exposed by user handles. Custom images
+need Bash with coprocess support, getent, useradd, setpriv with `--pdeathsig`
+support (util-linux), GNU find, and coreutils (including env's
+`--default-signal`), with setpriv, env, and sleep available under `/usr/bin`.
+User file reads use base64 command output to preserve binary
 contents; uploads stream through the native file endpoint. Command time limits
 and `KILL` clean up the command's process group inside the selected account so
 child processes release their output streams promptly. Catchable signals such
@@ -573,3 +576,30 @@ and filesystem operations only. See the executable
 [`sandbox_10_users.py`](examples/sandbox_10_users.py) example for generic
 consumers, command execution, and isolation using both APIs. The design follows
 Vercel's [multi-agent sandbox guide](https://vercel.com/docs/sandbox/concepts/multi-agent).
+
+## Groups and shared directories
+
+Create a Linux group to let selected users collaborate through a shared
+directory, while their homes stay private:
+
+```python
+devs = await instance.create_group("devs")
+await devs.add_user(alice)
+await bob.add_to_group(devs)  # Either direction accepts a handle or a name
+
+await alice.fs.write_text(f"{devs.shared_dir}/spec.txt", "v2")
+assert await bob.fs.read_text("/shared/devs/spec.txt") == "v2"
+
+await devs.remove_user("bob")
+```
+
+`create_group()` provisions `/shared/<groupname>` with mode `2770`, owned by
+the sandbox default account and the new group. Entries created there by
+commands, uploads, or `mkdir` belong to the group, so members can read them and
+non-members cannot. It raises `SandboxGroupAlreadyExistsError` if the group
+exists; pass its `groupname` to `as_group()`, which performs no I/O, to select
+that group. Group names follow the username rules. Membership changes apply to
+commands and reads started afterwards, and fail with `SandboxError` for a
+missing account or group, or when removing a non-member. Custom images
+additionally need groupadd, usermod, and gpasswd. See the executable
+[`sandbox_11_groups.py`](examples/sandbox_11_groups.py) example.

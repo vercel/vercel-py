@@ -130,7 +130,7 @@ async def test_create_user_distinguishes_existing_accounts_from_provisioning_err
 
 
 @pytest.mark.parametrize("sync", [False, True], ids=["async", "sync"])
-@pytest.mark.parametrize("failure", [None, "upload", "chown", "chmod"])
+@pytest.mark.parametrize("failure", [None, "upload", "file", "directory"])
 @respx.mock
 async def test_user_upload_keeps_payload_out_of_commands(
     mock_env_clear: None, sync: bool, failure: str | None
@@ -143,7 +143,9 @@ async def test_user_upload_keeps_payload_out_of_commands(
         body = json.loads(request.content)
         commands.append(body)
         name = body["command"]
-        events.append(name)
+        # Ownership commands name the kind of entry they assign.
+        step = body["args"][3] if name == "/bin/bash" else name
+        events.append(step)
         output = {
             "getent": "alice:x:1001:1002::/home/alice:/bin/bash\n",
             "id": "1000\n",
@@ -159,8 +161,8 @@ async def test_user_upload_keeps_payload_out_of_commands(
         records = [
             {"command": state},
             {"stream": "stdout", "data": output},
-            {"stream": "stderr", "data": "metadata failed" if name == failure else ""},
-            {"command": {**state, "exitCode": 1 if name == failure else 0}},
+            {"stream": "stderr", "data": "metadata failed" if step == failure else ""},
+            {"command": {**state, "exitCode": 1 if step == failure else 0}},
         ]
         return httpx.Response(200, text="\n".join(json.dumps(record) for record in records))
 
@@ -214,12 +216,12 @@ async def test_user_upload_keeps_payload_out_of_commands(
             await exercise()
 
     assert route.call_count == 1
-    assert all(body["command"] in {"getent", "id", "chown", "chmod"} for body in commands)
+    assert set(events) <= {"getent", "id", "upload", "file", "directory"}
     assert base64.b64encode(data).decode() not in json.dumps(commands)
     if failure == "upload":
         assert events == ["getent", "upload"]
     else:
-        assert events.index("upload") < events.index("chown")
+        assert events.index("upload") < events.index("file")
 
 
 @respx.mock

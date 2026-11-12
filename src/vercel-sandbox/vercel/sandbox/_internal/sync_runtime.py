@@ -130,6 +130,7 @@ from vercel.sandbox._internal.value_model import SandboxModel
 if TYPE_CHECKING:
     from _typeshed import ReadableBuffer, WriteableBuffer
 
+    from vercel.sandbox.sync.group import SyncSandboxGroup
     from vercel.sandbox.sync.user import SyncSandboxUser
 
 
@@ -1058,6 +1059,35 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         iter_coroutine(user._context.provision())
         return user
 
+    def as_group(self, groupname: str) -> "SyncSandboxGroup":
+        """Select an existing group without I/O; validate the group name now.
+
+        A missing group fails when membership changes are attempted.
+        This handle stays pinned to this runtime session.
+        """
+        from vercel.sandbox._internal.group_core import GroupContext
+        from vercel.sandbox.sync.group import SyncSandboxGroup
+
+        return SyncSandboxGroup(
+            GroupContext(
+                groupname=groupname,
+                service=self._service,
+                execution=self.fs._execution,
+            )
+        )
+
+    def create_group(self, groupname: str) -> "SyncSandboxGroup":
+        """Create a Linux group with a setgid (2770) directory at /shared/<groupname>.
+
+        The directory belongs to the sandbox default account, for HTTP uploads,
+        and the new group; entries created inside inherit the group. Existing
+        groups raise ``SandboxGroupAlreadyExistsError``; use ``as_group()`` to
+        reuse one. Other provisioning failures raise ``SandboxError``.
+        """
+        group = self.as_group(groupname)
+        iter_coroutine(group._context.provision())
+        return group
+
     def run_command(
         self,
         command: str,
@@ -1656,6 +1686,35 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         user = self.as_user(username)
         iter_coroutine(user._context.provision())
         return user
+
+    def as_group(self, groupname: str) -> "SyncSandboxGroup":
+        """Select an existing group without I/O; validate the group name now.
+
+        A missing group fails when membership changes are attempted.
+        This handle follows this sandbox through lazy resume.
+        """
+        from vercel.sandbox._internal.group_core import GroupContext
+        from vercel.sandbox.sync.group import SyncSandboxGroup
+
+        return SyncSandboxGroup(
+            GroupContext(
+                groupname=groupname,
+                service=self._service,
+                execution=self.fs._execution,
+            )
+        )
+
+    def create_group(self, groupname: str) -> "SyncSandboxGroup":
+        """Create a Linux group with a setgid (2770) directory at /shared/<groupname>.
+
+        The directory belongs to the sandbox default account, for HTTP uploads,
+        and the new group; entries created inside inherit the group. Existing
+        groups raise ``SandboxGroupAlreadyExistsError``; use ``as_group()`` to
+        reuse one. Other provisioning failures raise ``SandboxError``.
+        """
+        group = self.as_group(groupname)
+        iter_coroutine(group._context.provision())
+        return group
 
     def run_command(
         self,
