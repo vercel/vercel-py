@@ -1,6 +1,6 @@
 # Tooling
 
-Repository tooling for checks, changelogs, releases, and publishing, all driven from the workspace root through Poe tasks.
+Repository tooling for checks, changelogs, releases, and publishing, driven from the workspace root through Poe and Turborepo tasks.
 
 Contributor commands are listed in [[CONTRIBUTING.md]]; this page explains the design behind them.
 
@@ -11,6 +11,20 @@ Lint, typecheck, and test tasks are defined once and inherited by every package,
 Packages include the shared [[scripts/poe/poe.toml]] and only override tasks for genuine differences. The runner in [[scripts/poe/workspace_poe.py]] maps scopes — package names, `root`, or paths — to owning packages and runs them in parallel; the full design is in [[scripts/poe/README.md]].
 
 Example tests are opt-in: a package declares its own `test-examples` task and owns discovery, credentials, setup, and cleanup, so live examples skip safely when secrets are missing.
+
+### Turborepo lint
+
+CI lint and formatting run through Turborepo's experimental native uv workspace support, configured in [[turbo.json]] and [[pyproject.toml]]. Other checks and contributor workflows still use Poe.
+
+[[.github/workflows/ci.yml]] pins Turbo 2.11.10 and runs native Ruff tasks over
+the workspace members plus custom commands for root tests and examples.
+Formatting runs with `--check` and without caching; native lint uses the local
+Turbo cache. [[CONTRIBUTING.md]] documents the equivalent local commands.
+
+Turbo discovers workspace membership, but its graph omits dependencies declared
+only through the dynamic Hatch hook. CI therefore checks all members without
+affected filtering. [[scripts/poe/README.md]] describes the task mappings and
+the remaining migration requirements.
 
 ### Git hooks
 
