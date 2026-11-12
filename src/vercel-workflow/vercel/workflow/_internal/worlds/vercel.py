@@ -13,6 +13,7 @@ from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
 from datetime import UTC
 from typing import Any, TypeVar, overload
 
+import anyio
 import cbor2
 import httpx2 as httpx
 import pydantic
@@ -68,6 +69,42 @@ def _parse_response_body(resp: httpx.Response) -> Any:
         return cbor2.loads(
             resp.content, tag_hook=_cbor_tag_hook, object_hook=_cbor_filter_undefined
         )
+
+
+# These errors occur before the request is sent, so writes can be retried safely.
+_UNSENT_REQUEST_ERRORS: tuple[type[httpx.TransportError], ...] = (
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.PoolTimeout,
+)
+_IDEMPOTENT_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+# Limit each request to three attempts, with a short wait between attempts.
+_REQUEST_ATTEMPTS = 3
+_REQUEST_RETRY_BASE_SECONDS = 0.1
+
+
+def _is_retryable_transport_error(method: str, error: httpx.TransportError) -> bool:
+    if isinstance(error, _UNSENT_REQUEST_ERRORS):
+        return True
+    return method.upper() in _IDEMPOTENT_METHODS
+
+
+async def _send_with_transport_retries(
+    client: httpx.AsyncClient,
+    method: str,
+    endpoint: str,
+    *,
+    content: bytes | None,
+) -> httpx.Response:
+    for attempt in range(_REQUEST_ATTEMPTS):
+        try:
+            return await client.request(method, endpoint, content=content)
+        except httpx.TransportError as error:
+            if attempt + 1 >= _REQUEST_ATTEMPTS or not _is_retryable_transport_error(method, error):
+                raise
+            delay = _REQUEST_RETRY_BASE_SECONDS * 2**attempt
+            await anyio.sleep(delay + random.uniform(0, delay / 2))
+    raise AssertionError("unreachable")  # pragma: no cover
 
 
 # Failed deliveries retry with exponential backoff and jitter, up to 900 seconds.
@@ -510,11 +547,7 @@ class VercelWorld(w.World):
             body = cbor2.dumps(data)
 
         async with httpx.AsyncClient(base_url=self._base_url, headers=headers) as client:
-            resp = await client.request(
-                method,
-                endpoint,
-                content=body,
-            )
+            resp = await _send_with_transport_retries(client, method, endpoint, content=body)
 
         # utils.ts, makeRequest: the status decides, not the body. A body only
         # has to parse when the server said the call succeeded — otherwise an

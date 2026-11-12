@@ -1,4 +1,4 @@
-"""Tests for VercelWorld queue transport, delivery handling, and routing.
+"""Tests for VercelWorld HTTP and queue transport, delivery handling, and routing.
 
 Mirrors ``DualTransport`` in ``@workflow/world-vercel``: every producer at
 ``specVersion >= 3`` puts workflow messages on the queue as CBOR, so the
@@ -20,6 +20,7 @@ import httpx2 as httpx
 import pytest
 from hypothesis import given, strategies as st
 
+import vendor.respx as respx
 import vercel.queue as vqs
 from vercel.queue import MessageMetadata
 from vercel.queue._internal.subscribers import infer_subscriber_transport
@@ -183,6 +184,121 @@ def test_server_retry_delay_is_respected_up_to_the_queue_limit(
 
     assert delay >= min(retry_after, 900)
     assert delay <= 900
+
+
+@pytest.fixture
+def _no_http_backoff_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(vercel_mod.anyio, "sleep", _sleep)
+
+
+def _http_ok() -> httpx.Response:
+    return httpx.Response(
+        200, content=cbor2.dumps({}), headers={"content-type": "application/cbor"}
+    )
+
+
+# @lat: [[vercel-workflow#Worlds#HTTP request retries]]
+@pytest.mark.parametrize(
+    "error_type", [httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout]
+)
+@pytest.mark.usefixtures("_no_http_backoff_sleep")
+@respx.mock
+async def test_step_start_retries_before_the_request_is_sent(
+    error_type: type[httpx.TransportError],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client_factory = Mock(wraps=httpx.AsyncClient)
+    monkeypatch.setattr(httpx, "AsyncClient", client_factory)
+    world = vercel_mod.VercelWorld(token="test-token")
+    route = respx.post(f"{world._base_url}/v3/runs/wrun_test/events").mock(
+        side_effect=[error_type("connection failed"), _http_ok()]
+    )
+
+    await world.events_create("wrun_test", w.StepStartedEvent(correlation_id="step_test"))
+
+    assert route.call_count == 2
+    assert client_factory.call_count == 1
+
+
+@pytest.mark.parametrize(
+    "error_type",
+    [
+        httpx.ReadTimeout,
+        httpx.WriteTimeout,
+        httpx.ReadError,
+        httpx.WriteError,
+        httpx.RemoteProtocolError,
+    ],
+)
+@pytest.mark.usefixtures("_no_http_backoff_sleep")
+@respx.mock
+async def test_step_start_does_not_retry_an_uncertain_write(
+    error_type: type[httpx.TransportError],
+) -> None:
+    # A read timeout means the server may already have applied the write;
+    # re-sending a `step_started` would count the attempt twice.
+    world = vercel_mod.VercelWorld(token="test-token")
+    route = respx.post(f"{world._base_url}/v3/runs/wrun_test/events").mock(
+        side_effect=[error_type("request failed"), _http_ok()]
+    )
+
+    with pytest.raises(error_type):
+        await world.events_create("wrun_test", w.StepStartedEvent(correlation_id="step_test"))
+
+    assert route.call_count == 1
+
+
+@pytest.mark.usefixtures("_no_http_backoff_sleep")
+@respx.mock
+async def test_event_list_retries_after_a_read_timeout() -> None:
+    world = vercel_mod.VercelWorld(token="test-token")
+    page: dict[str, object] = {"data": [], "cursor": None, "hasMore": False}
+    route = respx.get(url__startswith=f"{world._base_url}/v3/runs/wrun_test/events").mock(
+        side_effect=[
+            httpx.ReadTimeout("read timed out"),
+            httpx.Response(
+                200, content=cbor2.dumps(page), headers={"content-type": "application/cbor"}
+            ),
+        ]
+    )
+
+    result = await world.events_list("wrun_test")
+
+    assert result.data == []
+    assert result.has_more is False
+    assert route.call_count == 2
+
+
+@pytest.mark.usefixtures("_no_http_backoff_sleep")
+@respx.mock
+async def test_transport_retries_are_bounded() -> None:
+    world = vercel_mod.VercelWorld(token="test-token")
+    route = respx.post(f"{world._base_url}/v3/runs/wrun_test/events").mock(
+        side_effect=httpx.ConnectError("connection refused")
+    )
+
+    with pytest.raises(httpx.ConnectError):
+        await world.events_create("wrun_test", w.StepStartedEvent(correlation_id="step_test"))
+
+    assert route.call_count == vercel_mod._REQUEST_ATTEMPTS
+
+
+@pytest.mark.parametrize("status", [429, 503])
+@pytest.mark.usefixtures("_no_http_backoff_sleep")
+@respx.mock
+async def test_http_error_responses_are_not_retried(status: int) -> None:
+    world = vercel_mod.VercelWorld(token="test-token")
+    route = respx.get(url__startswith=f"{world._base_url}/v3/runs/wrun_test/events").respond(
+        status, json={"message": "temporarily unavailable"}
+    )
+
+    with pytest.raises(w.WorkflowWorldError):
+        await world.events_list("wrun_test")
+
+    assert route.call_count == 1
 
 
 def test_queue_client_cache_includes_region(monkeypatch):
