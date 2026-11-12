@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.0 - 2026-11-12
+
+### Breaking Changes
+
+- Require Python 3.11 or newer and add Python 3.15 support; Python 3.10 is no longer supported. (#518)
+
+### Bug Fixes
+
+- Track async SDK session clients per AnyIO event loop, so successive or concurrent Trio runs no longer share one HTTP client, and close a rejected async client from a sync session without relying on asyncio. (#512)
+- Allow services to disable a request read timeout while preserving the HTTP client’s connection, write, and pool limits. (#492)
+
 ## 0.2.2 - 2026-10-15
 
 ### Bug Fixes
