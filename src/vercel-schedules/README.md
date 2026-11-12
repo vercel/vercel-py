@@ -8,8 +8,8 @@ pip install vercel-schedules
 
 ## Read the firing in a schedule command
 
-A schedule with a `command` builds the image from the Dockerfile in `root`, and
-runs the command once per firing:
+A schedule with `run` builds the image from the Dockerfile in `root`, and runs
+the command once per firing:
 
 ```json
 {
@@ -18,7 +18,7 @@ runs the command once per firing:
       "schedule": "0 3 * * *",
       "root": "jobs",
       "entrypoint": "Dockerfile",
-      "command": ["python", "reindex.py"]
+      "run": ["python", "reindex.py"]
     }
   }
 }
