@@ -1,1 +1,0 @@
-Retry safe Workflow API requests after transport failures, with at most three attempts and short backoff delays. Reads can retry after any transport error; writes retry only when a connection or pool error prevents the request from being sent.
