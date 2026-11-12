@@ -1,4 +1,4 @@
-"""Tests for the CBOR queue transport VercelWorld sends and receives with.
+"""Tests for VercelWorld HTTP and queue transport, delivery handling, and routing.
 
 Mirrors ``DualTransport`` in ``@workflow/world-vercel``: every producer at
 ``specVersion >= 3`` puts workflow messages on the queue as CBOR, so the
@@ -16,8 +16,12 @@ from typing import Any
 from unittest.mock import AsyncMock, Mock
 
 import cbor2
+import httpx2 as httpx
 import pytest
+from hypothesis import given, strategies as st
 
+import vendor.respx as respx
+import vercel.queue as vqs
 from vercel.queue import MessageMetadata
 from vercel.queue._internal.subscribers import infer_subscriber_transport
 from vercel.workflow._internal import ulid, world as w
@@ -107,6 +111,208 @@ def test_dispatch_resolves_the_transport_without_help_from_the_client(
     )
 
     assert infer_subscriber_transport(metadata) is vercel_mod._QUEUE_TRANSPORT
+
+
+def _handler_for(world: vercel_mod.VercelWorld, error: BaseException) -> Any:
+    async def handler(message, *, queue_name, attempt, message_id):  # noqa: ANN001, ANN202
+        del message, queue_name, attempt, message_id
+        raise error
+
+    world.create_queue_handler("__wkf_workflow_", handler)
+    return world._queue_callbacks[-1]
+
+
+def _message(delivery_count: int) -> vqs.Message[Any]:
+    metadata = MessageMetadata(
+        message_id="m1",
+        delivery_count=delivery_count,
+        created_at=datetime.datetime(2026, 1, 1, tzinfo=UTC),
+        topic="__wkf_workflow_greet",
+        consumer_group=w.QUEUE_CONSUMER_GROUP,
+        content_type="application/cbor",
+    )
+    return vqs.Message(
+        payload=WRAPPER,
+        metadata=metadata,
+    )
+
+
+# @lat: [[vercel-workflow#Worlds#Queue handler failures]]
+@pytest.mark.usefixtures("isolated_subscriptions")
+async def test_failed_delivery_requests_a_short_retry() -> None:
+    world = vercel_mod.VercelWorld(token="test-token")
+    callback = _handler_for(world, httpx.ConnectTimeout("connect timed out"))
+
+    with pytest.raises(vqs.RetryAfter) as raised:
+        await callback(_message(delivery_count=1))
+
+    assert raised.value.timeout_seconds == 1
+    assert isinstance(raised.value.__cause__, httpx.ConnectTimeout)
+
+
+@pytest.mark.usefixtures("isolated_subscriptions")
+@pytest.mark.parametrize("directive", [vqs.RetryAfter(42), vqs.Handoff()])
+async def test_handler_directives_pass_through(directive: vqs.QueueDirective) -> None:
+    world = vercel_mod.VercelWorld(token="test-token")
+    callback = _handler_for(world, directive)
+
+    with pytest.raises(type(directive)) as raised:
+        await callback(_message(delivery_count=3))
+
+    assert raised.value is directive
+
+
+@given(delivery_count=st.integers(min_value=0, max_value=200))
+def test_redelivery_backoff_ramps_with_jitter_and_stays_in_bounds(delivery_count: int) -> None:
+    delay = vercel_mod._handler_error_retry_after_seconds(RuntimeError("x"), delivery_count)
+    backoff = min(max(1, 2 ** max(0, delivery_count - 1)), 900)
+
+    assert 1 <= delay <= backoff
+    assert delay >= backoff - (backoff + 3) // 4
+
+
+@pytest.mark.parametrize(
+    "delivery_count,expected",
+    [(-1, 1), (0, 1), (1, 1), (2, 2), (10, 512), (11, 900), (12, 900), (10**100, 900)],
+)
+def test_redelivery_backoff_caps_large_counts_before_exponentiation(
+    monkeypatch: pytest.MonkeyPatch, delivery_count: int, expected: int
+) -> None:
+    monkeypatch.setattr(vercel_mod.random, "randint", lambda lower, upper: 0)
+
+    delay = vercel_mod._handler_error_retry_after_seconds(RuntimeError("x"), delivery_count)
+
+    assert delay == expected
+
+
+@given(
+    delivery_count=st.integers(min_value=0, max_value=200),
+    retry_after=st.integers(min_value=1, max_value=10_000),
+)
+def test_server_retry_delay_is_respected_up_to_the_queue_limit(
+    delivery_count: int, retry_after: int
+) -> None:
+    error = w.ThrottleError("slow down", status=429, retry_after=retry_after)
+
+    delay = vercel_mod._handler_error_retry_after_seconds(error, delivery_count)
+
+    assert delay >= min(retry_after, 900)
+    assert delay <= 900
+
+
+@pytest.fixture
+def _no_http_backoff_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(vercel_mod.anyio, "sleep", _sleep)
+
+
+def _http_ok() -> httpx.Response:
+    return httpx.Response(
+        200, content=cbor2.dumps({}), headers={"content-type": "application/cbor"}
+    )
+
+
+# @lat: [[vercel-workflow#Worlds#HTTP request retries]]
+@pytest.mark.parametrize(
+    "error_type", [httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout]
+)
+@pytest.mark.usefixtures("_no_http_backoff_sleep")
+@respx.mock
+async def test_step_start_retries_before_the_request_is_sent(
+    error_type: type[httpx.TransportError],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client_factory = Mock(wraps=httpx.AsyncClient)
+    monkeypatch.setattr(httpx, "AsyncClient", client_factory)
+    world = vercel_mod.VercelWorld(token="test-token")
+    route = respx.post(f"{world._base_url}/v3/runs/wrun_test/events").mock(
+        side_effect=[error_type("connection failed"), _http_ok()]
+    )
+
+    await world.events_create("wrun_test", w.StepStartedEvent(correlation_id="step_test"))
+
+    assert route.call_count == 2
+    assert client_factory.call_count == 1
+
+
+@pytest.mark.parametrize(
+    "error_type",
+    [
+        httpx.ReadTimeout,
+        httpx.WriteTimeout,
+        httpx.ReadError,
+        httpx.WriteError,
+        httpx.RemoteProtocolError,
+    ],
+)
+@pytest.mark.usefixtures("_no_http_backoff_sleep")
+@respx.mock
+async def test_step_start_does_not_retry_an_uncertain_write(
+    error_type: type[httpx.TransportError],
+) -> None:
+    # A read timeout means the server may already have applied the write;
+    # re-sending a `step_started` would count the attempt twice.
+    world = vercel_mod.VercelWorld(token="test-token")
+    route = respx.post(f"{world._base_url}/v3/runs/wrun_test/events").mock(
+        side_effect=[error_type("request failed"), _http_ok()]
+    )
+
+    with pytest.raises(error_type):
+        await world.events_create("wrun_test", w.StepStartedEvent(correlation_id="step_test"))
+
+    assert route.call_count == 1
+
+
+@pytest.mark.usefixtures("_no_http_backoff_sleep")
+@respx.mock
+async def test_event_list_retries_after_a_read_timeout() -> None:
+    world = vercel_mod.VercelWorld(token="test-token")
+    page: dict[str, object] = {"data": [], "cursor": None, "hasMore": False}
+    route = respx.get(url__startswith=f"{world._base_url}/v3/runs/wrun_test/events").mock(
+        side_effect=[
+            httpx.ReadTimeout("read timed out"),
+            httpx.Response(
+                200, content=cbor2.dumps(page), headers={"content-type": "application/cbor"}
+            ),
+        ]
+    )
+
+    result = await world.events_list("wrun_test")
+
+    assert result.data == []
+    assert result.has_more is False
+    assert route.call_count == 2
+
+
+@pytest.mark.usefixtures("_no_http_backoff_sleep")
+@respx.mock
+async def test_transport_retries_are_bounded() -> None:
+    world = vercel_mod.VercelWorld(token="test-token")
+    route = respx.post(f"{world._base_url}/v3/runs/wrun_test/events").mock(
+        side_effect=httpx.ConnectError("connection refused")
+    )
+
+    with pytest.raises(httpx.ConnectError):
+        await world.events_create("wrun_test", w.StepStartedEvent(correlation_id="step_test"))
+
+    assert route.call_count == vercel_mod._REQUEST_ATTEMPTS
+
+
+@pytest.mark.parametrize("status", [429, 503])
+@pytest.mark.usefixtures("_no_http_backoff_sleep")
+@respx.mock
+async def test_http_error_responses_are_not_retried(status: int) -> None:
+    world = vercel_mod.VercelWorld(token="test-token")
+    route = respx.get(url__startswith=f"{world._base_url}/v3/runs/wrun_test/events").respond(
+        status, json={"message": "temporarily unavailable"}
+    )
+
+    with pytest.raises(w.WorkflowWorldError):
+        await world.events_list("wrun_test")
+
+    assert route.call_count == 1
 
 
 def test_queue_client_cache_includes_region(monkeypatch):
