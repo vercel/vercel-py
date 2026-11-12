@@ -1079,8 +1079,8 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
     def create_group(self, groupname: str) -> "SyncSandboxGroup":
         """Create a Linux group with a setgid (2770) directory at /shared/<groupname>.
 
-        The directory belongs to the sandbox default account, for HTTP uploads,
-        and the new group; entries created inside inherit the group. Existing
+        The directory belongs to the sandbox default account and the new group;
+        entries that members' commands create inside inherit the group. Existing
         groups raise ``SandboxGroupAlreadyExistsError``; use ``as_group()`` to
         reuse one. Other provisioning failures raise ``SandboxError``.
         """
@@ -1707,8 +1707,8 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
     def create_group(self, groupname: str) -> "SyncSandboxGroup":
         """Create a Linux group with a setgid (2770) directory at /shared/<groupname>.
 
-        The directory belongs to the sandbox default account, for HTTP uploads,
-        and the new group; entries created inside inherit the group. Existing
+        The directory belongs to the sandbox default account and the new group;
+        entries that members' commands create inside inherit the group. Existing
         groups raise ``SandboxGroupAlreadyExistsError``; use ``as_group()`` to
         reuse one. Other provisioning failures raise ``SandboxError``.
         """

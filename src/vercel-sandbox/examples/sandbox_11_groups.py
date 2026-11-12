@@ -27,14 +27,10 @@ async def main() -> None:
         await project.add_user(researcher)
         await coder.add_to_group(project)
 
+        # Files that a member's command creates there belong to the group.
         spec = f"{project.shared_dir}/spec.txt"
-        await researcher.fs.write_text(spec, "API spec v2\n")
+        await researcher.run_command("tee", [spec], input=b"API spec v2\n", check=True)
         print(f"coder reads {spec}: {(await coder.fs.read_text(spec)).strip()}")
-
-        # Files created by commands in the shared directory belong to the group too.
-        status = f"{project.shared_dir}/status.txt"
-        await coder.run_command("bash", ["-c", 'echo done > "$1"', "write", status], check=True)
-        print(f"researcher reads {status}: {(await researcher.fs.read_text(status)).strip()}")
 
         try:
             await reviewer.fs.read_text(spec)

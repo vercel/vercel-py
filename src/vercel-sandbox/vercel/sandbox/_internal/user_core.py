@@ -194,30 +194,6 @@ fi
 chown -- "$1:$2" "/home/$1"
 chmod 770 -- "/home/$1"
 """
-# Paths are absolute. An entry in a setgid directory takes that directory's
-# group, as Linux assigns it to entries created there: files change owner only,
-# and directories stay with the HTTP account so later uploads can reach them.
-_ASSIGN_OWNERSHIP = """
-set -eu
-kind=$1 owner=$2 group=$3
-shift 3
-for path; do
-    parent=${path%/*}/
-    if [ -g "$parent" ]; then
-        chgrp --reference="$parent" -- "$path"
-        if [ "$kind" = directory ]; then
-            chmod -- 2770 "$path"
-        else
-            chown -- "$owner" "$path"
-        fi
-    else
-        chown -- "$owner:$group" "$path"
-        if [ "$kind" = directory ]; then
-            chmod -- 770 "$path"
-        fi
-    fi
-done
-"""
 
 
 class UserContext:
@@ -411,35 +387,30 @@ class UserService(SandboxService):
         session_id: str,
         operation: str,
         paths: Sequence[str],
-        kind: Literal["file", "directory"],
-        group: str,
+        ownership: str,
+        mode: str | None = None,
     ) -> None:
         if not paths:
             return
-        result = await self._parent.run_process(
-            session_id=session_id,
-            command="/bin/bash",
-            args=[
-                "-c",
-                _ASSIGN_OWNERSHIP,
-                "assign-ownership",
-                kind,
-                self._context.username,
-                group,
-                *paths,
-            ],
-            cwd="/",
-            sudo=True,
-            output_router=ProcessOutputRouter(stdout=None, stderr=None, capture_output=True),
-        )
-        if result.process.returncode != 0:
-            raise SandboxFilesystemCommandError(
-                operation,
-                paths=tuple(paths),
-                exit_code=result.process.returncode,
-                stdout=(result.stdout or b"").decode("utf-8"),
-                stderr=(result.stderr or b"").decode("utf-8"),
+        for command, value in (("chown", ownership), ("chmod", mode)):
+            if value is None:
+                continue
+            result = await self._parent.run_process(
+                session_id=session_id,
+                command=command,
+                args=["--", value, *paths],
+                cwd="/",
+                sudo=True,
+                output_router=ProcessOutputRouter(stdout=None, stderr=None, capture_output=True),
             )
+            if result.process.returncode != 0:
+                raise SandboxFilesystemCommandError(
+                    operation,
+                    paths=tuple(paths),
+                    exit_code=result.process.returncode,
+                    stdout=(result.stdout or b"").decode("utf-8"),
+                    stderr=(result.stderr or b"").decode("utf-8"),
+                )
 
     async def _wrap(
         self,
@@ -641,8 +612,8 @@ class UserService(SandboxService):
             session_id,
             "mkdir",
             [absolute_path, *self._ancestor_dirs_under_home([absolute_path])],
-            "directory",
-            await self.default_gid(session_id),
+            f"{self._context.username}:{await self.default_gid(session_id)}",
+            "770",
         )
 
     async def listdir(
@@ -736,12 +707,19 @@ class UserService(SandboxService):
         absolute_paths = [posixpath.normpath(posixpath.join(cwd, path)) for path in paths]
         try:
             await self._set_metadata(
-                session_id, "write", absolute_paths, "file", str(self._context.primary_gid)
+                session_id,
+                "write",
+                absolute_paths,
+                f"{self._context.username}:{self._context.primary_gid}",
             )
             dirs = self._ancestor_dirs_under_home(absolute_paths)
             if dirs:
                 await self._set_metadata(
-                    session_id, "write", dirs, "directory", await self.default_gid(session_id)
+                    session_id,
+                    "write",
+                    dirs,
+                    f"{self._context.username}:{await self.default_gid(session_id)}",
+                    "770",
                 )
         except SandboxFilesystemCommandError as error:
             raise SandboxFilesystemWriteError(paths=paths, cwd=cwd, cause=error) from error

@@ -108,8 +108,8 @@ class GroupContext:
 
     async def provision(self) -> None:
         async def create(session_id: str) -> None:
-            # The HTTP file API runs as the sandbox default account, which owns
-            # the shared directory so SDK writes can reach it.
+            # The sandbox default account, which the HTTP file API runs as, owns
+            # the shared directory, matching the TypeScript SDK.
             lookup = await _run(self.service, session_id, "id", ["-u"], sudo=False)
             default_uid = (lookup.stdout or b"").decode("utf-8").strip()
             if lookup.process.returncode != 0 or not re.fullmatch(r"[0-9]+", default_uid):

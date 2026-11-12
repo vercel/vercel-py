@@ -14,7 +14,9 @@ class SandboxGroup:
     Obtain handles through ``create_group()`` or ``as_group()``. Members read
     and write ``shared_dir``, which ``create_group()`` provisions; a group
     selected with ``as_group()`` has that directory only if it was created
-    through this API. Membership changes apply to commands started afterwards.
+    through this API. Share files by writing them with members' commands:
+    uploads through a user handle belong to that user's primary group.
+    Membership changes apply to commands started afterwards.
     """
 
     __slots__ = ("_context",)

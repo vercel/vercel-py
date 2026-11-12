@@ -57,50 +57,27 @@ async def test_group_members_share_a_directory(driver: Any) -> None:
             assert not isinstance(occupied.value, SandboxGroupAlreadyExistsError)
             assert (await _run(box, "getent", ["group", "occupied"])).returncode != 0
 
-            # Commands create entries with the shared group, as setgid assigns it.
+            # Commands create entries with the shared group, as setgid assigns it,
+            # so members read each other's files and non-members cannot.
             spec = f"{devs.shared_dir}/spec.txt"
             await _run(alice, "bash", ["-c", 'printf "spec v2" > "$1"', "write", spec], check=True)
+            ownership = await _run(alice, "stat", ["-c", "%U:%G", spec], check=True)
+            assert ownership.stdout == b"alice:devs\n"
             assert (await _run(bob, "cat", [spec], check=True)).stdout == b"spec v2"
+            assert await _call(bob.fs.read_text, spec) == "spec v2"
+            assert [entry.path for entry in await _call(bob.fs.listdir, devs.shared_dir)] == [
+                "spec.txt"
+            ]
             assert (await _run(carol, "cat", [spec])).returncode != 0
             assert (await _run(carol, "ls", [devs.shared_dir])).returncode != 0
-
-            # SDK uploads and directories keep that group too, so every member,
-            # the default account, and later uploads can reach them.
-            notes = f"{devs.shared_dir}/notes.txt"
-            reply = f"{devs.shared_dir}/drafts/reply.txt"
-            await _call(alice.fs.write_text, notes, "from alice")
-            await _call(alice.fs.mkdir, f"{devs.shared_dir}/drafts")
-            await _call(bob.fs.write_text, reply, "from bob")
-            assert await _call(bob.fs.read_text, notes) == "from alice"
-            assert await _call(alice.fs.read_text, reply) == "from bob"
-            assert await _call(box.fs.read_text, spec) == "spec v2"
-            ownership = await _run(
-                box,
-                "stat",
-                ["-c", "%U:%G:%a", spec, notes, f"{devs.shared_dir}/drafts", reply],
-                sudo=True,
-                check=True,
-            )
-            assert (
-                ownership.stdout
-                == (
-                    f"alice:devs:644\nalice:devs:644\n{default_user}:devs:2770\nbob:devs:644\n"
-                ).encode()
-            )
-            await _run(bob, "touch", [f"{devs.shared_dir}/drafts/from-command"], check=True)
             with pytest.raises(SandboxFilesystemError):
-                await _call(carol.fs.read_text, notes)
-
-            # Uploads outside a shared directory still use the primary group.
-            await _call(alice.fs.write_text, "private.txt", "alice only", mode=0o600)
-            private = await _run(alice, "stat", ["-c", "%U:%G:%a", "private.txt"], check=True)
-            assert private.stdout == b"alice:alice:600\n"
+                await _call(carol.fs.read_text, spec)
 
             # Membership changes apply to the next command.
             await _call(devs.remove_user, "bob")
             assert (await _run(bob, "cat", [spec])).returncode != 0
             with pytest.raises(SandboxFilesystemError):
-                await _call(bob.fs.read_text, notes)
+                await _call(bob.fs.read_text, spec)
             await _call(alice.remove_from_group, "devs")
             assert (await _run(alice, "id", ["-Gn"], check=True)).stdout == b"alice\n"
 
