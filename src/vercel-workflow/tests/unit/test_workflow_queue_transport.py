@@ -171,6 +171,20 @@ def test_redelivery_backoff_ramps_with_jitter_and_stays_in_bounds(delivery_count
     assert delay >= backoff - (backoff + 3) // 4
 
 
+@pytest.mark.parametrize(
+    "delivery_count,expected",
+    [(-1, 1), (0, 1), (1, 1), (2, 2), (10, 512), (11, 900), (12, 900), (10**100, 900)],
+)
+def test_redelivery_backoff_caps_large_counts_before_exponentiation(
+    monkeypatch: pytest.MonkeyPatch, delivery_count: int, expected: int
+) -> None:
+    monkeypatch.setattr(vercel_mod.random, "randint", lambda lower, upper: 0)
+
+    delay = vercel_mod._handler_error_retry_after_seconds(RuntimeError("x"), delivery_count)
+
+    assert delay == expected
+
+
 @given(
     delivery_count=st.integers(min_value=0, max_value=200),
     retry_after=st.integers(min_value=1, max_value=10_000),

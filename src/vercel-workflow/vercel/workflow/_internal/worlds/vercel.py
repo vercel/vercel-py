@@ -128,10 +128,12 @@ def _error_retry_after_seconds(error: BaseException) -> int | None:
 
 def _handler_error_retry_after_seconds(error: BaseException, delivery_count: int) -> int:
     """Seconds until a delivery that failed with ``error`` is redelivered."""
-    backoff = min(
-        max(_HANDLER_ERROR_RETRY_AFTER_SECONDS, 2 ** max(0, delivery_count - 1)),
-        _HANDLER_ERROR_MAX_RETRY_AFTER_SECONDS,
-    )
+    # Check the ceiling first: delivery_count comes from the request, and a
+    # large exponent would allocate a huge integer before min() could cap it.
+    if delivery_count > _HANDLER_ERROR_MAX_RETRY_AFTER_SECONDS.bit_length():
+        backoff = _HANDLER_ERROR_MAX_RETRY_AFTER_SECONDS
+    else:
+        backoff = max(_HANDLER_ERROR_RETRY_AFTER_SECONDS, 2 ** max(0, delivery_count - 1))
     jitter = random.randint(0, math.ceil(backoff * _HANDLER_ERROR_RETRY_JITTER_RATIO))
     jittered = max(_HANDLER_ERROR_RETRY_AFTER_SECONDS, backoff - jitter)
     # Apply jitter before the server delay so it cannot shorten that delay.

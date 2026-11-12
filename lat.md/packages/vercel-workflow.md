@@ -51,9 +51,9 @@ The Vercel world retries safe Workflow API requests after transport failures so 
 
 Failed Vercel workflow deliveries request a retry after a short delay instead of waiting for the default five-minute processing lease to expire.
 
-[[src/vercel-workflow/vercel/workflow/_internal/worlds/vercel.py#VercelWorld#create_queue_handler]] turns handler exceptions into the queue SDK's `RetryAfter` directive. Explicit queue directives pass through unchanged. [[src/vercel-workflow/vercel/workflow/_internal/worlds/vercel.py#_handler_error_retry_after_seconds]] starts at one second and increases the delay with the delivery count, with jitter and a 900-second cap. A positive server retry delay sets a lower bound, also capped at 900 seconds. The queue SDK retries the visibility update; if those attempts fail, the existing lease remains the fallback.
+[[src/vercel-workflow/vercel/workflow/_internal/worlds/vercel.py#VercelWorld#create_queue_handler]] turns handler exceptions into the queue SDK's `RetryAfter` directive. Explicit queue directives pass through unchanged. [[src/vercel-workflow/vercel/workflow/_internal/worlds/vercel.py#_handler_error_retry_after_seconds]] starts at one second and increases the delay with the delivery count, with jitter and a 900-second cap. Large delivery counts select the capped delay before exponentiation, so the calculation cannot allocate an unbounded integer. A positive server retry delay sets a lower bound, also capped at 900 seconds. The queue SDK retries the visibility update; if those attempts fail, the existing lease remains the fallback.
 
-[[src/vercel-workflow/tests/unit/test_workflow_queue_transport.py#test_failed_delivery_requests_a_short_retry|Queue delivery tests]] cover short failure retries, explicit directive passthrough, bounded jitter, and server retry delays.
+[[src/vercel-workflow/tests/unit/test_workflow_queue_transport.py#test_failed_delivery_requests_a_short_retry|Queue delivery tests]] cover short failure retries, explicit directive passthrough, bounded jitter, and server retry delays. [[src/vercel-workflow/tests/unit/test_workflow_queue_transport.py#test_redelivery_backoff_caps_large_counts_before_exponentiation]] checks the cap boundary and extremely large counts.
 
 ## Payloads and encryption
 
