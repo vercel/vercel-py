@@ -1,0 +1,1 @@
+Use bytes for command I/O: output readers, communicate(), and captured results return bytes, input requires bytes-like data, and output destinations must be writable binary streams. Replace TextReader/SyncTextReader with ByteReader/SyncByteReader; async readers implement AnyIO ByteReceiveStream and iterate byte chunks. Encode and decode text explicitly.

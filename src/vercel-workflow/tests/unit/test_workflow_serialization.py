@@ -11,7 +11,7 @@ be read is otherwise noticed several frames away from its cause.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -36,7 +36,7 @@ def test_payload_is_devl_plus_devalue() -> None:
         "unicode 你好",
         [{"amount": 21, "tier": "pro"}],
         {"nested": {"list": [1, 2.5, True, None]}},
-        datetime(2026, 7, 30, 17, 6, 33, tzinfo=timezone.utc),
+        datetime(2026, 7, 30, 17, 6, 33, tzinfo=UTC),
         b"\x00\xff\x80",
     ],
 )

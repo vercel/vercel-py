@@ -11,20 +11,19 @@ import json
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from typing import TypeVar
 
-import httpx2 as httpx
+from pydantic import BaseModel
 
 from vercel._internal.core.http import StreamingResponse
+from vercel._internal.core.http._compat import transport_errors
 from vercel.sandbox._internal.errors import (
     SandboxApiError,
     SandboxResponseError,
     SandboxStreamError,
 )
 from vercel.sandbox._internal.models import ProcessLog, ProcessLogStream
+from vercel.sandbox._internal.retry import _RETRIES, AsyncSleep, _retry_delay, _with_request_retries
 
-AsyncSleep = Callable[[float], Awaitable[None]]
-
-# Retries after the first attempt, with exponential backoff between attempts.
-_RETRIES = 2
+_ResultT = TypeVar("_ResultT")
 _RETRY_BACKOFF_SECONDS = 0.2
 
 # Reported when the API loses its connection to the sandbox, whether or not
@@ -32,7 +31,16 @@ _RETRY_BACKOFF_SECONDS = 0.2
 # HTTP 410 when it happens before the first record.
 STREAM_CLOSED_ERROR_CODE = "sandbox_stream_closed"
 
-_ResultT = TypeVar("_ResultT")
+
+class _CommandLogPayload(BaseModel):
+    """Adapt the current text wire format to the byte output contract."""
+
+    stream: ProcessLogStream
+    data: str
+
+    def to_log(self) -> ProcessLog:
+        # Temporary compatibility shim until the service provides native bytes.
+        return ProcessLog(stream=self.stream, data=self.data.encode("utf-8"))
 
 
 class _TruncatedStreamError(SandboxResponseError):
@@ -48,7 +56,7 @@ def _is_transient_error(error: BaseException) -> bool:
     If the sandbox did stop, the retried request reports that instead.
     Cancellation is never an ``Exception`` and so is never retried.
     """
-    if isinstance(error, httpx.TransportError | _TruncatedStreamError):
+    if isinstance(error, (*transport_errors(), _TruncatedStreamError)):
         return True
     if (
         isinstance(error, SandboxApiError | SandboxStreamError)
@@ -56,29 +64,15 @@ def _is_transient_error(error: BaseException) -> bool:
     ):
         return True
     return isinstance(error, SandboxApiError) and (
-        error.status_code == 429 or error.status_code >= 500
+        error.status_code == 429 or 500 <= error.status_code < 600
     )
 
 
-def _retry_delay(failures: int) -> float:
-    return _RETRY_BACKOFF_SECONDS * 2**failures
-
-
 async def _with_transient_retries(
-    operation: Callable[[], Awaitable[_ResultT]],
-    *,
-    sleep: AsyncSleep,
+    operation: Callable[[], Awaitable[_ResultT]], *, sleep: AsyncSleep
 ) -> _ResultT:
-    """Run an idempotent request, retrying transient failures a bounded number of times."""
-    failures = 0
-    while True:
-        try:
-            return await operation()
-        except Exception as error:
-            if failures >= _RETRIES or not _is_transient_error(error):
-                raise
-        await sleep(_retry_delay(failures))
-        failures += 1
+    """Retry command reads, including the service losing its sandbox connection."""
+    return await _with_request_retries(operation, sleep=sleep, is_retryable=_is_transient_error)
 
 
 async def _ndjson_lines(response: StreamingResponse) -> AsyncIterator[tuple[str, bool]]:
@@ -123,7 +117,7 @@ def _parse_command_log_record(line: str, *, terminated: bool = True) -> ProcessL
     stream = record.get("stream")
     data = record.get("data")
     if stream in {"stdout", "stderr"} and isinstance(data, str):
-        return ProcessLog(stream=stream, data=data)
+        return _CommandLogPayload.model_validate(record).to_log()
     if stream != "error" or not isinstance(data, dict):
         return None
 
@@ -135,7 +129,7 @@ def _parse_command_log_record(line: str, *, terminated: bool = True) -> ProcessL
 
 
 class _OutputOffsets:
-    """Count the characters of each output stream delivered to a consumer."""
+    """Count the bytes of each output stream delivered to a consumer."""
 
     __slots__ = ("_counts",)
 
@@ -148,7 +142,7 @@ class _OutputOffsets:
     def advance(self, stream: ProcessLogStream, count: int) -> None:
         self._counts[stream] += count
 
-    def skip(self, event: ProcessLog) -> str:
+    def skip(self, event: ProcessLog) -> bytes:
         """Consume replayed output from ``event`` and return the data past it."""
         skipped = min(self._counts[event.stream], len(event.data))
         self._counts[event.stream] -= skipped
@@ -164,7 +158,7 @@ async def _iter_command_logs(
     """Yield a command's logs, reconnecting when the connection is interrupted.
 
     Each reconnection replays the logs from the beginning and skips what
-    ``delivered`` has already counted, so consumers see every character once.
+    ``delivered`` has already counted, so consumers see every byte once.
     Passing the offsets of output delivered by a different stream continues
     from where that stream stopped. Retries are bounded per interruption: a
     connection that delivers new output resets the retry budget.
@@ -174,8 +168,10 @@ async def _iter_command_logs(
     while True:
         replay = delivered.copy()
         progressed = False
+        opened = False
         try:
             response = await open_response()
+            opened = True
             try:
                 async for line, terminated in _ndjson_lines(response):
                     if not line.strip():
@@ -199,5 +195,12 @@ async def _iter_command_logs(
                 failures = 0
             if failures >= _RETRIES or not _is_transient_error(error):
                 raise
-        await sleep(_retry_delay(failures))
+            # HTTP opening failures follow request policy; interrupted bodies
+            # retain the TypeScript stream reconnection delay.
+            delay = (
+                _RETRY_BACKOFF_SECONDS * 2**failures if opened else _retry_delay(error, failures)
+            )
+            if delay is None:
+                raise
+        await sleep(delay)
         failures += 1

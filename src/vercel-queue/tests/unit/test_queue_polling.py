@@ -5,7 +5,7 @@ from typing import Any, ClassVar, ForwardRef, cast
 import json
 import logging
 from collections.abc import AsyncIterator, Iterator
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import anyio
 import anyio.lowlevel
@@ -944,7 +944,7 @@ async def test_poll_by_id_handles_unsupported_error_shapes(
 ) -> None:
     group = "test-group"
 
-    with time_machine.travel(datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc), tick=False):
+    with time_machine.travel(datetime(2026, 1, 1, 0, 0, tzinfo=UTC), tick=False):
         eqs.app._server.respond_once(
             method="POST",
             action="message_id",

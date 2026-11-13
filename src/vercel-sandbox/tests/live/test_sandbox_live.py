@@ -38,8 +38,6 @@ def _name(scenario: str, mode: str) -> str:
 
 
 def _exception_notes(error: BaseException) -> tuple[str, ...]:
-    if not hasattr(BaseException, "add_note"):
-        return ()
     return tuple(getattr(error, "__notes__", ()))
 
 
@@ -305,7 +303,7 @@ async def test_drive_persists_files_for_a_mounted_sandbox() -> None:
                 capture_output=True,
             )
             assert result.returncode == 0
-            assert result.stdout == probe_content
+            assert result.stdout == probe_content.encode()
             await second_box.stop()
             await second_box.destroy()
             known_sandboxes.pop(second_sandbox_name)

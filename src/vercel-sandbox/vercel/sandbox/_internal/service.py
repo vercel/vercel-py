@@ -24,7 +24,6 @@ from vercel.sandbox._internal.errors import (
 )
 from vercel.sandbox._internal.log_stream import (
     AsyncSleep,
-    _iter_command_logs,
     _with_transient_retries,
 )
 from vercel.sandbox._internal.models import (
@@ -40,6 +39,7 @@ from vercel.sandbox._internal.models import (
     NetworkPolicy,
     PrivateSandboxParameters,
     ProcessLog,
+    SandboxManagedCredentials,
     SandboxQuery,
     SandboxQueryByCreatedAt,
     SandboxQueryByCurrentSnapshotId,
@@ -330,6 +330,7 @@ class SandboxService:
         execution_time_limit: timedelta | None = None,
         resources: SandboxResources | None = None,
         persistent: bool | None = None,
+        credentials: SandboxManagedCredentials | None = None,
         network_policy: NetworkPolicy | None = None,
         network_id: str | None = None,
         env: Mapping[str, str] | None = None,
@@ -351,6 +352,7 @@ class SandboxService:
             execution_time_limit=execution_time_limit,
             resources=resources,
             persistent=persistent,
+            credentials=credentials,
             network_policy=network_policy,
             network_id=network_id,
             env=env,
@@ -440,6 +442,7 @@ class SandboxService:
         execution_time_limit: timedelta | None = None,
         resources: SandboxResources | None = None,
         persistent: bool | None = None,
+        credentials: SandboxManagedCredentials | None = None,
         network_policy: NetworkPolicy | None = None,
         network_id: str | None = None,
         env: Mapping[str, str] | None = None,
@@ -480,6 +483,7 @@ class SandboxService:
             execution_time_limit=execution_time_limit,
             resources=resources,
             persistent=persistent,
+            credentials=credentials,
             network_policy=network_policy,
             network_id=network_id,
             env=env,
@@ -857,10 +861,9 @@ class SandboxService:
         # from the logs endpoint and its exit through the wait endpoint.
         try:
             async with aclosing(
-                _iter_command_logs(
-                    lambda: self.process_logs_response(
-                        session_id=session_id, process_id=started.id
-                    ),
+                self._api_client.command_logs(
+                    session_id=session_id,
+                    command_id=started.id,
                     sleep=self._sleep,
                     delivered=delivered,
                 )
@@ -1245,15 +1248,11 @@ class SandboxService:
     async def sleep(self, seconds: float) -> None:
         await self._sleep(seconds)
 
-    async def process_logs_response(self, *, session_id: str, process_id: str) -> StreamingResponse:
-        self._ensure_open()
-        return await self._api_client.command_logs_response(
-            session_id=session_id, command_id=process_id
-        )
-
     def process_logs(self, *, session_id: str, process_id: str) -> AsyncGenerator[ProcessLog, None]:
-        return _iter_command_logs(
-            lambda: self.process_logs_response(session_id=session_id, process_id=process_id),
+        self._ensure_open()
+        return self._api_client.command_logs(
+            session_id=session_id,
+            command_id=process_id,
             sleep=self._sleep,
         )
 
@@ -1362,6 +1361,8 @@ def get_sandbox_service(session: "SdkSession") -> SandboxService:
                 credentials_factory=options.credentials_factory,
                 transport=session.get_transport(),
                 file_transfer_timeout=options.file_transfer_timeout,
+                request_timeout=options.request_timeout,
+                sleep=session.sleep,
             ),
             options=options,
             ensure_open=session.check_open,
@@ -1381,6 +1382,7 @@ def get_sync_sandbox_service(session: "SyncSdkSession") -> SandboxService:
             base_url=sync_options.base_url,
             credentials_factory=_adapt_sync_credentials_factory(sync_options.credentials_factory),
             file_transfer_timeout=sync_options.file_transfer_timeout,
+            request_timeout=sync_options.request_timeout,
             region=sync_options.region,
         )
         return SandboxService(
@@ -1389,6 +1391,8 @@ def get_sync_sandbox_service(session: "SyncSdkSession") -> SandboxService:
                 credentials_factory=options.credentials_factory,
                 transport=session.get_transport(),
                 file_transfer_timeout=options.file_transfer_timeout,
+                request_timeout=options.request_timeout,
+                sleep=session.sleep,
             ),
             options=options,
             ensure_open=session.check_open,

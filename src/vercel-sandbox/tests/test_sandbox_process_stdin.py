@@ -226,7 +226,7 @@ class _Handle:
         stdin = self.process.stdin
         self._call(stdin.close if self._portal is None else stdin.aclose)
 
-    def communicate(self, input: object = None) -> tuple[str | None, str | None]:
+    def communicate(self, input: object = None) -> tuple[bytes | None, bytes | None]:
         return self._call(self.process.communicate, input)  # type: ignore[no-any-return]
 
 
@@ -316,7 +316,7 @@ def test_writes_reach_the_process_in_order_and_close_sends_eof(driver: _Driver) 
     assert driver.server.closed
     assert driver.server.bodies[0] == {}
     assert [body.get("offset") for body in driver.server.writes()] == [0, 6, 9, 12]
-    assert process.communicate() == ("hello world\n", "")
+    assert process.communicate() == (b"hello world\n", b"")
 
 
 @pytest.mark.parametrize("lookup", ["get_command", "query_commands"])
@@ -343,7 +343,7 @@ def test_a_looked_up_process_continues_after_input_already_written(
     [
         (b"", None, b"", False),
         (b"", b"", b"", True),
-        (b"", "x", b"x", True),
+        (b"", b"x", b"x", True),
         (b"later", None, b"later", True),
     ],
     ids=["no-input", "empty-input", "input", "written-then-no-input"],
@@ -371,7 +371,7 @@ def test_a_looked_up_process_without_stdin_refuses_input(driver: _Driver) -> Non
         with pytest.raises(sandbox.SandboxStdinError, match="stdin=subprocess.PIPE"):
             fetched.write(b"data")
     with pytest.raises(sandbox.SandboxStdinError, match="stdin=subprocess.PIPE"):
-        driver.get_command().communicate("data")
+        driver.get_command().communicate(b"data")
 
     # Nothing was attached, so there's nothing to close.
     fetched.close()
@@ -390,7 +390,7 @@ def test_a_looked_up_process_that_stops_taking_input_breaks_the_pipe(
 
     with pytest.raises(fetched.broken):
         fetched.write(b"b")
-    assert fetched.communicate(b"more") == ("a", "")
+    assert fetched.communicate(b"more") == (b"a", b"")
 
 
 def test_stdin_is_not_attached_unless_requested(driver: _Driver) -> None:
@@ -398,7 +398,7 @@ def test_stdin_is_not_attached_unless_requested(driver: _Driver) -> None:
         process = driver.create_command(stdin=stdin)
         assert process.process.stdin is None
         with pytest.raises(ValueError, match="stdin=subprocess.PIPE"):
-            process.communicate("input")
+            process.communicate(b"input")
 
     assert all("attachStdin" not in body for body in driver.api.created)
     assert driver.server.bodies == []
@@ -406,7 +406,7 @@ def test_stdin_is_not_attached_unless_requested(driver: _Driver) -> None:
 
 @pytest.mark.parametrize(
     ("input", "expected"),
-    [("héllo\n", b"h\xc3\xa9llo\n"), (b"\x00\xff", b"\x00\xff"), ("", b""), (None, b"")],
+    [("héllo\n".encode(), b"h\xc3\xa9llo\n"), (b"\x00\xff", b"\x00\xff"), (b"", b""), (None, b"")],
 )
 def test_communicate_writes_input_and_closes_stdin(
     driver: _Driver, input: object, expected: bytes
@@ -417,7 +417,7 @@ def test_communicate_writes_input_and_closes_stdin(
 
     assert driver.server.data == expected
     assert driver.server.closed
-    assert stdout == expected.decode(errors="replace")
+    assert stdout == expected.decode(errors="replace").encode()
 
 
 def test_large_writes_are_split_into_bounded_requests(driver: _Driver) -> None:
@@ -450,6 +450,48 @@ def test_transient_failures_resend_the_same_request(
     first, resent = driver.server.writes()[1:3]
     assert first == resent == {"data": base64.b64encode(b"bc").decode(), "offset": 1}
     assert len(sleeps) == 1
+
+
+@pytest.mark.parametrize(
+    ("retry_after", "expected_delay"),
+    [
+        (None, 0.4),
+        ("invalid", 0.4),
+        ("NaN", 0.4),
+        ("0", 0.4),
+        ("-1", 0.4),
+        ("0.25", 0.25),
+        ("20", 20.0),
+        ("20.1", None),
+    ],
+)
+def test_stdin_rate_limits_use_short_server_waits_or_backoff(
+    driver: _Driver, sleeps: list[float], retry_after: str | None, expected_delay: float | None
+) -> None:
+    process = driver.create_command(stdin=subprocess.PIPE)
+    process.write(b"a")
+
+    def rate_limited(
+        server: _StdinServer, request: httpx.Request, body: dict[str, Any]
+    ) -> httpx.Response:
+        headers = {} if retry_after is None else {"Retry-After": retry_after}
+        return _json({"error": {"code": "rate_limited", "message": "try later"}}, 429, headers)
+
+    driver.server.faults.append(rate_limited)
+    if expected_delay is None:
+        with pytest.raises(sandbox.SandboxStdinError):
+            process.write(b"bc")
+        assert driver.server.data == b"a"
+        assert len(driver.server.writes()) == 2
+        assert sleeps == []
+    else:
+        process.write(b"bc")
+        assert driver.server.data == b"abc"
+        assert (
+            driver.server.writes()[1:]
+            == [{"data": base64.b64encode(b"bc").decode(), "offset": 1}] * 2
+        )
+        assert sleeps == [expected_delay]
 
 
 def test_a_write_that_may_have_landed_breaks_the_stream_until_closed(
@@ -504,7 +546,7 @@ def test_exited_process_breaks_the_pipe_but_not_communicate_or_close(driver: _Dr
         process.write(b"b")
     with pytest.raises(process.broken):
         process.write(b"c")
-    assert process.communicate(b"more") == ("a", "")
+    assert process.communicate(b"more") == (b"a", b"")
 
 
 def test_timeouts_are_resent_while_the_process_keeps_reading(driver: _Driver) -> None:
@@ -600,9 +642,9 @@ def test_writes_fail_before_writing_when_the_offset_is_unknown(driver: _Driver) 
 
 
 def test_run_command_feeds_input_while_streaming_output(driver: _Driver) -> None:
-    result = driver.run_command(input="hello\n", capture_output=True)
+    result = driver.run_command(input=b"hello\n", capture_output=True)
 
-    assert result.stdout == "hello\n"
+    assert result.stdout == b"hello\n"
     assert result.returncode == 0
     assert driver.api.created[0]["attachStdin"] is True
     assert driver.server.data == b"hello\n"
@@ -612,11 +654,11 @@ def test_run_command_feeds_input_while_streaming_output(driver: _Driver) -> None
 def test_run_command_feeds_input_once_when_its_output_stream_drops(driver: _Driver) -> None:
     driver.api.interrupt_run = True
 
-    result = driver.run_command(input="hello\n", capture_output=True)
+    result = driver.run_command(input=b"hello\n", capture_output=True)
 
     # The command keeps running, so its output is followed from the logs
     # endpoint instead of starting it, and writing its input, again.
-    assert result.stdout == "hello\n"
+    assert result.stdout == b"hello\n"
     assert len(driver.api.created) == 1
     assert driver.server.writes() == [
         {"data": base64.b64encode(b"hello\n").decode(), "offset": 0},
@@ -653,11 +695,11 @@ def test_run_command_on_start_runs_before_input_is_written(driver: _Driver, rais
 
     if raises:
         with pytest.raises(RuntimeError) as raised:
-            driver.run_command(input="hello\n", capture_output=True, on_start=on_start)
+            driver.run_command(input=b"hello\n", capture_output=True, on_start=on_start)
         assert raised.value is error
     else:
-        result = driver.run_command(input="hello\n", capture_output=True, on_start=on_start)
-        assert result.stdout == "hello\n"
+        result = driver.run_command(input=b"hello\n", capture_output=True, on_start=on_start)
+        assert result.stdout == b"hello\n"
 
     assert seen == [("cmd_1", b"", False)]
     # The input is written and stdin closed even when on_start raises, so the
@@ -696,7 +738,12 @@ def test_stdin_takes_bytes_not_text(driver: _Driver) -> None:
 
     with pytest.raises(TypeError, match="bytes"):
         process.write("text")  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="bytes"):
+        process.communicate("text")
+    with pytest.raises(TypeError, match="bytes"):
+        driver.run_command(input="text", capture_output=True)
 
+    assert len(driver.api.created) == 1
     assert driver.server.writes() == []
 
 

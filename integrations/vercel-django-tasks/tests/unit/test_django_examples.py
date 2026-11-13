@@ -4,12 +4,12 @@ from typing import Any
 
 import importlib
 import sys
+import tomllib
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-import tomllib
 from django.tasks import TaskResultStatus, task_backends
 from django.test import RequestFactory
 from django.urls import resolve

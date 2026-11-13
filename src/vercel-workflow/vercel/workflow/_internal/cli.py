@@ -20,14 +20,10 @@ import importlib
 import json
 import pathlib
 import sys
+import tomllib
 from typing import Any
 
 from . import core, runtime, world as w
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:  # pragma: no cover -- exercised on 3.10 only
-    import tomli as tomllib
 
 PYPROJECT = "pyproject.toml"
 PYTHON = sys.executable

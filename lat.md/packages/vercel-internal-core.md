@@ -6,9 +6,9 @@ Lives in [[src/vercel-internal-core]]. Most of it is under `vercel._internal.cor
 
 ## Versioning contract
 
-Dependents pin this package to a single minor series because its internal API carries no compatibility promise.
+Dependents explicitly bound compatible minor versions because this package's internal API carries no compatibility promise.
 
-Every consumer declares a dependency like `vercel-internal-core>=0.2.0,<0.3.0`. A breaking internal change therefore ships as a new minor version, and each dependent opts in by widening its bound in the same release.
+A breaking internal change ships as a new minor version, and each dependent opts in by widening its upper bound in the same release. [[tooling#Releases#Dynamic dependencies|Build-time metadata]] raises the lower bound to the current sibling version.
 
 ## Sessions and service options
 
@@ -26,7 +26,7 @@ Transports are the only place HTTP requests are built and sent, so service code 
 
 Finishing a request stream returns the server's response even when the server stopped reading early and a prior write failed, so callers can map the real error instead of a broken pipe. A success response that arrives before the body is complete raises `anyio.BrokenResourceError` rather than looking like a finished upload.
 
-[[src/vercel-internal-core/vercel/_internal/core/http/retry.py#RetryPolicy]] describes retry behavior. [[src/vercel-internal-core/vercel/_internal/core/http/transport.py#extract_structured_error]] normalizes Vercel API error bodies for the services that wrap them.
+[[src/vercel-internal-core/vercel/_internal/core/http/retry.py#RetryPolicy]] describes retry behavior. [[src/vercel-internal-core/vercel/_internal/core/http/transport.py#NO_READ_TIMEOUT]] disables only the request read timeout, preserving client connection, write, and pool limits without mutating client defaults. [[src/vercel-internal-core/vercel/_internal/core/http/transport.py#extract_structured_error]] normalizes Vercel API error bodies for the services that wrap them.
 
 ### Legacy httpx compatibility
 

@@ -62,7 +62,7 @@ async def _main() -> None:
         )
         resumed_session_id = box.current_session_id
         assert resumed_session_id != stopped_session_id
-        print(f"auto-resumed as {resumed_session_id}: {result.stdout}", end="")
+        print(f"auto-resumed as {resumed_session_id}: {(result.stdout or b'').decode()}", end="")
 
         # box.session() makes the session boundary explicit. Managed use stops
         # exactly the session yielded here, even if box later adopts a
@@ -77,7 +77,7 @@ async def _main() -> None:
                 capture_output=True,
                 check=True,
             )
-            print(f"{exact_session_id}: {exact_result.stdout}", end="")
+            print(f"{exact_session_id}: {(exact_result.stdout or b'').decode()}", end="")
 
         assert exact_session.status is SandboxStatus.STOPPED
         print(f"managed session {exact_session_id} stopped")

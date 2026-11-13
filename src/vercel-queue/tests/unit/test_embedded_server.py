@@ -6,7 +6,7 @@ import base64
 import json
 import logging
 from collections.abc import AsyncIterator
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from urllib.parse import quote
 from uuid import uuid4
 
@@ -69,7 +69,7 @@ async def test_async_send_poll_metadata_and_ack_lifecycle(
     assert message_id == "msg_1"
     assert len(deliveries) == 1
     message = deliveries[0].message
-    assert message.metadata.expires_at == datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc)
+    assert message.metadata.expires_at == datetime(2026, 1, 1, 0, 1, tzinfo=UTC)
     assert message.metadata.receipt_handle in eqs.state.by_receipt
 
     await eqs.client.acknowledge(message)
@@ -701,7 +701,7 @@ async def test_async_deployment_partition_all_deployments_delay_retention_and_id
     duplicate_original = await eqs.client.send("partitions", {"dedupe": True}, idempotency_key="k")
     duplicate = await eqs.client.send("partitions", {"dedupe": True}, idempotency_key="k")
 
-    assert eqs.state.next_expires_at == datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc)
+    assert eqs.state.next_expires_at == datetime(2026, 1, 1, 0, 1, tzinfo=UTC)
 
     partition_messages: list[Any] = payloads(
         await collect_messages(partition_client.poll("partitions", "test-group", limit=10))
@@ -724,7 +724,7 @@ async def test_async_deployment_partition_all_deployments_delay_retention_and_id
         await collect_messages(eqs.client.poll("partitions", "late", limit=10))
     )
     assert "msg_4" not in eqs.state.by_id
-    assert eqs.state.next_expires_at == datetime(2026, 1, 2, tzinfo=timezone.utc)
+    assert eqs.state.next_expires_at == datetime(2026, 1, 2, tzinfo=UTC)
     assert late_messages == [
         {"partition": "a"},
         {"partition": "all"},

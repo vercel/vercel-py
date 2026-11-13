@@ -5,10 +5,8 @@ from __future__ import annotations
 import builtins
 import traceback
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, TypedDict, cast
-
-from vercel._internal.core.polyfills import UTC
 
 from .errors import FatalError, HookConflictError, RemoteError, RetryableError, StepCancelledError
 

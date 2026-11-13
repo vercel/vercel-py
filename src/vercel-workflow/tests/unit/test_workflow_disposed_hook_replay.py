@@ -1,6 +1,6 @@
 import asyncio
 import dataclasses
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -113,7 +113,7 @@ async def test_disposed_hook_still_occupies_its_recorded_position(recorded_kind:
             step_name="previous_step", input=PLAIN_ENCODER.encode([])
         ).into_event(f"step_{position}")
         if recorded_kind == "step"
-        else w.WaitCreatedEventData(resume_at=datetime(2026, 1, 1, tzinfo=timezone.utc)).into_event(
+        else w.WaitCreatedEventData(resume_at=datetime(2026, 1, 1, tzinfo=UTC)).into_event(
             f"wait_{position}"
         )
     )

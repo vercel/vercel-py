@@ -10,6 +10,7 @@ from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from datetime import timedelta
+from enum import StrEnum
 from types import TracebackType
 from typing import Any, Final, TypeAlias, cast, final
 
@@ -18,7 +19,6 @@ import httpx2 as httpx
 from anyio.abc import ObjectReceiveStream, ObjectSendStream
 
 from vercel._internal.core.http._compat import is_async_http_client
-from vercel._internal.core.polyfills import StrEnum
 from vercel._internal.core.time import to_seconds_float
 
 PrimitiveData: TypeAlias = str | int | float | bool | None
@@ -72,7 +72,17 @@ class _NoTimeout:
 
 
 NO_TIMEOUT: Final = _NoTimeout()
-RequestTimeout: TypeAlias = timedelta | _NoTimeout | None
+
+
+@final
+class _NoReadTimeout:
+    """Disable read timeouts while retaining the client's other limits."""
+
+    __slots__ = ()
+
+
+NO_READ_TIMEOUT: Final = _NoReadTimeout()
+RequestTimeout: TypeAlias = timedelta | _NoTimeout | _NoReadTimeout | None
 
 
 class ReadResponsePolicy(StrEnum):
@@ -166,6 +176,18 @@ class BaseTransport(abc.ABC):
                 headers.setdefault("content-type", body.content_type)
             case RawBody():
                 content = body.data
+
+        if timeout is NO_READ_TIMEOUT:
+            request = client.build_request(
+                method,
+                _normalize_path(path),
+                params=params,
+                headers=headers,
+                json=json,
+                content=content,
+            )
+            request.extensions["timeout"] = {**request.extensions["timeout"], "read": None}
+            return request
 
         if timeout is NO_TIMEOUT:
             return client.build_request(

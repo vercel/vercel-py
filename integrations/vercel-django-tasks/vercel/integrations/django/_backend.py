@@ -6,7 +6,7 @@ import copy
 import math
 import threading
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from traceback import format_exception
 
 import vercel.queue as vqs
@@ -172,7 +172,7 @@ def _parse_iso_datetime(value: object) -> datetime | None:
     except ValueError as exc:
         raise ValueError("task result timestamp is invalid") from exc
     if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
+        return parsed.replace(tzinfo=UTC)
     return parsed
 
 

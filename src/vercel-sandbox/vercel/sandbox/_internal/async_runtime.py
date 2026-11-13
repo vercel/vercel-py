@@ -7,13 +7,12 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Mappi
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import timedelta
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, Literal, TextIO, overload
+from typing import TYPE_CHECKING, Any, BinaryIO, Literal, Self, overload
 
 import anyio
 from pydantic import Field, SkipValidation, field_validator
 
 from vercel._internal.core.byte_stream import AsyncByteStreamRuntime
-from vercel._internal.core.polyfills import Self
 from vercel._internal.core.time import parse_duration_seconds, parse_required_duration_seconds
 from vercel.sandbox._internal.async_filesystem_handle import (
     SandboxBinaryReader,
@@ -21,6 +20,7 @@ from vercel.sandbox._internal.async_filesystem_handle import (
     SandboxTextReader,
     SandboxTextWriter,
 )
+from vercel.sandbox._internal.byte_reader import ByteReader, _byte_readers
 from vercel.sandbox._internal.errors import (
     SandboxApiError,
     SandboxCleanupError,
@@ -61,6 +61,7 @@ from vercel.sandbox._internal.models import (
     PrivateSandboxParameters,
     ProcessLog,
     RemotePath,
+    SandboxManagedCredentials,
     SandboxQuery,
     SandboxResources,
     SandboxSource,
@@ -93,7 +94,7 @@ from vercel.sandbox._internal.process_stdin import (
     CommandStdin,
     StdinMode,
     _async_stdin,
-    _coerce_input,
+    _coerce_bytes,
     _validate_stdin,
 )
 from vercel.sandbox._internal.recovery import (
@@ -126,7 +127,6 @@ from vercel.sandbox._internal.state import (
     SnapshotSessionState,
     SnapshotState,
 )
-from vercel.sandbox._internal.text_reader import TextReader, _text_readers
 from vercel.sandbox._internal.value_model import SandboxModel, SandboxValueModel
 
 if TYPE_CHECKING:
@@ -156,8 +156,8 @@ class Command(_ProcessHandleState):
     __slots__ = ("_service", "stderr", "stdin", "stdout")
 
     stdin: CommandStdin | None
-    stdout: TextReader | None
-    stderr: TextReader | None
+    stdout: ByteReader | None
+    stderr: ByteReader | None
 
     def __init__(
         self,
@@ -171,8 +171,8 @@ class Command(_ProcessHandleState):
         super().__init__(payload)
         self._service = service
         self.stdin = _async_stdin(service, payload, stdin)
-        self.stdout, self.stderr = _text_readers(
-            lambda: service.process_logs_response(session_id=self._session_id, process_id=self.id),
+        self.stdout, self.stderr = _byte_readers(
+            lambda: service.process_logs(session_id=self._session_id, process_id=self.id),
             stdout=stdout,
             stderr=stderr,
         )
@@ -198,7 +198,9 @@ class Command(_ProcessHandleState):
             raise SandboxResponseError("Wait response did not include a process return code")
         return self.returncode
 
-    async def communicate(self, input: CommandInput | None = None) -> tuple[str | None, str | None]:
+    async def communicate(
+        self, input: CommandInput | None = None
+    ) -> tuple[bytes | None, bytes | None]:
         """Send input, read all output, and wait for the process to exit.
 
         Stdin is closed whenever ``input`` is given, even if it is empty. With
@@ -208,12 +210,12 @@ class Command(_ProcessHandleState):
         output without ending its input.
 
         Args:
-            input: Bytes, or text encoded as UTF-8, to write to stdin before
-                closing it. It is not an error if the process exits or stops
-                reading before taking all of it.
+            input: Bytes to write to stdin before closing it. It is not an
+                error if the process exits or stops reading before taking all
+                of it.
 
         Returns:
-            A ``(stdout, stderr)`` tuple. A stream without a reader is
+            A ``(stdout, stderr)`` tuple of bytes. A stream without a reader is
             ``None``, so merging with ``stderr=subprocess.STDOUT`` returns
             ``(merged, None)``.
 
@@ -222,7 +224,7 @@ class Command(_ProcessHandleState):
             SandboxStdinError: If writing or closing stdin fails, including
                 writing to a looked-up process that has no stdin.
         """
-        data = None if input is None else _coerce_input(input)
+        data = None if input is None else _coerce_bytes(input)
         if self.stdin is not None:
             await self.stdin._communicate(data)
         elif data is not None:
@@ -584,8 +586,8 @@ class SandboxFilesystem:
         return SandboxTextWriter(TextWriterCore(binding, encoding, errors, newline, permissions))
 
     async def _collect_output(self, command: ProcessState) -> tuple[str, str]:
-        stdout: list[str] = []
-        stderr: list[str] = []
+        stdout: list[bytes] = []
+        stderr: list[bytes] = []
         async for event in self._service.process_logs(
             session_id=command.session_id, process_id=command.id
         ):
@@ -593,7 +595,7 @@ class SandboxFilesystem:
                 stdout.append(event.data)
             else:
                 stderr.append(event.data)
-        return "".join(stdout), "".join(stderr)
+        return b"".join(stdout).decode("utf-8"), b"".join(stderr).decode("utf-8")
 
     async def mkdir(
         self, path: RemotePath, *, cwd: RemotePath | None = None, recursive: bool = True
@@ -1006,8 +1008,8 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         sudo: bool = False,
         kill_after: float | timedelta | None = None,
         check: bool = False,
-        stdout: TextIO | int | None = None,
-        stderr: TextIO | int | None = None,
+        stdout: BinaryIO | int | None = None,
+        stderr: BinaryIO | int | None = None,
         capture_output: bool = False,
         input: CommandInput | None = None,
         on_start: Callable[[Command], None] | None = None,
@@ -1023,16 +1025,15 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
             kill_after: Duration after which the service kills the process
                 with ``SIGKILL``.
             check: Whether to raise for a nonzero exit code.
-            stdout: Writable text stream or subprocess output sentinel for
-                stdout. ``None`` inherits the local stdout stream.
-            stderr: Writable text stream or subprocess output sentinel for
-                stderr. ``None`` inherits the local stderr stream; ``STDOUT``
-                merges stderr into the stdout destination.
+            stdout: Writable binary stream or subprocess output sentinel for
+                stdout. ``None`` inherits the local stdout binary buffer.
+            stderr: Writable binary stream or subprocess output sentinel for
+                stderr. ``None`` inherits the local stderr binary buffer;
+                ``STDOUT`` merges stderr into the stdout destination.
             capture_output: Whether to capture stdout and stderr in the result.
-            input: Data written to the process's stdin, which is then closed;
-                text is encoded as UTF-8. Without it the process reads an
-                empty stdin. A process that exits or stops reading before
-                taking all of it is not an error.
+            input: Bytes written to the process's stdin, which is then closed.
+                Without it the process reads an empty stdin. A process that
+                exits or stops reading before taking all of it is not an error.
             on_start: Synchronous callable called once with a ``Command``
                 handle as soon as the process starts, before any of its
                 output is delivered. Output is held until it returns, so keep
@@ -1066,7 +1067,7 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         output_router = ProcessOutputRouter(
             stdout=stdout, stderr=stderr, capture_output=capture_output
         )
-        data = None if input is None else _coerce_input(input)
+        data = None if input is None else _coerce_bytes(input)
         start_hook = _ProcessStartHook.create(
             on_start,
             lambda payload: Command(
@@ -1116,8 +1117,8 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         sudo: bool = False,
         kill_after: float | timedelta | None = None,
         check: bool = False,
-        stdout: TextIO | int | None = None,
-        stderr: TextIO | int | None = None,
+        stdout: BinaryIO | int | None = None,
+        stderr: BinaryIO | int | None = None,
         capture_output: bool = False,
         input: CommandInput | None = None,
         on_start: Callable[[Command], None] | None = None,
@@ -1544,8 +1545,8 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         sudo: bool = False,
         kill_after: float | timedelta | None = None,
         check: bool = False,
-        stdout: TextIO | int | None = None,
-        stderr: TextIO | int | None = None,
+        stdout: BinaryIO | int | None = None,
+        stderr: BinaryIO | int | None = None,
         capture_output: bool = False,
         input: CommandInput | None = None,
         on_start: Callable[[Command], None] | None = None,
@@ -1563,7 +1564,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         output_router = ProcessOutputRouter(
             stdout=stdout, stderr=stderr, capture_output=capture_output
         )
-        data = None if input is None else _coerce_input(input)
+        data = None if input is None else _coerce_bytes(input)
         start_hook = _ProcessStartHook.create(
             on_start,
             lambda payload: Command(
@@ -1618,8 +1619,8 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         sudo: bool = False,
         kill_after: float | timedelta | None = None,
         check: bool = False,
-        stdout: TextIO | int | None = None,
-        stderr: TextIO | int | None = None,
+        stdout: BinaryIO | int | None = None,
+        stderr: BinaryIO | int | None = None,
         capture_output: bool = False,
         input: CommandInput | None = None,
         on_start: Callable[[Command], None] | None = None,
@@ -2095,6 +2096,7 @@ class _CreateSandboxParams(SandboxValueModel):
     execution_time_limit: timedelta | None = None
     resources: SandboxResources | None = None
     persistent: bool | None = None
+    credentials: SandboxManagedCredentials | None = None
     network_policy: NetworkPolicy | None = None
     network_id: str | None = None
     env: Mapping[str, str] | None = None
@@ -2155,6 +2157,7 @@ class CreateSandboxOperation:
             execution_time_limit=self._params.execution_time_limit,
             resources=self._params.resources,
             persistent=self._params.persistent,
+            credentials=self._params.credentials,
             network_policy=self._params.network_policy,
             network_id=self._params.network_id,
             env=self._params.env,
@@ -2421,6 +2424,7 @@ def create_sandbox_operation(
     execution_time_limit: DurationInput = None,
     resources: SandboxResources | None = None,
     persistent: bool | None = None,
+    credentials: SandboxManagedCredentials | None = None,
     network_policy: NetworkPolicy | None = None,
     network_id: str | None = None,
     env: Mapping[str, str] | None = None,
@@ -2444,6 +2448,7 @@ def create_sandbox_operation(
             execution_time_limit=parse_duration_seconds(execution_time_limit),
             resources=resources,
             persistent=persistent,
+            credentials=credentials,
             network_policy=network_policy,
             network_id=network_id,
             env=env,
@@ -2543,6 +2548,7 @@ async def get_or_create_sandbox(
     execution_time_limit: DurationInput = None,
     resources: SandboxResources | None = None,
     persistent: bool | None = None,
+    credentials: SandboxManagedCredentials | None = None,
     network_policy: NetworkPolicy | None = None,
     network_id: str | None = None,
     env: Mapping[str, str] | None = None,
@@ -2566,6 +2572,7 @@ async def get_or_create_sandbox(
             execution_time_limit=parse_duration_seconds(execution_time_limit),
             resources=resources,
             persistent=persistent,
+            credentials=credentials,
             network_policy=network_policy,
             network_id=network_id,
             env=env,

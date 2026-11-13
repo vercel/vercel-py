@@ -517,6 +517,7 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
             },
             "timeout": 120000,
             "resources": {"vcpus": 2, "memory": 4096},
+            "credentials": {"npm": True},
             "snapshotExpiration": 86400000,
             "keepLastSnapshots": {
                 "count": 3,
@@ -582,6 +583,7 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
             ),
             execution_time_limit=120,
             resources=SandboxResources(vcpus=2, memory=4096),
+            credentials=sandbox.SandboxManagedCredentials(npm=True),
             snapshot_expiration=SnapshotExpiration(timedelta(days=1)),
             snapshot_retention=SnapshotRetention(
                 count=3,
@@ -1191,8 +1193,8 @@ async def test_update_live_policy_failure_skips_configuration(
             tags={"env": "updated"},
         )
 
-    assert order == ["policy"]
-    assert policy_route.call_count == 1
+    assert order == ["policy"] * 3
+    assert policy_route.call_count == 3
     assert patch_route.call_count == 0
 
 
@@ -1230,7 +1232,7 @@ async def test_update_keeps_live_changes_before_a_failed_step(
                     execution_time_limit=360, network_policy=_authored_network_policy()
                 )
 
-    assert order == ["extend", "policy"]
+    assert order == ["extend", "policy", "policy", "policy"]
     assert patch_route.call_count == 0
     assert handle.current_session is original_session
     assert handle.current_session.execution_time_limit == timedelta(minutes=6)
@@ -1354,7 +1356,7 @@ async def test_async_update_step_superseded_by_recovery_keeps_current_session(
             allow_extend.set()
 
     assert len(errors) == 1
-    assert policy_route.call_count == 1
+    assert policy_route.call_count == 3
     assert patch_route.call_count == 0
     assert handle.current_session_id == "sbx_new"
     assert handle.current_session is not None
@@ -1389,7 +1391,7 @@ def test_sync_update_step_superseded_by_recovery_keeps_current_session(
             with pytest.raises(SandboxApiError):
                 update.result(timeout=5)
 
-    assert policy_route.call_count == 1
+    assert policy_route.call_count == 3
     assert patch_route.call_count == 0
     assert handle.current_session_id == "sbx_new"
     assert handle.current_session is not None
@@ -1473,7 +1475,7 @@ async def test_update_extend_timeout_ignores_only_session_gone_errors(
     if raises:
         with pytest.raises(SandboxApiError):
             await _run_sandbox_update(sync, execution_time_limit=360)
-        assert order == ["extend"]
+        assert order == ["extend"] * (3 if status_code >= 500 else 1)
         assert patch_route.call_count == 0
     else:
         await _run_sandbox_update(sync, execution_time_limit=360)
@@ -2507,6 +2509,7 @@ async def test_async_get_or_create_returns_existing_or_created_sandbox(
             "projectId": "prj_other",
             "name": "missing",
             "persistent": True,
+            "credentials": {"npm": True},
             "tags": {"purpose": "test"},
         }
         return httpx.Response(
@@ -2524,6 +2527,7 @@ async def test_async_get_or_create_returns_existing_or_created_sandbox(
         created, was_created = await sandbox.get_or_create_sandbox(
             name="missing",
             persistent=True,
+            credentials=sandbox.SandboxManagedCredentials(npm=True),
             tags={"purpose": "test"},
         )
 
@@ -2710,6 +2714,7 @@ def test_sync_get_or_create_defaults_to_resume_and_returns_created_flag(
             "projectId": "prj_123",
             "name": "missing",
             "image": "missing-repository:latest",
+            "credentials": {"npm": True},
         }
         return httpx.Response(
             200,
@@ -2723,7 +2728,9 @@ def test_sync_get_or_create_defaults_to_resume_and_returns_created_flag(
             name="existing", image="existing-repository:latest"
         )
         created, was_created = sandbox_sync.get_or_create_sandbox(
-            name="missing", image="missing-repository:latest"
+            name="missing",
+            image="missing-repository:latest",
+            credentials=sandbox_sync.SandboxManagedCredentials(npm=True),
         )
 
     assert existing.name == "existing"
@@ -2830,7 +2837,11 @@ def test_sync_get_is_plain_handle_and_create_resume_are_managed(
 
 
 @respx.mock
-async def test_closed_session_rejects_handles_and_lazy_readers(mock_env_clear: None) -> None:
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
+async def test_closed_session_rejects_handles_and_lazy_readers(
+    mock_env_clear: None, anyio_backend: str
+) -> None:
     respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
@@ -2865,10 +2876,18 @@ async def test_closed_session_rejects_handles_and_lazy_readers(mock_env_clear: N
     with pytest.raises(VercelSessionClosedError):
         await command.refresh()
     assert command.stdout is not None
+    assert command.stderr is not None
     with pytest.raises(VercelSessionClosedError):
         # The reader opens its log response lazily, so the first read observes
         # the closed session.
         await command.stdout.read()
+    with anyio.fail_after(5):
+        for reader in (command.stdout, command.stderr):
+            with pytest.raises(anyio.BrokenResourceError):
+                await reader.read()
+        await command.stdout.aclose()
+        await command.stderr.aclose()
+    assert command.stdout.closed and command.stderr.closed
     with pytest.raises(VercelSessionClosedError):
         await snapshot.delete()
     with pytest.raises(VercelSessionClosedError):

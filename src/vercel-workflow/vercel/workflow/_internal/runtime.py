@@ -12,7 +12,6 @@ import logging
 import math
 import os
 import random
-import sys
 import traceback
 from collections import deque
 from collections.abc import (
@@ -22,15 +21,13 @@ from collections.abc import (
     Mapping,
     Sequence,
 )
-from datetime import datetime
+from datetime import UTC, datetime
 from itertools import chain
-from typing import Any, Generic, ParamSpec, TypeVar, overload
+from typing import Any, Generic, ParamSpec, Self, TypeVar, overload
 from urllib.parse import parse_qsl, urlsplit
 
 import anyio
 import pydantic
-
-from vercel._internal.core.polyfills import UTC, Self
 
 from . import (
     attributes as attrs,
@@ -797,57 +794,13 @@ def open_writable(run_id: str | None, name: str) -> streams.WorkflowWritable[Any
     return state.writer_for(run_id or state.run_id, name)
 
 
-if sys.version_info >= (3, 11):
-
-    def _run_in_loop(
-        coro: Coroutine[Any, Any, T],
-        *,
-        loop_factory: Callable[[], asyncio.AbstractEventLoop],
-    ) -> T:
-        with asyncio.Runner(loop_factory=loop_factory) as runner:
-            return runner.run(coro)
-
-else:
-
-    def _cancel_all_tasks(loop: asyncio.AbstractEventLoop) -> None:
-        tasks = asyncio.all_tasks(loop)
-        if not tasks:
-            return
-
-        for task in tasks:
-            task.cancel()
-
-        loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
-
-        for task in tasks:
-            if task.cancelled():
-                continue
-            exception = task.exception()
-            if exception is not None:
-                loop.call_exception_handler(
-                    {
-                        "message": "unhandled exception during workflow loop shutdown",
-                        "exception": exception,
-                        "task": task,
-                    }
-                )
-
-    def _run_in_loop(
-        coro: Coroutine[Any, Any, T],
-        *,
-        loop_factory: Callable[[], asyncio.AbstractEventLoop],
-    ) -> T:
-        """Python 3.10 backport of the lifecycle used by ``asyncio.Runner``."""
-        loop = loop_factory()
-        try:
-            return loop.run_until_complete(coro)
-        finally:
-            try:
-                _cancel_all_tasks(loop)
-                loop.run_until_complete(loop.shutdown_asyncgens())
-                loop.run_until_complete(loop.shutdown_default_executor())
-            finally:
-                loop.close()
+def _run_in_loop(
+    coro: Coroutine[Any, Any, T],
+    *,
+    loop_factory: Callable[[], asyncio.AbstractEventLoop],
+) -> T:
+    with asyncio.Runner(loop_factory=loop_factory) as runner:
+        return runner.run(coro)
 
 
 def _run_isolated(
@@ -1823,9 +1776,7 @@ async def _flush_hook_lifecycle_events(
                 events_created = True
 
     # Catch errors so anyio does not cancel sibling token groups.
-    # For now, raise just the first failure as the TS SDK does. We can add a
-    # manual ExceptionGroup aggregation later, which would require a Python
-    # 3.10 backport dependency like what anyio does.
+    # Raise just the first failure as the TS SDK does.
     failures: list[Exception] = []
 
     async def settle_group(hooks: list[Hook]) -> None:

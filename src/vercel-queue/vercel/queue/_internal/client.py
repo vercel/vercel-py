@@ -11,7 +11,7 @@ from collections.abc import (
 )
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import TracebackType
 from urllib.parse import quote
 
@@ -189,7 +189,7 @@ class BaseQueueClient:
         headers = {
             HEADER_AUTHORIZATION: f"Bearer {token}",
             HEADER_USER_AGENT: USER_AGENT,
-            VQS_HEADER_CLIENT_TS: datetime.now(timezone.utc).isoformat(),
+            VQS_HEADER_CLIENT_TS: datetime.now(UTC).isoformat(),
         }
         if content_type is not None:
             headers[HEADER_CONTENT_TYPE] = content_type

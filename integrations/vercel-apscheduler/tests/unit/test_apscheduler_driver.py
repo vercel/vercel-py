@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from vercel.integrations.apscheduler._payload import StartPayload, WakeupPayload
 from vercel.integrations.apscheduler._time import canonical_scheduled_logical_time
-
-UTC = timezone.utc
 
 
 def test_payloads_round_trip_generation_and_sequence() -> None:

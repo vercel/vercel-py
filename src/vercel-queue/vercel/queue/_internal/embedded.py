@@ -24,7 +24,7 @@ from contextlib import (
     contextmanager,
 )
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from itertools import count
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -107,7 +107,7 @@ class EmbeddedQueuePushClient(Protocol):
 @dataclass
 class RealEmbeddedQueueClock:
     def now(self) -> datetime:
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)
 
     def monotonic(self) -> float:
         return time.monotonic()
@@ -115,7 +115,7 @@ class RealEmbeddedQueueClock:
 
 @dataclass
 class ManualEmbeddedQueueClock:
-    current: datetime = field(default_factory=lambda: datetime(2026, 1, 1, tzinfo=timezone.utc))
+    current: datetime = field(default_factory=lambda: datetime(2026, 1, 1, tzinfo=UTC))
 
     def now(self) -> datetime:
         return self.current
@@ -328,7 +328,7 @@ class EmbeddedQueueState:
         self.responses.clear()
         self.ids = count(1)
         self.receipts = count(1)
-        self.now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        self.now = datetime(2026, 1, 1, tzinfo=UTC)
 
     def close(self) -> None:
         self.clear_payloads()
@@ -1859,7 +1859,7 @@ def _multipart_part(message: StoredMessage, receipt_handle: str, consumer: str) 
 
 
 def _format_dt(value: datetime) -> str:
-    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _min_datetime(current: datetime | None, candidate: datetime) -> datetime:

@@ -1,10 +1,5 @@
 from __future__ import annotations
 
-import sys
-
-if sys.version_info < (3, 11):
-    raise SystemExit("subscriber_poll.py requires Python 3.11 or newer")
-
 import asyncio
 
 from vercel.queue import QueueClient, poll_and_handle, subscribe

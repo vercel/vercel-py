@@ -15,7 +15,7 @@ from collections.abc import (
 )
 from contextlib import AbstractAsyncContextManager, AbstractContextManager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from threading import Lock
 from urllib.parse import urljoin, urlsplit
@@ -320,8 +320,8 @@ def parse_retry_after(response: AsyncHttpResponse) -> int | None:
         except (TypeError, ValueError):
             return None
         if retry_at.tzinfo is None:
-            retry_at = retry_at.replace(tzinfo=timezone.utc)
-        delay = (retry_at.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds()
+            retry_at = retry_at.replace(tzinfo=UTC)
+        delay = (retry_at.astimezone(UTC) - datetime.now(UTC)).total_seconds()
         return max(1, int(delay))
     return max(1, parsed) if parsed >= 0 else None
 

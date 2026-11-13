@@ -39,6 +39,7 @@ from vercel.sandbox._internal.async_runtime import (
     query_snapshots as _query_snapshots,
     resume_sandbox_operation as _resume_sandbox_operation,
 )
+from vercel.sandbox._internal.byte_reader import ByteReader
 from vercel.sandbox._internal.errors import (
     SandboxApiError,
     SandboxCleanupError,
@@ -88,6 +89,7 @@ from vercel.sandbox._internal.models import (
     NetworkPolicyRule,
     NetworkPolicySubnets,
     NetworkPolicyTransform,
+    SandboxManagedCredentials,
     SandboxMount,
     SandboxQuery,
     SandboxQueryByCreatedAt,
@@ -115,7 +117,6 @@ from vercel.sandbox._internal.process_stdin import CommandStdin
 from vercel.sandbox._internal.region import CURRENT_REGION, CurrentRegion, RegionInput
 from vercel.sandbox._internal.service import SandboxService, get_sandbox_service
 from vercel.sandbox._internal.state import SnapshotRetentionState
-from vercel.sandbox._internal.text_reader import TextReader
 from vercel.sandbox.protocols import (
     SandboxExecution,
     SandboxFilesystemOperations,
@@ -141,6 +142,7 @@ def create_sandbox(
     execution_time_limit: DurationInput = None,
     resources: SandboxResources | None = None,
     persistent: bool | None = None,
+    credentials: SandboxManagedCredentials | None = None,
     network_policy: NetworkPolicy | None = None,
     network_id: str | None = None,
     env: Mapping[str, str] | None = None,
@@ -171,6 +173,8 @@ def create_sandbox(
             duration.
         resources: Requested CPU and memory resources.
         persistent: Whether the sandbox persists beyond its current session.
+        credentials: Vercel-managed credentials to inject into the sandbox's
+            network policy.
         network_policy: Network access policy sent to the Sandbox API.
         network_id: Secure Compute network ID to attach to the sandbox.
         env: Environment variables for the sandbox.
@@ -202,6 +206,7 @@ def create_sandbox(
         execution_time_limit=execution_time_limit,
         resources=resources,
         persistent=persistent,
+        credentials=credentials,
         network_policy=network_policy,
         network_id=network_id,
         env=env,
@@ -313,6 +318,7 @@ async def get_or_create_sandbox(
     execution_time_limit: DurationInput = None,
     resources: SandboxResources | None = None,
     persistent: bool | None = None,
+    credentials: SandboxManagedCredentials | None = None,
     network_policy: NetworkPolicy | None = None,
     network_id: str | None = None,
     env: Mapping[str, str] | None = None,
@@ -343,6 +349,8 @@ async def get_or_create_sandbox(
             duration.
         resources: Requested CPU and memory resources.
         persistent: Whether the sandbox persists beyond its current session.
+        credentials: Vercel-managed credentials used only when creating the
+            sandbox.
         network_policy: Network access policy sent to the Sandbox API.
         network_id: Secure Compute network ID to attach to the sandbox.
         env: Environment variables for the sandbox.
@@ -371,6 +379,7 @@ async def get_or_create_sandbox(
         execution_time_limit=execution_time_limit,
         resources=resources,
         persistent=persistent,
+        credentials=credentials,
         network_policy=network_policy,
         network_id=network_id,
         env=env,
@@ -713,6 +722,7 @@ __all__ = [
     "SandboxResponseError",
     "ResumeSandboxOperation",
     "SandboxInteractiveError",
+    "SandboxManagedCredentials",
     "SandboxStdinError",
     "SandboxStreamError",
     "SandboxRuntimeSession",
@@ -730,7 +740,7 @@ __all__ = [
     "SnapshotSource",
     "TagFilter",
     "TarballSource",
-    "TextReader",
+    "ByteReader",
     "create_sandbox",
     "delete_drive",
     "fork_drive",

@@ -8,9 +8,8 @@ suffixes for the chained-long-wait and near-elapsed cases.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 
-from vercel._internal.core.polyfills import UTC
 from vercel.workflow._internal.runtime import (
     NEAR_ELAPSED_WAIT_THRESHOLD_SECONDS,
     WAIT_CONTINUATION_MAX_DELAY_SECONDS,

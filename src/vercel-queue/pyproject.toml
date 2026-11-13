@@ -7,7 +7,7 @@ name = "vercel-queue"
 dynamic = ["version", "dependencies"]
 description = "Vercel Queue client for Python"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE", "LICENSE.*"]
 
@@ -19,9 +19,8 @@ dependencies = [
     "anyio>=4.11.0,<5",
     "httpx2[http2]>=2",
     "python-multipart>=0.0.20",
-    "typing_extensions>=4.0.0",
     "vercel-headers>=0.6.0",
-    "vercel-internal-core>=0.2.0,<0.3.0",
+    "vercel-internal-core>=0.2.0,<0.4.0",
     "vercel-oidc>=0.6.0",
 ]
 

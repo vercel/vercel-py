@@ -21,13 +21,13 @@ import enum
 import pathlib
 import typing
 import uuid
+from datetime import UTC
 from typing import TYPE_CHECKING, Any
 
 import pydantic
 import pytest
 
 from tests.payloads import PLAIN_ENCODER
-from vercel._internal.core.polyfills import UTC
 from vercel.workflow import FatalError, TypeValidationError, get_run, register_serializable, start
 from vercel.workflow._internal import (
     core,
@@ -71,7 +71,7 @@ class Address:
     zip_code: str
 
 
-class Tier(str, enum.Enum):
+class Tier(enum.StrEnum):
     BASIC = "basic"
     PRO = "pro"
 
@@ -400,9 +400,7 @@ def test_a_name_that_never_resolves_passes_through_rather_than_erroring_late() -
     unreadable annotation to the pass-through this module promises everywhere
     else.
 
-    `list["Order"]` is the same shape on Python 3.10, where `get_type_hints`
-    leaves the inner string alone; 3.11 resolves it and the adapter is real.
-    Either way no `PydanticUserError` reaches the caller.
+    Nested forward references that resolve still produce typed models.
     """
     registry = _registry()
 
@@ -420,10 +418,7 @@ def test_a_name_that_never_resolves_passes_through_rather_than_erroring_late() -
 
     args, kwargs = nested.codec.validate_arguments([], {"items": [_ORDER_DICT]})
     assert args == []
-    if nested.codec._codec("items")._adapter is None:
-        assert kwargs == {"items": [_ORDER_DICT]}  # 3.10: unresolved, passed through
-    else:
-        assert kwargs == {"items": [Order.model_validate(_ORDER_DICT)]}
+    assert kwargs == {"items": [Order.model_validate(_ORDER_DICT)]}
 
 
 class Dangling(pydantic.BaseModel):

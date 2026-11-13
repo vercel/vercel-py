@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-from typing_extensions import Self
+from typing import TYPE_CHECKING, Self
 
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable

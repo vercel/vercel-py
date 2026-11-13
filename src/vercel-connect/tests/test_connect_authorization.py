@@ -1,7 +1,7 @@
 """Authorization flow, URL validation, and detached interactive auth."""
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx2 as httpx
@@ -344,4 +344,4 @@ async def test_expires_at_is_converted_from_epoch_milliseconds(mock_env_clear: N
     async with session(service_options=session_options()):
         result = await start_authorization("linear/my-app", subject=ConnectAppTokenSubject())
 
-    assert result.expires_at == datetime.fromtimestamp(1_700_000_000, tz=timezone.utc)
+    assert result.expires_at == datetime.fromtimestamp(1_700_000_000, tz=UTC)

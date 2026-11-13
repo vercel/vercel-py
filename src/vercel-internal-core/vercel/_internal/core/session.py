@@ -5,7 +5,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from contextvars import ContextVar, Token
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, cast, overload
+from typing import TYPE_CHECKING, Any, ClassVar, Self, TypeVar, cast, overload
 
 import anyio
 import anyio.lowlevel
@@ -21,7 +21,6 @@ from vercel._internal.core.http._compat import (
     is_sync_http_client,
 )
 from vercel._internal.core.options import ServiceOptions, merge_service_options
-from vercel._internal.core.polyfills import Self
 
 if TYPE_CHECKING:
     from vercel._internal.core.byte_stream import (

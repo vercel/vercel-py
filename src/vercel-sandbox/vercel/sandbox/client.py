@@ -1,9 +1,9 @@
 """Standalone Sandbox service clients."""
 
 from collections.abc import AsyncIterator, Mapping
+from typing import Self
 
 from vercel._internal.core.options import collect_service_options
-from vercel._internal.core.polyfills import Self
 from vercel._internal.core.session import HttpxClientFactory, SdkSession
 from vercel.sandbox._internal.async_runtime import (
     CreateSandboxOperation,
@@ -35,6 +35,7 @@ from vercel.sandbox._internal.models import (
     FailoverRegionsInput,
     JSONValue as _JSONValue,
     NetworkPolicy,
+    SandboxManagedCredentials,
     SandboxQuery,
     SandboxResources,
     SandboxSource,
@@ -91,6 +92,7 @@ class SandboxClient:
         execution_time_limit: DurationInput = None,
         resources: SandboxResources | None = None,
         persistent: bool | None = None,
+        credentials: SandboxManagedCredentials | None = None,
         network_policy: NetworkPolicy | None = None,
         network_id: str | None = None,
         env: Mapping[str, str] | None = None,
@@ -112,6 +114,7 @@ class SandboxClient:
             execution_time_limit=execution_time_limit,
             resources=resources,
             persistent=persistent,
+            credentials=credentials,
             network_policy=network_policy,
             network_id=network_id,
             env=env,
@@ -181,6 +184,7 @@ class SandboxClient:
         execution_time_limit: DurationInput = None,
         resources: SandboxResources | None = None,
         persistent: bool | None = None,
+        credentials: SandboxManagedCredentials | None = None,
         network_policy: NetworkPolicy | None = None,
         network_id: str | None = None,
         env: Mapping[str, str] | None = None,
@@ -203,6 +207,7 @@ class SandboxClient:
             execution_time_limit=execution_time_limit,
             resources=resources,
             persistent=persistent,
+            credentials=credentials,
             network_policy=network_policy,
             network_id=network_id,
             env=env,

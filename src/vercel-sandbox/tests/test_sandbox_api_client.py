@@ -5,11 +5,13 @@ from contextlib import asynccontextmanager
 from datetime import timedelta
 from types import SimpleNamespace
 
+import anyio
 import httpx2 as httpx
 import pytest
 from httpx2._types import HeaderTypes, QueryParamTypes
 
 from vercel._internal.core.http import (
+    NO_READ_TIMEOUT,
     NO_TIMEOUT,
     BaseTransport,
     BytesBody,
@@ -345,13 +347,13 @@ async def test_waiting_for_command_disables_client_timeout() -> None:
     assert transport.timeout is NO_TIMEOUT
 
 
-async def test_polling_command_uses_client_timeout() -> None:
+async def test_polling_command_disables_read_timeout() -> None:
     transport = RecordingJsonTransport(_command_response(exit_code=None))
     client = _sandbox_client(transport)
 
     await client.get_command(session_id="sbx_1", command_id="cmd_1", wait=False)
 
-    assert transport.timeout is None
+    assert transport.timeout is NO_READ_TIMEOUT
 
 
 async def test_run_process_disables_client_timeout() -> None:
@@ -373,13 +375,23 @@ async def test_run_process_disables_client_timeout() -> None:
 
 
 async def test_command_logs_disable_client_timeout() -> None:
-    transport = RecordingStreamTransport()
+    transport = RecordingStreamTransport(
+        lines=(
+            json.dumps({"stream": "stdout", "data": "café\n"}),
+            json.dumps({"stream": "stderr", "data": "雪\n"}),
+        )
+    )
     client = _sandbox_client(transport)
 
-    response = await client.command_logs_response(session_id="sbx_1", command_id="cmd_1")
-    await response.aclose()
+    events = [
+        (event.stream, event.data)
+        async for event in client.command_logs(
+            session_id="sbx_1", command_id="cmd_1", sleep=anyio.sleep
+        )
+    ]
 
     assert transport.timeout is NO_TIMEOUT
+    assert events == [("stdout", "café\n".encode()), ("stderr", "雪\n".encode())]
 
 
 async def test_file_read_uses_file_transfer_timeout() -> None:

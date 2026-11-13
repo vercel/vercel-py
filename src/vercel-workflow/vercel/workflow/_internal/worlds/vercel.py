@@ -4,18 +4,21 @@ import json
 import math
 import os
 import platform
+import random
+import sys
 import threading
 import traceback
 import urllib.parse
 from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
+from datetime import UTC
 from typing import Any, TypeVar, overload
 
+import anyio
 import cbor2
 import httpx2 as httpx
 import pydantic
 
 import vercel.queue as vqs
-from vercel._internal.core.polyfills import UTC
 from vercel.headers import REQUEST_ID_HEADER_NAME, get_headers
 from vercel.oidc import VercelOidcTokenError
 from vercel.oidc.aio import get_vercel_oidc_token
@@ -66,6 +69,75 @@ def _parse_response_body(resp: httpx.Response) -> Any:
         return cbor2.loads(
             resp.content, tag_hook=_cbor_tag_hook, object_hook=_cbor_filter_undefined
         )
+
+
+# These errors occur before the request is sent, so writes can be retried safely.
+_UNSENT_REQUEST_ERRORS: tuple[type[httpx.TransportError], ...] = (
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.PoolTimeout,
+)
+_IDEMPOTENT_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+# Limit each request to three attempts, with a short wait between attempts.
+_REQUEST_ATTEMPTS = 3
+_REQUEST_RETRY_BASE_SECONDS = 0.1
+
+
+def _is_retryable_transport_error(method: str, error: httpx.TransportError) -> bool:
+    if isinstance(error, _UNSENT_REQUEST_ERRORS):
+        return True
+    return method.upper() in _IDEMPOTENT_METHODS
+
+
+async def _send_with_transport_retries(
+    client: httpx.AsyncClient,
+    method: str,
+    endpoint: str,
+    *,
+    content: bytes | None,
+) -> httpx.Response:
+    for attempt in range(_REQUEST_ATTEMPTS):
+        try:
+            return await client.request(method, endpoint, content=content)
+        except httpx.TransportError as error:
+            if attempt + 1 >= _REQUEST_ATTEMPTS or not _is_retryable_transport_error(method, error):
+                raise
+            delay = _REQUEST_RETRY_BASE_SECONDS * 2**attempt
+            await anyio.sleep(delay + random.uniform(0, delay / 2))
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
+# Failed deliveries retry with exponential backoff and jitter, up to 900 seconds.
+_HANDLER_ERROR_RETRY_AFTER_SECONDS = 1
+_HANDLER_ERROR_MAX_RETRY_AFTER_SECONDS = 900
+_HANDLER_ERROR_RETRY_JITTER_RATIO = 0.25
+
+
+def _error_retry_after_seconds(error: BaseException) -> int | None:
+    """Read a positive retry delay from an error and cap it at 900 seconds."""
+    retry_after = getattr(error, "retry_after", None)
+    if (
+        not isinstance(retry_after, int | float)
+        or isinstance(retry_after, bool)
+        or not math.isfinite(retry_after)
+        or retry_after <= 0
+    ):
+        return None
+    return min(math.ceil(retry_after), _HANDLER_ERROR_MAX_RETRY_AFTER_SECONDS)
+
+
+def _handler_error_retry_after_seconds(error: BaseException, delivery_count: int) -> int:
+    """Seconds until a delivery that failed with ``error`` is redelivered."""
+    # Check the ceiling first: delivery_count comes from the request, and a
+    # large exponent would allocate a huge integer before min() could cap it.
+    if delivery_count > _HANDLER_ERROR_MAX_RETRY_AFTER_SECONDS.bit_length():
+        backoff = _HANDLER_ERROR_MAX_RETRY_AFTER_SECONDS
+    else:
+        backoff = max(_HANDLER_ERROR_RETRY_AFTER_SECONDS, 2 ** max(0, delivery_count - 1))
+    jitter = random.randint(0, math.ceil(backoff * _HANDLER_ERROR_RETRY_JITTER_RATIO))
+    jittered = max(_HANDLER_ERROR_RETRY_AFTER_SECONDS, backoff - jitter)
+    # Apply jitter before the server delay so it cannot shorten that delay.
+    return max(jittered, _error_retry_after_seconds(error) or 0)
 
 
 class _QueueTransport:
@@ -477,11 +549,7 @@ class VercelWorld(w.World):
             body = cbor2.dumps(data)
 
         async with httpx.AsyncClient(base_url=self._base_url, headers=headers) as client:
-            resp = await client.request(
-                method,
-                endpoint,
-                content=body,
-            )
+            resp = await _send_with_transport_retries(client, method, endpoint, content=body)
 
         # utils.ts, makeRequest: the status decides, not the body. A body only
         # has to parse when the server said the call succeeded — otherwise an
@@ -732,9 +800,20 @@ class VercelWorld(w.World):
                         delay_seconds=delay_seconds,
                         idempotency_key=result.idempotency_key,
                     )
-            except Exception:
-                traceback.print_exc()
+            except vqs.QueueDirective:
                 raise
+            except Exception as error:
+                # Request a shorter visibility timeout instead of waiting for
+                # the default 300-second processing lease to expire.
+                delay = _handler_error_retry_after_seconds(error, message.metadata.delivery_count)
+                traceback.print_exc()
+                print(
+                    f"[workflow] Queue handler failed for message "
+                    f"{message.metadata.message_id!r} on delivery attempt "
+                    f"{message.metadata.delivery_count}; retrying in {delay}s",
+                    file=sys.stderr,
+                )
+                raise vqs.RetryAfter(delay, reason=error) from error
 
         topic_prefix = w.get_physical_topic(queue_name_prefix)
         vqs.subscribe(

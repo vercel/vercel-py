@@ -35,7 +35,7 @@ _MAX_RETRIES = 5
 _MAX_STALLED_TIMEOUTS = 2
 _MAX_RETRY_AFTER_SECONDS = 20.0
 
-CommandInput = str | bytes | bytearray | memoryview
+CommandInput = bytes | bytearray | memoryview
 
 StdinMode: TypeAlias = Literal["attached", "fetched"] | None
 """How a process handle relates to its stdin.
@@ -76,13 +76,6 @@ def _coerce_bytes(data: object) -> bytes:
         raise TypeError(f"a bytes-like object is required, not {type(data).__name__}") from None
 
 
-def _coerce_input(input: CommandInput) -> bytes:
-    """Encode ``communicate`` and ``run_command`` input; text becomes UTF-8."""
-    if isinstance(input, str):
-        return input.encode("utf-8")
-    return _coerce_bytes(input)
-
-
 def _is_stdin_unavailable(error: BaseException) -> bool:
     return (
         isinstance(error, SandboxApiError)
@@ -101,7 +94,8 @@ def _is_input_not_accepted(error: BaseException) -> bool:
 
 def _retry_after(error: SandboxApiError) -> float | None:
     try:
-        return float(error.response.headers.get("retry-after", ""))
+        retry_after = float(error.response.headers.get("retry-after", ""))
+        return retry_after if retry_after > 0 else None
     except ValueError:
         return None
 

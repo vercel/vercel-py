@@ -1,7 +1,7 @@
 [project]
 name = "vercel-apscheduler-example-cleanup"
 version = "0.1.0"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "APScheduler>=3.10.4,<4",
     "vercel-apscheduler>=0.1.0",

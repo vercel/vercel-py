@@ -30,6 +30,6 @@ Packages share a deliberately small runtime stack so they behave consistently wh
 
 - **HTTPX2** (`httpx2`) is the only HTTP client family the SDK installs. Legacy `httpx` clients are accepted only as a runtime migration path, through [[runtime#SDK sessions]] or the [[vercel-queue]] client factory.
 - **AnyIO** provides concurrency primitives in implementation code; direct `asyncio` usage is limited to tests, examples, and documentation. CI tests every package against both the lowest and the latest supported AnyIO.
-- **Python 3.10** is the minimum version for every package.
+- **Python 3.11** is the minimum version for every package.
 
 Workspace dependencies are declared with lower bounds that the release tooling keeps current; see [[tooling#Releases#Dynamic dependencies]].

@@ -14,9 +14,8 @@ drive the real ``async_handler`` closure and assert what survives that round tri
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 
-from vercel._internal.core.polyfills import UTC
 from vercel.queue import Message, MessageMetadata, SanitizedName, get_subscriptions
 from vercel.workflow._internal import world as w
 from vercel.workflow._internal.worlds.vercel import VercelWorld

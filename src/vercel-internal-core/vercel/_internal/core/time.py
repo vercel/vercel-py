@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 MILLISECOND = timedelta(milliseconds=1)
 SECOND = timedelta(seconds=1)
@@ -51,12 +51,12 @@ def to_seconds_float(td: timedelta) -> float:
 
 def from_epoch_ms(value: int | float) -> datetime:
     """Read a millisecond epoch timestamp as an aware UTC datetime."""
-    return datetime.fromtimestamp(value / 1000, tz=timezone.utc)
+    return datetime.fromtimestamp(value / 1000, tz=UTC)
 
 
 def from_epoch_seconds(value: int | float) -> datetime:
     """Read a second epoch timestamp as an aware UTC datetime."""
-    return datetime.fromtimestamp(value, tz=timezone.utc)
+    return datetime.fromtimestamp(value, tz=UTC)
 
 
 def parse_epoch_seconds(value: object) -> datetime | None:

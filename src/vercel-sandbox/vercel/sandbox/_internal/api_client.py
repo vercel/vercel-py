@@ -5,12 +5,13 @@ import json
 import os
 import platform
 import sys
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
 from datetime import timedelta
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from typing import Literal, TypeVar, cast
 
+import anyio
 from httpx2 import Response
 from httpx2._types import QueryParamTypes
 from pydantic import (
@@ -25,6 +26,7 @@ from pydantic import (
 
 from vercel._internal.core.detect_agent import detect_agent_name
 from vercel._internal.core.http import (
+    NO_READ_TIMEOUT,
     NO_TIMEOUT,
     BaseTransport,
     BytesBody,
@@ -44,7 +46,9 @@ from vercel.sandbox._internal.errors import (
     SandboxStreamError,
 )
 from vercel.sandbox._internal.log_stream import (
+    _CommandLogPayload,
     _is_transient_error,
+    _iter_command_logs,
     _ndjson_lines,
     _OutputOffsets,
     _TruncatedStreamError,
@@ -60,7 +64,7 @@ from vercel.sandbox._internal.models import (
     NetworkPolicyReadback,
     PrivateSandboxParameters,
     ProcessLog,
-    ProcessLogStream,
+    SandboxManagedCredentials,
     SandboxResources,
     SandboxSource,
     SandboxStatus,
@@ -80,6 +84,7 @@ from vercel.sandbox._internal.options import (
 )
 from vercel.sandbox._internal.process_output import ProcessOutputRouter
 from vercel.sandbox._internal.region import ResolvedRegion
+from vercel.sandbox._internal.retry import _RETRIES, AsyncSleep, _with_request_retries
 from vercel.sandbox._internal.state import (
     CompletedProcessState,
     DrivesPageState,
@@ -195,6 +200,7 @@ class _SandboxCreationOverridesRequest(_ApiRequestModel):
     timeout: timedelta | None = None
     resources: SandboxResources | None = None
     persistent: bool | None = None
+    credentials: SandboxManagedCredentials | None = None
     network_policy: NetworkPolicy | None = Field(default=None, serialization_alias="networkPolicy")
     network_id: str | None = Field(default=None, serialization_alias="networkId")
     env: dict[str, str] | None = None
@@ -1041,11 +1047,15 @@ class SandboxApiClient:
         credentials_factory: SandboxCredentialsFactory,
         transport: BaseTransport,
         file_transfer_timeout: timedelta,
+        request_timeout: timedelta | None = None,
+        sleep: AsyncSleep = anyio.sleep,
     ) -> None:
         self._credentials_factory = credentials_factory
         self._base_url = base_url
         self._transport = transport
         self._file_transfer_timeout = file_transfer_timeout
+        self._request_timeout = NO_READ_TIMEOUT if request_timeout is None else request_timeout
+        self._sleep = sleep
 
     def _url(self, path: str) -> str:
         return self._base_url.rstrip("/") + "/" + path.lstrip("/")
@@ -1060,6 +1070,7 @@ class SandboxApiClient:
         params: Mapping[str, JSONValue | None] | None = None,
         headers: Mapping[str, str] | None = None,
         timeout: RequestTimeout = None,
+        retries: int = _RETRIES,
     ) -> Response:
         query = cast(
             QueryParamTypes,
@@ -1074,22 +1085,26 @@ class SandboxApiClient:
             "user-agent": _user_agent(),
             **dict(headers or {}),
         }
-        response = await self._transport.send(
-            method,
-            self._url(path),
-            token=credentials.token,
-            params=query,
-            body=body,
-            headers=request_headers,
-            timeout=timeout,
-            read_response=ReadResponsePolicy.ALWAYS,
-        )
 
-        if not response.is_success:
-            message, data = extract_structured_error(response)
-            raise SandboxApiError(response, message, data=data)
+        async def send() -> Response:
+            response = await self._transport.send(
+                method,
+                self._url(path),
+                token=credentials.token,
+                params=query,
+                body=body,
+                headers=request_headers,
+                timeout=self._request_timeout if timeout is None else timeout,
+                read_response=ReadResponsePolicy.ALWAYS,
+            )
 
-        return response
+            if not response.is_success:
+                message, data = extract_structured_error(response)
+                raise SandboxApiError(response, message, data=data)
+
+            return response
+
+        return await _with_request_retries(send, sleep=self._sleep, retries=retries)
 
     async def _request_stream(
         self,
@@ -1101,6 +1116,7 @@ class SandboxApiClient:
         params: Mapping[str, JSONValue | None] | None = None,
         headers: Mapping[str, str] | None = None,
         timeout: RequestTimeout = None,
+        retries: int = _RETRIES,
     ) -> StreamingResponse:
         query = cast(
             QueryParamTypes,
@@ -1115,25 +1131,29 @@ class SandboxApiClient:
             "user-agent": _user_agent(),
             **dict(headers or {}),
         }
-        response = await self._transport.open_response_stream(
-            method,
-            self._url(path),
-            token=credentials.token,
-            params=query,
-            body=body,
-            headers=request_headers,
-            timeout=timeout,
-            read_response=ReadResponsePolicy.NON_SUCCESS_ONLY,
-        )
 
-        if response.response.is_success:
-            return response
+        async def send() -> StreamingResponse:
+            response = await self._transport.open_response_stream(
+                method,
+                self._url(path),
+                token=credentials.token,
+                params=query,
+                body=body,
+                headers=request_headers,
+                timeout=self._request_timeout if timeout is None else timeout,
+                read_response=ReadResponsePolicy.NON_SUCCESS_ONLY,
+            )
 
-        try:
-            message, data = extract_structured_error(response.response)
-            raise SandboxApiError(response.response, message, data=data)
-        finally:
-            await response.aclose()
+            if response.response.is_success:
+                return response
+
+            try:
+                message, data = extract_structured_error(response.response)
+                raise SandboxApiError(response.response, message, data=data)
+            finally:
+                await response.aclose()
+
+        return await _with_request_retries(send, sleep=self._sleep, retries=retries)
 
     async def _request_json(
         self,
@@ -1144,6 +1164,7 @@ class SandboxApiClient:
         body: JSONValue | None = None,
         params: Mapping[str, JSONValue | None] | None = None,
         timeout: RequestTimeout = None,
+        retries: int = _RETRIES,
     ) -> JSONObject:
         response = await self._request(
             method,
@@ -1153,6 +1174,7 @@ class SandboxApiClient:
             params=params,
             headers={"content-type": "application/json"},
             timeout=timeout,
+            retries=retries,
         )
 
         try:
@@ -1177,6 +1199,7 @@ class SandboxApiClient:
         execution_time_limit: timedelta | None = None,
         resources: SandboxResources | None = None,
         persistent: bool | None = None,
+        credentials: SandboxManagedCredentials | None = None,
         network_policy: NetworkPolicy | None = None,
         network_id: str | None = None,
         env: Mapping[str, str] | None = None,
@@ -1188,8 +1211,8 @@ class SandboxApiClient:
         failover_regions: tuple[str, ...] | None = None,
         private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
     ) -> _PreparedSandboxCreation:
-        credentials = await self._credentials_factory()
-        resolved_project_id = project_id or credentials.project_id
+        api_credentials = await self._credentials_factory()
+        resolved_project_id = project_id or api_credentials.project_id
         serialized_mounts = _serialize_drive_mounts(
             mounts,
             project_id=resolved_project_id,
@@ -1207,6 +1230,7 @@ class SandboxApiClient:
             timeout=execution_time_limit,
             resources=resources,
             persistent=persistent,
+            credentials=credentials,
             network_policy=network_policy,
             network_id=network_id,
             env=dict(env) if env is not None else None,
@@ -1223,7 +1247,7 @@ class SandboxApiClient:
             body, ensure_ascii=False, separators=(",", ":"), allow_nan=False
         ).encode("utf-8")
         return _PreparedSandboxCreation(
-            credentials=credentials,
+            credentials=api_credentials,
             project_id=resolved_project_id,
             body=encoded_body,
         )
@@ -1270,6 +1294,7 @@ class SandboxApiClient:
         execution_time_limit: timedelta | None = None,
         resources: SandboxResources | None = None,
         persistent: bool | None = None,
+        credentials: SandboxManagedCredentials | None = None,
         network_policy: NetworkPolicy | None = None,
         network_id: str | None = None,
         env: Mapping[str, str] | None = None,
@@ -1290,6 +1315,7 @@ class SandboxApiClient:
             execution_time_limit=execution_time_limit,
             resources=resources,
             persistent=persistent,
+            credentials=credentials,
             network_policy=network_policy,
             network_id=network_id,
             env=env,
@@ -1859,6 +1885,7 @@ class SandboxApiClient:
             body=JSONBody(request.to_api_dict()),
             headers={"connection": "close"},
             timeout=NO_TIMEOUT,
+            retries=0,
         )
 
         initial: ProcessState | None = None
@@ -1908,9 +1935,9 @@ class SandboxApiClient:
                                 "Sandbox process response included output outside process metadata",
                                 data=record,
                             )
-                        event = ProcessLog(stream=ProcessLogStream(stream), data=data)
+                        event = _CommandLogPayload.model_validate(record).to_log()
                         output_router.route(event)
-                        delivered.advance(event.stream, len(data))
+                        delivered.advance(event.stream, len(event.data))
                         continue
                     if stream == "error" and isinstance(data, dict):
                         code = data.get("code")
@@ -1962,6 +1989,8 @@ class SandboxApiClient:
             credentials=credentials,
             params={"wait": "true" if wait else "false"},
             timeout=NO_TIMEOUT if wait else None,
+            # The service retries the entire read, including its response body.
+            retries=0,
         )
         return _validate_response(_CommandResponse, data).to_command()
 
@@ -2083,6 +2112,7 @@ class SandboxApiClient:
             ),
             credentials=credentials,
             body=body,
+            retries=0,
         )
         return _validate_response(_CommandStdinResponse, response).bytes_written
 
@@ -2106,7 +2136,22 @@ class SandboxApiClient:
         )
         return _validate_response(_CommandResponse, data).to_command()
 
-    async def command_logs_response(
+    def command_logs(
+        self,
+        *,
+        session_id: str,
+        command_id: str,
+        sleep: AsyncSleep,
+        delivered: _OutputOffsets | None = None,
+    ) -> AsyncGenerator[ProcessLog, None]:
+        """Yield byte output events, handling wire decoding and interrupted streams."""
+        return _iter_command_logs(
+            lambda: self._command_logs_response(session_id=session_id, command_id=command_id),
+            sleep=sleep,
+            delivered=delivered,
+        )
+
+    async def _command_logs_response(
         self,
         *,
         session_id: str,
@@ -2123,4 +2168,5 @@ class SandboxApiClient:
             credentials=credentials,
             headers={"connection": "close"},
             timeout=NO_TIMEOUT,
+            retries=0,
         )

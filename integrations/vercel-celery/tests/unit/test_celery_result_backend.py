@@ -158,7 +158,7 @@ def test_runtime_cache_result_backend_saves_and_restores_group_result() -> None:
     install_result_backend_integration()
     app = CeleryApp("result-group", backend="vercel-runtime-cache://")
     signature = app.signature("tasks.add", args=(1, 2))
-    result = group(signature).freeze(group_id="group-1")
+    result = group(signature).set(task_id="group-1").freeze()
 
     app.backend.save_group("group-1", result)
 

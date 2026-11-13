@@ -5,7 +5,7 @@ from __future__ import annotations
 import subprocess
 from collections.abc import Mapping, Sequence
 from datetime import timedelta
-from typing import TYPE_CHECKING, Literal, Protocol, TextIO, overload, runtime_checkable
+from typing import TYPE_CHECKING, BinaryIO, Literal, Protocol, overload, runtime_checkable
 
 from vercel.sandbox._internal.models import CompletedCommand, DirectoryEntry, RemotePath
 
@@ -164,8 +164,8 @@ class SandboxExecution(Protocol):
         sudo: bool = False,
         kill_after: float | timedelta | None = None,
         check: bool = False,
-        stdout: TextIO | int | None = None,
-        stderr: TextIO | int | None = None,
+        stdout: BinaryIO | int | None = None,
+        stderr: BinaryIO | int | None = None,
         capture_output: bool = False,
     ) -> CompletedCommand: ...
 
@@ -179,8 +179,8 @@ class SandboxExecution(Protocol):
         sudo: bool = False,
         kill_after: float | timedelta | None = None,
         check: bool = False,
-        stdout: TextIO | int | None = None,
-        stderr: TextIO | int | None = None,
+        stdout: BinaryIO | int | None = None,
+        stderr: BinaryIO | int | None = None,
         capture_output: bool = False,
     ) -> CompletedCommand:
         """Deprecated alias for ``run_command()``."""
@@ -353,8 +353,8 @@ class SyncSandboxExecution(Protocol):
         sudo: bool = False,
         kill_after: float | timedelta | None = None,
         check: bool = False,
-        stdout: TextIO | int | None = None,
-        stderr: TextIO | int | None = None,
+        stdout: BinaryIO | int | None = None,
+        stderr: BinaryIO | int | None = None,
         capture_output: bool = False,
     ) -> CompletedCommand: ...
 
@@ -368,8 +368,8 @@ class SyncSandboxExecution(Protocol):
         sudo: bool = False,
         kill_after: float | timedelta | None = None,
         check: bool = False,
-        stdout: TextIO | int | None = None,
-        stderr: TextIO | int | None = None,
+        stdout: BinaryIO | int | None = None,
+        stderr: BinaryIO | int | None = None,
         capture_output: bool = False,
     ) -> CompletedCommand:
         """Deprecated alias for ``run_command()``."""

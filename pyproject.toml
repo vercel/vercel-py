@@ -23,17 +23,16 @@ dev = [
     "ty==0.0.55",
     "zizmor>=1.24.1,<2",
     "hatchling>=1.27.0,<2",
-    "time-machine>=2.16,<3",
+    "time-machine>=3.4,<4",
     "textual>=8.0.0,<9",
     "mcp>=2.3.0,<3",
     "trio>=0.33.0,<1",
     "poethepoet>=0.48.0",
     "tox>=4",
     "tox-uv-bare",
-    "tomli>=2.0.0,<3; python_version < '3.11'",
     "vendoring>=1,<2",
     "lograil~=0.8.1",
-    "ggt>=1.6.1; python_version >= '3.11'",
+    "ggt>=1.6.1",
 ]
 
 [tool.uv]
@@ -73,7 +72,7 @@ markers = [
 
 [tool.tox]
 requires = ["tox>=4", "tox-uv-bare"]
-env_list = ["py310", "py311", "py312", "py313", "py314"]
+env_list = ["py311", "py312", "py313", "py314", "py315"]
 
 [tool.tox.env_run_base]
 runner = "uv-venv-lock-runner"
@@ -84,7 +83,7 @@ uv_sync_flags = ["--all-packages"]
 commands = [["./scripts/test.sh", { replace = "posargs", extend = true }]]
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.11"
 plugins = ["pydantic.mypy"]
 cache_dir = "$MYPY_CONFIG_FILE_DIR/.mypy_cache/root"
 check_untyped_defs = true
@@ -113,12 +112,12 @@ mypy_path = [
 ]
 
 [tool.ty.environment]
-python-version = "3.10"
+python-version = "3.11"
 root = ["./src", "./integrations"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py311"
 extend-exclude = ["vendor"]
 
 [tool.ruff.lint]

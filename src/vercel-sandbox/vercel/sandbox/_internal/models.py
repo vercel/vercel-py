@@ -2,7 +2,7 @@
 
 from collections.abc import Iterable, Mapping
 from datetime import timedelta
-from enum import IntEnum
+from enum import IntEnum, StrEnum
 from pathlib import PurePosixPath
 from subprocess import CalledProcessError
 from types import MappingProxyType
@@ -12,6 +12,7 @@ from typing import (
     Final,
     Literal,
     Protocol,
+    Self,
     TypeAlias,
     TypeVar,
     cast,
@@ -32,7 +33,6 @@ from pydantic import (
     model_validator,
 )
 
-from vercel._internal.core.polyfills import Self, StrEnum
 from vercel._internal.core.time import SECOND, coerce_duration, to_ms_int
 from vercel.sandbox._internal.region import ResolvedRegion
 from vercel.sandbox._internal.value_model import SandboxValueModel
@@ -898,7 +898,12 @@ class CommandSignal(IntEnum):
 
 
 class CompletedCommand(SandboxValueModel):
-    """The captured result of one completed remote command."""
+    """The captured result of one completed remote command.
+
+    Captured output is bytes, or ``None`` for streams that were not captured.
+    It is currently re-encoded from the service's UTF-8 text and cannot
+    recover bytes already lost by the service.
+    """
 
     id: str
     name: str
@@ -907,8 +912,8 @@ class CompletedCommand(SandboxValueModel):
     session_id: str
     started_at: int
     returncode: int
-    stdout: str | None
-    stderr: str | None
+    stdout: bytes | None
+    stderr: bytes | None
 
     def check_returncode(self) -> None:
         """Raise an error when the process exited unsuccessfully.
@@ -978,6 +983,17 @@ class SandboxResources(_InputModel):
 
     vcpus: int | None = None
     memory: int | None = None
+
+
+class SandboxManagedCredentials(_InputModel):
+    """Configure Vercel-managed credential providers for a sandbox."""
+
+    npm: Literal[True] | None = Field(
+        default=None,
+        description=(
+            "Allow the sandbox to install private packages using the team's npm credentials."
+        ),
+    )
 
 
 class SnapshotRetention(_InputModel):
@@ -1090,9 +1106,9 @@ DriveQuery: TypeAlias = DriveQueryByCreatedAt | DriveQueryByUpdatedAt | DriveQue
 
 
 class ProcessLog(BaseModel):
-    """One streamed process output event."""
+    """One byte-oriented process output event, independent of the wire format."""
 
-    data: str
+    data: StrictBytes
     stream: ProcessLogStream
 
 

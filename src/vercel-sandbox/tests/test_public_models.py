@@ -4,6 +4,9 @@ import json
 from datetime import timedelta
 from types import SimpleNamespace
 
+import pytest
+from pydantic import ValidationError
+
 from vercel import sandbox
 
 
@@ -47,8 +50,8 @@ def test_command_types_preserve_process_import_compatibility() -> None:
         session_id="sbx_test",
         started_at=1,
         returncode=0,
-        stdout="hello\n",
-        stderr="",
+        stdout=b"hello\n",
+        stderr=b"",
     )
     assert isinstance(result, sandbox.CompletedProcess)
     assert sync.CompletedCommand is sandbox.CompletedCommand
@@ -86,6 +89,16 @@ def test_drive_mount_serializes_handle_as_name() -> None:
     expected = {"drive": "data", "mode": "read-write"}
     assert mount.model_dump() == expected
     assert json.loads(mount.model_dump_json()) == expected
+
+
+def test_managed_credentials_require_an_enabled_provider() -> None:
+    credentials = sandbox.SandboxManagedCredentials(npm=True)
+
+    assert credentials.to_api_dict() == {"npm": True}
+    assert "private packages" in credentials.model_json_schema()["properties"]["npm"]["description"]
+    assert sandbox.sync.SandboxManagedCredentials is sandbox.SandboxManagedCredentials
+    with pytest.raises(ValidationError):
+        sandbox.SandboxManagedCredentials.model_validate({"npm": False})
 
 
 def test_snapshot_retention_roundtrip_preserves_api_payload() -> None:
