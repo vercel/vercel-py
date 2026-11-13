@@ -1,6 +1,6 @@
 import threading
 from collections.abc import Iterator
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -28,7 +28,7 @@ def metadata(name: str) -> ScheduleMetadata:
         execution_id="execution-id",
         name=name,
         namespace="default",
-        scheduled_at=datetime(2026, 9, 2, 3, tzinfo=timezone.utc),
+        scheduled_at=datetime(2026, 9, 2, 3, tzinfo=UTC),
         source="static",
         expression="0 3 * * *",
     )
