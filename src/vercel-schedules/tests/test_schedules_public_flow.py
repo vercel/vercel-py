@@ -8,7 +8,7 @@ credential behaviour that only shows up with a real transport in the loop.
 import asyncio
 import base64
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx2 as httpx
@@ -120,7 +120,7 @@ async def test_name_based_operations_pass_name_and_namespace(mock_env_clear: Non
     async with session(service_options=session_options()):
         assert (await get_schedule("cleanup", namespace="jobs")).name == "cleanup"
         await update_schedule("cleanup", namespace="jobs", jitter=timedelta(minutes=5))
-        until = datetime(2027, 1, 15, 8, tzinfo=timezone.utc)
+        until = datetime(2027, 1, 15, 8, tzinfo=UTC)
         assert (await enable_schedule("cleanup", namespace="jobs", until=until)).is_active
         assert not (await disable_schedule("cleanup", namespace="jobs")).is_active
         await invoke_schedule("cleanup", namespace="jobs")

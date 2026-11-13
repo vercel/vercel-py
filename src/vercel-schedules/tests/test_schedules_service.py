@@ -5,7 +5,7 @@ public surface only forwards to them. Testing them directly keeps each case to
 the inputs and the resulting dict.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -19,7 +19,7 @@ from vercel.schedules._internal.service import (
     resolve_one_off,
 )
 
-AT = datetime(2026, 10, 1, 9, 30, tzinfo=timezone.utc)
+AT = datetime(2026, 10, 1, 9, 30, tzinfo=UTC)
 
 
 def create_body(**overrides: Any) -> dict[str, Any]:
@@ -74,12 +74,12 @@ def test_one_off_rounds_subminute_times_up(second: int, microsecond: int) -> Non
 
 
 def test_one_off_rounding_carries_into_the_next_day() -> None:
-    at = datetime(2026, 12, 31, 23, 59, 30, tzinfo=timezone.utc)
+    at = datetime(2026, 12, 31, 23, 59, 30, tzinfo=UTC)
 
     assert resolve_one_off(at, None) == ("2027-01-01T00:00:00", "UTC")
 
 
-@pytest.mark.parametrize("tzinfo", [timezone.utc, ZoneInfo("UTC")])
+@pytest.mark.parametrize("tzinfo", [UTC, ZoneInfo("UTC")])
 def test_utc_datetime_resolves_to_utc(tzinfo: Any) -> None:
     assert resolve_one_off(AT.replace(tzinfo=tzinfo), None) == ("2026-10-01T09:30:00", "UTC")
 

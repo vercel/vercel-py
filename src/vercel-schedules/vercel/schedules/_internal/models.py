@@ -2,11 +2,11 @@
 
 import re
 from datetime import datetime, timedelta
+from enum import StrEnum
 from typing import Any, Literal, TypeAlias
 
 from pydantic import ValidationInfo, field_validator
 
-from vercel._internal.core.polyfills import StrEnum
 from vercel.schedules._internal.base import SchedulesModel
 from vercel.schedules._internal.errors import SchedulesValidationError
 

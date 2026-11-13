@@ -5,7 +5,7 @@ handling without a network layer.
 """
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import httpx2 as httpx
 import pytest
@@ -156,7 +156,7 @@ async def test_get_percent_encodes_the_name_and_maps_the_schedule() -> None:
     assert schedule.source is ScheduleSource.DYNAMIC
     assert schedule.jitter == timedelta(minutes=2)
     assert schedule.active_until is None
-    assert schedule.created_at == datetime(2023, 11, 14, 22, 13, 20, tzinfo=timezone.utc)
+    assert schedule.created_at == datetime(2023, 11, 14, 22, 13, 20, tzinfo=UTC)
 
 
 async def test_get_without_namespace_sends_no_query() -> None:
@@ -228,7 +228,7 @@ async def test_active_until_is_parsed() -> None:
 
     schedule = await client.get_schedule("cleanup", namespace=None)
 
-    assert schedule.active_until == datetime(2027, 1, 15, 8, 0, tzinfo=timezone.utc)
+    assert schedule.active_until == datetime(2027, 1, 15, 8, 0, tzinfo=UTC)
 
 
 async def test_unparseable_cron_is_a_malformed_response() -> None:
