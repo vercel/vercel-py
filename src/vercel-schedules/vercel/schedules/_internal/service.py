@@ -124,6 +124,10 @@ def _until_ms(until: datetime | None) -> int | None:
 
 def _jitter_to_wire(jitter: timedelta) -> int:
     """Validate a jitter and render it in the unit the service expects."""
+    if not isinstance(jitter, timedelta):
+        raise SchedulesValidationError(
+            f"jitter must be a timedelta, such as timedelta(minutes=5), got {jitter!r}"
+        )
     if not MIN_JITTER <= jitter <= MAX_JITTER:
         raise SchedulesValidationError(
             f"jitter must be between {MIN_JITTER} and {MAX_JITTER} inclusive, got {jitter}"

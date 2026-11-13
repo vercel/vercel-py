@@ -165,6 +165,7 @@ def test_create_accepts_jitter_bounds_inclusive(jitter: timedelta) -> None:
         ({"cron": "* * * * *", "jitter": timedelta(seconds=59)}, "between"),
         ({"cron": "* * * * *", "jitter": timedelta(minutes=15, seconds=1)}, "between"),
         ({"cron": "* * * * *", "jitter": timedelta(minutes=1, seconds=1)}, "whole number"),
+        ({"cron": "* * * * *", "jitter": 5}, "must be a timedelta"),
         ({"cron": "* * * * *", "name": ""}, "name"),
         ({"cron": "* * * * *", "name": "."}, "name"),
         ({"cron": "* * * * *", "name": ".."}, "name"),
