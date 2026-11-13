@@ -3,7 +3,7 @@
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from vercel.schedules._internal.errors import NotAScheduleInvocationError, ScheduleEventParseError
 
@@ -23,13 +23,12 @@ def _require(env: Mapping[str, str], name: str) -> str:
 def _scheduled_at(env: Mapping[str, str]) -> datetime:
     raw = _require(env, _SCHEDULED_AT_VAR)
     try:
-        # Python 3.10's `fromisoformat` does not accept a `Z` suffix.
-        value = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        value = datetime.fromisoformat(raw)
     except ValueError as exc:
         raise ScheduleEventParseError(f"invalid {_SCHEDULED_AT_VAR} {raw!r}") from exc
     if value.utcoffset() is None:
         raise ScheduleEventParseError(f"invalid {_SCHEDULED_AT_VAR} {raw!r}: missing offset")
-    return value.astimezone(timezone.utc)
+    return value.astimezone(UTC)
 
 
 @dataclass(frozen=True)

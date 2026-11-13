@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -19,7 +19,7 @@ METADATA = ScheduleMetadata(
     execution_id="execution-id",
     name="nightly",
     namespace="default",
-    scheduled_at=datetime(2026, 9, 2, 12, tzinfo=timezone.utc),
+    scheduled_at=datetime(2026, 9, 2, 12, tzinfo=UTC),
     source="static",
     expression="0 12 * * *",
 )
