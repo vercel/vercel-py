@@ -25,6 +25,7 @@ from vercel.schedules import (
     OneOffExpression,
     PathTarget,
     QueueTarget,
+    Schedule,
     ScheduleNotFoundError,
     SchedulesApiError,
     ScheduleSource,
@@ -194,6 +195,25 @@ async def test_one_off_expression_keeps_the_wall_clock_time() -> None:
 
     assert schedule.expression == OneOffExpression(at=datetime(2026, 10, 1, 9))
     assert schedule.timezone == "America/Los_Angeles"
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        {"type": "cron", "cron": "0 3 * * *"},
+        {"type": "single", "at": "2026-10-01T09:00"},
+    ],
+)
+async def test_schedule_survives_a_dump_and_validate_round_trip(
+    expression: dict[str, str],
+) -> None:
+    # Callers cache schedules or pass them through task queues. Validating a
+    # dumped one-off schedule must not stop at `Cron`, the first union member.
+    client, _ = make_client(httpx.Response(200, json={**SCHEDULE_JSON, "expression": expression}))
+    schedule = await client.get_schedule("cleanup", namespace=None)
+
+    assert Schedule.model_validate(schedule.model_dump()) == schedule
+    assert Schedule.model_validate_json(schedule.model_dump_json()) == schedule
 
 
 @pytest.mark.parametrize(

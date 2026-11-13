@@ -3,9 +3,9 @@
 import re
 from datetime import datetime, timedelta
 from enum import StrEnum
-from typing import Any, Literal, TypeAlias
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 
-from pydantic import ValidationInfo, field_validator
+from pydantic import ValidationInfo, field_validator, model_validator
 
 from vercel.schedules._internal.base import SchedulesModel
 from vercel.schedules._internal.errors import SchedulesValidationError
@@ -121,26 +121,27 @@ class Cron(SchedulesModel):
     month: str
     day_of_week: str
 
-    def __init__(
-        self,
-        *,
-        minute: CronField | None = None,
-        hour: CronField | None = None,
-        day: CronField | None = None,
-        month: CronField | None = None,
-        day_of_week: CronField | None = None,
-    ) -> None:
-        super().__init__(
-            **_cron_defaults(
-                {
-                    "minute": minute,
-                    "hour": hour,
-                    "day": day,
-                    "month": month,
-                    "day_of_week": day_of_week,
-                }
-            )
-        )
+    if TYPE_CHECKING:
+
+        def __init__(
+            self,
+            *,
+            minute: CronField | None = None,
+            hour: CronField | None = None,
+            day: CronField | None = None,
+            month: CronField | None = None,
+            day_of_week: CronField | None = None,
+        ) -> None: ...
+
+    # Defaults are filled in a validator rather than `__init__`, so validating
+    # a dict, such as a dumped `Schedule`, fails with a validation error and
+    # lets pydantic try the other `ScheduleExpression` member.
+    @model_validator(mode="before")
+    @classmethod
+    def _fill_defaults(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        return {**data, **_cron_defaults({name: data.get(name) for name in _CRON_FIELDS})}
 
     @classmethod
     def from_crontab(cls, expression: str) -> "Cron":
