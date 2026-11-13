@@ -48,6 +48,30 @@ schedules the module registers. Renaming a schedule replaces it. A handler
 takes no arguments, or the `ScheduleMetadata` of the firing, and may be a
 coroutine function.
 
+### Function settings
+
+A schedule can set how long a firing may run and the regions its function is
+deployed to:
+
+```python
+from datetime import timedelta
+
+
+@schedule(Cron(hour=4), max_duration=timedelta(minutes=15), regions=["fra1"])
+def export_reports() -> None:
+    ...
+```
+
+`max_duration` is a whole number of seconds, up to your plan's limit, and
+defaults to the platform's default. Each firing runs once, in one of the
+`regions`: the others are used only if it is unavailable, so pass one region
+to choose where the schedule runs. `regions` defaults to the project's regions.
+
+Schedules with the same settings run in one function, and each other
+combination runs in a function of its own. Schedules in different functions do
+not share a process, so they do not share module-level state such as a cache
+or a connection pool.
+
 Importing the module registers its schedules. `get_registered_schedules()`
 returns them, and `RegisteredSchedule.run(metadata)` calls the handler for one
 firing: a coroutine function is awaited, and a regular function runs in a

@@ -63,6 +63,17 @@ def test_overrides_name_timezone_and_jitter() -> None:
     )
 
 
+def test_records_the_function_settings() -> None:
+    @schedule("0 4 * * *", max_duration=timedelta(minutes=15), regions=["fra1", "cdg1"])
+    def export_reports() -> None: ...
+
+    [registered] = get_registered_schedules()
+    assert (registered.max_duration, registered.regions) == (
+        timedelta(minutes=15),
+        ("fra1", "cdg1"),
+    )
+
+
 async def test_runs_a_sync_handler_off_the_event_loop() -> None:
     threads: list[threading.Thread] = []
 
@@ -126,6 +137,11 @@ def test_registering_the_same_handler_again_replaces_it() -> None:
         ("0 3 * * *", {"timezone": "Mars/Olympus_Mons"}, "not a known IANA timezone"),
         ("0 3 * * *", {"jitter": timedelta(minutes=20)}, "jitter must be between"),
         ("0 3 * * *", {"name": "nightly report"}, "schedule name 'nightly report'"),
+        ("0 3 * * *", {"max_duration": timedelta(0)}, "max_duration must be positive"),
+        ("0 3 * * *", {"max_duration": timedelta(seconds=1.5)}, "whole number of seconds"),
+        ("0 3 * * *", {"regions": "fra1"}, r"such as \['fra1'\]"),
+        ("0 3 * * *", {"regions": []}, "at least one region"),
+        ("0 3 * * *", {"regions": ["fra1", ""]}, "region IDs such as 'iad1'"),
     ],
 )
 def test_rejects_invalid_options(cron: str, options: dict[str, Any], match: str) -> None:

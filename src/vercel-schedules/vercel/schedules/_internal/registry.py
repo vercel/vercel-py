@@ -4,7 +4,7 @@ import functools
 import inspect
 import re
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, TypeVar
@@ -26,6 +26,31 @@ _EVENT_PARAMETER_KINDS = (
     inspect.Parameter.POSITIONAL_OR_KEYWORD,
     inspect.Parameter.VAR_POSITIONAL,
 )
+
+
+def _check_max_duration(max_duration: timedelta) -> None:
+    if max_duration <= timedelta(0):
+        raise SchedulesValidationError(f"max_duration must be positive, got {max_duration}")
+    if max_duration % timedelta(seconds=1):
+        raise SchedulesValidationError("max_duration must be a whole number of seconds")
+
+
+def _check_regions(regions: Sequence[str]) -> tuple[str, ...]:
+    # A string is a sequence of characters, so `regions="fra1"` would
+    # otherwise become ("f", "r", "a", "1").
+    if isinstance(regions, str):
+        raise SchedulesValidationError(
+            f"regions must be a list of region IDs, such as [{regions!r}]"
+        )
+    checked = tuple(regions)
+    if not checked:
+        raise SchedulesValidationError("regions must name at least one region")
+    for region in checked:
+        if not isinstance(region, str) or not region.strip():
+            raise SchedulesValidationError(
+                f"regions must contain region IDs such as 'iad1', got {region!r}"
+            )
+    return checked
 
 
 def _qualified_name(func: Callable[..., Any]) -> str:
@@ -59,6 +84,10 @@ class RegisteredSchedule:
         timezone: IANA timezone `cron` is evaluated in, or `None` for UTC.
         jitter: Random delay added to each firing, if configured.
         func: The handler.
+        max_duration: Longest a firing may run, or `None` for the platform
+            default.
+        regions: Regions the schedule's function is deployed to, or `None`
+            for the project's default regions.
     """
 
     name: str
@@ -66,6 +95,8 @@ class RegisteredSchedule:
     timezone: str | None
     jitter: timedelta | None
     func: Callable[..., Any]
+    max_duration: timedelta | None = None
+    regions: tuple[str, ...] | None = None
     _takes_metadata: bool = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -111,6 +142,8 @@ def schedule(
     name: str | None = None,
     timezone: str | None = None,
     jitter: timedelta | None = None,
+    max_duration: timedelta | None = None,
+    regions: Sequence[str] | None = None,
 ) -> Callable[[F], F]:
     """Declare a function as the handler of a recurring schedule.
 
@@ -127,7 +160,13 @@ def schedule(
 
     @schedule("*/15 * * * *", name="sync-billing", timezone="America/New_York")
     async def sync(metadata: ScheduleMetadata) -> None: ...
+
+    @schedule(Cron(hour=4), max_duration=timedelta(minutes=15), regions=["fra1"])
+    def export_reports() -> None: ...
     ```
+
+    A deployment runs schedules with the same `max_duration` and `regions` in
+    one function, and each other combination in a function of its own.
 
     Args:
         cron: When the schedule fires, as a `Cron` or a five-field crontab
@@ -139,13 +178,21 @@ def schedule(
         timezone: IANA timezone name. Defaults to UTC.
         jitter: Random delay added to each firing, in whole minutes between one
             and fifteen inclusive.
+        max_duration: Longest a firing may run, in whole seconds. Defaults to
+            the platform's default for functions. The plan sets the maximum.
+        regions: Regions this schedule's function is deployed to, such as
+            `["fra1"]`. Each firing runs once, in one of them; the others are
+            used only if it is unavailable. Pass one region to choose where the
+            schedule runs. Defaults to the project's regions.
 
     Returns:
         A decorator that registers the function and returns it unchanged.
 
     Raises:
-        SchedulesValidationError: If an argument is invalid, or another
-            function already declares a schedule with this name.
+        SchedulesValidationError: If an argument is invalid, such as a
+            `max_duration` that is not a positive whole number of seconds or
+            empty `regions`, or another function already declares a schedule
+            with this name.
         TypeError: If the function requires arguments other than one
             `ScheduleMetadata`.
     """
@@ -154,6 +201,9 @@ def schedule(
         zone_info(timezone)
     if jitter is not None:
         jitter_minutes(jitter)
+    if max_duration is not None:
+        _check_max_duration(max_duration)
+    checked_regions = None if regions is None else _check_regions(regions)
 
     def decorator(func: F) -> F:
         schedule_name = func.__name__ if name is None else name
@@ -164,7 +214,13 @@ def schedule(
             )
         _register(
             RegisteredSchedule(
-                name=schedule_name, cron=parsed, timezone=timezone, jitter=jitter, func=func
+                name=schedule_name,
+                cron=parsed,
+                timezone=timezone,
+                jitter=jitter,
+                func=func,
+                max_duration=max_duration,
+                regions=checked_regions,
             )
         )
         return func
