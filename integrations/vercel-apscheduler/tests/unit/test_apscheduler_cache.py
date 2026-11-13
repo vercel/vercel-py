@@ -212,6 +212,50 @@ def test_cache_driver_adopts_newer_wake_and_fences_older() -> None:
     assert driver.claim_wake(older, "owner-3", now).state == "stale"
 
 
+def test_cache_driver_idle_bounded_adoption_fails_stale() -> None:
+    """An evicted preview document must stop the chain, not unbound it.
+
+    The idle deadline lives only in the document; adopting an idle-bounded
+    chain into an empty document would resurrect it with no deadline and no
+    traffic requirement — a runaway preview.
+    """
+    driver = cache_driver()
+    now = datetime.now(UTC)
+    token = WakeToken(generation=3, sequence=7, logical_time=now)
+
+    assert driver.claim_wake(token, "owner-1", now, idle_bounded=True).state == "stale"
+    assert driver.claim_start(3, "owner-2", now, idle_bounded=True).state == "stale"
+    # The refusal writes nothing: the document stays absent.
+    assert driver.snapshot().generation == 0
+
+
+def test_cache_driver_idle_bounded_adoption_needs_an_unexpired_deadline() -> None:
+    driver = cache_driver()
+    now = datetime.now(UTC)
+
+    # A document with a live deadline accepts newer idle-bounded deliveries.
+    driver.start(now, idle_timeout_seconds=1800)
+    assert driver.claim_start(2, "owner-1", now, idle_bounded=True).state == "claimed"
+    finish = driver.finish_start(2, "owner-1", now + timedelta(minutes=1), now)
+    assert finish.state == "advanced"
+    assert finish.wake is not None
+    ahead = WakeToken(
+        generation=2,
+        sequence=finish.wake.sequence + 3,
+        logical_time=now + timedelta(minutes=5),
+    )
+    assert driver.claim_wake(ahead, "owner-2", now, idle_bounded=True).state == "claimed"
+
+
+def test_cache_driver_unbounded_adoption_is_unchanged_by_the_flag_default() -> None:
+    """Production and development chains keep adopting from empty documents."""
+    driver = cache_driver()
+    now = datetime.now(UTC)
+    token = WakeToken(generation=2, sequence=5, logical_time=now)
+
+    assert driver.claim_wake(token, "owner-1", now).state == "claimed"
+
+
 def test_cache_driver_resume_generation_revives_paused_document() -> None:
     driver = cache_driver()
     now = datetime.now(UTC)
