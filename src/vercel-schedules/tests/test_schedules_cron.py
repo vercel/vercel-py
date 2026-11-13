@@ -39,6 +39,12 @@ def test_from_crontab_keeps_every_field() -> None:
     assert Cron.from_crontab(str(cron)) == cron
 
 
+def test_from_crontab_accepts_every_item_form_the_service_accepts() -> None:
+    # Responses parse through `Cron`, so rejecting a form the service stores,
+    # such as a step from a single value, would break reading that schedule.
+    assert str(Cron.from_crontab("5/15 0-23/2 1,15 * *")) == "5/15 0-23/2 1,15 * *"
+
+
 @pytest.mark.parametrize(
     ("kwargs", "match"),
     [
@@ -46,6 +52,14 @@ def test_from_crontab_keeps_every_field() -> None:
         ({"hour": -1}, "hour must be between 0 and 23"),
         ({"day": 0}, "day must be between 1 and 31"),
         ({"day_of_week": 7}, "day_of_week must be between 0 and 6"),
+        # A string field gets the same bounds as an int one.
+        ({"day_of_week": "7"}, "day_of_week must be between 0 and 6"),
+        ({"minute": "0,99"}, "minute must be between 0 and 59"),
+        ({"hour": "20-24"}, "hour must be between 0 and 23"),
+        ({"minute": "5-1"}, "minute has a range that ends before it starts"),
+        ({"minute": "*/0"}, "minute has a step of zero"),
+        ({"minute": "1-"}, "minute has a malformed item"),
+        ({"minute": "1,,2"}, "minute has a malformed item"),
         ({"day_of_week": "MON"}, "day_of_week must hold only numbers"),
         ({"minute": ""}, "minute must hold only numbers"),
         ({"minute": True}, "minute must be an int or a string"),

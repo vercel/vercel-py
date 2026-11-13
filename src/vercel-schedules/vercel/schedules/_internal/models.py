@@ -63,6 +63,23 @@ _BOUNDS = {
 # weekday names are rejected.
 _CRON_FIELD_PATTERN = re.compile(r"[0-9*,/-]+")
 
+# One comma-separated item: `*`, `N`, or `N-M`, with an optional `/step`.
+_CRON_ITEM_PATTERN = re.compile(r"(?:\*|(\d+)(?:-(\d+))?)(?:/(\d+))?")
+
+
+def _check_cron_item(item: str, low: int, high: int) -> None:
+    match = _CRON_ITEM_PATTERN.fullmatch(item)
+    if match is None:
+        raise SchedulesValidationError(f"has a malformed item {item!r}")
+    start, end, step = match.groups()
+    for number in (start, end):
+        if number is not None and not low <= int(number) <= high:
+            raise SchedulesValidationError(f"must be between {low} and {high}, got {item!r}")
+    if start is not None and end is not None and int(start) > int(end):
+        raise SchedulesValidationError(f"has a range that ends before it starts: {item!r}")
+    if step is not None and int(step) == 0:
+        raise SchedulesValidationError(f"has a step of zero: {item!r}")
+
 
 def _cron_defaults(fields: dict[str, CronField | None]) -> dict[str, CronField]:
     explicit = [name for name in _SIGNIFICANCE if fields[name] is not None]
@@ -131,8 +148,9 @@ class Cron(SchedulesModel):
 
         Raises:
             SchedulesValidationError: If the expression does not have five
-                fields, or a field holds anything but numbers, `*`, `,`, `-`,
-                and `/`.
+                fields, a field holds anything but numbers, `*`, `,`, `-`, and
+                `/`, or a field has a number out of range, a backwards range, or
+                a zero step.
         """
         parts = expression.split()
         if len(parts) != len(_CRON_FIELDS):
@@ -147,8 +165,8 @@ class Cron(SchedulesModel):
         name = info.field_name or ""
         if isinstance(value, bool) or not isinstance(value, int | str):
             raise SchedulesValidationError(f"must be an int or a string, got {value!r}")
+        low, high = _BOUNDS[name]
         if isinstance(value, int):
-            low, high = _BOUNDS[name]
             if not low <= value <= high:
                 raise SchedulesValidationError(f"must be between {low} and {high}, got {value}")
             return str(value)
@@ -156,6 +174,8 @@ class Cron(SchedulesModel):
             raise SchedulesValidationError(
                 f"must hold only numbers, '*', ',', '-' and '/', got {value!r}"
             )
+        for item in value.split(","):
+            _check_cron_item(item, low, high)
         return value
 
     def __str__(self) -> str:

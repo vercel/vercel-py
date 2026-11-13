@@ -186,7 +186,7 @@ def update_schedule(
         topic: New queue topic to dispatch to.
         jitter: New jitter, between one and fifteen minutes inclusive. Pass
             `None` to remove the jitter.
-        payload: New payload. Pass `None` to configure a JSON `null`.
+        payload: New payload. Pass `None` to remove the payload.
 
     Returns:
         The updated schedule.
