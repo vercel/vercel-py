@@ -21,10 +21,9 @@ F = TypeVar("F", bound=Callable[..., Any])
 # The names the Schedules API and `vercel.json` accept.
 _NAME_PATTERN = re.compile(r"[0-9A-Za-z][0-9A-Za-z._-]{0,255}")
 
-_EVENT_PARAMETER_KINDS = (
+_POSITIONAL_KINDS = (
     inspect.Parameter.POSITIONAL_ONLY,
     inspect.Parameter.POSITIONAL_OR_KEYWORD,
-    inspect.Parameter.VAR_POSITIONAL,
 )
 
 
@@ -60,18 +59,26 @@ def _qualified_name(func: Callable[..., Any]) -> str:
 def _takes_metadata(func: Callable[..., Any]) -> bool:
     """Whether the handler takes the `ScheduleMetadata`, which must be all it requires."""
     parameters = inspect.signature(func).parameters.values()
-    required = [
-        p
+    positional = [p for p in parameters if p.kind in _POSITIONAL_KINDS]
+    # The metadata would land in a parameter with a default, such as
+    # `full: bool = False`, which the signature can't tell from an optional
+    # `metadata` parameter.
+    for p in positional:
+        if p.default is not inspect.Parameter.empty:
+            raise TypeError(
+                f"schedule handler {_qualified_name(func)} would receive the "
+                f"ScheduleMetadata in {p.name!r}, which has a default; make it required "
+                "to take the metadata, or keyword-only"
+            )
+    if len(positional) > 1 or any(
+        p.kind is inspect.Parameter.KEYWORD_ONLY and p.default is inspect.Parameter.empty
         for p in parameters
-        if p.default is inspect.Parameter.empty
-        and p.kind not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
-    ]
-    if len(required) > 1 or any(p.kind is inspect.Parameter.KEYWORD_ONLY for p in required):
+    ):
         raise TypeError(
             f"schedule handler {_qualified_name(func)} must take no arguments or one "
             "ScheduleMetadata argument"
         )
-    return any(p.kind in _EVENT_PARAMETER_KINDS for p in parameters)
+    return bool(positional) or any(p.kind is inspect.Parameter.VAR_POSITIONAL for p in parameters)
 
 
 @dataclass(frozen=True)
@@ -116,23 +123,34 @@ class RegisteredSchedule:
             await to_thread.run_sync(call)
 
 
-_schedules: dict[str, RegisteredSchedule] = {}
+@dataclass(frozen=True)
+class _Entry:
+    schedule: RegisteredSchedule
+    named: bool
+    """Whether `@schedule` was passed `name=`."""
+
+
+_schedules: dict[str, _Entry] = {}
 _schedules_lock = threading.Lock()
 
 
-def _register(registered: RegisteredSchedule) -> None:
+def _register(registered: RegisteredSchedule, *, named: bool) -> None:
     with _schedules_lock:
+        # Every schedule stacked on one function names itself, so none of
+        # them takes the function's name.
+        stacked = [e for e in _schedules.values() if e.schedule.func is registered.func]
+        if stacked and not (named and all(e.named for e in stacked)):
+            raise SchedulesValidationError(
+                f"{_qualified_name(registered.func)} has more than one @schedule; "
+                "pass name= to each"
+            )
         existing = _schedules.get(registered.name)
-        # Importing a module again, such as on reload, registers its handlers
-        # again; only a different handler with the same name is a conflict.
-        if existing is not None and _qualified_name(existing.func) != _qualified_name(
-            registered.func
-        ):
+        if existing is not None:
             raise SchedulesValidationError(
                 f"schedule {registered.name!r} is already declared by "
-                f"{_qualified_name(existing.func)}"
+                f"{_qualified_name(existing.schedule.func)}"
             )
-        _schedules[registered.name] = registered
+        _schedules[registered.name] = _Entry(registered, named)
 
 
 def schedule(
@@ -168,13 +186,23 @@ def schedule(
     A deployment runs schedules with the same `max_duration` and `regions` in
     one function, and each other combination in a function of its own.
 
+    Stack `@schedule` to run one function on several schedules, and pass each
+    one a `name`:
+
+    ```python
+    @schedule("0 3 * * *", name="report-morning")
+    @schedule("0 15 * * *", name="report-afternoon", regions=["fra1"])
+    def report(metadata: ScheduleMetadata) -> None: ...
+    ```
+
     Args:
         cron: When the schedule fires, as a `Cron` or a five-field crontab
             string, evaluated in `timezone`.
         name: Schedule name, unique among the schedules the entrypoint
-            registers. Defaults to the function's name. A deployment names
-            the schedule `<entry>.<name>`, after its `vercel.json` entry.
-            Renaming a schedule replaces it.
+            registers. Defaults to the function's name, unless the function
+            has more than one `@schedule`. A deployment names the schedule
+            `<entry>.<name>`, after its `vercel.json` entry. Renaming a
+            schedule replaces it.
         timezone: IANA timezone name. Defaults to UTC.
         jitter: Random delay added to each firing, in whole minutes between one
             and fifteen inclusive.
@@ -191,10 +219,11 @@ def schedule(
     Raises:
         SchedulesValidationError: If an argument is invalid, such as a
             `max_duration` that is not a positive whole number of seconds or
-            empty `regions`, or another function already declares a schedule
-            with this name.
+            empty `regions`, a schedule with this name is already declared,
+            or the function has more than one `@schedule` and one of them has
+            no `name`.
         TypeError: If the function requires arguments other than one
-            `ScheduleMetadata`.
+            `ScheduleMetadata`, or has a positional parameter with a default.
     """
     parsed = Cron.from_crontab(cron) if isinstance(cron, str) else cron
     if timezone is not None:
@@ -221,7 +250,8 @@ def schedule(
                 func=func,
                 max_duration=max_duration,
                 regions=checked_regions,
-            )
+            ),
+            named=name is not None,
         )
         return func
 
@@ -231,7 +261,7 @@ def schedule(
 def get_registered_schedules() -> tuple[RegisteredSchedule, ...]:
     """Return the schedules declared with `@schedule` in the modules imported so far."""
     with _schedules_lock:
-        return tuple(_schedules.values())
+        return tuple(entry.schedule for entry in _schedules.values())
 
 
 __all__ = ["RegisteredSchedule", "get_registered_schedules", "schedule"]

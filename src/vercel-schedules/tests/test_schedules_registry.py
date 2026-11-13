@@ -120,14 +120,39 @@ def test_rejects_a_second_handler_with_the_same_name() -> None:
         schedule("0 4 * * *", name="nightly")(cleanup)
 
 
-def test_registering_the_same_handler_again_replaces_it() -> None:
-    # Importing a module again, such as on reload, decorates its functions again.
-    def reindex() -> None: ...
+def test_rejects_a_redefined_handler_with_the_same_name() -> None:
+    # A copy-pasted handler is a new function with the first one's qualified name.
+    def define() -> Any:
+        def cleanup() -> None: ...
 
-    schedule("0 3 * * *")(reindex)
-    schedule("0 4 * * *")(reindex)
+        return cleanup
 
-    assert [str(s.cron) for s in get_registered_schedules()] == ["0 4 * * *"]
+    schedule("0 3 * * *")(define())
+    with pytest.raises(SchedulesValidationError, match="already declared by"):
+        schedule("0 4 * * *")(define())
+
+
+def test_stacked_schedules_run_one_handler() -> None:
+    @schedule("0 3 * * *", name="report-morning")
+    @schedule("0 15 * * *", name="report-afternoon", regions=["fra1"])
+    def report() -> None: ...
+
+    assert [(s.name, s.func, s.regions) for s in get_registered_schedules()] == [
+        ("report-afternoon", report, ("fra1",)),
+        ("report-morning", report, None),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("inner", "outer"),
+    [(None, None), ("report-afternoon", None), (None, "report-morning")],
+)
+def test_stacked_schedules_each_need_a_name(inner: str | None, outer: str | None) -> None:
+    def report() -> None: ...
+
+    schedule("0 15 * * *", name=inner)(report)
+    with pytest.raises(SchedulesValidationError, match="pass name= to each"):
+        schedule("0 3 * * *", name=outer)(report)
 
 
 @pytest.mark.parametrize(
@@ -165,3 +190,24 @@ def test_rejects_a_handler_that_requires_other_arguments() -> None:
         schedule("0 3 * * *")(reindex)
 
     assert get_registered_schedules() == ()
+
+
+def test_rejects_a_positional_parameter_with_a_default() -> None:
+    # `run` would pass the metadata as `full`.
+    def reindex(full: bool = False) -> None: ...
+
+    with pytest.raises(TypeError, match="'full', which has a default"):
+        schedule("0 3 * * *")(reindex)
+
+
+async def test_a_keyword_only_option_keeps_its_default() -> None:
+    received: list[bool] = []
+
+    @schedule("0 3 * * *")
+    async def reindex(*, full: bool = False) -> None:
+        received.append(full)
+
+    [registered] = get_registered_schedules()
+    await registered.run(metadata("reindex"))
+
+    assert received == [False]

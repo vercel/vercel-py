@@ -39,14 +39,24 @@ runs in and the module path, relative to it:
 
 The build imports `jobs` from the root and creates a schedule for each
 `@schedule` it registers, including those in modules it imports. Each schedule is named after
-the entry and the handler, such as `jobs.reindex` and `jobs.sync-billing`. Use
+the entry and the schedule, such as `jobs.reindex` and `jobs.sync-billing`. Use
 that name with `get_schedule()` and the other management functions, and expect
 it in `metadata.name`.
 
 The schedule name defaults to the function's name and must be unique among the
 schedules the module registers. Renaming a schedule replaces it. A handler
-takes no arguments, or the `ScheduleMetadata` of the firing, and may be a
-coroutine function.
+takes no arguments, or the `ScheduleMetadata` of the firing as its one
+positional parameter, and may be a coroutine function. Other parameters must be
+keyword-only with a default.
+
+To run one function on several schedules, stack `@schedule` and name each one:
+
+```python
+@schedule("0 3 * * *", name="report-morning")
+@schedule("0 15 * * *", name="report-afternoon")
+def report(metadata: ScheduleMetadata) -> None:
+    ...
+```
 
 ### Function settings
 
