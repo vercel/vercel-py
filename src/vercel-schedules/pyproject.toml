@@ -25,6 +25,7 @@ dependencies = [
     # imported directly, so the bound is declared rather than inherited.
     "httpx2>=2",
     "pydantic>=2.7.0,<3",
+    "anyio>=4.11.0,<5",
 ]
 
 [tool.uv.sources]

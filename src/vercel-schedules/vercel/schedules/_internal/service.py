@@ -51,7 +51,7 @@ def _check_timezone(timezone: str) -> None:
         raise SchedulesValidationError("timezone must be a non-empty IANA timezone name")
 
 
-def _zone(timezone: str) -> ZoneInfo:
+def zone_info(timezone: str) -> ZoneInfo:
     _check_timezone(timezone)
     try:
         return ZoneInfo(timezone)
@@ -103,7 +103,7 @@ def resolve_one_off(at: datetime, timezone: str | None) -> tuple[str, str]:
         return _wall_clock(at), timezone
 
     if timezone is not None:
-        return _wall_clock(at.astimezone(_zone(timezone))), timezone
+        return _wall_clock(at.astimezone(zone_info(timezone))), timezone
 
     name = _timezone_name(at)
     if name is None:
@@ -122,7 +122,7 @@ def _until_ms(until: datetime | None) -> int | None:
     return int(until.timestamp() * 1000)
 
 
-def _jitter_to_wire(jitter: timedelta) -> int:
+def jitter_minutes(jitter: timedelta) -> int:
     """Validate a jitter and render it in the unit the service expects."""
     if not isinstance(jitter, timedelta):
         raise SchedulesValidationError(
@@ -188,7 +188,7 @@ def build_create_body(
     else:
         raise SchedulesValidationError("pass exactly one of cron or at")
     if jitter is not None:
-        body["jitter"] = _jitter_to_wire(jitter)
+        body["jitter"] = jitter_minutes(jitter)
     body["target"] = _queue_target(topic)
     if payload is not UNSET:
         body["payload"] = payload
@@ -231,7 +231,7 @@ def build_update_body(
     if jitter is None:
         body["jitter"] = None
     elif not isinstance(jitter, UnsetType):
-        body["jitter"] = _jitter_to_wire(jitter)
+        body["jitter"] = jitter_minutes(jitter)
 
     if payload is not UNSET:
         body["payload"] = payload
