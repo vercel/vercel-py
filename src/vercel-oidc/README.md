@@ -17,7 +17,13 @@ async def main() -> None:
 ```
 
 Token lookup prefers the `x-vercel-oidc-token` request header registered with
-`vercel.headers.set_headers()`, then `VERCEL_OIDC_TOKEN`. The compatibility
+`vercel.headers.set_headers()`, then the UTF-8 file named by
+`VERCEL_OIDC_TOKEN_FILE`, then `VERCEL_OIDC_TOKEN`. The file is reread on each
+lookup and surrounding whitespace is stripped. When a file path is configured,
+a missing or unreadable file raises its filesystem error; an empty file raises
+`VercelOidcTokenError`. These errors do not fall back to the environment token
+or local CLI refresh. An expired file token can still trigger local CLI refresh.
+The compatibility
 alias `vercel.oidc.set_headers()` updates the same header context. In local development,
 you can load a short-lived token dynamically:
 
