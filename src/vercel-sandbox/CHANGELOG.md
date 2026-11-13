@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.0.0 - 2026-11-12
+
+### Breaking Changes
+
+- Use bytes for command I/O: output readers, communicate(), and captured results return bytes, input requires bytes-like data, and output destinations must be writable binary streams. Replace TextReader/SyncTextReader with ByteReader/SyncByteReader; async readers implement AnyIO ByteReceiveStream and iterate byte chunks. Encode and decode text explicitly. (#513)
+- Require Python 3.11 or newer and add Python 3.15 support; Python 3.10 is no longer supported. (#518)
+
+### Features
+
+- Add `credentials=SandboxManagedCredentials(npm=True)` to sandbox creation so private npm packages can be installed with Vercel-managed team credentials without exposing tokens inside the sandbox. (#517)
+
+### Bug Fixes
+
+- Align Sandbox retries and timeouts with the TypeScript SDK. Retry transient ordinary requests twice with randomized backoff and bounded Retry-After handling, remove the inherited read timeout, and support an explicit request_timeout. Preserve bounded file transfers and separate streaming recovery policies. Malformed stdin Retry-After values use normal backoff. (#492)
+
 ## 0.11.0 - 2026-10-30
 
 ### Breaking Changes
