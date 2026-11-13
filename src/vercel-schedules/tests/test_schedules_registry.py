@@ -1,3 +1,4 @@
+import functools
 import threading
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -100,6 +101,23 @@ async def test_passes_the_metadata_to_an_async_handler_that_takes_it() -> None:
     assert received == [metadata("reindex")]
 
 
+async def test_awaits_a_coroutine_from_a_sync_wrapper() -> None:
+    received: list[ScheduleMetadata] = []
+
+    async def reindex(firing: ScheduleMetadata) -> None:
+        received.append(firing)
+
+    @functools.wraps(reindex)
+    def traced(firing: ScheduleMetadata) -> Any:
+        return reindex(firing)
+
+    schedule("0 3 * * *")(traced)
+    [registered] = get_registered_schedules()
+    await registered.run(metadata("reindex"))
+
+    assert received == [metadata("reindex")]
+
+
 async def test_handler_errors_propagate() -> None:
     @schedule("0 3 * * *")
     async def reindex() -> None:
@@ -120,16 +138,48 @@ def test_rejects_a_second_handler_with_the_same_name() -> None:
         schedule("0 4 * * *", name="nightly")(cleanup)
 
 
-def test_rejects_a_redefined_handler_with_the_same_name() -> None:
-    # A copy-pasted handler is a new function with the first one's qualified name.
-    def define() -> Any:
-        def cleanup() -> None: ...
+def define_cleanup(module: str, source_file: str) -> Any:
+    """Execute a `cleanup` definition as if it were in `module`, from `source_file`."""
+    namespace: dict[str, Any] = {"__name__": module}
+    exec(compile("def cleanup() -> None: ...", source_file, "exec"), namespace)
+    return namespace["cleanup"]
 
-        return cleanup
 
-    schedule("0 3 * * *")(define())
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        pytest.param(
+            ("jobs.tasks", "jobs/tasks.py"), ("jobs.tasks", "jobs/tasks.py"), id="module reload"
+        ),
+        pytest.param(
+            ("jobs.tasks", "jobs/tasks.py"), ("__main__", "jobs/tasks.py"), id="run as __main__"
+        ),
+        pytest.param(("__main__", "cell-1"), ("__main__", "cell-2"), id="edited notebook cell"),
+    ],
+)
+def test_a_rerun_definition_replaces_its_schedule(
+    first: tuple[str, str], second: tuple[str, str]
+) -> None:
+    schedule("0 3 * * *")(define_cleanup(*first))
+    cleanup = define_cleanup(*second)
+    schedule("0 4 * * *")(cleanup)
+
+    [registered] = get_registered_schedules()
+    assert (registered.func, str(registered.cron)) == (cleanup, "0 4 * * *")
+
+
+def test_rejects_a_function_of_the_same_name_in_another_module() -> None:
+    schedule("0 3 * * *")(define_cleanup("jobs.tasks", "jobs/tasks.py"))
     with pytest.raises(SchedulesValidationError, match="already declared by"):
-        schedule("0 4 * * *")(define())
+        schedule("0 4 * * *")(define_cleanup("jobs.maintenance", "jobs/maintenance.py"))
+
+
+def test_rejects_one_name_stacked_twice_on_a_function() -> None:
+    def report() -> None: ...
+
+    schedule("0 15 * * *", name="report")(report)
+    with pytest.raises(SchedulesValidationError, match="already declared by"):
+        schedule("0 3 * * *", name="report")(report)
 
 
 def test_stacked_schedules_run_one_handler() -> None:
@@ -162,6 +212,7 @@ def test_stacked_schedules_each_need_a_name(inner: str | None, outer: str | None
         ("0 3 * * *", {"timezone": "Mars/Olympus_Mons"}, "not a known IANA timezone"),
         ("0 3 * * *", {"jitter": timedelta(minutes=20)}, "jitter must be between"),
         ("0 3 * * *", {"name": "nightly report"}, "schedule name 'nightly report'"),
+        ("0 3 * * *", {"max_duration": 300}, r"such as timedelta\(seconds=300\)"),
         ("0 3 * * *", {"max_duration": timedelta(0)}, "max_duration must be positive"),
         ("0 3 * * *", {"max_duration": timedelta(seconds=1.5)}, "whole number of seconds"),
         ("0 3 * * *", {"regions": "fra1"}, r"such as \['fra1'\]"),

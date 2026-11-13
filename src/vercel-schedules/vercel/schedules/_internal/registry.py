@@ -28,6 +28,11 @@ _POSITIONAL_KINDS = (
 
 
 def _check_max_duration(max_duration: timedelta) -> None:
+    if not isinstance(max_duration, timedelta):
+        raise SchedulesValidationError(
+            "max_duration must be a timedelta, such as timedelta(seconds=300), "
+            f"got {max_duration!r}"
+        )
     if max_duration <= timedelta(0):
         raise SchedulesValidationError(f"max_duration must be positive, got {max_duration}")
     if max_duration % timedelta(seconds=1):
@@ -113,14 +118,19 @@ class RegisteredSchedule:
         """Run the handler for one firing of this schedule.
 
         A coroutine function is awaited, and a regular function runs in a
-        worker thread so it does not block the event loop. Exceptions from the
-        handler propagate.
+        worker thread so it does not block the event loop. An awaitable that a
+        regular function returns is awaited too. Exceptions from the handler
+        propagate.
         """
         call = functools.partial(self.func, metadata) if self._takes_metadata else self.func
         if inspect.iscoroutinefunction(self.func):
             await call()
         else:
-            await to_thread.run_sync(call)
+            # A sync wrapper around a coroutine function, such as a decorator
+            # that uses `functools.wraps`, returns the coroutine.
+            result = await to_thread.run_sync(call)
+            if inspect.isawaitable(result):
+                await result
 
 
 @dataclass(frozen=True)
@@ -134,6 +144,26 @@ _schedules: dict[str, _Entry] = {}
 _schedules_lock = threading.Lock()
 
 
+def _source_file(func: Callable[..., Any]) -> str | None:
+    code = getattr(inspect.unwrap(func), "__code__", None)
+    return None if code is None else code.co_filename
+
+
+def _is_rerun(existing: Callable[..., Any], new: Callable[..., Any]) -> bool:
+    """Whether `new` is `existing`'s definition executed again.
+
+    A reload executes the module again under the same name and file. A file
+    run as `__main__` after being imported keeps its file, and an edited
+    notebook cell keeps its module.
+    """
+    if existing is new or existing.__qualname__ != new.__qualname__:
+        return False
+    if existing.__module__ == new.__module__:
+        return True
+    source_file = _source_file(existing)
+    return source_file is not None and source_file == _source_file(new)
+
+
 def _register(registered: RegisteredSchedule, *, named: bool) -> None:
     with _schedules_lock:
         # Every schedule stacked on one function names itself, so none of
@@ -145,7 +175,7 @@ def _register(registered: RegisteredSchedule, *, named: bool) -> None:
                 "pass name= to each"
             )
         existing = _schedules.get(registered.name)
-        if existing is not None:
+        if existing is not None and not _is_rerun(existing.schedule.func, registered.func):
             raise SchedulesValidationError(
                 f"schedule {registered.name!r} is already declared by "
                 f"{_qualified_name(existing.schedule.func)}"
@@ -202,7 +232,8 @@ def schedule(
             registers. Defaults to the function's name, unless the function
             has more than one `@schedule`. A deployment names the schedule
             `<entry>.<name>`, after its `vercel.json` entry. Renaming a
-            schedule replaces it.
+            schedule replaces it. Running the same definition again, such as
+            in a module reload, replaces its registration.
         timezone: IANA timezone name. Defaults to UTC.
         jitter: Random delay added to each firing, in whole minutes between one
             and fifteen inclusive.
@@ -218,10 +249,10 @@ def schedule(
 
     Raises:
         SchedulesValidationError: If an argument is invalid, such as a
-            `max_duration` that is not a positive whole number of seconds or
-            empty `regions`, a schedule with this name is already declared,
-            or the function has more than one `@schedule` and one of them has
-            no `name`.
+            `max_duration` that is not a `timedelta` of a positive whole number
+            of seconds or empty `regions`, another function already declares
+            a schedule with this name, or the function has more than one
+            `@schedule` and one of them has no `name`.
         TypeError: If the function requires arguments other than one
             `ScheduleMetadata`, or has a positional parameter with a default.
     """

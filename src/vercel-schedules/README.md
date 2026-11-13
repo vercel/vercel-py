@@ -85,7 +85,7 @@ or a connection pool.
 Importing the module registers its schedules. `get_registered_schedules()`
 returns them, and `RegisteredSchedule.run(metadata)` calls the handler for one
 firing: a coroutine function is awaited, and a regular function runs in a
-worker thread.
+worker thread, with any awaitable it returns awaited too.
 
 To handle a firing in your own route, such as a schedule that targets a path,
 read it from the request headers with `ScheduleMetadata.from_headers()`:
