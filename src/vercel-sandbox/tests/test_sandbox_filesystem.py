@@ -8,7 +8,7 @@ from typing import Any, cast
 import httpx2 as httpx
 import pytest
 from hypothesis import HealthCheck, given, settings, strategies as st
-from sandbox_fixtures import sandbox_service_options as _session_options
+from sandbox_fixtures import command_stream_response, sandbox_service_options as _session_options
 
 import vendor.respx as respx
 from vercel import sandbox
@@ -98,7 +98,7 @@ def _logs_response(stdout: str = "", stderr: str = "") -> httpx.Response:
         records.append({"stream": "stdout", "data": stdout})
     if stderr:
         records.append({"stream": "stderr", "data": stderr})
-    return httpx.Response(200, text="".join(json.dumps(item) + "\n" for item in records))
+    return command_stream_response(*records)
 
 
 def _tar_entries(content: bytes) -> dict[str, tuple[bytes, int]]:

@@ -23,6 +23,7 @@ dependencies = [
     "vercel-internal-core>=0.2.0,<0.4.0",
     "vercel-oidc>=0.6.0",
     "anyio>=4.11.0,<5",
+    "cbor2>=6.0,<7",
     "httpx2[ws]>=2",
     "pydantic>=2.7.0,<3",
 ]

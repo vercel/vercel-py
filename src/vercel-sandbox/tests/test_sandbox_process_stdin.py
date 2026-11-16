@@ -22,7 +22,12 @@ import pytest
 from anyio.from_thread import BlockingPortal, start_blocking_portal
 from anyio.streams.text import TextSendStream
 from hypothesis import given, settings, strategies as st
-from sandbox_fixtures import sandbox_service_options
+from sandbox_fixtures import (
+    COMMAND_STREAM_HEADERS,
+    command_stream_item,
+    command_stream_response,
+    sandbox_service_options,
+)
 
 import vendor.respx as respx
 from vercel import sandbox
@@ -142,7 +147,7 @@ class _LazyStream(httpx.SyncByteStream, httpx.AsyncByteStream):
 
     def __iter__(self) -> Iterator[bytes]:
         for record in self._records():
-            yield (json.dumps(record) + "\n").encode()
+            yield command_stream_item(record)
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
         for chunk in self:
@@ -172,7 +177,7 @@ class _Api:
         router.post(f"{_BASE}/cmd").mock(side_effect=self._create)
         router.post(f"{_BASE}/cmd/cmd_1/stdin").mock(side_effect=server)
         router.get(f"{_BASE}/cmd/cmd_1/logs").mock(
-            side_effect=lambda _: httpx.Response(200, text=self._stdout_record() + "\n")
+            side_effect=lambda _: command_stream_response(self._stdout_record())
         )
         router.get(f"{_BASE}/cmd").mock(return_value=_json({"commands": [_COMMAND]}))
         router.get(f"{_BASE}/cmd/cmd_1").mock(
@@ -180,8 +185,8 @@ class _Api:
         )
         router.post(f"{_BASE}/cmd/cmd_1/kill").mock(side_effect=self._kill)
 
-    def _stdout_record(self) -> str:
-        return json.dumps({"stream": "stdout", "data": self.server.data.decode(errors="replace")})
+    def _stdout_record(self) -> dict[str, object]:
+        return {"stream": "stdout", "data": bytes(self.server.data)}
 
     def _create(self, request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
@@ -193,10 +198,10 @@ class _Api:
             yield {"command": _COMMAND}
             if self.interrupt_run:
                 raise httpx.ReadError("connection reset by peer")
-            yield {"stream": "stdout", "data": self.server.data.decode(errors="replace")}
+            yield self._stdout_record()
             yield {"command": {**_COMMAND, "exitCode": 0}}
 
-        return httpx.Response(200, stream=_LazyStream(records))
+        return httpx.Response(200, stream=_LazyStream(records), headers=COMMAND_STREAM_HEADERS)
 
     def _kill(self, request: httpx.Request) -> httpx.Response:
         self.signals.append(json.loads(request.content)["signal"])
@@ -417,7 +422,7 @@ def test_communicate_writes_input_and_closes_stdin(
 
     assert driver.server.data == expected
     assert driver.server.closed
-    assert stdout == expected.decode(errors="replace").encode()
+    assert stdout == expected
 
 
 def test_large_writes_are_split_into_bounded_requests(driver: _Driver) -> None:

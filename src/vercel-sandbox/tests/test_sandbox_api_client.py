@@ -9,6 +9,7 @@ import anyio
 import httpx2 as httpx
 import pytest
 from httpx2._types import HeaderTypes, QueryParamTypes
+from sandbox_fixtures import COMMAND_STREAM_HEADERS, command_stream_item
 
 from vercel._internal.core.http import (
     NO_READ_TIMEOUT,
@@ -120,11 +121,17 @@ class RecordingJsonTransport(JsonTransport):
 
 
 class _CompletedResponse(StreamingResponse):
-    def __init__(self, response: httpx.Response, *, lines: tuple[str, ...] = ()) -> None:
+    def __init__(
+        self,
+        response: httpx.Response,
+        *,
+        lines: tuple[str, ...] = (),
+        chunks: tuple[bytes, ...] = (),
+    ) -> None:
         self.response = response
         self.closed = False
         self.lines = lines
-        self._chunks = iter(line.encode() + b"\n" for line in lines)
+        self._chunks = iter((*(line.encode() + b"\n" for line in lines), *chunks))
 
     async def __anext__(self) -> bytes:
         try:
@@ -155,9 +162,9 @@ class _CompletedRequest(StreamingRequest):
 
 
 class RecordingStreamTransport(JsonTransport):
-    def __init__(self, *, lines: tuple[str, ...] = ()) -> None:
+    def __init__(self, *, records: tuple[object, ...] = ()) -> None:
         super().__init__({})
-        self.lines = lines
+        self.records = records
         self.timeout: RequestTimeout = None
         self.headers: httpx.Headers | None = None
 
@@ -177,8 +184,12 @@ class RecordingStreamTransport(JsonTransport):
     ) -> StreamingResponse:
         self.timeout = timeout
         self.headers = httpx.Headers(headers)
-        response = httpx.Response(200, request=httpx.Request(method, path))
-        return _CompletedResponse(response, lines=self.lines)
+        response = httpx.Response(
+            200, headers=COMMAND_STREAM_HEADERS, request=httpx.Request(method, path)
+        )
+        return _CompletedResponse(
+            response, chunks=tuple(command_stream_item(record) for record in self.records)
+        )
 
 
 class RecordingUploadTransport(JsonTransport):
@@ -358,9 +369,9 @@ async def test_polling_command_disables_read_timeout() -> None:
 
 async def test_run_process_disables_client_timeout() -> None:
     transport = RecordingStreamTransport(
-        lines=(
-            json.dumps(_command_response(exit_code=None)),
-            json.dumps(_command_response(exit_code=0)),
+        records=(
+            _command_response(exit_code=None),
+            _command_response(exit_code=0),
         )
     )
     client = _sandbox_client(transport)
@@ -376,9 +387,9 @@ async def test_run_process_disables_client_timeout() -> None:
 
 async def test_command_logs_disable_client_timeout() -> None:
     transport = RecordingStreamTransport(
-        lines=(
-            json.dumps({"stream": "stdout", "data": "café\n"}),
-            json.dumps({"stream": "stderr", "data": "雪\n"}),
+        records=(
+            {"stream": "stdout", "data": "café\n"},
+            {"stream": "stderr", "data": "雪\n"},
         )
     )
     client = _sandbox_client(transport)

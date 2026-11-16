@@ -14,7 +14,13 @@ import anyio
 import httpx2 as httpx
 import pytest
 from hypothesis import HealthCheck, given, settings, strategies as st
-from sandbox_fixtures import sandbox_service_options
+from sandbox_fixtures import (
+    COMMAND_STREAM_HEADERS,
+    command_stream_body,
+    command_stream_item,
+    command_stream_response,
+    sandbox_service_options,
+)
 
 import vendor.respx as respx
 from vercel import sandbox
@@ -23,6 +29,7 @@ from vercel._internal.core.polyfills import Buffer
 from vercel.api import session
 from vercel.errors import VercelSessionClosedError
 from vercel.sandbox import sync as sandbox_sync
+from vercel.sandbox._internal.log_stream import COMMAND_STREAM_MEDIA_TYPE
 from vercel.sandbox._internal.state import (
     SandboxRuntimeSessionState,
     SandboxState,
@@ -67,7 +74,7 @@ def _logs_response() -> httpx.Response:
         {"stream": "stdout", "data": "out-1\nout-2"},
         {"stream": "stderr", "data": "err\n"},
     ]
-    return httpx.Response(200, text="".join(json.dumps(record) + "\n" for record in records))
+    return command_stream_response(*records)
 
 
 def _completed_response(
@@ -82,7 +89,7 @@ def _completed_response(
         {"stream": "stderr", "data": "err\n"},
         _process_response(returncode, args=args, session_id=session_id),
     ]
-    return httpx.Response(200, text="".join(json.dumps(record) + "\n" for record in records))
+    return command_stream_response(*records)
 
 
 def _interleaved_completed_response(returncode: int = 0) -> httpx.Response:
@@ -93,7 +100,7 @@ def _interleaved_completed_response(returncode: int = 0) -> httpx.Response:
         {"stream": "stdout", "data": "out-2\n"},
         _process_response(returncode),
     ]
-    return httpx.Response(200, text="".join(json.dumps(record) + "\n" for record in records))
+    return command_stream_response(*records)
 
 
 class _RecordingBinaryIO(io.BytesIO):
@@ -153,11 +160,11 @@ def _completed_body() -> bytes:
         {"stream": "stdout", "data": "out\n"},
         _process_response(0),
     ]
-    return "".join(json.dumps(record) + "\n" for record in records).encode()
+    return command_stream_body(*records)
 
 
-def _chunked_ndjson(*records: object) -> list[bytes]:
-    content = "\r\n\r\n".join(json.dumps(record, ensure_ascii=False) for record in records).encode()
+def _chunked_stream(*records: object) -> list[bytes]:
+    content = command_stream_body(*records)
     return [content[offset : offset + 1] for offset in range(len(content))]
 
 
@@ -632,12 +639,12 @@ def test_sync_run_command_routes_and_captures(
 
 
 @respx.mock
-async def test_async_run_command_reads_chunked_ndjson(mock_env_clear: None) -> None:
+async def test_async_run_command_reads_chunked_stream(mock_env_clear: None) -> None:
     respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
     stream = _TrackingAsyncStream(
-        _chunked_ndjson(
+        _chunked_stream(
             _process_response(),
             {"stream": "stdout", "data": "café\n"},
             {"stream": "stderr", "data": "雪\n"},
@@ -645,7 +652,7 @@ async def test_async_run_command_reads_chunked_ndjson(mock_env_clear: None) -> N
         )
     )
     respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
-        return_value=httpx.Response(200, stream=stream)
+        return_value=httpx.Response(200, stream=stream, headers=COMMAND_STREAM_HEADERS)
     )
 
     async with session(service_options=_session_options()):
@@ -744,12 +751,12 @@ def test_sync_run_command_replays_pre_stream_stopped_session_error(
 
 
 @respx.mock
-def test_sync_run_command_reads_chunked_ndjson(mock_env_clear: None) -> None:
+def test_sync_run_command_reads_chunked_stream(mock_env_clear: None) -> None:
     respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
     stream = _TrackingSyncStream(
-        _chunked_ndjson(
+        _chunked_stream(
             _process_response(),
             {"stream": "stdout", "data": "café\n"},
             {"stream": "stderr", "data": "雪\n"},
@@ -757,7 +764,7 @@ def test_sync_run_command_reads_chunked_ndjson(mock_env_clear: None) -> None:
         )
     )
     respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
-        return_value=httpx.Response(200, stream=stream)
+        return_value=httpx.Response(200, stream=stream, headers=COMMAND_STREAM_HEADERS)
     )
 
     with session(service_options=_session_options()):
@@ -770,7 +777,7 @@ def test_sync_run_command_reads_chunked_ndjson(mock_env_clear: None) -> None:
 
 
 @respx.mock
-async def test_async_process_readers_read_chunked_ndjson(mock_env_clear: None) -> None:
+async def test_async_process_readers_read_chunked_stream(mock_env_clear: None) -> None:
     respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
@@ -781,13 +788,13 @@ async def test_async_process_readers_read_chunked_ndjson(mock_env_clear: None) -
         return_value=httpx.Response(200, json=_process_response(0))
     )
     stream = _TrackingAsyncStream(
-        _chunked_ndjson(
+        _chunked_stream(
             {"stream": "stdout", "data": "café\n"},
             {"stream": "stderr", "data": "雪\n"},
         )
     )
     respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/logs").mock(
-        return_value=httpx.Response(200, stream=stream)
+        return_value=httpx.Response(200, stream=stream, headers=COMMAND_STREAM_HEADERS)
     )
 
     async with session(service_options=_session_options()):
@@ -800,7 +807,7 @@ async def test_async_process_readers_read_chunked_ndjson(mock_env_clear: None) -
 
 
 @respx.mock
-def test_sync_process_readers_read_chunked_ndjson(mock_env_clear: None) -> None:
+def test_sync_process_readers_read_chunked_stream(mock_env_clear: None) -> None:
     respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
@@ -811,13 +818,13 @@ def test_sync_process_readers_read_chunked_ndjson(mock_env_clear: None) -> None:
         return_value=httpx.Response(200, json=_process_response(0))
     )
     stream = _TrackingSyncStream(
-        _chunked_ndjson(
+        _chunked_stream(
             {"stream": "stdout", "data": "café\n"},
             {"stream": "stderr", "data": "雪\n"},
         )
     )
     respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/logs").mock(
-        return_value=httpx.Response(200, stream=stream)
+        return_value=httpx.Response(200, stream=stream, headers=COMMAND_STREAM_HEADERS)
     )
 
     with session(service_options=_session_options()):
@@ -867,7 +874,7 @@ async def test_async_run_command_closes_response_when_sink_write_fails(
     )
     stream = _TrackingAsyncStream(_completed_body())
     respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
-        return_value=httpx.Response(200, stream=stream)
+        return_value=httpx.Response(200, stream=stream, headers=COMMAND_STREAM_HEADERS)
     )
 
     async with session(service_options=_session_options()):
@@ -887,7 +894,7 @@ def test_sync_run_command_closes_response_when_sink_flush_fails(
     )
     stream = _TrackingSyncStream(_completed_body())
     respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
-        return_value=httpx.Response(200, stream=stream)
+        return_value=httpx.Response(200, stream=stream, headers=COMMAND_STREAM_HEADERS)
     )
 
     with session(service_options=_session_options()):
@@ -901,7 +908,9 @@ def test_sync_run_command_closes_response_when_sink_flush_fails(
 @pytest.mark.parametrize(
     ("records", "error", "match"),
     [
-        (["not-json"], sandbox.SandboxResponseError, "malformed NDJSON"),
+        ([b"\xff"], sandbox.SandboxResponseError, "malformed CBOR"),
+        (["not-an-item"], sandbox.SandboxResponseError, "malformed item"),
+        ([_process_response(), [7, b""]], sandbox.SandboxResponseError, "unexpected item"),
         (
             [_process_response(), _process_response(0, command_id="cmd_other")],
             sandbox.SandboxResponseError,
@@ -930,10 +939,11 @@ async def test_run_command_rejects_invalid_streams(
     respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
         return_value=httpx.Response(
             200,
-            text="".join(
-                (record if isinstance(record, str) else json.dumps(record)) + "\n"
+            content=b"".join(
+                record if isinstance(record, bytes) else command_stream_item(record)
                 for record in records
             ),
+            headers=COMMAND_STREAM_HEADERS,
         )
     )
 
@@ -944,6 +954,74 @@ async def test_run_command_rejects_invalid_streams(
 
 
 @respx.mock
+async def test_run_command_and_logs_deliver_non_utf8_output_exactly(
+    mock_env_clear: None,
+) -> None:
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+
+    def command(request: httpx.Request) -> httpx.Response:
+        if not json.loads(request.content).get("wait"):
+            return httpx.Response(200, json=_process_response())
+        assert request.headers["accept"] == COMMAND_STREAM_MEDIA_TYPE
+        return httpx.Response(
+            200,
+            stream=_InterruptedStream(
+                _process_response(),
+                {"stream": "stdout", "data": b"\xff\xfe\xc3"},
+                {"stream": "stdout", "data": b"\xa9\x00"},
+                {"stream": "stderr", "data": b"\x80"},
+                _process_response(0),
+            ),
+            headers=COMMAND_STREAM_HEADERS,
+        )
+
+    def logs(request: httpx.Request) -> httpx.Response:
+        assert request.headers["accept"] == COMMAND_STREAM_MEDIA_TYPE
+        return _command_stream(
+            {"stream": "stdout", "data": b"\xff\xfe\xc3"},
+            {"stream": "stdout", "data": b"\xa9\x00"},
+            {"stream": "stderr", "data": b"\x80"},
+        )
+
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(side_effect=command)
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/logs").mock(
+        side_effect=logs
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1").mock(
+        return_value=httpx.Response(200, json=_process_response(0))
+    )
+
+    async with session(service_options=_session_options()):
+        box = await sandbox.create_sandbox(name="preview")
+        result = await box.run_command("python", capture_output=True)
+        process = await box.create_command("python")
+        output = await process.communicate()
+
+    assert (result.stdout, result.stderr) == (b"\xff\xfe\xc3\xa9\x00", b"\x80")
+    assert output == (b"\xff\xfe\xc3\xa9\x00", b"\x80")
+
+
+@pytest.mark.parametrize("sync", [False, True], ids=["async", "sync"])
+@respx.mock
+async def test_command_streams_reject_other_media_types(mock_env_clear: None, sync: bool) -> None:
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
+        return_value=httpx.Response(
+            200,
+            text=f"{json.dumps(_process_response())}\n",
+            headers={"content-type": "application/x-ndjson"},
+        )
+    )
+
+    with pytest.raises(sandbox.SandboxResponseError, match="unexpected content type"):
+        await _run_through(sync, "sandbox")
+
+
+@respx.mock
 async def test_async_run_command_does_not_replay_lifecycle_stream_errors(
     mock_env_clear: None,
 ) -> None:
@@ -951,18 +1029,12 @@ async def test_async_run_command_does_not_replay_lifecycle_stream_errors(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
     respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
-        return_value=httpx.Response(
-            200,
-            text="".join(
-                json.dumps(record) + "\n"
-                for record in (
-                    _process_response(),
-                    {
-                        "stream": "error",
-                        "data": {"code": "sandbox_stopped", "message": "stream stopped"},
-                    },
-                )
-            ),
+        return_value=command_stream_response(
+            _process_response(),
+            {
+                "stream": "error",
+                "data": {"code": "sandbox_stopped", "message": "stream stopped"},
+            },
         )
     )
     resume_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
@@ -986,18 +1058,12 @@ def test_sync_run_command_does_not_replay_lifecycle_stream_errors(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
     respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
-        return_value=httpx.Response(
-            200,
-            text="".join(
-                json.dumps(record) + "\n"
-                for record in (
-                    _process_response(),
-                    {
-                        "stream": "error",
-                        "data": {"code": "sandbox_stopped", "message": "stream stopped"},
-                    },
-                )
-            ),
+        return_value=command_stream_response(
+            _process_response(),
+            {
+                "stream": "error",
+                "data": {"code": "sandbox_stopped", "message": "stream stopped"},
+            },
         )
     )
     resume_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
@@ -1462,15 +1528,14 @@ def _stream_closed_response() -> httpx.Response:
 
 
 class _InterruptedStream(httpx.SyncByteStream, httpx.AsyncByteStream):
-    """Send NDJSON records one byte at a time, then optionally lose the connection."""
+    """Send stream items one byte at a time, then optionally lose the connection."""
 
     def __init__(self, *records: object, interruption: str | None = None) -> None:
         if interruption == "stream-closed":
             records = (*records, {"stream": "error", "data": _STREAM_CLOSED})
-        body = "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records)
+        content = command_stream_body(*records)
         if interruption == "truncated":
-            body += '{"stream": "stdout", "data": "unfini'
-        content = body.encode()
+            content += command_stream_item({"stream": "stdout", "data": "unfinished"})[:-3]
         self.chunks = [content[offset : offset + 1] for offset in range(len(content))]
         self.error = {
             "reset": httpx.ReadError("connection reset by peer"),
@@ -1489,8 +1554,12 @@ class _InterruptedStream(httpx.SyncByteStream, httpx.AsyncByteStream):
             raise self.error
 
 
-def _ndjson_stream(*records: object, interruption: str | None = None) -> httpx.Response:
-    return httpx.Response(200, stream=_InterruptedStream(*records, interruption=interruption))
+def _command_stream(*records: object, interruption: str | None = None) -> httpx.Response:
+    return httpx.Response(
+        200,
+        stream=_InterruptedStream(*records, interruption=interruption),
+        headers=COMMAND_STREAM_HEADERS,
+    )
 
 
 @pytest.fixture
@@ -1508,7 +1577,7 @@ def _mock_interrupted_run(interruption: str) -> tuple[respx.Route, respx.Route, 
         return_value=httpx.Response(200, json=_sandbox_response())
     )
     run = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
-        return_value=_ndjson_stream(
+        return_value=_command_stream(
             _process_response(),
             {"stream": "stdout", "data": "hé😀"},
             {"stream": "stderr", "data": "warn"},
@@ -1517,7 +1586,7 @@ def _mock_interrupted_run(interruption: str) -> tuple[respx.Route, respx.Route, 
     )
     # The logs endpoint replays all output, chunked differently from the run response.
     logs = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/logs").mock(
-        return_value=_ndjson_stream(
+        return_value=_command_stream(
             {"stream": "stdout", "data": "hé"},
             {"stream": "stderr", "data": "warning"},
             {"stream": "stdout", "data": "😀 world"},
@@ -1574,7 +1643,7 @@ def test_sync_run_command_resumes_interrupted_stream_without_rerunning(
 
 @pytest.mark.parametrize(
     "failure",
-    [httpx.ConnectError("connection refused"), _ndjson_stream(interruption="reset")],
+    [httpx.ConnectError("connection refused"), _command_stream(interruption="reset")],
     ids=["connect", "stream"],
 )
 @respx.mock
@@ -1610,8 +1679,8 @@ def _mock_process_with_flaky_logs(interruption: str) -> respx.Route:
         failures = [_stream_closed_response(), _stream_closed_response()]
     else:
         failures = [
-            _ndjson_stream({"stream": "stdout", "data": "one"}, interruption=interruption),
-            _ndjson_stream(
+            _command_stream({"stream": "stdout", "data": "one"}, interruption=interruption),
+            _command_stream(
                 {"stream": "stdout", "data": "one two"},
                 {"stream": "stderr", "data": "é"},
                 interruption=interruption,
@@ -1620,7 +1689,7 @@ def _mock_process_with_flaky_logs(interruption: str) -> respx.Route:
     return respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/logs").mock(
         side_effect=[
             *failures,
-            _ndjson_stream(
+            _command_stream(
                 {"stream": "stdout", "data": "one"},
                 {"stream": "stderr", "data": "é😀"},
                 {"stream": "stdout", "data": " two three"},
@@ -1665,11 +1734,11 @@ def test_sync_process_readers_reconnect_without_duplicating_output(
     ("failure", "error"),
     [
         (
-            lambda: _ndjson_stream({"stream": "stdout", "data": "same"}, interruption="reset"),
+            lambda: _command_stream({"stream": "stdout", "data": "same"}, interruption="reset"),
             httpx.ReadError,
         ),
         (
-            lambda: _ndjson_stream(
+            lambda: _command_stream(
                 {"stream": "stdout", "data": "same"}, interruption="stream-closed"
             ),
             sandbox.SandboxStreamError,
@@ -1752,7 +1821,7 @@ def _mock_lifecycle_failure_after_start(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
     run = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
-        return_value=_ndjson_stream(
+        return_value=_command_stream(
             _process_response(), {"stream": "stdout", "data": "out"}, interruption=interruption
         )
     )
@@ -1760,7 +1829,7 @@ def _mock_lifecycle_failure_after_start(
     respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/logs").mock(
         return_value=lifecycle_error
         if failing == "logs"
-        else _ndjson_stream({"stream": "stdout", "data": "out"})
+        else _command_stream({"stream": "stdout", "data": "out"})
     )
     respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1").mock(
         return_value=lifecycle_error
@@ -1924,13 +1993,10 @@ async def test_run_command_on_start_does_not_change_output_or_result(
     returncode: int,
     merge: bool,
 ) -> None:
-    body = "".join(
-        json.dumps(record) + "\n"
-        for record in (
-            _process_response(),
-            *({"stream": stream, "data": data} for stream, data in records),
-            _process_response(returncode),
-        )
+    body = command_stream_body(
+        _process_response(),
+        *({"stream": stream, "data": data} for stream, data in records),
+        _process_response(returncode),
     )
     output: dict[str, Any] = (
         {"stdout": subprocess.PIPE, "stderr": subprocess.STDOUT}
@@ -1944,7 +2010,9 @@ async def test_run_command_on_start_does_not_change_output_or_result(
             return_value=httpx.Response(200, json=_sandbox_response())
         )
         respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
-            side_effect=lambda _request: httpx.Response(200, text=body)
+            side_effect=lambda _request: httpx.Response(
+                200, content=body, headers=COMMAND_STREAM_HEADERS
+            )
         )
         plain = await _run_through(sync, "sandbox", **output)
         hooked = await _run_through(sync, "sandbox", on_start=started.append, **output)
@@ -1976,17 +2044,14 @@ async def test_run_command_on_start_error_propagates_without_kill_or_replay(
     respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
-    body = "".join(
-        json.dumps(record) + "\n"
-        for record in (
-            _process_response(),
-            {"stream": "stdout", "data": "out\n"},
-            _process_response(9),
-        )
-    ).encode()
+    body = command_stream_body(
+        _process_response(),
+        {"stream": "stdout", "data": "out\n"},
+        _process_response(9),
+    )
     stream = _TrackingSyncStream(body) if sync else _TrackingAsyncStream(body)
     run = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
-        return_value=httpx.Response(200, stream=stream)
+        return_value=httpx.Response(200, stream=stream, headers=COMMAND_STREAM_HEADERS)
     )
     untouched = [
         respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/kill"),
@@ -2047,7 +2112,7 @@ async def test_run_command_on_start_runs_once_after_pre_start_replay(
             ),
             sandbox.SandboxApiError,
         ),
-        (lambda: httpx.Response(200, text=""), sandbox.SandboxResponseError),
+        (lambda: command_stream_response(), sandbox.SandboxResponseError),
     ],
     ids=["http-error", "missing-metadata"],
 )

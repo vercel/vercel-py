@@ -43,13 +43,14 @@ from vercel._internal.core.url import format_url_path
 from vercel.sandbox._internal.errors import (
     SandboxApiError,
     SandboxResponseError,
-    SandboxStreamError,
 )
 from vercel.sandbox._internal.log_stream import (
-    _CommandLogPayload,
+    COMMAND_STREAM_MEDIA_TYPE,
+    _command_output,
+    _command_stream_items,
     _is_transient_error,
+    _ItemType,
     _iter_command_logs,
-    _ndjson_lines,
     _OutputOffsets,
     _TruncatedStreamError,
 )
@@ -980,27 +981,6 @@ def _validate_response(model: type[ResponseModelT], data: JSONObject) -> Respons
         ) from exc
 
 
-def _parse_run_process_record(line: str, *, terminated: bool = True) -> JSONObject:
-    try:
-        record = json.loads(line)
-    except json.JSONDecodeError as exc:
-        if not terminated:
-            raise _TruncatedStreamError(
-                "Sandbox process response ended in the middle of a record",
-                data=line,
-            ) from exc
-        raise SandboxResponseError(
-            "Sandbox process response included malformed NDJSON",
-            data=line,
-        ) from exc
-    if not isinstance(record, dict):
-        raise SandboxResponseError(
-            "Sandbox process response included a non-object NDJSON record",
-            data=record,
-        )
-    return cast(JSONObject, record)
-
-
 class _RunProcessInterrupted(Exception):
     """A run response broke after the process started but before it finished.
 
@@ -1883,7 +1863,7 @@ class SandboxApiClient:
             credentials=credentials,
             params={"wait": "true", "logs": "true"},
             body=JSONBody(request.to_api_dict()),
-            headers={"connection": "close"},
+            headers={"connection": "close", "accept": COMMAND_STREAM_MEDIA_TYPE},
             timeout=NO_TIMEOUT,
             retries=0,
         )
@@ -1894,12 +1874,16 @@ class SandboxApiClient:
         on_start_failed = False
         try:
             try:
-                async for line, terminated in _ndjson_lines(response):
-                    if not line.strip():
-                        continue
-                    record = _parse_run_process_record(line, terminated=terminated)
-                    if "command" in record:
-                        process = _validate_response(_CommandResponse, record).to_command()
+                async for item_type, payload in _command_stream_items(response):
+                    if item_type == _ItemType.COMMAND:
+                        if not isinstance(payload, dict):
+                            raise SandboxResponseError(
+                                "Sandbox process response included malformed process metadata",
+                                data=payload,
+                            )
+                        process = _validate_response(
+                            _CommandResponse, {"command": payload}
+                        ).to_command()
                         if initial is None:
                             initial = process
                             if on_start is not None:
@@ -1923,31 +1907,23 @@ class SandboxApiClient:
                         else:
                             raise SandboxResponseError(
                                 "Sandbox process response included extra process metadata",
-                                data=record,
+                                data=payload,
                             )
                         continue
 
-                    stream = record.get("stream")
-                    data = record.get("data")
-                    if (stream == "stdout" or stream == "stderr") and isinstance(data, str):
-                        if initial is None or final is not None:
-                            raise SandboxResponseError(
-                                "Sandbox process response included output outside process metadata",
-                                data=record,
-                            )
-                        event = _CommandLogPayload.model_validate(record).to_log()
-                        output_router.route(event)
-                        delivered.advance(event.stream, len(event.data))
-                        continue
-                    if stream == "error" and isinstance(data, dict):
-                        code = data.get("code")
-                        message = data.get("message")
-                        if isinstance(code, str) and isinstance(message, str):
-                            raise SandboxStreamError(message, code=code)
-                    raise SandboxResponseError(
-                        "Sandbox process response included an unexpected NDJSON record",
-                        data=record,
-                    )
+                    event = _command_output(item_type, payload)
+                    if event is None:
+                        raise SandboxResponseError(
+                            "Sandbox process response included an unexpected item",
+                            data=[item_type, payload],
+                        )
+                    if initial is None or final is not None:
+                        raise SandboxResponseError(
+                            "Sandbox process response included output outside process metadata",
+                            data=[item_type, payload],
+                        )
+                    output_router.route(event)
+                    delivered.advance(event.stream, len(event.data))
             finally:
                 await response.aclose()
             if initial is not None and final is None:
@@ -2166,7 +2142,7 @@ class SandboxApiClient:
                 command_id=command_id,
             ),
             credentials=credentials,
-            headers={"connection": "close"},
+            headers={"connection": "close", "accept": COMMAND_STREAM_MEDIA_TYPE},
             timeout=NO_TIMEOUT,
             retries=0,
         )
