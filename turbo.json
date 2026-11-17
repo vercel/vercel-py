@@ -113,6 +113,10 @@
       "inputs": ["vercel/**", "pyproject.toml", "hatch_build.py"],
       "dependsOn": ["vercel-internal-core#sources", "vercel-oidc#sources"]
     },
+    "vercel-schedules#sources": {
+      "inputs": ["vercel/**", "pyproject.toml", "hatch_build.py"],
+      "dependsOn": ["vercel-internal-core#sources"]
+    },
     "vercel-workflow#sources": {
       "inputs": ["vercel/**", "pyproject.toml", "hatch_build.py"],
       "dependsOn": [
