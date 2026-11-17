@@ -92,6 +92,23 @@ uv run poe fix
 
 The workspace task system is documented in `scripts/poe/README.md`.
 
+CI runs the same Poe tasks through [Turborepo](https://turborepo.dev), which
+skips packages whose inputs match a cached run. With Node.js installed, run
+them the same way locally:
+
+```sh
+uv sync --all-packages
+scripts/turbo.sh run poe:lint poe:typecheck poe:test
+scripts/turbo.sh run poe:test --filter=vercel-oidc
+```
+
+After changing a package's workspace dependencies, regenerate the dependency
+edges in `turbo.json`:
+
+```sh
+uv run python scripts/turbo_graph.py
+```
+
 ## Knowledge Graph
 
 Architecture, design decisions, and cross-package conventions are documented

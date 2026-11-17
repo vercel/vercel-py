@@ -4,6 +4,18 @@ This directory contains the shared task system for workspace package checks. It
 keeps package `pyproject.toml` files small while still letting each package own
 its local configuration differences.
 
+## Turborepo
+
+CI runs `lint`, `typecheck`, and `test` through Turborepo instead of the
+workspace runner. The root `turbo.json` maps `poe:<task>` to `uv run poe
+<task>` in each package and to the `<task>-root` task at the workspace root,
+so task definitions stay here. Turborepo adds the dependency graph and the
+cache; see `lat.md/tooling.md` for the design.
+
+The tasks are not named `lint` and `test` because Turborepo has built-in uv
+tasks with those names. An unfiltered built-in `lint` runs once at the
+workspace root, which would replace the per-package tasks.
+
 ## Layout
 
 - `poe.toml` is the shared Poe include. Workspace members include this file from

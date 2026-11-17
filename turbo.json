@@ -1,0 +1,126 @@
+{
+  "$schema": "https://turborepo.dev/schema.json",
+  "futureFlags": {
+    "experimentalPythonWorkspaces": true,
+    "experimentalTaskCommand": true
+  },
+  "envMode": "loose",
+  "globalDependencies": [
+    ".github/workflows/ci.yml",
+    "integrations/ruff.toml",
+    "pyproject.toml",
+    "scripts/hatch_build.py",
+    "scripts/poe/**",
+    "uv.lock",
+    "vendor/**"
+  ],
+  "globalEnv": ["CI_ANYIO", "CI_PYTHON", "ImageOS"],
+  "tasks": {
+    "sources": {
+      "inputs": ["vercel/**", "pyproject.toml", "hatch_build.py"]
+    },
+    "poe:lint": {
+      "command": ["uv", "run", "--no-sync", "poe", "lint"]
+    },
+    "poe:typecheck": {
+      "command": ["uv", "run", "--no-sync", "poe", "typecheck"],
+      "dependsOn": ["sources"]
+    },
+    "poe:test": {
+      "command": ["uv", "run", "--no-sync", "poe", "test"],
+      "dependsOn": ["sources"],
+      "env": [
+        "APSCHEDULER_TEST_REDIS_URL",
+        "CI_LIVE_CREDENTIALS",
+        "FORCE_PYTEST",
+        "PYTEST_ADDOPTS",
+        "VERCEL_DEVALUE_JS",
+        "VERCEL_WORKFLOW_CLI"
+      ]
+    },
+    "vercel-py#poe:lint": {
+      "command": ["uv", "run", "--no-sync", "poe", "lint-root"]
+    },
+    "vercel-py#poe:typecheck": {
+      "command": ["uv", "run", "--no-sync", "poe", "typecheck-root"]
+    },
+    "vercel-py#poe:test": {
+      "command": ["uv", "run", "--no-sync", "poe", "test-root"]
+    },
+    "vercel#sources": {
+      "inputs": ["vercel/**", "pyproject.toml", "hatch_build.py"],
+      "dependsOn": [
+        "vercel-blob#sources",
+        "vercel-cache#sources",
+        "vercel-headers#sources",
+        "vercel-internal-core#sources",
+        "vercel-internal-telemetry#sources",
+        "vercel-oidc#sources",
+        "vercel-queue#sources",
+        "vercel-sandbox#sources",
+        "vercel-workflow#sources"
+      ]
+    },
+    "vercel-apscheduler#sources": {
+      "inputs": ["vercel/**", "pyproject.toml", "hatch_build.py"],
+      "dependsOn": ["vercel-cache#sources", "vercel-queue#sources"]
+    },
+    "vercel-blob#sources": {
+      "inputs": ["vercel/**", "pyproject.toml", "hatch_build.py"],
+      "dependsOn": ["vercel-internal-core#sources", "vercel-oidc#sources"]
+    },
+    "vercel-cache#sources": {
+      "inputs": ["vercel/**", "pyproject.toml", "hatch_build.py"],
+      "dependsOn": ["vercel-headers#sources", "vercel-internal-telemetry#sources"]
+    },
+    "vercel-celery#sources": {
+      "inputs": ["vercel/**", "pyproject.toml", "hatch_build.py"],
+      "dependsOn": ["vercel-cache#sources", "vercel-queue#sources"]
+    },
+    "vercel-connect#sources": {
+      "inputs": ["vercel/**", "pyproject.toml", "hatch_build.py"],
+      "dependsOn": ["vercel-internal-core#sources", "vercel-oidc#sources"]
+    },
+    "vercel-django-tasks#sources": {
+      "inputs": ["vercel/**", "pyproject.toml", "hatch_build.py"],
+      "dependsOn": ["vercel-cache#sources", "vercel-queue#sources"]
+    },
+    "vercel-dramatiq#sources": {
+      "inputs": ["vercel/**", "pyproject.toml", "hatch_build.py"],
+      "dependsOn": ["vercel-cache#sources", "vercel-queue#sources"]
+    },
+    "vercel-internal-telemetry#sources": {
+      "inputs": ["vercel/**", "pyproject.toml", "hatch_build.py"],
+      "dependsOn": ["vercel-oidc#sources"]
+    },
+    "vercel-oidc#sources": {
+      "inputs": ["vercel/**", "pyproject.toml", "hatch_build.py"],
+      "dependsOn": ["vercel-headers#sources"]
+    },
+    "vercel-passport#sources": {
+      "inputs": ["vercel/**", "pyproject.toml", "hatch_build.py"],
+      "dependsOn": ["vercel-headers#sources", "vercel-oidc#sources"]
+    },
+    "vercel-queue#sources": {
+      "inputs": ["vercel/**", "pyproject.toml", "hatch_build.py"],
+      "dependsOn": [
+        "vercel-headers#sources",
+        "vercel-internal-core#sources",
+        "vercel-oidc#sources"
+      ]
+    },
+    "vercel-sandbox#sources": {
+      "inputs": ["vercel/**", "pyproject.toml", "hatch_build.py"],
+      "dependsOn": ["vercel-internal-core#sources", "vercel-oidc#sources"]
+    },
+    "vercel-workflow#sources": {
+      "inputs": ["vercel/**", "pyproject.toml", "hatch_build.py"],
+      "dependsOn": [
+        "vercel-headers#sources",
+        "vercel-internal-core#sources",
+        "vercel-oidc#sources",
+        "vercel-queue#sources"
+      ]
+    }
+  }
+}
