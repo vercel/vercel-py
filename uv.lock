@@ -24,6 +24,7 @@ members = [
     "vercel-cache",
     "vercel-celery",
     "vercel-connect",
+    "vercel-context",
     "vercel-cron",
     "vercel-django-tasks",
     "vercel-dramatiq",
@@ -2537,6 +2538,7 @@ dependencies = [
     { name = "python-dotenv" },
     { name = "vercel-blob" },
     { name = "vercel-cache" },
+    { name = "vercel-context" },
     { name = "vercel-cron" },
     { name = "vercel-headers" },
     { name = "vercel-internal-core" },
@@ -2557,6 +2559,7 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.0.0,<2" },
     { name = "vercel-blob", editable = "src/vercel-blob" },
     { name = "vercel-cache", editable = "src/vercel-cache" },
+    { name = "vercel-context", editable = "src/vercel-context" },
     { name = "vercel-cron", editable = "src/vercel-cron" },
     { name = "vercel-headers", editable = "src/vercel-headers" },
     { name = "vercel-internal-core", editable = "src/vercel-internal-core" },
@@ -2655,6 +2658,20 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.7.0,<3" },
     { name = "vercel-internal-core", editable = "src/vercel-internal-core" },
     { name = "vercel-oidc", extras = ["verify"], editable = "src/vercel-oidc" },
+]
+
+[[package]]
+name = "vercel-context"
+source = { editable = "src/vercel-context" }
+dependencies = [
+    { name = "vercel-cache" },
+    { name = "vercel-headers" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "vercel-cache", editable = "src/vercel-cache" },
+    { name = "vercel-headers", editable = "src/vercel-headers" },
 ]
 
 [[package]]

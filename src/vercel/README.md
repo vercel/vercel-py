@@ -10,7 +10,8 @@ helpers.
   owned `vercel-cron` dependency
 - `vercel.deployments` - deployment creation and deployment file upload helpers,
   delivered by the separately owned `vercel-platform` dependency
-- `vercel.functions` - convenience exports for function code
+- `vercel.functions` - convenience exports for function code, delivered by the
+  separately owned `vercel-context` dependency
 - `vercel.oidc` - OIDC token lookup, refresh, credentials, and payload decoding
 - `vercel.project_routes` - project-level routing rule staging, publishing, and history,
   delivered by the separately owned `vercel-platform` dependency
@@ -22,7 +23,8 @@ helpers.
   separately owned `vercel-workflow` dependency
 - `vercel.client` - `AsyncVercel` and `Vercel` grouped clients, delivered by the
   separately owned `vercel-platform` dependency
-- `vercel.env` - Vercel system environment variable parsing
+- `vercel.env` - Vercel system environment variable parsing, delivered by the
+  separately owned `vercel-context` dependency
 - `vercel.headers` - request header context, IP, and geolocation helpers
 
 ## Internals
