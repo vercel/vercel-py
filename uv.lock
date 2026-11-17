@@ -34,6 +34,7 @@ members = [
     "vercel-proxy",
     "vercel-queue",
     "vercel-sandbox",
+    "vercel-schedules",
     "vercel-workflow",
 ]
 
@@ -2823,6 +2824,20 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.7.0,<3" },
     { name = "vercel-internal-core", editable = "src/vercel-internal-core" },
     { name = "vercel-oidc", editable = "src/vercel-oidc" },
+]
+
+[[package]]
+name = "vercel-schedules"
+source = { editable = "src/vercel-schedules" }
+dependencies = [
+    { name = "pydantic" },
+    { name = "vercel-internal-core" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "pydantic", specifier = ">=2.7.0,<3" },
+    { name = "vercel-internal-core", editable = "src/vercel-internal-core" },
 ]
 
 [[package]]

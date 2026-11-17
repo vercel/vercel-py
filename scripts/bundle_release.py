@@ -89,6 +89,7 @@ EXTERNAL_DEPENDENCIES = {
     # extras are already passed through unvendored.
     "vercel-connect": {"pydantic"},
     "vercel-passport": {"pydantic"},
+    "vercel-schedules": {"pydantic"},
     # redis-py's dotted self-imports cannot be rewritten for namespace
     # vendoring, and applications import redis directly to build the job
     # store's connection pool anyway.
