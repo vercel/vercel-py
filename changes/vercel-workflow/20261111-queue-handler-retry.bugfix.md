@@ -1,1 +1,0 @@
-Request a short retry delay when a Vercel workflow queue handler fails, instead of waiting for the default five-minute processing lease to expire. Repeated failures use exponential backoff with jitter, capped at 900 seconds.

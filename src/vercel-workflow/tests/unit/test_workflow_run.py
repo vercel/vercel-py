@@ -956,3 +956,28 @@ async def test_region_configuration_is_reusable(monkeypatch):
     await start(workflow, "order_3", region="business", deployment_id="argument")
     assert world.create_run_id.call_args.kwargs == {"region": None}
     assert world.queue.call_args.kwargs == {"deployment_id": "dpl_current", "region": None}
+
+
+async def test_start_rejects_missing_arguments_before_preparing_run(start_world):
+    with pytest.raises(TypeError):
+        await start(upload, compress_arguments=True)  # type: ignore[call-arg]
+    start_world.get_deployment_id.assert_not_awaited()
+    start_world.run_key.assert_not_awaited()
+    start_world.events_create.assert_not_awaited()
+    start_world.queue.assert_not_awaited()
+
+
+@pytest.mark.parametrize("failure_stage", ["prepare", "create", "queue"])
+async def test_start_failure_preserves_durable_write_order(start_world, failure_stage):
+    error = RuntimeError(f"{failure_stage} failed")
+    failing_operation = {
+        "prepare": start_world.run_key,
+        "create": start_world.events_create,
+        "queue": start_world.queue,
+    }[failure_stage]
+    failing_operation.side_effect = error
+    with pytest.raises(RuntimeError) as caught:
+        await start(upload, "payload", compress_arguments=True)
+    assert caught.value is error
+    assert start_world.events_create.await_count == (failure_stage != "prepare")
+    assert start_world.queue.await_count == (failure_stage == "queue")
