@@ -16,6 +16,7 @@ def mock_env_clear(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, Non
         "BLOB_READ_WRITE_TOKEN",
         "BLOB_STORE_ID",
         "VERCEL_OIDC_TOKEN",
+        "VERCEL_OIDC_TOKEN_FILE",
         "VERCEL_OIDC_TOKEN_HEADER",
         "VERCEL_CACHE_API_TOKEN",
         "VERCEL_CACHE_API_URL",
@@ -28,9 +29,12 @@ def mock_env_clear(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, Non
 
     import vercel.cache.runtime_cache as runtime_cache
     from vercel.headers import set_headers
+    from vercel.oidc.token import _clear_cached_oidc_token
 
     set_headers(None)
+    _clear_cached_oidc_token()
     monkeypatch.setattr(runtime_cache, "_cached_cache_instance", None)
     monkeypatch.setattr(runtime_cache, "_cached_async_cache_instance", None)
     yield
+    _clear_cached_oidc_token()
     set_headers(None)

@@ -98,3 +98,45 @@ class TestSharedHeaderContext:
 
         assert ctx.get_headers() == {"x-test": "from-shared"}
         assert ctx.get_context().headers == {"x-test": "from-shared"}
+
+
+class TestCacheContextUpdatesOidcContext:
+    """Test OIDC token lookup sees cache context headers."""
+
+    def test_cache_set_headers_updates_oidc_context(self, mock_env_clear):
+        """Test OIDC token lookup sees cache context headers."""
+        from vercel.cache.context import set_headers
+        from vercel.oidc import get_vercel_oidc_token_sync
+
+        set_headers({"x-vercel-oidc-token": "cache_header_token"})
+
+        try:
+            token = get_vercel_oidc_token_sync()
+            assert token == "cache_header_token"
+        finally:
+            set_headers(None)
+
+    def test_cache_set_context_updates_oidc_context(self, mock_env_clear):
+        """Test OIDC token lookup sees headers from set_context."""
+        from vercel.cache.context import set_context
+        from vercel.oidc import get_vercel_oidc_token_sync
+
+        set_context(headers={"x-vercel-oidc-token": "set_context_header_token"})
+
+        try:
+            token = get_vercel_oidc_token_sync()
+            assert token == "set_context_header_token"
+        finally:
+            set_context(headers=None)
+
+    def test_cache_context_snapshot_uses_shared_headers(self, mock_env_clear):
+        """Test cache context snapshots reflect shared header state."""
+        from vercel.cache.context import get_context
+        from vercel.headers import set_headers
+
+        set_headers({"x-vercel-oidc-token": "snapshot_header_token"})
+
+        try:
+            assert get_context().headers == {"x-vercel-oidc-token": "snapshot_header_token"}
+        finally:
+            set_headers(None)

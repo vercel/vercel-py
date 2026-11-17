@@ -151,7 +151,7 @@ The symlinked runners accept zero or more scopes before `--`, and tool args afte
 ./scripts/lint.sh
 ./scripts/fix.sh vercel-oidc
 ./scripts/typecheck.sh vercel-oidc
-./scripts/test.sh src/vercel/tests/unit/test_time.py -- -k coerce_duration
+./scripts/test.sh src/vercel-internal-core/tests/test_time.py -- -k coerce_duration
 ```
 
 The equivalent Poe commands are available at the workspace root:
@@ -159,11 +159,11 @@ The equivalent Poe commands are available at the workspace root:
 ```sh
 uv run poe lint vercel-oidc
 uv run poe typecheck vercel-oidc
-uv run poe test src/vercel/tests/unit/test_time.py -- -k coerce_duration
+uv run poe test src/vercel-internal-core/tests/test_time.py -- -k coerce_duration
 uv run poe test-examples
 uv run poe test-examples vercel-sandbox
 uv run poe test-examples vercel-sandbox -- -k sessions_and_resume
-uv run poe qa src/vercel/tests/unit/test_time.py
+uv run poe qa src/vercel-internal-core/tests/test_time.py
 ```
 
 `qa` runs lint, typecheck, and test for the selected scopes. It accepts only
