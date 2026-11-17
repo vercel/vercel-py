@@ -67,6 +67,7 @@ SHARED_VENDORED_CONSUMERS = {
     "vercel-oidc",
     "vercel-queue",
     "vercel-sandbox",
+    "vercel-schedules",
 }
 # Queue lease renewal uses EventLoopToken and from_thread token support (4.11).
 ANYIO_REQUIREMENT = "anyio>=4.11.0,<5"

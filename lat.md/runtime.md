@@ -24,6 +24,34 @@ A session's mode must match the API being called: sync APIs raise inside an asyn
 
 Each service contributes its own [[src/vercel-internal-core/vercel/_internal/core/options.py#ServiceOptions]] subclass; a session accepts at most one options object per logical service. A session can also take an `httpx_client_factory`, which is the supported way to plug in a custom or legacy `httpx` client.
 
+## Service packages
+
+A new service package follows [[vercel-sandbox]], then [[vercel-blob]]. [[vercel-connect]] predates the conventions below and is not a template for them.
+
+Each service keeps its behavior in one async-only service class, wrapped by thin sync and async runtimes with matching names and arguments. The sections below cover the layers that new packages most often get wrong.
+
+### API client and wire models
+
+The API client owns the wire format through private, typed request and response models, as [[src/vercel-sandbox/vercel/sandbox/_internal/api_client.py#_CreateSandboxRequest]] does.
+
+API client methods take typed keyword arguments in the service's vocabulary, build a request model, and serialize it. No layer passes an untyped `dict` body. Rich values such as `datetime`, `timedelta`, and model types stay rich up to the request model. Only its serializers convert them to wire names and units, such as camelCase keys, milliseconds, or a formatted string. When the API changes, tighten these models first, then adapt the layers above.
+
+The service validates arguments and makes the decisions a request depends on. It does not build bodies.
+
+### Credentials and service options
+
+Each service has an async and a sync options class that share one registry key, and each takes a credentials factory for its own mode.
+
+[[src/vercel-sandbox/vercel/sandbox/_internal/options.py#_SandboxServiceOptionsKey]] shows the shared key. The async class takes an async factory, and the sync class takes a plain function, which may block on a file or the network. The sync module exports its class under the async name, as `vercel.sandbox.sync` does. Do not run an async factory in a sync session.
+
+The factory is the only credential source. Do not add a separate `token` field: a fixed token is a factory that returns it.
+
+### Listing and validation
+
+Paging iterators are named `query_<resource>`, with a `query_<resource>_page` method underneath, as in [[src/vercel-sandbox/vercel/sandbox/_internal/async_runtime.py#query_snapshots]] and [[src/vercel-blob/vercel/blob/__init__.py#query_blobs]].
+
+Validate on the client only what can be decided without the server, and fail before the request. Use one helper for each kind of check, such as a non-empty string. Do not check a value passed through to the API against host data, such as the local timezone database, which may reject a value the server accepts.
+
 ## Request headers
 
 Function helpers read the incoming Vercel request headers from one context-local store, registered once per request.

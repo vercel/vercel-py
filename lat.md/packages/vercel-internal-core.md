@@ -41,6 +41,7 @@ Small utilities let one async-shaped implementation serve both public API modes.
 - [[src/vercel-internal-core/vercel/_internal/core/iter_coroutine.py#iter_coroutine]] drives a non-suspending coroutine to completion and raises if it ever suspends.
 - [[src/vercel-internal-core/vercel/_internal/core/byte_stream.py]] adapts sync and async byte sources to one `ReadableByteStream` protocol. The async runtime accepts only buffers and async readers and rejects blocking readers rather than offloading them to worker threads. It also provides a `StagingFileRuntime` for spooling uploads, with sync and async runtimes supplied by the session.
 - [[src/vercel-internal-core/vercel/_internal/core/time.py#coerce_duration]] and its siblings normalize numeric and `timedelta` durations.
+- [[src/vercel-internal-core/vercel/_internal/core/sentinel.py#UNSET]] marks an argument as not supplied where `None` is itself meaningful, such as clearing a field in a partial update.
 
 ## Agent detection
 
