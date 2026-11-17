@@ -6,7 +6,8 @@ helpers.
 ## Public Modules
 
 - `vercel.cache` - Runtime Cache clients and invalidation helpers
-- `vercel.cron` - cron decorators and schedule helpers
+- `vercel.cron` - cron decorators and schedule helpers, delivered by the separately
+  owned `vercel-cron` dependency
 - `vercel.deployments` - deployment creation and deployment file upload helpers
 - `vercel.functions` - convenience exports for function code
 - `vercel.oidc` - OIDC token lookup, refresh, credentials, and payload decoding

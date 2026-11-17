@@ -101,6 +101,9 @@ UNBUNDLED_PACKAGES = {
     # Proxy is only used as an explicit dependency of user code, so it has no
     # need for a -bundle.
     "vercel-proxy",
+    # Split out of the umbrella `vercel` distribution, which never shipped a
+    # -bundle, so nothing vendors these.
+    "vercel-cron",
 }
 COMMON_DROP_TRANSFORMATIONS = (
     "*.so",
