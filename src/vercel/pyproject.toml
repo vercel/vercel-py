@@ -28,6 +28,7 @@ dependencies = [
     "vercel-internal-core>=0.2.0,<0.4.0",
     "vercel-internal-telemetry>=0.6.0",
     "vercel-oidc>=0.6.0",
+    "vercel-platform>=0.1.0",
     "vercel-queue>=0.6.0",
     "vercel-sandbox>=0.2.0",
     "vercel-workflow>=0.9.0",
@@ -44,6 +45,7 @@ vercel-headers = { workspace = true }
 vercel-internal-core = { workspace = true }
 vercel-internal-telemetry = { workspace = true }
 vercel-oidc = { workspace = true }
+vercel-platform = { workspace = true }
 vercel-queue = { workspace = true }
 vercel-sandbox = { workspace = true }
 vercel-workflow = { workspace = true }
@@ -56,10 +58,7 @@ force-include = { "../../scripts/hatch_build.py" = "/_vercel_hatch_build.py" }
 include = [
     "/**/*.py",
     "/**/*.md",
-    "/deployments/py.typed",
     "/functions/py.typed",
-    "/project_routes/py.typed",
-    "/projects/py.typed",
     "/pyproject.toml",
     "/hatch_build.py",
     "/LICENSE",
@@ -71,13 +70,8 @@ exclude = [
 [tool.hatch.build.targets.wheel]
 dev-mode-dirs = [".."]
 only-include = [
-    "/_internal/project_routes",
-    "/deployments",
     "/functions",
-    "/project_routes",
-    "/projects",
     "/__main__.py",
-    "/client.py",
     "/env.py",
     "/README.md",
     "/version.py",

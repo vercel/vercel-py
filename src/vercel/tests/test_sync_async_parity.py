@@ -83,39 +83,3 @@ class TestCacheClassParity:
         assert expected_methods.issubset(async_methods), (
             f"Missing async methods: {expected_methods - async_methods}"
         )
-
-
-class TestProjectsSignatureParity:
-    """Test projects module sync/async signature parity."""
-
-    def test_get_projects_signatures_match(self):
-        """Test get_projects and get_projects_async have matching signatures."""
-        from vercel.projects import get_projects
-        from vercel.projects.projects import get_projects_async
-
-        differences = compare_signatures(get_projects, get_projects_async)
-        assert not differences, f"Signature differences: {differences}"
-
-    def test_create_project_signatures_match(self):
-        """Test create_project and create_project_async have matching signatures."""
-        from vercel.projects import create_project
-        from vercel.projects.projects import create_project_async
-
-        differences = compare_signatures(create_project, create_project_async)
-        assert not differences, f"Signature differences: {differences}"
-
-    def test_update_project_signatures_match(self):
-        """Test update_project and update_project_async have matching signatures."""
-        from vercel.projects import update_project
-        from vercel.projects.projects import update_project_async
-
-        differences = compare_signatures(update_project, update_project_async)
-        assert not differences, f"Signature differences: {differences}"
-
-    def test_delete_project_signatures_match(self):
-        """Test delete_project and delete_project_async have matching signatures."""
-        from vercel.projects import delete_project
-        from vercel.projects.projects import delete_project_async
-
-        differences = compare_signatures(delete_project, delete_project_async)
-        assert not differences, f"Signature differences: {differences}"

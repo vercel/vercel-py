@@ -3,7 +3,6 @@
 These tests require real API credentials set via environment variables:
 - VERCEL_TOKEN or VERCEL_OIDC_TOKEN: Vercel API/OIDC token
 - VERCEL_TEAM_ID and VERCEL_PROJECT_ID when using VERCEL_TOKEN
-- BLOB_READ_WRITE_TOKEN: Blob storage read/write token
 """
 
 import os
@@ -22,20 +21,10 @@ def has_vercel_credentials() -> bool:
     )
 
 
-def has_blob_credentials() -> bool:
-    """Check if Blob storage credentials are available."""
-    return bool(os.getenv("BLOB_READ_WRITE_TOKEN"))
-
-
 # Skip markers for live tests
 requires_vercel_credentials = pytest.mark.skipif(
     not has_vercel_credentials(),
     reason="Requires VERCEL_TOKEN or VERCEL_OIDC_TOKEN, plus VERCEL_TEAM_ID",
-)
-
-requires_blob_credentials = pytest.mark.skipif(
-    not has_blob_credentials(),
-    reason="Requires BLOB_READ_WRITE_TOKEN environment variable",
 )
 
 
@@ -58,30 +47,12 @@ def vercel_team_id() -> str:
 
 
 @pytest.fixture
-def blob_token() -> str:
-    """Get Blob storage token from environment."""
-    token = os.getenv("BLOB_READ_WRITE_TOKEN")
-    if not token:
-        pytest.skip("BLOB_READ_WRITE_TOKEN environment variable not set")
-    return token
-
-
-@pytest.fixture
 def unique_test_name() -> str:
     """Generate a collision-resistant test resource name.
 
     Format: vercel-py-test-{uuid}
     """
     return f"vercel-py-test-{uuid.uuid4().hex}"
-
-
-@pytest.fixture
-def unique_blob_path() -> str:
-    """Generate a collision-resistant blob path for testing.
-
-    Format: test/{uuid}/file.txt
-    """
-    return f"test/{uuid.uuid4().hex}/file.txt"
 
 
 class CleanupRegistry:

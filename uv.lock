@@ -32,6 +32,7 @@ members = [
     "vercel-internal-telemetry",
     "vercel-oidc",
     "vercel-passport",
+    "vercel-platform",
     "vercel-proxy",
     "vercel-queue",
     "vercel-sandbox",
@@ -2541,6 +2542,7 @@ dependencies = [
     { name = "vercel-internal-core" },
     { name = "vercel-internal-telemetry" },
     { name = "vercel-oidc" },
+    { name = "vercel-platform" },
     { name = "vercel-queue" },
     { name = "vercel-sandbox" },
     { name = "vercel-workflow" },
@@ -2560,6 +2562,7 @@ requires-dist = [
     { name = "vercel-internal-core", editable = "src/vercel-internal-core" },
     { name = "vercel-internal-telemetry", editable = "src/vercel-internal-telemetry" },
     { name = "vercel-oidc", editable = "src/vercel-oidc" },
+    { name = "vercel-platform", editable = "src/vercel-platform" },
     { name = "vercel-queue", editable = "src/vercel-queue" },
     { name = "vercel-sandbox", editable = "src/vercel-sandbox" },
     { name = "vercel-workflow", editable = "src/vercel-workflow" },
@@ -2763,6 +2766,24 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.10.0,<3" },
     { name = "vercel-headers", editable = "src/vercel-headers" },
     { name = "vercel-oidc", extras = ["verify"], editable = "src/vercel-oidc" },
+]
+
+[[package]]
+name = "vercel-platform"
+source = { editable = "src/vercel-platform" }
+dependencies = [
+    { name = "httpx2" },
+    { name = "pydantic" },
+    { name = "vercel-internal-core" },
+    { name = "vercel-internal-telemetry" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx2", specifier = ">=2" },
+    { name = "pydantic", specifier = ">=2.7.0,<3" },
+    { name = "vercel-internal-core", editable = "src/vercel-internal-core" },
+    { name = "vercel-internal-telemetry", editable = "src/vercel-internal-telemetry" },
 ]
 
 [[package]]

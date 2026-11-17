@@ -6,7 +6,7 @@ from typing import Any, TypeVar
 
 from vercel._internal.core.http import DEFAULT_API_BASE_URL
 from vercel._internal.core.iter_coroutine import iter_coroutine
-from vercel._internal.project_routes.core import (
+from vercel.project_routes._internal.core import (
     AsyncProjectRoutesOpsClient,
     SyncProjectRoutesOpsClient,
 )
