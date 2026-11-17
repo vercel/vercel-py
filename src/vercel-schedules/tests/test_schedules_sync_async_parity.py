@@ -16,8 +16,14 @@ ASYNC_OPERATIONS = [
     "disable_schedule",
     "invoke_schedule",
 ]
-ITERATOR_OPERATIONS = ["list_schedules"]
+ITERATOR_OPERATIONS = ["query_schedules"]
 OPERATIONS = ASYNC_OPERATIONS + ITERATOR_OPERATIONS
+# Same name in both surfaces, but each takes or returns a factory for its mode.
+MODE_SPECIFIC = [
+    "SchedulesCredentialsFactory",
+    "SchedulesServiceOptions",
+    "static_credentials_factory",
+]
 
 
 def test_public_names_match() -> None:
@@ -58,7 +64,12 @@ def test_async_operations_are_coroutines_and_sync_ones_are_not(name: str) -> Non
 
 @pytest.mark.parametrize(
     "name",
-    [n for n in schedules.__all__ if n not in OPERATIONS and n != "sync"],
+    [n for n in schedules.__all__ if n not in [*OPERATIONS, *MODE_SPECIFIC, "sync"]],
 )
 def test_shared_symbols_are_the_same_object_in_both_surfaces(name: str) -> None:
     assert getattr(schedules, name) is getattr(schedules_sync, name)
+
+
+@pytest.mark.parametrize("name", MODE_SPECIFIC)
+def test_mode_specific_symbols_differ(name: str) -> None:
+    assert getattr(schedules, name) is not getattr(schedules_sync, name)

@@ -13,7 +13,7 @@ from typing import Any
 
 import httpx2 as httpx
 import pytest
-from conftest import SCHEDULE_JSON, TEST_BASE_URL, session_options
+from conftest import SCHEDULE_JSON, TEST_BASE_URL, session_options, sync_session_options
 
 import vendor.respx as respx
 from vercel.api import session
@@ -30,7 +30,7 @@ from vercel.schedules import (
     enable_schedule,
     get_schedule,
     invoke_schedule,
-    list_schedules,
+    query_schedules,
     sync as schedules_sync,
     update_schedule,
 )
@@ -77,12 +77,10 @@ def test_base_url_defaults_to_public_service_unless_env_overrides(
     assert SchedulesServiceOptions().base_url == "https://staging.test/"
 
 
-def test_token_and_credentials_factory_are_exclusive() -> None:
-    async def factory() -> str:
-        return "x"
-
-    with pytest.raises(SchedulesValidationError):
-        SchedulesServiceOptions(token="t", credentials_factory=factory)
+def test_async_options_do_not_configure_a_sync_session(mock_env_clear: None) -> None:
+    with session(service_options=session_options()):
+        with pytest.raises(VercelError, match="use SyncSchedulesServiceOptions"):
+            schedules_sync.get_schedule("cleanup")
 
 
 # --- async surface ---------------------------------------------------------
@@ -140,7 +138,7 @@ async def test_list_follows_cursors(mock_env_clear: None) -> None:
     )
 
     async with session(service_options=session_options()):
-        ids = [s.schedule_id async for s in list_schedules(namespace="jobs", page_size=2)]
+        ids = [s.schedule_id async for s in query_schedules(namespace="jobs", page_size=2)]
 
     assert ids == ["a", "b", "c"]
     assert [str(call.request.url) for call in route.calls] == [
@@ -154,7 +152,7 @@ async def test_list_stops_on_an_empty_page_even_with_a_cursor(mock_env_clear: No
     route = respx.get(SCHEDULES_URL).mock(return_value=page(cursor="loop"))
 
     async with session(service_options=session_options()):
-        assert [s async for s in list_schedules()] == []
+        assert [s async for s in query_schedules()] == []
 
     assert route.call_count == 1
 
@@ -163,7 +161,7 @@ async def test_list_stops_on_an_empty_page_even_with_a_cursor(mock_env_clear: No
 async def test_list_rejects_non_positive_page_size(mock_env_clear: None) -> None:
     async with session(service_options=session_options()):
         with pytest.raises(SchedulesValidationError, match="positive integer"):
-            async for _ in list_schedules(page_size=0):
+            async for _ in query_schedules(page_size=0):
                 pass
 
 
@@ -199,9 +197,9 @@ def test_sync_surface_drives_every_operation(mock_env_clear: None) -> None:
     )
     routes = mock_name_routes()
 
-    with session(service_options=session_options()):
+    with session(service_options=sync_session_options()):
         created = schedules_sync.create_schedule("cleanup", topic="t", cron="0 * * * *")
-        ids = [s.schedule_id for s in schedules_sync.list_schedules()]
+        ids = [s.schedule_id for s in schedules_sync.query_schedules()]
         assert schedules_sync.get_schedule("cleanup").name == "cleanup"
         schedules_sync.update_schedule("cleanup", jitter=timedelta(minutes=5))
         assert schedules_sync.enable_schedule("cleanup").is_active
@@ -225,7 +223,7 @@ def test_sync_surface_drives_every_operation(mock_env_clear: None) -> None:
 @respx.mock
 async def test_async_surface_rejects_a_sync_session(mock_env_clear: None) -> None:
     with pytest.raises(VercelError):
-        with session(service_options=session_options()):
+        with session(service_options=sync_session_options()):
             await get_schedule("cleanup")
 
 
@@ -259,6 +257,22 @@ async def test_credentials_factory_is_called_per_request(mock_env_clear: None) -
 
 
 @respx.mock
+def test_sync_session_takes_a_plain_credentials_factory(mock_env_clear: None) -> None:
+    respx.get(CLEANUP_URL).mock(return_value=ok())
+
+    def factory() -> str:
+        return "file-token"
+
+    options = schedules_sync.SchedulesServiceOptions(
+        base_url=TEST_BASE_URL, credentials_factory=factory
+    )
+    with session(service_options=[options]):
+        schedules_sync.get_schedule("cleanup")
+
+    assert respx.calls.last.request.headers["authorization"] == "Bearer file-token"
+
+
+@respx.mock
 async def test_missing_credentials_surface_as_credentials_error(mock_env_clear: None) -> None:
     respx.get(CLEANUP_URL).mock(return_value=ok())
 
@@ -271,22 +285,25 @@ async def test_missing_credentials_surface_as_credentials_error(mock_env_clear: 
 def test_missing_credentials_surface_as_credentials_error_sync(mock_env_clear: None) -> None:
     respx.get(CLEANUP_URL).mock(return_value=ok())
 
-    with session(service_options=[SchedulesServiceOptions(base_url=TEST_BASE_URL)]):
+    options = schedules_sync.SchedulesServiceOptions(base_url=TEST_BASE_URL)
+    with session(service_options=[options]):
         with pytest.raises(SchedulesCredentialsError):
             schedules_sync.get_schedule("cleanup")
 
 
 @respx.mock
-def test_sync_session_rejects_a_suspending_credentials_factory(mock_env_clear: None) -> None:
+def test_sync_session_rejects_an_async_credentials_factory(mock_env_clear: None) -> None:
     route = respx.get(CLEANUP_URL).mock(return_value=ok())
 
     async def factory() -> str:
-        await asyncio.sleep(0)
         return "token"
 
-    options = SchedulesServiceOptions(base_url=TEST_BASE_URL, credentials_factory=factory)
+    options = schedules_sync.SchedulesServiceOptions(
+        base_url=TEST_BASE_URL,
+        credentials_factory=factory,  # type: ignore[arg-type]
+    )
     with session(service_options=[options]):
-        with pytest.raises(SchedulesCredentialsError, match="suspended in a sync session"):
+        with pytest.raises(SchedulesCredentialsError, match="not an awaitable"):
             schedules_sync.get_schedule("cleanup")
 
     assert not route.called
@@ -346,7 +363,7 @@ def test_unsupported_local_api_version_is_a_credentials_error(
         monkeypatch.setenv(name, value)
     route = respx.get(CLEANUP_URL).mock(return_value=ok())
 
-    with session(service_options=[SchedulesServiceOptions()]):
+    with session(service_options=[schedules_sync.SchedulesServiceOptions()]):
         with pytest.raises(SchedulesCredentialsError, match="local Schedules API version"):
             schedules_sync.get_schedule("cleanup")
 

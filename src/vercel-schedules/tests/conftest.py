@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from vercel.schedules import SchedulesServiceOptions
+from vercel.schedules import SchedulesServiceOptions, static_credentials_factory, sync
 
 pytest_plugins = ["vendor.respx.plugin"]
 
@@ -51,10 +51,20 @@ def mock_env_clear(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, Non
     _clear_cached_oidc_token()
 
 
-def session_options(
-    *,
-    base_url: str = TEST_BASE_URL,
-    token: str = TEST_TOKEN,
-) -> list[SchedulesServiceOptions]:
-    """Service options wired to a test base URL and a fixed token."""
-    return [SchedulesServiceOptions(base_url=base_url, token=token)]
+def session_options() -> list[SchedulesServiceOptions]:
+    """Async service options wired to a test base URL and a fixed token."""
+    return [
+        SchedulesServiceOptions(
+            base_url=TEST_BASE_URL, credentials_factory=static_credentials_factory(TEST_TOKEN)
+        )
+    ]
+
+
+def sync_session_options() -> list[sync.SchedulesServiceOptions]:
+    """Sync service options wired to a test base URL and a fixed token."""
+    return [
+        sync.SchedulesServiceOptions(
+            base_url=TEST_BASE_URL,
+            credentials_factory=sync.static_credentials_factory(TEST_TOKEN),
+        )
+    ]

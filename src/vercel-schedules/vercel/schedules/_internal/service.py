@@ -6,7 +6,7 @@ async runtimes share one implementation.
 
 from collections.abc import Callable
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from vercel._internal.core.sentinel import UNSET, UnsetType
@@ -17,9 +17,17 @@ from vercel.schedules._internal.models import (
     MAX_JITTER,
     MIN_JITTER,
     Cron,
+    JSONValue,
+    OneOffExpression,
     Schedule,
+    ScheduleExpression,
 )
-from vercel.schedules._internal.options import SchedulesServiceOptions
+from vercel.schedules._internal.options import (
+    SchedulesCredentialsFactory,
+    SchedulesServiceOptions,
+    SyncSchedulesServiceOptions,
+    adapt_sync_credentials_factory,
+)
 
 if TYPE_CHECKING:
     from vercel._internal.core.session import SdkSession, SyncSdkSession
@@ -46,13 +54,7 @@ def _check_namespace(namespace: str | None) -> None:
         _require_non_empty(namespace, "namespace")
 
 
-def _check_timezone(timezone: str) -> None:
-    if not timezone:
-        raise SchedulesValidationError("timezone must be a non-empty IANA timezone name")
-
-
 def _zone(timezone: str) -> ZoneInfo:
-    _check_timezone(timezone)
     try:
         return ZoneInfo(timezone)
     except (ZoneInfoNotFoundError, ValueError) as exc:
@@ -74,20 +76,18 @@ def _timezone_name(at: datetime) -> str | None:
     return None
 
 
-def _wall_clock(at: datetime) -> str:
-    """Render a wall-clock time with no offset, rounded up to the whole minute.
-
-    One-off schedules have minute precision. Rounding up rather than down means
+def _round_up_to_minute(at: datetime) -> datetime:
+    """One-off schedules have minute precision. Rounding up rather than down means
     the firing never happens before `at`, and an `at` in the future never becomes
     one in the past.
     """
     if at.second or at.microsecond:
-        at = at.replace(second=0, microsecond=0) + timedelta(minutes=1)
-    return at.replace(tzinfo=None).isoformat(timespec="seconds")
+        return at.replace(second=0, microsecond=0) + timedelta(minutes=1)
+    return at
 
 
-def resolve_one_off(at: datetime, timezone: str | None) -> tuple[str, str]:
-    """Return the wire `at` and IANA `timezone` for a one-off schedule.
+def resolve_one_off(at: datetime, timezone: str | None) -> tuple[datetime, str]:
+    """Return the wall-clock time and IANA timezone of a one-off schedule.
 
     The service stores one-off firings as a wall-clock time in a named
     timezone. An aware `at` carrying a `ZoneInfo` (or UTC) supplies that name
@@ -99,31 +99,44 @@ def resolve_one_off(at: datetime, timezone: str | None) -> tuple[str, str]:
             raise SchedulesValidationError(
                 "at is naive; pass timezone=... or make it timezone-aware with ZoneInfo"
             )
-        _check_timezone(timezone)
-        return _wall_clock(at), timezone
+        return _round_up_to_minute(at), _require_non_empty(timezone, "timezone")
 
     if timezone is not None:
-        return _wall_clock(at.astimezone(_zone(timezone))), timezone
+        return _round_up_to_minute(at.astimezone(_zone(timezone))), timezone
 
     name = _timezone_name(at)
     if name is None:
         raise SchedulesValidationError(
             "at has a fixed offset but no IANA timezone; use ZoneInfo or pass timezone=..."
         )
-    return _wall_clock(at), name
+    return _round_up_to_minute(at), name
 
 
-def _until_ms(until: datetime | None) -> int | None:
-    """Render `enable_schedule(until=...)` as the Unix milliseconds the service expects."""
-    if until is None:
-        return None
-    if until.utcoffset() is None:
+def _resolve_expression(
+    cron: str | Cron | None, at: datetime | None, timezone: str | None
+) -> tuple[ScheduleExpression | None, str | None]:
+    """The expression to send, if any, and the `timezone` sent with it.
+
+    A cron, or a timezone on its own, passes the timezone name through for the
+    service to check. A one-off always resolves one: its wall-clock time means
+    nothing without the zone it is in.
+    """
+    if at is not None:
+        wall_clock, zone = resolve_one_off(at, timezone)
+        return OneOffExpression(at=wall_clock), zone
+    if timezone is not None:
+        _require_non_empty(timezone, "timezone")
+    if isinstance(cron, str):
+        cron = Cron.from_crontab(cron)
+    return cron, timezone
+
+
+def _check_until(until: datetime | None) -> None:
+    if until is not None and until.utcoffset() is None:
         raise SchedulesValidationError("until is naive; make it timezone-aware")
-    return int(until.timestamp() * 1000)
 
 
-def _jitter_to_wire(jitter: timedelta) -> int:
-    """Validate a jitter and render it in the unit the service expects."""
+def _check_jitter(jitter: object) -> None:
     if not isinstance(jitter, timedelta):
         raise SchedulesValidationError(
             f"jitter must be a timedelta, such as timedelta(minutes=5), got {jitter!r}"
@@ -134,111 +147,6 @@ def _jitter_to_wire(jitter: timedelta) -> int:
         )
     if jitter % JITTER_UNIT:
         raise SchedulesValidationError("jitter must be a whole number of minutes")
-    return jitter // JITTER_UNIT
-
-
-def _cron_fields(cron: str | Cron, timezone: str | None) -> dict[str, Any]:
-    """`expression` for a cron schedule, plus `timezone` when the caller gave one."""
-    if isinstance(cron, str):
-        cron = Cron.from_crontab(cron)
-    fields: dict[str, Any] = {"expression": {"type": "cron", "cron": str(cron)}}
-    if timezone is not None:
-        _check_timezone(timezone)
-        fields["timezone"] = timezone
-    return fields
-
-
-def _one_off_fields(at: datetime, timezone: str | None) -> dict[str, Any]:
-    """`expression` for a one-off schedule, plus the `timezone` it resolved to.
-
-    Unlike cron, a one-off always sends `timezone`: the wire `at` is a wall-clock
-    time, which means nothing without the zone it was rendered in.
-    """
-    wire_at, zone_name = resolve_one_off(at, timezone)
-    return {"expression": {"type": "single", "at": wire_at}, "timezone": zone_name}
-
-
-def _queue_target(topic: str) -> dict[str, str]:
-    _require_non_empty(topic, "topic")
-    return {"type": "queue", "topic": topic}
-
-
-def build_create_body(
-    *,
-    name: str,
-    topic: str,
-    cron: str | Cron | None,
-    at: datetime | None,
-    timezone: str | None,
-    namespace: str | None,
-    jitter: timedelta | None,
-    payload: Any,
-) -> dict[str, Any]:
-    """Validate `create_schedule` arguments and render the request body."""
-    _check_name(name)
-    _check_namespace(namespace)
-
-    body: dict[str, Any] = {"name": name}
-    if namespace is not None:
-        body["namespace"] = namespace
-    if cron is not None and at is None:
-        body.update(_cron_fields(cron, timezone))
-    elif at is not None and cron is None:
-        body.update(_one_off_fields(at, timezone))
-    else:
-        raise SchedulesValidationError("pass exactly one of cron or at")
-    if jitter is not None:
-        body["jitter"] = _jitter_to_wire(jitter)
-    body["target"] = _queue_target(topic)
-    if payload is not UNSET:
-        body["payload"] = payload
-    return body
-
-
-def build_update_body(
-    *,
-    cron: str | Cron | None,
-    at: datetime | None,
-    timezone: str | None,
-    topic: str | None,
-    jitter: timedelta | None | UnsetType,
-    payload: Any,
-) -> dict[str, Any]:
-    """Validate `update_schedule` arguments and render the PATCH body.
-
-    Only supplied fields are sent. `jitter=None` clears the jitter; omitting it
-    leaves it unchanged.
-
-    `timezone` rides along with whichever expression is being set: verbatim next
-    to a new cron, or as the zone a new `at` was resolved into. On its own it
-    re-zones the existing expression.
-    """
-    if cron is not None and at is not None:
-        raise SchedulesValidationError("pass at most one of cron or at")
-
-    body: dict[str, Any] = {}
-    if cron is not None:
-        body.update(_cron_fields(cron, timezone))
-    elif at is not None:
-        body.update(_one_off_fields(at, timezone))
-    elif timezone is not None:
-        _check_timezone(timezone)
-        body["timezone"] = timezone
-
-    if topic is not None:
-        body["target"] = _queue_target(topic)
-
-    if jitter is None:
-        body["jitter"] = None
-    elif not isinstance(jitter, UnsetType):
-        body["jitter"] = _jitter_to_wire(jitter)
-
-    if payload is not UNSET:
-        body["payload"] = payload
-
-    if not body:
-        raise SchedulesValidationError("update_schedule needs at least one field to change")
-    return body
 
 
 class SchedulesService:
@@ -248,16 +156,10 @@ class SchedulesService:
         self,
         *,
         api_client: SchedulesApiClient,
-        options: SchedulesServiceOptions,
         ensure_open: Callable[[], None],
     ) -> None:
         self._api_client = api_client
-        self._options = options
         self._ensure_open = ensure_open
-
-    @property
-    def options(self) -> SchedulesServiceOptions:
-        return self._options
 
     async def create_schedule(
         self,
@@ -269,22 +171,30 @@ class SchedulesService:
         timezone: str | None,
         namespace: str | None,
         jitter: timedelta | None,
-        payload: Any,
+        payload: JSONValue | UnsetType,
     ) -> Schedule:
         self._ensure_open()
-        body = build_create_body(
+        _check_name(name)
+        _check_namespace(namespace)
+        _require_non_empty(topic, "topic")
+        if cron is not None and at is not None:
+            raise SchedulesValidationError("pass exactly one of cron or at")
+        expression, timezone = _resolve_expression(cron, at, timezone)
+        if expression is None:
+            raise SchedulesValidationError("pass exactly one of cron or at")
+        if jitter is not None:
+            _check_jitter(jitter)
+        return await self._api_client.create_schedule(
             name=name,
-            topic=topic,
-            cron=cron,
-            at=at,
-            timezone=timezone,
             namespace=namespace,
+            expression=expression,
+            timezone=timezone,
             jitter=jitter,
+            topic=topic,
             payload=payload,
         )
-        return await self._api_client.create_schedule(body)
 
-    async def list_schedules_page(
+    async def query_schedules_page(
         self,
         *,
         namespace: str | None,
@@ -295,7 +205,7 @@ class SchedulesService:
         _check_namespace(namespace)
         if page_size is not None and page_size < 1:
             raise SchedulesValidationError("page_size must be a positive integer")
-        return await self._api_client.list_schedules(
+        return await self._api_client.query_schedules_page(
             namespace=namespace, cursor=cursor, limit=page_size
         )
 
@@ -314,15 +224,36 @@ class SchedulesService:
         timezone: str | None,
         topic: str | None,
         jitter: timedelta | None | UnsetType,
-        payload: Any,
+        payload: JSONValue | UnsetType,
     ) -> Schedule:
+        """Change only the supplied fields.
+
+        `jitter=None` and `payload=None` remove them; omitting them leaves them
+        unchanged. `timezone` goes with whichever expression is being set; on
+        its own it re-zones the existing expression.
+        """
         self._ensure_open()
         _check_name(name)
         _check_namespace(namespace)
-        body = build_update_body(
-            cron=cron, at=at, timezone=timezone, topic=topic, jitter=jitter, payload=payload
+        if cron is not None and at is not None:
+            raise SchedulesValidationError("pass at most one of cron or at")
+        expression, timezone = _resolve_expression(cron, at, timezone)
+        if topic is not None:
+            _require_non_empty(topic, "topic")
+        if not (jitter is None or isinstance(jitter, UnsetType)):
+            _check_jitter(jitter)
+        unchanged = expression is None and timezone is None and topic is None
+        if unchanged and jitter is UNSET and payload is UNSET:
+            raise SchedulesValidationError("update_schedule needs at least one field to change")
+        return await self._api_client.update_schedule(
+            name,
+            namespace=namespace,
+            expression=expression,
+            timezone=timezone,
+            topic=topic,
+            jitter=jitter,
+            payload=payload,
         )
-        return await self._api_client.update_schedule(name, namespace=namespace, body=body)
 
     async def delete_schedule(self, name: str, *, namespace: str | None) -> None:
         self._ensure_open()
@@ -334,8 +265,9 @@ class SchedulesService:
     ) -> Schedule:
         self._ensure_open()
         _check_namespace(namespace)
+        _check_until(until)
         return await self._api_client.enable_schedule(
-            _check_name(name), namespace=namespace, until_ms=_until_ms(until)
+            _check_name(name), namespace=namespace, until=until
         )
 
     async def disable_schedule(self, name: str, *, namespace: str | None) -> Schedule:
@@ -349,31 +281,48 @@ class SchedulesService:
         await self._api_client.invoke_schedule(_check_name(name), namespace=namespace)
 
 
-def get_schedules_service(session: "SdkSession | SyncSdkSession") -> SchedulesService:
-    """Resolve the Schedules service for a session, creating it once per session."""
-    from vercel._internal.core.session import SyncSdkSession
+def _create_service(
+    session: "SdkSession | SyncSdkSession",
+    options: SchedulesServiceOptions | SyncSchedulesServiceOptions,
+    credentials_factory: SchedulesCredentialsFactory,
+) -> SchedulesService:
+    return SchedulesService(
+        api_client=SchedulesApiClient(
+            base_url=options.base_url,
+            credentials_factory=credentials_factory,
+            transport=session.get_transport(),
+            timeout=options.timeout,
+        ),
+        ensure_open=session.check_open,
+    )
+
+
+def get_schedules_service(session: "SdkSession") -> SchedulesService:
+    """Resolve the Schedules service for an async session, once per session."""
 
     def factory() -> SchedulesService:
         options = session.get_service_option(SchedulesServiceOptions) or SchedulesServiceOptions()
-        is_sync = isinstance(session, SyncSdkSession)
-        return SchedulesService(
-            api_client=SchedulesApiClient(
-                base_url=options.base_url,
-                credentials_factory=options.resolve_credentials_factory(sync=is_sync),
-                transport=session.get_transport(),
-                timeout=options.timeout,
-            ),
-            options=options,
-            ensure_open=session.check_open,
+        return _create_service(session, options, options.resolve_credentials_factory())
+
+    return session.get_or_create_service(SchedulesService, factory)
+
+
+def get_sync_schedules_service(session: "SyncSdkSession") -> SchedulesService:
+    """Resolve the Schedules service for a sync session, once per session."""
+
+    def factory() -> SchedulesService:
+        options = (
+            session.get_service_option(SyncSchedulesServiceOptions) or SyncSchedulesServiceOptions()
         )
+        credentials_factory = adapt_sync_credentials_factory(options.resolve_credentials_factory())
+        return _create_service(session, options, credentials_factory)
 
     return session.get_or_create_service(SchedulesService, factory)
 
 
 __all__ = [
     "SchedulesService",
-    "build_create_body",
-    "build_update_body",
     "get_schedules_service",
+    "get_sync_schedules_service",
     "resolve_one_off",
 ]

@@ -6,6 +6,8 @@ handling without a network layer.
 
 import json
 from datetime import UTC, datetime, timedelta
+from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx2 as httpx
 import pytest
@@ -19,6 +21,7 @@ from vercel._internal.core.http import (
     RequestTimeout,
 )
 from vercel._internal.core.http.transport import HeaderTypes, QueryParamTypes
+from vercel._internal.core.sentinel import UNSET
 from vercel.schedules import (
     Cron,
     FunctionTarget,
@@ -92,15 +95,41 @@ def make_client(*responses: httpx.Response) -> tuple[SchedulesApiClient, FakeTra
 BASE = "https://schedules.test/v1/schedules"
 
 
+CREATE_DEFAULTS: dict[str, Any] = {
+    "name": "cleanup",
+    "namespace": None,
+    "expression": Cron.from_crontab("0 * * * *"),
+    "timezone": None,
+    "jitter": None,
+    "topic": "t",
+    "payload": UNSET,
+}
+
+
+async def create_body(**overrides: Any) -> dict[str, Any]:
+    client, transport = make_client(httpx.Response(200, json=SCHEDULE_JSON))
+    await client.create_schedule(**{**CREATE_DEFAULTS, **overrides})
+    return json.loads(transport.requests[0].content)
+
+
+async def update_body(**overrides: Any) -> dict[str, Any]:
+    client, transport = make_client(httpx.Response(200, json=SCHEDULE_JSON))
+    fields: dict[str, Any] = {
+        "namespace": None,
+        "expression": None,
+        "timezone": None,
+        "topic": None,
+        "jitter": UNSET,
+        "payload": UNSET,
+    }
+    await client.update_schedule("cleanup", **{**fields, **overrides})
+    return json.loads(transport.requests[0].content)
+
+
 async def test_create_posts_json_body_with_auth_and_user_agent() -> None:
     client, transport = make_client(httpx.Response(200, json=SCHEDULE_JSON))
 
-    body = {
-        "name": "cleanup",
-        "expression": {"type": "cron", "cron": "0 * * * *"},
-        "target": {"type": "queue", "topic": "t"},
-    }
-    schedule = await client.create_schedule(body)
+    schedule = await client.create_schedule(**CREATE_DEFAULTS)
 
     assert schedule.schedule_id == "sch_123"
     assert schedule.name == "cleanup"
@@ -111,14 +140,49 @@ async def test_create_posts_json_body_with_auth_and_user_agent() -> None:
     assert request.headers["user-agent"] == USER_AGENT
     assert request.headers[REQUEST_SOURCE_HEADER] == "sdk"
     assert request.headers["content-type"] == "application/json"
-    assert json.loads(request.content) == body
+    assert json.loads(request.content) == {
+        "name": "cleanup",
+        "expression": {"type": "cron", "cron": "0 * * * *"},
+        "target": {"type": "queue", "topic": "t"},
+    }
+
+
+async def test_create_renders_every_field_in_wire_units() -> None:
+    assert await create_body(
+        namespace="jobs",
+        timezone="America/New_York",
+        jitter=timedelta(minutes=2),
+        payload={"maxAgeDays": 30},
+    ) == {
+        "name": "cleanup",
+        "namespace": "jobs",
+        "expression": {"type": "cron", "cron": "0 * * * *"},
+        "timezone": "America/New_York",
+        "jitter": 2,
+        "target": {"type": "queue", "topic": "t"},
+        "payload": {"maxAgeDays": 30},
+    }
+
+
+async def test_create_sends_a_none_payload_as_json_null() -> None:
+    assert (await create_body(payload=None))["payload"] is None
+
+
+@pytest.mark.parametrize(
+    "at",
+    [datetime(2026, 10, 1, 9, 30), datetime(2026, 10, 1, 9, 30, tzinfo=ZoneInfo("Asia/Tokyo"))],
+)
+async def test_one_off_at_is_sent_as_a_wall_clock_time(at: datetime) -> None:
+    body = await create_body(expression=OneOffExpression(at=at), timezone="Asia/Tokyo")
+
+    assert body["expression"] == {"type": "single", "at": "2026-10-01T09:30:00"}
 
 
 async def test_create_requires_the_full_schedule_in_the_response() -> None:
     client, _ = make_client(httpx.Response(200, json={"scheduleId": "sch_1"}))
 
     with pytest.raises(SchedulesResponseError):
-        await client.create_schedule({"name": "x"})
+        await client.create_schedule(**CREATE_DEFAULTS)
 
 
 async def test_list_sends_only_supplied_query_params() -> None:
@@ -127,12 +191,12 @@ async def test_list_sends_only_supplied_query_params() -> None:
         httpx.Response(200, json={"data": [], "cursor": None}),
     )
 
-    page = await client.list_schedules(namespace="jobs", cursor="abc", limit=10)
+    page = await client.query_schedules_page(namespace="jobs", cursor="abc", limit=10)
     assert [s.schedule_id for s in page.schedules] == ["sch_123"]
     assert page.next_cursor is None
     assert str(transport.requests[0].url) == f"{BASE}?namespace=jobs&cursor=abc&limit=10"
 
-    await client.list_schedules(namespace=None, cursor=None, limit=None)
+    await client.query_schedules_page(namespace=None, cursor=None, limit=None)
     assert str(transport.requests[1].url) == BASE
 
 
@@ -277,14 +341,42 @@ async def test_unknown_target_is_a_malformed_response() -> None:
 async def test_update_patches_by_name_and_namespace() -> None:
     client, transport = make_client(httpx.Response(200, json=SCHEDULE_JSON))
 
-    body = {"jitter": None, "timezone": "UTC"}
-    schedule = await client.update_schedule("cleanup", namespace="jobs", body=body)
+    schedule = await client.update_schedule(
+        "cleanup",
+        namespace="jobs",
+        expression=None,
+        timezone="UTC",
+        topic=None,
+        jitter=UNSET,
+        payload=UNSET,
+    )
 
     request = transport.requests[0]
     assert schedule.schedule_id == "sch_123"
     assert request.method == "PATCH"
     assert str(request.url) == f"{BASE}/cleanup?namespace=jobs"
-    assert json.loads(request.content) == body
+    assert json.loads(request.content) == {"timezone": "UTC"}
+
+
+async def test_update_sends_every_supplied_field_in_wire_units() -> None:
+    assert await update_body(
+        expression=Cron(hour=2),
+        timezone="America/New_York",
+        topic="daily-cleanup",
+        jitter=timedelta(minutes=5),
+        payload={"job": "cleanup"},
+    ) == {
+        "expression": {"type": "cron", "cron": "0 2 * * *"},
+        "timezone": "America/New_York",
+        "target": {"type": "queue", "topic": "daily-cleanup"},
+        "jitter": 5,
+        "payload": {"job": "cleanup"},
+    }
+
+
+async def test_update_sends_none_as_null_to_remove_a_field() -> None:
+    # PATCH reads `null` as "remove it"; an omitted field stays unchanged.
+    assert await update_body(jitter=None, payload=None) == {"jitter": None, "payload": None}
 
 
 async def test_delete_tolerates_204() -> None:
@@ -300,7 +392,7 @@ async def test_enable_and_disable_post_without_a_body() -> None:
         httpx.Response(200, json=SCHEDULE_JSON), httpx.Response(200, json=SCHEDULE_JSON)
     )
 
-    await client.enable_schedule("cleanup", namespace=None, until_ms=None)
+    await client.enable_schedule("cleanup", namespace=None, until=None)
     await client.disable_schedule("cleanup", namespace=None)
 
     for request, action in zip(transport.requests, ["enable", "disable"], strict=True):
@@ -313,7 +405,8 @@ async def test_enable_and_disable_post_without_a_body() -> None:
 async def test_enable_until_sends_unix_milliseconds() -> None:
     client, transport = make_client(httpx.Response(200, json=SCHEDULE_JSON))
 
-    await client.enable_schedule("cleanup", namespace=None, until_ms=1_800_000_000_000)
+    until = datetime(2027, 1, 15, 8, tzinfo=UTC)
+    await client.enable_schedule("cleanup", namespace=None, until=until)
 
     assert json.loads(transport.requests[0].content) == {"until": 1_800_000_000_000}
 

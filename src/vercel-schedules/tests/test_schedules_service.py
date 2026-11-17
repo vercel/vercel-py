@@ -1,53 +1,59 @@
-"""Argument validation and request-body rendering, with no session or network.
+"""Argument validation and the decisions the service makes before a request.
 
-`build_create_body`, `build_update_body`, and `resolve_one_off` are pure; the
-public surface only forwards to them. Testing them directly keeps each case to
-the inputs and the resulting dict.
+Each case calls the sync surface over a mocked transport and checks the request
+body it sends, or the error it raises before sending anything. Wire rendering
+itself is covered in `test_schedules_api_client`.
 """
 
+import json
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import httpx2 as httpx
 import pytest
+from conftest import SCHEDULE_JSON, TEST_BASE_URL, sync_session_options
 
-from vercel._internal.core.sentinel import UNSET
-from vercel.schedules import MAX_JITTER, MIN_JITTER, Cron, SchedulesValidationError
-from vercel.schedules._internal.service import (
-    build_create_body,
-    build_update_body,
-    resolve_one_off,
+import vendor.respx as respx
+from vercel.api import session
+from vercel.schedules import (
+    MAX_JITTER,
+    MIN_JITTER,
+    Cron,
+    SchedulesValidationError,
+    sync as schedules_sync,
 )
 
 AT = datetime(2026, 10, 1, 9, 30, tzinfo=UTC)
+SCHEDULES_URL = f"{TEST_BASE_URL}/v1/schedules"
+
+
+def sent_body(method: str, url: str, call: Any) -> dict[str, Any]:
+    with respx.mock(assert_all_called=False) as router:
+        route = router.request(method, url).mock(
+            return_value=httpx.Response(200, json=SCHEDULE_JSON)
+        )
+        with session(service_options=sync_session_options()):
+            call()
+        return json.loads(route.calls.last.request.content)
 
 
 def create_body(**overrides: Any) -> dict[str, Any]:
-    kwargs: dict[str, Any] = {
-        "name": "tick",
-        "topic": "t",
-        "cron": None,
-        "at": None,
-        "timezone": None,
-        "namespace": None,
-        "jitter": None,
-        "payload": UNSET,
-    }
-    kwargs.update(overrides)
-    return build_create_body(**kwargs)
+    kwargs: dict[str, Any] = {"name": "tick", "topic": "t", **overrides}
+    return sent_body("POST", SCHEDULES_URL, lambda: schedules_sync.create_schedule(**kwargs))
 
 
 def update_body(**overrides: Any) -> dict[str, Any]:
-    kwargs: dict[str, Any] = {
-        "cron": None,
-        "at": None,
-        "timezone": None,
-        "topic": None,
-        "jitter": UNSET,
-        "payload": UNSET,
-    }
-    kwargs.update(overrides)
-    return build_update_body(**kwargs)
+    return sent_body(
+        "PATCH",
+        f"{SCHEDULES_URL}/cleanup",
+        lambda: schedules_sync.update_schedule("cleanup", **overrides),
+    )
+
+
+def one_off(at: datetime, timezone: str | None = None) -> tuple[str, str]:
+    body = create_body(at=at, timezone=timezone)
+    return body["expression"]["at"], body["timezone"]
 
 
 # --- one-off resolution ----------------------------------------------------
@@ -56,7 +62,7 @@ def update_body(**overrides: Any) -> dict[str, Any]:
 def test_zoneinfo_datetime_supplies_the_timezone() -> None:
     local = datetime(2026, 10, 1, 9, 30, tzinfo=ZoneInfo("America/Los_Angeles"))
 
-    assert resolve_one_off(local, None) == ("2026-10-01T09:30:00", "America/Los_Angeles")
+    assert one_off(local) == ("2026-10-01T09:30:00", "America/Los_Angeles")
 
 
 @pytest.mark.parametrize(("second", "microsecond"), [(15, 0), (0, 1)])
@@ -65,57 +71,37 @@ def test_one_off_rounds_subminute_times_up(second: int, microsecond: int) -> Non
     # the firing from running before `at`.
     at = AT.replace(second=second, microsecond=microsecond)
 
-    assert resolve_one_off(at, None) == ("2026-10-01T09:31:00", "UTC")
-    assert resolve_one_off(at.replace(tzinfo=None), "Europe/Berlin") == (
+    assert one_off(at) == ("2026-10-01T09:31:00", "UTC")
+    assert one_off(at.replace(tzinfo=None), "Europe/Berlin") == (
         "2026-10-01T09:31:00",
         "Europe/Berlin",
     )
-    assert resolve_one_off(at, "Asia/Tokyo") == ("2026-10-01T18:31:00", "Asia/Tokyo")
+    assert one_off(at, "Asia/Tokyo") == ("2026-10-01T18:31:00", "Asia/Tokyo")
 
 
 def test_one_off_rounding_carries_into_the_next_day() -> None:
     at = datetime(2026, 12, 31, 23, 59, 30, tzinfo=UTC)
 
-    assert resolve_one_off(at, None) == ("2027-01-01T00:00:00", "UTC")
+    assert one_off(at) == ("2027-01-01T00:00:00", "UTC")
 
 
 @pytest.mark.parametrize("tzinfo", [UTC, ZoneInfo("UTC")])
 def test_utc_datetime_resolves_to_utc(tzinfo: Any) -> None:
-    assert resolve_one_off(AT.replace(tzinfo=tzinfo), None) == ("2026-10-01T09:30:00", "UTC")
+    assert one_off(AT.replace(tzinfo=tzinfo)) == ("2026-10-01T09:30:00", "UTC")
 
 
 def test_naive_datetime_uses_the_explicit_timezone_verbatim() -> None:
-    assert resolve_one_off(datetime(2026, 10, 1, 9, 30), "Europe/Berlin") == (
+    assert one_off(datetime(2026, 10, 1, 9, 30), "Europe/Berlin") == (
         "2026-10-01T09:30:00",
         "Europe/Berlin",
     )
 
 
 def test_aware_datetime_is_converted_into_the_explicit_timezone() -> None:
-    assert resolve_one_off(AT, "Asia/Tokyo") == ("2026-10-01T18:30:00", "Asia/Tokyo")
+    assert one_off(AT, "Asia/Tokyo") == ("2026-10-01T18:30:00", "Asia/Tokyo")
 
 
 # --- create ----------------------------------------------------------------
-
-
-def test_create_renders_every_field() -> None:
-    assert create_body(
-        name="cleanup",
-        topic="scheduled-cleanup",
-        cron="0 * * * *",
-        timezone="America/New_York",
-        namespace="jobs",
-        jitter=timedelta(minutes=2),
-        payload={"maxAgeDays": 30},
-    ) == {
-        "name": "cleanup",
-        "namespace": "jobs",
-        "expression": {"type": "cron", "cron": "0 * * * *"},
-        "timezone": "America/New_York",
-        "jitter": 2,
-        "target": {"type": "queue", "topic": "scheduled-cleanup"},
-        "payload": {"maxAgeDays": 30},
-    }
 
 
 @pytest.mark.parametrize("cron", [Cron(hour=3), "0 3 * * *", "  0  3 * *   * "])
@@ -159,6 +145,7 @@ def test_create_accepts_jitter_bounds_inclusive(jitter: timedelta) -> None:
         ({"cron": "0 3 * * MON"}, "day_of_week must hold only numbers"),
         ({"cron": "* * * * *", "timezone": ""}, "timezone must be"),
         ({"at": AT.replace(tzinfo=None)}, "at is naive"),
+        ({"at": AT.replace(tzinfo=None), "timezone": " "}, "timezone must be"),
         ({"at": AT.astimezone(timezone(timedelta(hours=-5)))}, "fixed offset"),
         ({"at": AT, "timezone": "Mars/Olympus_Mons"}, "not a known IANA timezone"),
         ({"cron": "* * * * *", "jitter": timedelta(seconds=-1)}, "between"),
@@ -179,22 +166,6 @@ def test_create_rejects_bad_arguments(kwargs: dict[str, Any], match: str) -> Non
 
 
 # --- update ----------------------------------------------------------------
-
-
-def test_update_renders_only_supplied_fields() -> None:
-    assert update_body(
-        cron="0 2 * * *",
-        timezone="America/New_York",
-        topic="daily-cleanup",
-        jitter=None,
-        payload={"job": "cleanup"},
-    ) == {
-        "expression": {"type": "cron", "cron": "0 2 * * *"},
-        "timezone": "America/New_York",
-        "target": {"type": "queue", "topic": "daily-cleanup"},
-        "jitter": None,
-        "payload": {"job": "cleanup"},
-    }
 
 
 def test_update_jitter_alone() -> None:
@@ -230,6 +201,7 @@ def test_update_one_off_converts_into_explicit_timezone() -> None:
         ({"cron": "* * * * *", "at": AT}, "at most one of cron or at"),
         ({"jitter": timedelta(seconds=30)}, "between"),
         ({"topic": ""}, "topic"),
+        ({"timezone": ""}, "timezone must be"),
     ],
 )
 def test_update_rejects_bad_arguments(kwargs: dict[str, Any], match: str) -> None:
