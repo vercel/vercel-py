@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - main
+      # TEMPORARY: lets the test PRs based on this branch restore its cache,
+      # the way pull requests will restore the cache of main. Remove before merge.
+      - ricardo/turbo-ci
   pull_request:
     types: [opened, synchronize, reopened, labeled, unlabeled]
 
