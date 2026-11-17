@@ -1,0 +1,72 @@
+[build-system]
+requires = ["hatchling>=1.27.0,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vercel-context"
+dynamic = ["version", "dependencies"]
+description = "Vercel Function runtime helpers and system environment parsing"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE", "LICENSE.*"]
+
+[tool.hatch.metadata.hooks.custom]
+path = "hatch_build.py"
+
+[tool.vercel.release.dependencies]
+dependencies = [
+    "vercel-cache>=0.6.0",
+    "vercel-headers>=0.6.0",
+]
+
+[tool.uv.sources]
+vercel-cache = { workspace = true }
+vercel-headers = { workspace = true }
+
+[tool.hatch.version]
+path = "version.py"
+
+[tool.hatch.build.targets.sdist]
+force-include = { "../../scripts/hatch_build.py" = "/_vercel_hatch_build.py" }
+include = [
+    "/vercel/functions/**",
+    "/vercel/env.py",
+    "/version.py",
+    "/README.md",
+    "/pyproject.toml",
+    "/hatch_build.py",
+    "/LICENSE",
+]
+exclude = [
+    "/**/__pycache__",
+]
+
+[tool.hatch.build.targets.wheel]
+dev-mode-dirs = ["."]
+only-include = [
+    "/vercel/functions",
+    "/vercel/env.py",
+]
+exclude = [
+    "/**/__pycache__",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "../.."]
+addopts = "--no-header --capture=tee-sys"
+asyncio_mode = "auto"
+
+[tool.poe]
+include = "../../scripts/poe/poe.toml"
+verbosity = -1
+
+[tool.mypy]
+cache_dir = "../../.mypy_cache/vercel-context"
+explicit_package_bases = true
+packages = ["vercel.functions"]
+modules = ["vercel.env"]
+
+[tool.poe.tasks.typecheck]
+cmd = "$MYPY"

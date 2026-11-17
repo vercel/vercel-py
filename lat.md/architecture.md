@@ -14,7 +14,7 @@ For example, [[vercel-oidc]] provides `vercel.oidc`, [[vercel-sandbox]] provides
 
 The [[vercel]] distribution in [[src/vercel]] is the batteries-included entry point that depends on most service packages.
 
-It owns function helpers such as `vercel.env` and `vercel.functions`, and the `vercel` console script. Modules such as `vercel.blob`, `vercel.cron` ([[vercel-cron]]), the REST API clients `vercel.deployments`, `vercel.projects`, `vercel.project_routes`, and `vercel.client` ([[vercel-platform]]), `vercel.sandbox`, and `vercel.workflow` arrive through its dependencies on the separately owned packages.
+It owns only the `vercel` console script and is otherwise an aggregate of its dependencies. Modules such as `vercel.blob`, `vercel.cron` ([[vercel-cron]]), the function helpers `vercel.functions` and `vercel.env` ([[vercel-context]]), the REST API clients `vercel.deployments`, `vercel.projects`, `vercel.project_routes`, and `vercel.client` ([[vercel-platform]]), `vercel.sandbox`, and `vercel.workflow` arrive through its dependencies on the separately owned packages.
 
 Its sources sit directly in `src/vercel/` instead of a nested `vercel/` directory; the Hatch wheel config maps that directory onto the `vercel` package.
 

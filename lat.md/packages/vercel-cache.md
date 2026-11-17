@@ -33,4 +33,4 @@ Entries carry tags, and purges operate on tags through the purge API the runtime
 
 The runtime hands per-request services to the SDK through context variables rather than globals.
 
-[[src/vercel-cache/vercel/cache/context.py#set_context]] stores the request's cache clients, purge API, `waitUntil` callback, and headers. The headers go to the shared [[vercel-headers]] store. [[vercel#Function helpers]] reads `wait_until` from the same context.
+[[src/vercel-cache/vercel/cache/context.py#set_context]] stores the request's cache clients, purge API, `waitUntil` callback, and headers. The headers go to the shared [[vercel-headers]] store. [[vercel-context#Function helpers]] reads `wait_until` from the same context.

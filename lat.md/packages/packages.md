@@ -15,9 +15,10 @@ Shared building blocks that service packages depend on; most applications never 
 
 Each wraps one Vercel product.
 
-- [[vercel]] — the aggregate distribution: function helpers.
+- [[vercel]] — the aggregate distribution: the `vercel` console script plus dependencies on the service packages.
 - [[vercel-cron]] — cron job declarations discovered by the Vercel build.
 - [[vercel-platform]] — deployments, projects, and project routes over the Vercel REST API, plus the grouped clients.
+- [[vercel-context]] — function runtime helpers and Vercel system environment parsing.
 - [[vercel-blob]] — Vercel Blob uploads, downloads, collections, and multipart uploads.
 - [[vercel-cache]] — Runtime Cache clients and tag invalidation.
 - [[vercel-queue]] — Vercel Queues publishing, push delivery, polling, and local emulation.
