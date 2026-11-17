@@ -4,9 +4,6 @@ on:
   push:
     branches:
       - main
-      # TEMPORARY: lets the test PRs based on this branch restore its cache,
-      # the way pull requests will restore the cache of main. Remove before merge.
-      - ricardo/turbo-ci
   pull_request:
     types: [opened, synchronize, reopened, labeled, unlabeled]
 
@@ -58,7 +55,7 @@ jobs:
           restore-keys: turbo-lint-
 
       - name: Lint and typecheck
-        run: scripts/turbo.sh run poe:lint poe:typecheck --continue --summarize
+        run: scripts/turbo.sh run poe:lint poe:typecheck --continue --summarize --output-logs=new-only
 
       - name: Report Turborepo tasks
         if: ${{ !cancelled() }}
@@ -212,7 +209,7 @@ jobs:
           restore-keys: ${{ env.TURBO_CACHE_KEY }}-
 
       - name: Test
-        run: scripts/turbo.sh run poe:test --continue --summarize
+        run: scripts/turbo.sh run poe:test --continue --summarize --output-logs=new-only
         env:
           VERCEL_DEVALUE_JS: ${{ runner.temp }}/devalue
           VERCEL_WORKFLOW_CLI: ${{ runner.temp }}/workflow-cli/node_modules/workflow
