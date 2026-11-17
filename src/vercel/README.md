@@ -1,31 +1,33 @@
-# vercel Package Map
+# vercel
 
-This package exposes small public modules for Vercel APIs and Vercel Function
-helpers.
+`vercel` is the aggregate distribution of the Vercel Python SDK. Installing it
+installs the SDK's packages and the `vercel` console script, which runs the
+Vercel CLI through `npx vercel`.
+
+```sh
+pip install vercel
+```
 
 ## Public Modules
 
-- `vercel.cache` - Runtime Cache clients and invalidation helpers
-- `vercel.cron` - cron decorators and schedule helpers, delivered by the separately
-  owned `vercel-cron` dependency
-- `vercel.deployments` - deployment creation and deployment file upload helpers,
-  delivered by the separately owned `vercel-platform` dependency
-- `vercel.functions` - convenience exports for function code, delivered by the
-  separately owned `vercel-context` dependency
-- `vercel.oidc` - OIDC token lookup, refresh, credentials, and payload decoding
-- `vercel.project_routes` - project-level routing rule staging, publishing, and history,
-  delivered by the separately owned `vercel-platform` dependency
-- `vercel.projects` - project list, create, update, and delete helpers, delivered by the
-  separately owned `vercel-platform` dependency
-- `vercel.sandbox` - Sandbox creation, commands, files, and snapshots, delivered by the
-  separately owned `vercel-sandbox` dependency
-- `vercel.workflow` - Workflows, steps, sleeps, hooks, and run startup, delivered by the
-  separately owned `vercel-workflow` dependency
-- `vercel.client` - `AsyncVercel` and `Vercel` grouped clients, delivered by the
-  separately owned `vercel-platform` dependency
-- `vercel.env` - Vercel system environment variable parsing, delivered by the
-  separately owned `vercel-context` dependency
-- `vercel.headers` - request header context, IP, and geolocation helpers
+| Module | Distribution |
+| --- | --- |
+| `vercel.api` - shared API session context | `vercel-internal-core` |
+| `vercel.blob` - Blob object storage | `vercel-blob` |
+| `vercel.cache` - Runtime Cache clients and invalidation helpers | `vercel-cache` |
+| `vercel.client` - `AsyncVercel` and `Vercel` grouped clients | `vercel-platform` |
+| `vercel.cron` - cron decorators and schedule helpers | `vercel-cron` |
+| `vercel.deployments` - deployment creation and file upload helpers | `vercel-platform` |
+| `vercel.env` - Vercel system environment variable parsing | `vercel-context` |
+| `vercel.errors` - shared exceptions | `vercel-internal-core` |
+| `vercel.functions` - convenience exports for function code | `vercel-context` |
+| `vercel.headers` - request header context, IP, and geolocation helpers | `vercel-headers` |
+| `vercel.oidc` - OIDC token lookup, refresh, credentials, and payload decoding | `vercel-oidc` |
+| `vercel.project_routes` - project-level routing rule staging, publishing, and history | `vercel-platform` |
+| `vercel.projects` - project list, create, update, and delete helpers | `vercel-platform` |
+| `vercel.queue` - Queue topics, publishing, and subscribers | `vercel-queue` |
+| `vercel.sandbox` - Sandbox creation, commands, files, and snapshots | `vercel-sandbox` |
+| `vercel.workflow` - Workflows, steps, sleeps, hooks, and run startup | `vercel-workflow` |
 
 ## Internals
 

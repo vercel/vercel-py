@@ -31,9 +31,11 @@ def mock_env_clear(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, Non
     ):
         monkeypatch.delenv(name, raising=False)
 
+    from vercel.headers import set_headers
     from vercel.oidc.token import _clear_cached_oidc_token
     from vercel.oidc.verify import clear_jwks_cache
 
+    set_headers(None)
     _clear_cached_oidc_token()
     try:
         clear_jwks_cache()
@@ -45,6 +47,7 @@ def mock_env_clear(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, Non
         clear_jwks_cache()
     except NotImplementedError:
         pass
+    set_headers(None)
 
 
 @pytest.fixture(scope="session")

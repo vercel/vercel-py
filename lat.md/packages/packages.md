@@ -2,6 +2,12 @@ One document per workspace distribution, covering what it owns, how it works, an
 
 Package READMEs remain the user-facing reference. These pages explain the behavior and constraints a contributor needs before changing a package. See [[architecture]] for how the distributions fit together.
 
+## Aggregate
+
+The distribution most applications install.
+
+- [[vercel]] — the `vercel` console script plus dependencies on the foundation and most service packages.
+
 ## Foundation
 
 Shared building blocks that service packages depend on; most applications never import them directly.
@@ -15,7 +21,6 @@ Shared building blocks that service packages depend on; most applications never 
 
 Each wraps one Vercel product.
 
-- [[vercel]] — the aggregate distribution: the `vercel` console script plus dependencies on the service packages.
 - [[vercel-cron]] — cron job declarations discovered by the Vercel build.
 - [[vercel-platform]] — deployments, projects, and project routes over the Vercel REST API, plus the grouped clients.
 - [[vercel-context]] — function runtime helpers and Vercel system environment parsing.

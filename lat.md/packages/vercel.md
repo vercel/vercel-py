@@ -1,8 +1,10 @@
 # vercel
 
-The batteries-included distribution: the `vercel` console script, and otherwise an aggregate of its dependencies on most service packages.
+The aggregate distribution: it owns only the `vercel` console script and otherwise installs the SDK's packages as dependencies.
 
-Lives in [[src/vercel]]. Its sources sit directly in that directory rather than a nested `vercel/` package; the Hatch wheel config maps the directory onto `vercel`. Modules such as `vercel.blob` ([[vercel-blob]]), `vercel.cron` ([[vercel-cron]]), the function helpers `vercel.functions` and `vercel.env` ([[vercel-context]]), the REST API clients ([[vercel-platform]]), `vercel.sandbox`, `vercel.queue`, and `vercel.workflow` come from its dependencies, not from this distribution.
+Lives in [[src/vercel]]. Its sources sit directly in that directory rather than a nested `vercel/` package; the Hatch wheel config maps the directory onto `vercel`.
+
+Every other `vercel.*` module comes from a dependency: [[vercel-blob]], [[vercel-cache]], [[vercel-context]], [[vercel-cron]], [[vercel-headers]], [[vercel-internal-core]], [[vercel-internal-telemetry]], [[vercel-oidc]], [[vercel-platform]], [[vercel-queue]], [[vercel-sandbox]], and [[vercel-workflow]]. The remaining service packages and the framework integrations are installed separately.
 
 ## Console script
 
