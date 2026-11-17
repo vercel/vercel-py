@@ -259,3 +259,4 @@ args = [
   { name = "verbose", options = ["-v", "--verbose"], type = "boolean" },
   { name = "scopes", positional = true, multiple = true },
 ]
+# turbo CI test
