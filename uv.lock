@@ -24,6 +24,7 @@ members = [
     "vercel-cache",
     "vercel-celery",
     "vercel-connect",
+    "vercel-cron",
     "vercel-django-tasks",
     "vercel-dramatiq",
     "vercel-headers",
@@ -2535,6 +2536,7 @@ dependencies = [
     { name = "python-dotenv" },
     { name = "vercel-blob" },
     { name = "vercel-cache" },
+    { name = "vercel-cron" },
     { name = "vercel-headers" },
     { name = "vercel-internal-core" },
     { name = "vercel-internal-telemetry" },
@@ -2553,6 +2555,7 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.0.0,<2" },
     { name = "vercel-blob", editable = "src/vercel-blob" },
     { name = "vercel-cache", editable = "src/vercel-cache" },
+    { name = "vercel-cron", editable = "src/vercel-cron" },
     { name = "vercel-headers", editable = "src/vercel-headers" },
     { name = "vercel-internal-core", editable = "src/vercel-internal-core" },
     { name = "vercel-internal-telemetry", editable = "src/vercel-internal-telemetry" },
@@ -2650,6 +2653,10 @@ requires-dist = [
     { name = "vercel-internal-core", editable = "src/vercel-internal-core" },
     { name = "vercel-oidc", extras = ["verify"], editable = "src/vercel-oidc" },
 ]
+
+[[package]]
+name = "vercel-cron"
+source = { editable = "src/vercel-cron" }
 
 [[package]]
 name = "vercel-django-tasks"
