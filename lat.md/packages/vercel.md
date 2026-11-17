@@ -1,16 +1,8 @@
 # vercel
 
-The batteries-included distribution: Vercel REST API helpers and function helpers, plus dependencies on most service packages.
+The batteries-included distribution: function helpers, plus dependencies on most service packages.
 
-Lives in [[src/vercel]]. Its sources sit directly in that directory rather than a nested `vercel/` package; the Hatch wheel config maps the directory onto `vercel`. Modules such as `vercel.blob` ([[vercel-blob]]), `vercel.cron` ([[vercel-cron]]), `vercel.sandbox`, `vercel.queue`, and `vercel.workflow` come from its dependencies, not from this distribution.
-
-## REST API clients
-
-Deployments, projects, and project routing rules are thin clients over the Vercel REST API, available sync and async.
-
-[[src/vercel/client.py#Vercel]] and [[src/vercel/client.py#AsyncVercel]] group the per-resource clients behind one access token. The module-level helpers ([[src/vercel/deployments/__init__.py|vercel.deployments]], [[src/vercel/projects/__init__.py|vercel.projects]], [[src/vercel/project_routes/__init__.py|vercel.project_routes]]) take the token per call.
-
-Project routes is the reference implementation of [[runtime#Sync and async parity]]. [[src/vercel/_internal/project_routes/core.py#BaseProjectRoutesOpsClient]] holds the async business logic, and the sync and async ops clients only choose the transport. Routing changes follow the platform's staging model: rules are staged as a version, then promoted, restored, or discarded.
+Lives in [[src/vercel]]. Its sources sit directly in that directory rather than a nested `vercel/` package; the Hatch wheel config maps the directory onto `vercel`. Modules such as `vercel.blob` ([[vercel-blob]]), `vercel.cron` ([[vercel-cron]]), the REST API clients ([[vercel-platform]]), `vercel.sandbox`, `vercel.queue`, and `vercel.workflow` come from its dependencies, not from this distribution.
 
 ## Function helpers
 
