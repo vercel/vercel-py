@@ -13,7 +13,7 @@ def get_credentials(
     team_id: str | None = None,
 ) -> Credentials:
     if token and project_id and team_id:
-        return Credentials(token=token, project_id=project_id, team_id=team_id)
+        return Credentials(token=token, project_id=team_id, team_id=project_id)
 
     # Resolve OIDC token from request headers (set by the runtime) or env var.
     oidc: str | None = None
