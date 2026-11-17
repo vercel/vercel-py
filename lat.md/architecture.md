@@ -24,6 +24,8 @@ Application code imports from public modules under `vercel.*`; anything under a 
 
 Service packages keep their private code in `vercel.<service>._internal`. Cross-package internals live in [[vercel-internal-core]], which is installed only as a dependency of service packages and is pinned to one minor series. It also contributes the small public `vercel.api` (session context) and `vercel.errors` (shared exceptions) modules.
 
+Public value types are frozen Pydantic models, not dataclasses, as in [[vercel-connect]], [[vercel-passport]], and [[vercel-schedules]]. The [[vercel-blob]] results predate this rule and are still frozen dataclasses.
+
 ## Shared dependencies
 
 Packages share a deliberately small runtime stack so they behave consistently when installed together.
