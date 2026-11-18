@@ -2,7 +2,7 @@ import functools
 import threading
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Annotated, Any
 
 import pytest
 
@@ -38,7 +38,7 @@ def metadata(name: str) -> ScheduleMetadata:
 def test_registers_the_function_under_its_name() -> None:
     def reindex() -> None: ...
 
-    assert schedule("0 3 * * *")(reindex) is reindex
+    assert schedule(cron="0 3 * * *")(reindex) is reindex
     assert get_registered_schedules() == (
         RegisteredSchedule(
             name="reindex", cron=Cron(hour=3), timezone=None, jitter=None, func=reindex
@@ -48,7 +48,7 @@ def test_registers_the_function_under_its_name() -> None:
 
 def test_overrides_name_timezone_and_jitter() -> None:
     @schedule(
-        Cron(minute="*/15"),
+        cron=Cron(minute="*/15"),
         name="sync-billing",
         timezone="America/New_York",
         jitter=timedelta(minutes=2),
@@ -65,7 +65,7 @@ def test_overrides_name_timezone_and_jitter() -> None:
 
 
 def test_records_the_function_settings() -> None:
-    @schedule("0 4 * * *", max_duration=timedelta(minutes=15), regions=["fra1", "cdg1"])
+    @schedule(cron="0 4 * * *", max_duration=timedelta(minutes=15), regions=["fra1", "cdg1"])
     def export_reports() -> None: ...
 
     [registered] = get_registered_schedules()
@@ -78,7 +78,7 @@ def test_records_the_function_settings() -> None:
 async def test_runs_a_sync_handler_off_the_event_loop() -> None:
     threads: list[threading.Thread] = []
 
-    @schedule("0 3 * * *")
+    @schedule(cron="0 3 * * *")
     def reindex() -> None:
         threads.append(threading.current_thread())
 
@@ -91,7 +91,7 @@ async def test_runs_a_sync_handler_off_the_event_loop() -> None:
 async def test_passes_the_metadata_to_an_async_handler_that_takes_it() -> None:
     received: list[ScheduleMetadata] = []
 
-    @schedule("0 3 * * *")
+    @schedule(cron="0 3 * * *")
     async def reindex(firing: ScheduleMetadata) -> None:
         received.append(firing)
 
@@ -111,7 +111,7 @@ async def test_awaits_a_coroutine_from_a_sync_wrapper() -> None:
     def traced(firing: ScheduleMetadata) -> Any:
         return reindex(firing)
 
-    schedule("0 3 * * *")(traced)
+    schedule(cron="0 3 * * *")(traced)
     [registered] = get_registered_schedules()
     await registered.run(metadata("reindex"))
 
@@ -119,7 +119,7 @@ async def test_awaits_a_coroutine_from_a_sync_wrapper() -> None:
 
 
 async def test_handler_errors_propagate() -> None:
-    @schedule("0 3 * * *")
+    @schedule(cron="0 3 * * *")
     async def reindex() -> None:
         raise RuntimeError("index unavailable")
 
@@ -129,13 +129,13 @@ async def test_handler_errors_propagate() -> None:
 
 
 def test_rejects_a_second_handler_with_the_same_name() -> None:
-    @schedule("0 3 * * *", name="nightly")
+    @schedule(cron="0 3 * * *", name="nightly")
     def reindex() -> None: ...
 
     def cleanup() -> None: ...
 
     with pytest.raises(SchedulesValidationError, match="already declared by"):
-        schedule("0 4 * * *", name="nightly")(cleanup)
+        schedule(cron="0 4 * * *", name="nightly")(cleanup)
 
 
 def define_cleanup(module: str, source_file: str) -> Any:
@@ -160,31 +160,31 @@ def define_cleanup(module: str, source_file: str) -> Any:
 def test_a_rerun_definition_replaces_its_schedule(
     first: tuple[str, str], second: tuple[str, str]
 ) -> None:
-    schedule("0 3 * * *")(define_cleanup(*first))
+    schedule(cron="0 3 * * *")(define_cleanup(*first))
     cleanup = define_cleanup(*second)
-    schedule("0 4 * * *")(cleanup)
+    schedule(cron="0 4 * * *")(cleanup)
 
     [registered] = get_registered_schedules()
     assert (registered.func, str(registered.cron)) == (cleanup, "0 4 * * *")
 
 
 def test_rejects_a_function_of_the_same_name_in_another_module() -> None:
-    schedule("0 3 * * *")(define_cleanup("jobs.tasks", "jobs/tasks.py"))
+    schedule(cron="0 3 * * *")(define_cleanup("jobs.tasks", "jobs/tasks.py"))
     with pytest.raises(SchedulesValidationError, match="already declared by"):
-        schedule("0 4 * * *")(define_cleanup("jobs.maintenance", "jobs/maintenance.py"))
+        schedule(cron="0 4 * * *")(define_cleanup("jobs.maintenance", "jobs/maintenance.py"))
 
 
 def test_rejects_one_name_stacked_twice_on_a_function() -> None:
     def report() -> None: ...
 
-    schedule("0 15 * * *", name="report")(report)
+    schedule(cron="0 15 * * *", name="report")(report)
     with pytest.raises(SchedulesValidationError, match="already declared by"):
-        schedule("0 3 * * *", name="report")(report)
+        schedule(cron="0 3 * * *", name="report")(report)
 
 
 def test_stacked_schedules_run_one_handler() -> None:
-    @schedule("0 3 * * *", name="report-morning")
-    @schedule("0 15 * * *", name="report-afternoon", regions=["fra1"])
+    @schedule(cron="0 3 * * *", name="report-morning")
+    @schedule(cron="0 15 * * *", name="report-afternoon", regions=["fra1"])
     def report() -> None: ...
 
     assert [(s.name, s.func, s.regions) for s in get_registered_schedules()] == [
@@ -200,9 +200,9 @@ def test_stacked_schedules_run_one_handler() -> None:
 def test_stacked_schedules_each_need_a_name(inner: str | None, outer: str | None) -> None:
     def report() -> None: ...
 
-    schedule("0 15 * * *", name=inner)(report)
+    schedule(cron="0 15 * * *", name=inner)(report)
     with pytest.raises(SchedulesValidationError, match="pass name= to each"):
-        schedule("0 3 * * *", name=outer)(report)
+        schedule(cron="0 3 * * *", name=outer)(report)
 
 
 @pytest.mark.parametrize(
@@ -224,37 +224,71 @@ def test_rejects_invalid_options(cron: str, options: dict[str, Any], match: str)
     def reindex() -> None: ...
 
     with pytest.raises(SchedulesValidationError, match=match):
-        schedule(cron, **options)(reindex)
+        schedule(cron=cron, **options)(reindex)
 
 
 def test_a_name_that_is_not_a_valid_schedule_name_needs_an_explicit_one() -> None:
     def _reindex() -> None: ...
 
     with pytest.raises(SchedulesValidationError, match="pass name="):
-        schedule("0 3 * * *")(_reindex)
+        schedule(cron="0 3 * * *")(_reindex)
 
 
-def test_rejects_a_handler_that_requires_other_arguments() -> None:
-    def reindex(firing: ScheduleMetadata, batch_size: int) -> None: ...
+@pytest.mark.parametrize(
+    ("source", "match"),
+    [
+        ("def reindex(batch_size: int): ...", "requires 'batch_size'"),
+        ("def reindex(firing): ...", "annotate it as ScheduleMetadata"),
+        ("def reindex(a: ScheduleMetadata, b: ScheduleMetadata): ...", "twice, in 'a' and 'b'"),
+        ("def reindex(*args): ...", "must not take"),
+        ("def reindex(**options): ...", "must not take"),
+        ("def reindex(full=False, firing: ScheduleMetadata = None, /): ...", "first parameter"),
+        # Imported under `TYPE_CHECKING`, so it would silently receive nothing.
+        ("def reindex(firing: 'ScheduleMetadata | None' = None): ...", "can't be resolved"),
+    ],
+)
+def test_rejects_a_handler_a_firing_cannot_call(source: str, match: str) -> None:
+    namespace: dict[str, Any] = {"__name__": "jobs.tasks"}
+    if "'" not in source:
+        namespace["ScheduleMetadata"] = ScheduleMetadata
+    exec(source, namespace)
 
-    with pytest.raises(TypeError, match="no arguments or one ScheduleMetadata"):
-        schedule("0 3 * * *")(reindex)
+    with pytest.raises(TypeError, match=match):
+        schedule(cron="0 3 * * *")(namespace["reindex"])
 
     assert get_registered_schedules() == ()
 
 
-def test_rejects_a_positional_parameter_with_a_default() -> None:
-    # `run` would pass the metadata as `full`.
-    def reindex(full: bool = False) -> None: ...
+@pytest.mark.parametrize(
+    "source",
+    [
+        "def reindex(full=False, *, firing: ScheduleMetadata): ...",
+        "def reindex(firing: ScheduleMetadata, /, full=False): ...",
+        "def reindex(full=False, firing: ScheduleMetadata | None = None): ...",
+        "def reindex(full=False, firing: 'Annotated[ScheduleMetadata, 1]' = None): ...",
+    ],
+)
+async def test_passes_the_metadata_to_the_annotated_parameter(source: str) -> None:
+    received: list[Any] = []
+    namespace: dict[str, Any] = {
+        "__name__": "jobs.tasks",
+        "Annotated": Annotated,
+        "ScheduleMetadata": ScheduleMetadata,
+        "received": received,
+    }
+    exec(source.replace("...", "received.append((full, firing))"), namespace)
+    schedule(cron="0 3 * * *")(namespace["reindex"])
 
-    with pytest.raises(TypeError, match="'full', which has a default"):
-        schedule("0 3 * * *")(reindex)
+    [registered] = get_registered_schedules()
+    await registered.run(metadata("reindex"))
+
+    assert received == [(False, metadata("reindex"))]
 
 
 async def test_a_keyword_only_option_keeps_its_default() -> None:
     received: list[bool] = []
 
-    @schedule("0 3 * * *")
+    @schedule(cron="0 3 * * *")
     async def reindex(*, full: bool = False) -> None:
         received.append(full)
 

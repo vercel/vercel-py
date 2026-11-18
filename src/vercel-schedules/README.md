@@ -15,12 +15,12 @@ pip install vercel-schedules
 from vercel.schedules import Cron, ScheduleMetadata, schedule
 
 
-@schedule(Cron(hour=3))
+@schedule(cron=Cron(hour=3))
 def reindex() -> None:
     ...
 
 
-@schedule("*/15 * * * *", name="sync-billing", timezone="America/New_York")
+@schedule(cron="*/15 * * * *", name="sync-billing", timezone="America/New_York")
 async def sync_billing(metadata: ScheduleMetadata) -> None:
     print(f"Running {metadata.name}, scheduled at {metadata.scheduled_at}")
 ```
@@ -44,16 +44,16 @@ that name with `get_schedule()` and the other management functions, and expect
 it in `metadata.name`.
 
 The schedule name defaults to the function's name and must be unique among the
-schedules the module registers. Renaming a schedule replaces it. A handler
-takes no arguments, or the `ScheduleMetadata` of the firing as its one
-positional parameter, and may be a coroutine function. Other parameters must be
-keyword-only with a default.
+schedules the module registers. Renaming a schedule replaces it. A handler may
+be a coroutine function. A parameter annotated `ScheduleMetadata` receives the
+firing's metadata, under any name. A firing supplies nothing else, so every
+other parameter needs a default.
 
 To run one function on several schedules, stack `@schedule` and name each one:
 
 ```python
-@schedule("0 3 * * *", name="report-morning")
-@schedule("0 15 * * *", name="report-afternoon")
+@schedule(cron="0 3 * * *", name="report-morning")
+@schedule(cron="0 15 * * *", name="report-afternoon")
 def report(metadata: ScheduleMetadata) -> None:
     ...
 ```
@@ -67,7 +67,7 @@ deployed to:
 from datetime import timedelta
 
 
-@schedule(Cron(hour=4), max_duration=timedelta(minutes=15), regions=["fra1"])
+@schedule(cron=Cron(hour=4), max_duration=timedelta(minutes=15), regions=["fra1"])
 def export_reports() -> None:
     ...
 ```

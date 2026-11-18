@@ -11,6 +11,13 @@ from typing import Any, TypeVar
 
 from anyio import to_thread
 
+from vercel._internal.core.typeutils import (
+    TypeAnnotationResolutionError,
+    args,
+    is_union_type,
+    resolve_annotation_with_namespace_from_call_stack,
+    strip_annotated,
+)
 from vercel.schedules._internal.errors import SchedulesValidationError
 from vercel.schedules._internal.metadata import ScheduleMetadata
 from vercel.schedules._internal.models import Cron
@@ -20,11 +27,6 @@ F = TypeVar("F", bound=Callable[..., Any])
 
 # The names the Schedules API and `vercel.json` accept.
 _NAME_PATTERN = re.compile(r"[0-9A-Za-z][0-9A-Za-z._-]{0,255}")
-
-_POSITIONAL_KINDS = (
-    inspect.Parameter.POSITIONAL_ONLY,
-    inspect.Parameter.POSITIONAL_OR_KEYWORD,
-)
 
 
 def _check_max_duration(max_duration: timedelta) -> None:
@@ -61,29 +63,75 @@ def _qualified_name(func: Callable[..., Any]) -> str:
     return f"{func.__module__}.{func.__qualname__}"
 
 
-def _takes_metadata(func: Callable[..., Any]) -> bool:
-    """Whether the handler takes the `ScheduleMetadata`, which must be all it requires."""
-    parameters = inspect.signature(func).parameters.values()
-    positional = [p for p in parameters if p.kind in _POSITIONAL_KINDS]
-    # The metadata would land in a parameter with a default, such as
-    # `full: bool = False`, which the signature can't tell from an optional
-    # `metadata` parameter.
-    for p in positional:
-        if p.default is not inspect.Parameter.empty:
+def _is_metadata_annotation(annotation: Any) -> bool:
+    annotation = strip_annotated(annotation)
+    if is_union_type(annotation):
+        members = [strip_annotated(a) for a in args(annotation) if a is not type(None)]
+        return members == [ScheduleMetadata]
+    return annotation is ScheduleMetadata
+
+
+def _takes_metadata(func: Callable[..., Any], parameter: inspect.Parameter) -> bool:
+    annotation = parameter.annotation
+    if annotation is inspect.Parameter.empty:
+        return False
+    try:
+        resolved = resolve_annotation_with_namespace_from_call_stack(
+            annotation, globalns=getattr(inspect.unwrap(func), "__globals__", {})
+        )
+    except TypeAnnotationResolutionError as exc:
+        # An annotation that names the metadata but can't be resolved, such as
+        # one imported under `TYPE_CHECKING`, would otherwise receive nothing.
+        if "ScheduleMetadata" in str(annotation):
             raise TypeError(
-                f"schedule handler {_qualified_name(func)} would receive the "
-                f"ScheduleMetadata in {p.name!r}, which has a default; make it required "
-                "to take the metadata, or keyword-only"
+                f"schedule handler {_qualified_name(func)} annotates {parameter.name!r} "
+                f"as {annotation!r}, which can't be resolved; import ScheduleMetadata "
+                "at runtime"
+            ) from exc.__cause__
+        return False
+    return _is_metadata_annotation(resolved.annotation)
+
+
+def _metadata_parameter(func: Callable[..., Any]) -> inspect.Parameter | None:
+    """The parameter annotated `ScheduleMetadata`, which receives the firing's metadata.
+
+    A firing supplies nothing else, so every other parameter needs a default.
+    """
+    parameters = list(inspect.signature(func).parameters.values())
+    found: inspect.Parameter | None = None
+    for parameter in parameters:
+        if parameter.kind in (
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        ):
+            raise TypeError(
+                f"schedule handler {_qualified_name(func)} must not take *args or "
+                "**kwargs; a decorator's wrapper should use functools.wraps"
             )
-    if len(positional) > 1 or any(
-        p.kind is inspect.Parameter.KEYWORD_ONLY and p.default is inspect.Parameter.empty
-        for p in parameters
+        if _takes_metadata(func, parameter):
+            if found is not None:
+                raise TypeError(
+                    f"schedule handler {_qualified_name(func)} takes the ScheduleMetadata "
+                    f"twice, in {found.name!r} and {parameter.name!r}"
+                )
+            found = parameter
+        elif parameter.default is inspect.Parameter.empty:
+            raise TypeError(
+                f"schedule handler {_qualified_name(func)} requires {parameter.name!r}, "
+                "which a firing can't supply; annotate it as ScheduleMetadata to take "
+                "the firing's metadata, or give it a default"
+            )
+    # A positional-only parameter can't be passed by name.
+    if (
+        found is not None
+        and found.kind is inspect.Parameter.POSITIONAL_ONLY
+        and found is not parameters[0]
     ):
         raise TypeError(
-            f"schedule handler {_qualified_name(func)} must take no arguments or one "
-            "ScheduleMetadata argument"
+            f"schedule handler {_qualified_name(func)} takes the ScheduleMetadata in the "
+            f"positional-only {found.name!r}, which must be its first parameter"
         )
-    return bool(positional) or any(p.kind is inspect.Parameter.VAR_POSITIONAL for p in parameters)
+    return found
 
 
 @dataclass(frozen=True)
@@ -109,20 +157,27 @@ class RegisteredSchedule:
     func: Callable[..., Any]
     max_duration: timedelta | None = None
     regions: tuple[str, ...] | None = None
-    _takes_metadata: bool = field(init=False, repr=False, compare=False)
+    _metadata_parameter: inspect.Parameter | None = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "_takes_metadata", _takes_metadata(self.func))
+        object.__setattr__(self, "_metadata_parameter", _metadata_parameter(self.func))
 
     async def run(self, metadata: ScheduleMetadata) -> None:
         """Run the handler for one firing of this schedule.
 
         A coroutine function is awaited, and a regular function runs in a
         worker thread so it does not block the event loop. An awaitable that a
-        regular function returns is awaited too. Exceptions from the handler
-        propagate.
+        regular function returns is awaited too. The metadata is passed to the
+        parameter annotated `ScheduleMetadata`, if there is one. Exceptions
+        from the handler propagate.
         """
-        call = functools.partial(self.func, metadata) if self._takes_metadata else self.func
+        parameter = self._metadata_parameter
+        if parameter is None:
+            call = self.func
+        elif parameter.kind is inspect.Parameter.POSITIONAL_ONLY:
+            call = functools.partial(self.func, metadata)
+        else:
+            call = functools.partial(self.func, **{parameter.name: metadata})
         if inspect.iscoroutinefunction(self.func):
             await call()
         else:
@@ -184,9 +239,8 @@ def _register(registered: RegisteredSchedule, *, named: bool) -> None:
 
 
 def schedule(
-    cron: str | Cron,
-    /,
     *,
+    cron: str | Cron,
     name: str | None = None,
     timezone: str | None = None,
     jitter: timedelta | None = None,
@@ -197,19 +251,20 @@ def schedule(
 
     Importing the module registers the schedule, and `get_registered_schedules()`
     returns every registered one. On each firing, `RegisteredSchedule.run` calls
-    the function with no arguments, or with the `ScheduleMetadata` if it takes one.
-    It may be a coroutine function.
+    the function, which may be a coroutine function. A parameter annotated
+    `ScheduleMetadata` receives the firing's metadata, under any name. A firing
+    supplies nothing else, so every other parameter needs a default.
 
     ```python
     from vercel.schedules import Cron, ScheduleMetadata, schedule
 
-    @schedule(Cron(hour=3))
+    @schedule(cron=Cron(hour=3))
     def reindex() -> None: ...
 
-    @schedule("*/15 * * * *", name="sync-billing", timezone="America/New_York")
+    @schedule(cron="*/15 * * * *", name="sync-billing", timezone="America/New_York")
     async def sync(metadata: ScheduleMetadata) -> None: ...
 
-    @schedule(Cron(hour=4), max_duration=timedelta(minutes=15), regions=["fra1"])
+    @schedule(cron=Cron(hour=4), max_duration=timedelta(minutes=15), regions=["fra1"])
     def export_reports() -> None: ...
     ```
 
@@ -220,8 +275,8 @@ def schedule(
     one a `name`:
 
     ```python
-    @schedule("0 3 * * *", name="report-morning")
-    @schedule("0 15 * * *", name="report-afternoon", regions=["fra1"])
+    @schedule(cron="0 3 * * *", name="report-morning")
+    @schedule(cron="0 15 * * *", name="report-afternoon", regions=["fra1"])
     def report(metadata: ScheduleMetadata) -> None: ...
     ```
 
@@ -253,8 +308,9 @@ def schedule(
             of seconds or empty `regions`, another function already declares
             a schedule with this name, or the function has more than one
             `@schedule` and one of them has no `name`.
-        TypeError: If the function requires arguments other than one
-            `ScheduleMetadata`, or has a positional parameter with a default.
+        TypeError: If the function has a parameter without a default that is
+            not annotated `ScheduleMetadata`, more than one parameter that is,
+            or `*args` or `**kwargs`.
     """
     parsed = Cron.from_crontab(cron) if isinstance(cron, str) else cron
     if timezone is not None:
