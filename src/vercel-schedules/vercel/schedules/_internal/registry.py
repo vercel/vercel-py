@@ -14,7 +14,7 @@ from anyio import to_thread
 from vercel.schedules._internal.errors import SchedulesValidationError
 from vercel.schedules._internal.metadata import ScheduleMetadata
 from vercel.schedules._internal.models import Cron
-from vercel.schedules._internal.service import jitter_minutes, zone_info
+from vercel.schedules._internal.service import check_jitter, zone_info
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -260,7 +260,7 @@ def schedule(
     if timezone is not None:
         zone_info(timezone)
     if jitter is not None:
-        jitter_minutes(jitter)
+        check_jitter(jitter)
     if max_duration is not None:
         _check_max_duration(max_duration)
     checked_regions = None if regions is None else _check_regions(regions)

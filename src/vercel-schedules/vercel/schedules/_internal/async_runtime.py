@@ -33,7 +33,7 @@ async def create_schedule(
     )
 
 
-def list_schedules(
+def query_schedules(
     service: SchedulesService,
     *,
     namespace: str | None = None,
@@ -42,7 +42,7 @@ def list_schedules(
     async def iterate() -> AsyncIterator[Schedule]:
         cursor: str | None = None
         while True:
-            page = await service.list_schedules_page(
+            page = await service.query_schedules_page(
                 namespace=namespace, cursor=cursor, page_size=page_size
             )
             for schedule in page.schedules:
@@ -119,6 +119,6 @@ __all__ = [
     "enable_schedule",
     "get_schedule",
     "invoke_schedule",
-    "list_schedules",
+    "query_schedules",
     "update_schedule",
 ]

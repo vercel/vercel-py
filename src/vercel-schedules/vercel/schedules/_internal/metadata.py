@@ -2,8 +2,9 @@
 
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass
 from datetime import UTC, datetime
+
+from pydantic import BaseModel, ConfigDict
 
 from vercel.schedules._internal.errors import NotAScheduleInvocationError, ScheduleEventParseError
 
@@ -37,8 +38,7 @@ def _scheduled_at(raw: str, label: str) -> datetime:
     return value.astimezone(UTC)
 
 
-@dataclass(frozen=True)
-class ScheduleMetadata:
+class ScheduleMetadata(BaseModel):
     """One firing of a schedule.
 
     Attributes:
@@ -52,6 +52,8 @@ class ScheduleMetadata:
         expression: The schedule's cron expression, or the local datetime of a
             one-time schedule.
     """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     schedule_id: str
     execution_id: str

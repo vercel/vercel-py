@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.13.0 - 2026-11-12
+
+### Breaking Changes
+
+- Require Python 3.11 or newer and add Python 3.15 support; Python 3.10 is no longer supported. (#518)
+
+### Features
+
+- Add `workflow.without_argument_compression()` and establish reusable workflow configuration for future `with_*` methods. (#504)
+- Add `workflow.with_region(...)` to select the run-data and queue region, with TypeScript-compatible region-tagged Vercel run IDs and regional queue routing. (#505)
+
+### Bug Fixes
+
+- Retry safe Workflow API requests after transport failures, with at most three attempts and short backoff delays. Reads can retry after any transport error; writes retry only when a connection or pool error prevents the request from being sent. (#521)
+- Request a short retry delay when a Vercel workflow queue handler fails, instead of waiting for the default five-minute processing lease to expire. Repeated failures use exponential backoff with jitter, capped at 900 seconds. (#521)
+
+### Internal
+
+- Pass a message when cancelling workflow tasks on suspension, so the resulting `CancelledError` identifies its cause when debugging. (#503)
+
 ## 0.12.1 - 2026-10-30
 
 - Update dependencies.

@@ -115,7 +115,7 @@ defaults to `"default"`.
 
 ```python
 from datetime import timedelta
-from vercel.schedules import Cron, create_schedule, list_schedules
+from vercel.schedules import Cron, create_schedule, query_schedules
 
 schedule = await create_schedule(
     "cleanup",
@@ -125,7 +125,7 @@ schedule = await create_schedule(
     payload={"max_age_days": 30},
 )
 
-async for schedule in list_schedules():
+async for schedule in query_schedules():
     print(schedule.name, schedule.expression, schedule.is_active)
 ```
 
@@ -201,10 +201,10 @@ to wait after `"rate_limited"`.
 The same surface is available synchronously, with identical names and arguments:
 
 ```python
-from vercel.schedules.sync import create_schedule, list_schedules
+from vercel.schedules.sync import create_schedule, query_schedules
 
 schedule = create_schedule("cleanup", topic="scheduled-cleanup", cron="0 * * * *")
-for schedule in list_schedules():
+for schedule in query_schedules():
     ...
 ```
 
@@ -216,19 +216,26 @@ either per session:
 
 ```python
 from vercel.api import session
-from vercel.schedules import SchedulesServiceOptions, get_schedule
+from vercel.schedules import SchedulesServiceOptions, get_schedule, static_credentials_factory
 
-async with session(service_options=[SchedulesServiceOptions(token="...", base_url="...")]):
+options = SchedulesServiceOptions(
+    base_url="...",
+    credentials_factory=static_credentials_factory("..."),
+)
+async with session(service_options=[options]):
     schedule = await get_schedule("cleanup")
 ```
 
-Use a plain `with` block and `vercel.schedules.sync` together; mixing an async
-call into a sync session, or the reverse, is rejected.
+`credentials_factory` runs before each request, so it can return a refreshed
+token. For sync calls, use `SchedulesServiceOptions` from
+`vercel.schedules.sync` in a plain `with` block. Its `credentials_factory` is a
+plain function, which may block. Mixing an async call into a sync session, or
+the reverse, is rejected.
 
 Under `vercel dev`, the SDK uses the local Schedules API that `vercel dev`
 serves, with the token it provides. Elsewhere, run `vercel link` and
-`vercel env pull` so an OIDC token is available, or pass
-`SchedulesServiceOptions(token=...)`.
+`vercel env pull` so an OIDC token is available, or pass a
+`credentials_factory`.
 
 ## Read the firing in a schedule command
 

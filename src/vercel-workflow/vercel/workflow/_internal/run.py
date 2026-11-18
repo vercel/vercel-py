@@ -269,51 +269,84 @@ async def start(
 ) -> Run[T]:
     config = wf.get_config()
     wf = wf.configure(config).workflow
-    # Bound before anything is written, so an arity mistake raises here instead
-    # of leaving a run behind that fails when its body is invoked.
+
+    # Bind and validate before preparing a run or writing anything durable.
     bound_args, bound_kwargs = wf.bind_arguments(args, kwargs)
     dumped_args, dumped_kwargs = wf.codec.dump_arguments(bound_args, bound_kwargs)
-    world = w.get_world()
-    deployment_id = await world.get_deployment_id()
-    namespace = wf._resolve_queue_namespace()
-    run_id = f"wrun_{world.create_run_id(region=config.region)}"
-    run_key = await world.run_key(run_id, deployment_id=deployment_id)
-    encryption_public_key = (
-        encryption.derive_run_public_key(run_key) if run_key is not None else None
-    )
-    encoder = ser.PayloadEncoder(compression=config.compress_arguments, encryption_key=run_key)
-    input_data = encoder.encode(ser.argument_array(dumped_args, dumped_kwargs))
-    execution_context: dict[str, Any] = {
-        "workflowCoreVersion": w.WORKFLOW_CORE_COMPAT_VERSION,
-        "hookResumeInputVersion": w.HOOK_RESUME_INPUT_VERSION,
-        "features": {"encryption": run_key is not None},
-    }
-    if namespace is not None:
-        execution_context["queueNamespace"] = namespace
-    data = w.RunCreatedEventData(
-        deployment_id=deployment_id,
-        workflow_name=wf.workflow_id,
-        input=input_data,
-        execution_context=execution_context,
-        encryption_public_key=encryption_public_key,
-    )
-    await world.events_create(run_id, data.into_event())
-    await world.queue(
-        w.get_queue_name(wf.workflow_id, namespace),
-        w.WorkflowInvokePayload(
-            run_id=run_id,
-            run_input=w.RunInput(
-                input=input_data,
-                deployment_id=deployment_id,
-                workflow_name=wf.workflow_id,
-                spec_version=w.SPEC_VERSION_CURRENT,
-                execution_context=execution_context,
-                encryption_public_key=encryption_public_key,
-                environment=world.get_environment(),
-            ),
-        ),
-        deployment_id=deployment_id,
-        region=config.region,
-    )
+    arguments = ser.argument_array(dumped_args, dumped_kwargs)
 
-    return Run(run_id, output_validator=wf.codec.validate_return)
+    world = w.get_world()
+    prepared = await _RunStart.prepare(world, wf, config, arguments)
+    return await prepared.submit(world)
+
+
+@dataclass(frozen=True, kw_only=True)
+class _RunStart(Generic[T]):
+    workflow: core.Workflow[..., T]
+    config: core.Configuration
+    run_id: str
+    deployment_id: str
+    input: bytes
+    execution_context: dict[str, Any]
+    encryption_public_key: str | None
+    queue_name: str
+
+    @classmethod
+    async def prepare(
+        cls,
+        world: w.World,
+        wf: core.Workflow[..., T],
+        config: core.Configuration,
+        arguments: list[Any],
+    ) -> _RunStart[T]:
+        deployment_id = await world.get_deployment_id()
+        namespace = wf._resolve_queue_namespace()
+        run_id = f"wrun_{world.create_run_id(region=config.region)}"
+        run_key = await world.run_key(run_id, deployment_id=deployment_id)
+        encoder = ser.PayloadEncoder(compression=config.compress_arguments, encryption_key=run_key)
+        return cls(
+            workflow=wf,
+            config=config,
+            run_id=run_id,
+            deployment_id=deployment_id,
+            encryption_public_key=(
+                encryption.derive_run_public_key(run_key) if run_key is not None else None
+            ),
+            input=encoder.encode(arguments),
+            execution_context={
+                "workflowCoreVersion": w.WORKFLOW_CORE_COMPAT_VERSION,
+                "hookResumeInputVersion": w.HOOK_RESUME_INPUT_VERSION,
+                "features": {"encryption": run_key is not None},
+                **({"queueNamespace": namespace} if namespace is not None else {}),
+            },
+            queue_name=w.get_queue_name(wf.workflow_id, namespace),
+        )
+
+    async def submit(self, world: w.World) -> Run[T]:
+        wf = self.workflow
+        event_data = w.RunCreatedEventData(
+            deployment_id=self.deployment_id,
+            workflow_name=wf.workflow_id,
+            input=self.input,
+            execution_context=self.execution_context,
+            encryption_public_key=self.encryption_public_key,
+        )
+        await world.events_create(self.run_id, event_data.into_event())
+        await world.queue(
+            self.queue_name,
+            w.WorkflowInvokePayload(
+                run_id=self.run_id,
+                run_input=w.RunInput(
+                    input=self.input,
+                    deployment_id=self.deployment_id,
+                    workflow_name=wf.workflow_id,
+                    spec_version=w.SPEC_VERSION_CURRENT,
+                    execution_context=self.execution_context,
+                    encryption_public_key=self.encryption_public_key,
+                    environment=world.get_environment(),
+                ),
+            ),
+            deployment_id=self.deployment_id,
+            region=self.config.region,
+        )
+        return Run(self.run_id, output_validator=wf.codec.validate_return)

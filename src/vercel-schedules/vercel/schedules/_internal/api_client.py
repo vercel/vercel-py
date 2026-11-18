@@ -1,7 +1,9 @@
 """Internal Schedules API client.
 
-Owns request/response wire models, camelCase aliasing, the user agent, and the
-mapping of non-2xx responses onto the `SchedulesApiError` taxonomy.
+Owns request/response wire models, camelCase aliasing, unit conversions, the
+user agent, and the mapping of non-2xx responses onto the `SchedulesApiError`
+taxonomy. Callers pass Python values such as `Cron`, `datetime`, and
+`timedelta`; only the models here know their wire form.
 
 Schedules are addressed by name, scoped by an optional namespace query
 parameter, matching `@vercel/schedules`.
@@ -17,7 +19,14 @@ from typing import Any, Literal, TypeVar
 from urllib.parse import quote
 
 from httpx2 import Response
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_serializer,
+    field_validator,
+)
 
 from vercel._internal.core.http import (
     BaseTransport,
@@ -26,6 +35,7 @@ from vercel._internal.core.http import (
     RequestBody,
     extract_structured_error,
 )
+from vercel._internal.core.sentinel import UNSET, UnsetType
 from vercel._internal.core.time import from_epoch_ms
 from vercel.schedules._internal.errors import (
     ScheduleNotFoundError,
@@ -36,6 +46,7 @@ from vercel.schedules._internal.models import (
     JITTER_UNIT,
     Cron,
     FunctionTarget,
+    JSONValue,
     OneOffExpression,
     PathTarget,
     QueueTarget,
@@ -68,6 +79,97 @@ ResponseModelT = TypeVar("ResponseModelT", bound=BaseModel)
 
 class _ApiModel(BaseModel):
     model_config = ConfigDict(extra="ignore", frozen=True, populate_by_name=True)
+
+
+def _is_none(value: object) -> bool:
+    return value is None
+
+
+def _is_unset(value: object) -> bool:
+    return value is UNSET
+
+
+class _ApiRequestModel(BaseModel):
+    model_config = ConfigDict(
+        arbitrary_types_allowed=True, extra="forbid", frozen=True, populate_by_name=True
+    )
+
+    def to_api_dict(self) -> dict[str, Any]:
+        return self.model_dump(by_alias=True)
+
+
+class _CronExpressionRequest(_ApiRequestModel):
+    type: Literal["cron"] = "cron"
+    cron: Cron
+
+    @field_serializer("cron")
+    def _render(self, cron: Cron) -> str:
+        return str(cron)
+
+
+class _SingleExpressionRequest(_ApiRequestModel):
+    type: Literal["single"] = "single"
+    at: datetime
+
+    @field_serializer("at")
+    def _wall_clock(self, at: datetime) -> str:
+        # The service reads `at` in the request's `timezone`, so it has no offset.
+        return at.replace(tzinfo=None).isoformat(timespec="seconds")
+
+
+class _QueueTargetRequest(_ApiRequestModel):
+    type: Literal["queue"] = "queue"
+    topic: str
+
+
+def _expression_request(
+    expression: ScheduleExpression,
+) -> _CronExpressionRequest | _SingleExpressionRequest:
+    if isinstance(expression, Cron):
+        return _CronExpressionRequest(cron=expression)
+    return _SingleExpressionRequest(at=expression.at)
+
+
+def _jitter_minutes(jitter: timedelta | None | UnsetType) -> int | None | UnsetType:
+    return jitter // JITTER_UNIT if isinstance(jitter, timedelta) else jitter
+
+
+class _CreateScheduleRequest(_ApiRequestModel):
+    name: str
+    namespace: str | None = Field(default=None, exclude_if=_is_none)
+    expression: _CronExpressionRequest | _SingleExpressionRequest
+    timezone: str | None = Field(default=None, exclude_if=_is_none)
+    jitter: timedelta | None = Field(default=None, exclude_if=_is_none)
+    target: _QueueTargetRequest
+    # `None` is a JSON null payload; `UNSET` sends no payload.
+    payload: JSONValue = Field(default=UNSET, exclude_if=_is_unset)
+
+    @field_serializer("jitter")
+    def _serialize_jitter(self, jitter: timedelta | None) -> int | None | UnsetType:
+        return _jitter_minutes(jitter)
+
+
+class _UpdateScheduleRequest(_ApiRequestModel):
+    expression: _CronExpressionRequest | _SingleExpressionRequest | None = Field(
+        default=None, exclude_if=_is_none
+    )
+    timezone: str | None = Field(default=None, exclude_if=_is_none)
+    target: _QueueTargetRequest | None = Field(default=None, exclude_if=_is_none)
+    # PATCH reads `null` as "remove it", so `None` is sent and `UNSET` is not.
+    jitter: timedelta | None | UnsetType = Field(default=UNSET, exclude_if=_is_unset)
+    payload: JSONValue = Field(default=UNSET, exclude_if=_is_unset)
+
+    @field_serializer("jitter")
+    def _serialize_jitter(self, jitter: timedelta | None | UnsetType) -> int | None | UnsetType:
+        return _jitter_minutes(jitter)
+
+
+class _EnableScheduleRequest(_ApiRequestModel):
+    until: datetime
+
+    @field_serializer("until")
+    def _unix_ms(self, until: datetime) -> int:
+        return int(until.timestamp() * 1000)
 
 
 class _CronExpressionModel(_ApiModel):
@@ -244,12 +346,33 @@ class SchedulesApiClient:
         self._transport = transport
         self._timeout = timeout
 
-    async def create_schedule(self, body: Mapping[str, Any]) -> Schedule:
+    async def create_schedule(
+        self,
+        *,
+        name: str,
+        namespace: str | None,
+        expression: ScheduleExpression,
+        timezone: str | None,
+        jitter: timedelta | None,
+        topic: str,
+        payload: JSONValue | UnsetType,
+    ) -> Schedule:
         """POST /v1/schedules."""
-        response = await self._request("POST", "/v1/schedules", body=JSONBody(dict(body)))
+        request = _CreateScheduleRequest(
+            name=name,
+            namespace=namespace,
+            expression=_expression_request(expression),
+            timezone=timezone,
+            jitter=jitter,
+            target=_QueueTargetRequest(topic=topic),
+            payload=payload,
+        )
+        response = await self._request(
+            "POST", "/v1/schedules", body=JSONBody(request.to_api_dict())
+        )
         return _parse_schedule(response)
 
-    async def list_schedules(
+    async def query_schedules_page(
         self,
         *,
         namespace: str | None,
@@ -279,14 +402,29 @@ class SchedulesApiClient:
         return _parse_schedule(response)
 
     async def update_schedule(
-        self, name: str, *, namespace: str | None, body: Mapping[str, Any]
+        self,
+        name: str,
+        *,
+        namespace: str | None,
+        expression: ScheduleExpression | None,
+        timezone: str | None,
+        topic: str | None,
+        jitter: timedelta | None | UnsetType,
+        payload: JSONValue | UnsetType,
     ) -> Schedule:
         """PATCH /v1/schedules/:name."""
+        request = _UpdateScheduleRequest(
+            expression=None if expression is None else _expression_request(expression),
+            timezone=timezone,
+            target=None if topic is None else _QueueTargetRequest(topic=topic),
+            jitter=jitter,
+            payload=payload,
+        )
         response = await self._request(
             "PATCH",
             _schedule_path(name),
             params=_namespace_params(namespace),
-            body=JSONBody(dict(body)),
+            body=JSONBody(request.to_api_dict()),
         )
         return _parse_schedule(response)
 
@@ -296,14 +434,16 @@ class SchedulesApiClient:
         await self._request("DELETE", _schedule_path(name), params=_namespace_params(namespace))
 
     async def enable_schedule(
-        self, name: str, *, namespace: str | None, until_ms: int | None
+        self, name: str, *, namespace: str | None, until: datetime | None
     ) -> Schedule:
         """POST /v1/schedules/:name/enable."""
         response = await self._request(
             "POST",
             _schedule_path(name, "/enable"),
             params=_namespace_params(namespace),
-            body=None if until_ms is None else JSONBody({"until": until_ms}),
+            body=None
+            if until is None
+            else JSONBody(_EnableScheduleRequest(until=until).to_api_dict()),
         )
         return _parse_schedule(response)
 

@@ -16,7 +16,9 @@ Declare a recurring schedule in code with `@schedule`. A schedule command runs
 once per firing; read the firing with `ScheduleMetadata.from_env()`.
 
 Requests authenticate with the deployment's Vercel OIDC token. Locally, run
-`vercel env pull` or pass `SchedulesServiceOptions(token=...)` in a session.
+`vercel env pull`, or pass
+`SchedulesServiceOptions(credentials_factory=static_credentials_factory(token))`
+in a session.
 """
 
 from collections.abc import Iterator
@@ -53,15 +55,16 @@ from vercel.schedules._internal.models import (
 )
 from vercel.schedules._internal.options import (
     DEFAULT_SCHEDULES_BASE_URL,
-    SchedulesCredentialsFactory,
-    SchedulesServiceOptions,
+    SyncSchedulesCredentialsFactory as SchedulesCredentialsFactory,
+    SyncSchedulesServiceOptions as SchedulesServiceOptions,
+    sync_static_credentials_factory as static_credentials_factory,
 )
 from vercel.schedules._internal.registry import (
     RegisteredSchedule,
     get_registered_schedules,
     schedule,
 )
-from vercel.schedules._internal.service import SchedulesService, get_schedules_service
+from vercel.schedules._internal.service import SchedulesService, get_sync_schedules_service
 from vercel.schedules._internal.sync_runtime import (
     create_schedule as _create_schedule,
     delete_schedule as _delete_schedule,
@@ -69,14 +72,14 @@ from vercel.schedules._internal.sync_runtime import (
     enable_schedule as _enable_schedule,
     get_schedule as _get_schedule,
     invoke_schedule as _invoke_schedule,
-    list_schedules as _list_schedules,
+    query_schedules as _query_schedules,
     update_schedule as _update_schedule,
 )
 from vercel.schedules.version import __version__
 
 
 def _service() -> SchedulesService:
-    return get_schedules_service(get_active_sync_session())
+    return get_sync_schedules_service(get_active_sync_session())
 
 
 def create_schedule(
@@ -136,7 +139,7 @@ def create_schedule(
     )
 
 
-def list_schedules(
+def query_schedules(
     *,
     namespace: str | None = None,
     page_size: int | None = None,
@@ -150,7 +153,7 @@ def list_schedules(
     Returns:
         An iterator that transparently follows pagination cursors.
     """
-    return _list_schedules(_service(), namespace=namespace, page_size=page_size)
+    return _query_schedules(_service(), namespace=namespace, page_size=page_size)
 
 
 def get_schedule(name: str, *, namespace: str | None = None) -> Schedule:
@@ -309,7 +312,8 @@ __all__ = [
     "get_registered_schedules",
     "get_schedule",
     "invoke_schedule",
-    "list_schedules",
+    "query_schedules",
     "schedule",
+    "static_credentials_factory",
     "update_schedule",
 ]
