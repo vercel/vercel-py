@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.1 - 2026-11-18
+
+- Update dependencies.
+
 ## 0.3.0 - 2026-11-12
 
 ### Breaking Changes

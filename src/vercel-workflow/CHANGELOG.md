@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.13.1 - 2026-11-18
+
+### Internal
+
+- Separate workflow startup preparation from durable run creation and queue delivery, preserving startup behavior and write ordering. (#507)
+
 ## 0.13.0 - 2026-11-12
 
 ### Breaking Changes
