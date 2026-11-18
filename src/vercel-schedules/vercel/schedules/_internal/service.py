@@ -54,7 +54,7 @@ def _check_namespace(namespace: str | None) -> None:
         _require_non_empty(namespace, "namespace")
 
 
-def _zone(timezone: str) -> ZoneInfo:
+def zone_info(timezone: str) -> ZoneInfo:
     try:
         return ZoneInfo(timezone)
     except (ZoneInfoNotFoundError, ValueError) as exc:
@@ -102,7 +102,7 @@ def resolve_one_off(at: datetime, timezone: str | None) -> tuple[datetime, str]:
         return _round_up_to_minute(at), _require_non_empty(timezone, "timezone")
 
     if timezone is not None:
-        return _round_up_to_minute(at.astimezone(_zone(timezone))), timezone
+        return _round_up_to_minute(at.astimezone(zone_info(timezone))), timezone
 
     name = _timezone_name(at)
     if name is None:
@@ -136,7 +136,7 @@ def _check_until(until: datetime | None) -> None:
         raise SchedulesValidationError("until is naive; make it timezone-aware")
 
 
-def _check_jitter(jitter: object) -> None:
+def check_jitter(jitter: object) -> None:
     if not isinstance(jitter, timedelta):
         raise SchedulesValidationError(
             f"jitter must be a timedelta, such as timedelta(minutes=5), got {jitter!r}"
@@ -183,7 +183,7 @@ class SchedulesService:
         if expression is None:
             raise SchedulesValidationError("pass exactly one of cron or at")
         if jitter is not None:
-            _check_jitter(jitter)
+            check_jitter(jitter)
         return await self._api_client.create_schedule(
             name=name,
             namespace=namespace,
@@ -241,7 +241,7 @@ class SchedulesService:
         if topic is not None:
             _require_non_empty(topic, "topic")
         if not (jitter is None or isinstance(jitter, UnsetType)):
-            _check_jitter(jitter)
+            check_jitter(jitter)
         unchanged = expression is None and timezone is None and topic is None
         if unchanged and jitter is UNSET and payload is UNSET:
             raise SchedulesValidationError("update_schedule needs at least one field to change")

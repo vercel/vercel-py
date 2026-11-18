@@ -1,4 +1,7 @@
+import json
 from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -53,3 +56,44 @@ def test_rejects_an_invalid_firing(overrides: dict[str, str], message: str) -> N
         ScheduleMetadata.from_env({**FIRING_ENV, **overrides})
 
     assert not isinstance(exc_info.value, NotAScheduleInvocationError)
+
+
+# The schedule dispatch protocol's conformance fixtures, copied from
+# vercel/schedules docs/fixtures/schedule-dispatch-v1beta.json.
+DISPATCH_FIXTURES = json.loads(
+    (Path(__file__).parent / "fixtures" / "schedule-dispatch-v1beta.json").read_text()
+)
+
+
+@pytest.mark.parametrize("case", DISPATCH_FIXTURES["accept"], ids=lambda case: case["description"])
+def test_reads_a_conforming_dispatch(case: dict[str, Any]) -> None:
+    expected = case["expected"]
+
+    assert ScheduleMetadata.from_headers(case["headers"]) == ScheduleMetadata(
+        schedule_id=expected["scheduleId"],
+        execution_id=expected["executionId"],
+        name=expected["name"],
+        namespace=expected["namespace"],
+        scheduled_at=datetime.fromisoformat(expected["scheduledAt"].replace("Z", "+00:00")),
+        source=expected["source"],
+        expression=expected["expression"],
+    )
+
+
+@pytest.mark.parametrize("case", DISPATCH_FIXTURES["reject"], ids=lambda case: case["description"])
+def test_rejects_a_nonconforming_dispatch(case: dict[str, Any]) -> None:
+    with pytest.raises(ScheduleEventParseError):
+        ScheduleMetadata.from_headers(case["headers"])
+
+
+def test_a_request_without_a_cloudevent_type_is_not_a_firing() -> None:
+    # A public path also receives direct requests and legacy Cron Jobs.
+    with pytest.raises(NotAScheduleInvocationError):
+        ScheduleMetadata.from_headers({"user-agent": "vercel-cron/1.0"})
+
+
+def test_header_names_are_case_insensitive() -> None:
+    [case] = [c for c in DISPATCH_FIXTURES["accept"] if c["headers"]["ce-id"] == "execution-1"]
+    headers = {name.title(): value for name, value in case["headers"].items()}
+
+    assert ScheduleMetadata.from_headers(headers).execution_id == "execution-1"

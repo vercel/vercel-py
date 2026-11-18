@@ -1,0 +1,336 @@
+{
+  "$comment": "Conformance fixtures for the schedule dispatch protocol (com.vercel.schedule.v1beta). See ../schedule-dispatch-protocol.md.",
+  "accept": [
+    {
+      "description": "static schedule dispatch in production",
+      "method": "POST",
+      "headers": {
+        "ce-specversion": "1.0",
+        "ce-type": "com.vercel.schedule.v1beta",
+        "ce-source": "/schedule/default/cleanup",
+        "ce-id": "01JABCDEF0123456789012345:1788350400000",
+        "ce-vssscheduleid": "01JABCDEF0123456789012345",
+        "ce-vssscheduledat": "2026-09-02T12:00:00.000Z",
+        "ce-vssschedulename": "cleanup",
+        "ce-vssnamespace": "default",
+        "ce-vssschedulesource": "static",
+        "x-vercel-schedules-token": "opaque",
+        "ce-vssexpression": "* * * * *"
+      },
+      "expected": {
+        "scheduleId": "01JABCDEF0123456789012345",
+        "executionId": "01JABCDEF0123456789012345:1788350400000",
+        "name": "cleanup",
+        "namespace": "default",
+        "scheduledAt": "2026-09-02T12:00:00.000Z",
+        "source": "static",
+        "expression": "* * * * *"
+      }
+    },
+    {
+      "description": "one-time schedule dispatch with a local datetime ce-vssexpression",
+      "method": "POST",
+      "headers": {
+        "ce-specversion": "1.0",
+        "ce-type": "com.vercel.schedule.v1beta",
+        "ce-source": "/schedule/default/launch",
+        "ce-id": "execution-5",
+        "ce-vssscheduleid": "schedule-5",
+        "ce-vssscheduledat": "2026-09-16T16:00:00.000Z",
+        "ce-vssschedulename": "launch",
+        "ce-vssnamespace": "default",
+        "ce-vssschedulesource": "static",
+        "ce-vssexpression": "2026-09-16T09:00"
+      },
+      "expected": {
+        "scheduleId": "schedule-5",
+        "executionId": "execution-5",
+        "name": "launch",
+        "namespace": "default",
+        "scheduledAt": "2026-09-16T16:00:00.000Z",
+        "source": "static",
+        "expression": "2026-09-16T09:00"
+      }
+    },
+    {
+      "description": "local development dispatch without a token",
+      "method": "POST",
+      "headers": {
+        "ce-specversion": "1.0",
+        "ce-type": "com.vercel.schedule.v1beta",
+        "ce-source": "/schedule/default/db.migrate",
+        "ce-id": "local-execution-1",
+        "ce-vssscheduleid": "local-schedule-1",
+        "ce-vssscheduledat": "2026-09-02T12:05:00.000Z",
+        "ce-vssschedulename": "db.migrate",
+        "ce-vssnamespace": "default",
+        "ce-vssschedulesource": "static",
+        "ce-vssexpression": "* * * * *"
+      },
+      "expected": {
+        "scheduleId": "local-schedule-1",
+        "executionId": "local-execution-1",
+        "name": "db.migrate",
+        "namespace": "default",
+        "scheduledAt": "2026-09-02T12:05:00.000Z",
+        "source": "static",
+        "expression": "* * * * *"
+      }
+    },
+    {
+      "description": "name and namespace use every allowed identifier character and are read as-is",
+      "method": "POST",
+      "headers": {
+        "ce-specversion": "1.0",
+        "ce-type": "com.vercel.schedule.v1beta",
+        "ce-source": "/schedule/jobs-eu_1.prod/0nightly_report-v2.1",
+        "ce-id": "execution-3",
+        "ce-vssscheduleid": "schedule-3",
+        "ce-vssscheduledat": "2026-09-02T00:00:00.000Z",
+        "ce-vssschedulename": "0nightly_report-v2.1",
+        "ce-vssnamespace": "jobs-eu_1.prod",
+        "ce-vssschedulesource": "dynamic",
+        "ce-vssexpression": "* * * * *"
+      },
+      "expected": {
+        "scheduleId": "schedule-3",
+        "executionId": "execution-3",
+        "name": "0nightly_report-v2.1",
+        "namespace": "jobs-eu_1.prod",
+        "scheduledAt": "2026-09-02T00:00:00.000Z",
+        "source": "dynamic",
+        "expression": "* * * * *"
+      }
+    },
+    {
+      "description": "GET dispatch with valid CloudEvent headers",
+      "method": "GET",
+      "headers": {
+        "ce-specversion": "1.0",
+        "ce-type": "com.vercel.schedule.v1beta",
+        "ce-source": "/schedule/default/cleanup",
+        "ce-id": "execution-1",
+        "ce-vssscheduleid": "schedule-1",
+        "ce-vssscheduledat": "2026-09-02T12:00:00.000Z",
+        "ce-vssschedulename": "cleanup",
+        "ce-vssnamespace": "default",
+        "ce-vssschedulesource": "static",
+        "ce-vssexpression": "* * * * *"
+      },
+      "expected": {
+        "scheduleId": "schedule-1",
+        "executionId": "execution-1",
+        "name": "cleanup",
+        "namespace": "default",
+        "scheduledAt": "2026-09-02T12:00:00.000Z",
+        "source": "static",
+        "expression": "* * * * *"
+      }
+    },
+    {
+      "description": "function dispatch with an unencoded cron ce-vssexpression",
+      "method": "POST",
+      "headers": {
+        "ce-specversion": "1.0",
+        "ce-type": "com.vercel.schedule.v1beta",
+        "ce-source": "/schedule/default/cleanup",
+        "ce-id": "execution-4",
+        "ce-vssscheduleid": "schedule-4",
+        "ce-vssscheduledat": "2026-09-02T03:00:00.000Z",
+        "ce-vssschedulename": "cleanup",
+        "ce-vssnamespace": "default",
+        "ce-vssschedulesource": "static",
+        "ce-vssexpression": "0 3 * * *",
+        "x-vercel-schedules-token": "opaque"
+      },
+      "expected": {
+        "scheduleId": "schedule-4",
+        "executionId": "execution-4",
+        "name": "cleanup",
+        "namespace": "default",
+        "scheduledAt": "2026-09-02T03:00:00.000Z",
+        "source": "static",
+        "expression": "0 3 * * *"
+      }
+    },
+    {
+      "description": "path dispatch with legacy cron headers",
+      "method": "POST",
+      "headers": {
+        "ce-specversion": "1.0",
+        "ce-type": "com.vercel.schedule.v1beta",
+        "ce-source": "/schedule/default/cleanup",
+        "ce-id": "execution-4",
+        "ce-vssscheduleid": "schedule-4",
+        "ce-vssscheduledat": "2026-09-02T03:00:00.000Z",
+        "ce-vssschedulename": "cleanup",
+        "ce-vssnamespace": "default",
+        "ce-vssschedulesource": "static",
+        "ce-vssexpression": "0 3 * * *",
+        "user-agent": "vercel-cron/1.0",
+        "x-vercel-cron-schedule": "0 3 * * *",
+        "authorization": "Bearer secret",
+        "x-vercel-schedules-token": "opaque"
+      },
+      "expected": {
+        "scheduleId": "schedule-4",
+        "executionId": "execution-4",
+        "name": "cleanup",
+        "namespace": "default",
+        "scheduledAt": "2026-09-02T03:00:00.000Z",
+        "source": "static",
+        "expression": "0 3 * * *"
+      }
+    },
+    {
+      "description": "unknown headers, including ce-time, are ignored",
+      "method": "POST",
+      "headers": {
+        "ce-specversion": "1.0",
+        "ce-type": "com.vercel.schedule.v1beta",
+        "ce-source": "/schedule/default/cleanup",
+        "ce-id": "execution-2",
+        "ce-vssscheduleid": "schedule-2",
+        "ce-vssscheduledat": "2026-09-02T12:00:00.000Z",
+        "ce-vssschedulename": "cleanup",
+        "ce-vssnamespace": "default",
+        "ce-vssschedulesource": "dynamic",
+        "ce-time": "2026-09-02T12:00:07.000Z",
+        "ce-vssfuturefield": "value",
+        "user-agent": "anything",
+        "ce-vssexpression": "* * * * *"
+      },
+      "expected": {
+        "scheduleId": "schedule-2",
+        "executionId": "execution-2",
+        "name": "cleanup",
+        "namespace": "default",
+        "scheduledAt": "2026-09-02T12:00:00.000Z",
+        "source": "dynamic",
+        "expression": "* * * * *"
+      }
+    }
+  ],
+  "reject": [
+    {
+      "description": "legacy cron request",
+      "method": "GET",
+      "headers": {
+        "user-agent": "vercel-cron/1.0",
+        "authorization": "Bearer secret",
+        "x-vercel-cron-schedule": "0 3 * * *"
+      }
+    },
+    {
+      "description": "unsupported CloudEvent spec version",
+      "method": "POST",
+      "headers": {
+        "ce-specversion": "0.3",
+        "ce-type": "com.vercel.schedule.v1beta",
+        "ce-source": "/schedule/default/cleanup",
+        "ce-id": "execution-1",
+        "ce-vssscheduleid": "schedule-1",
+        "ce-vssscheduledat": "2026-09-02T12:00:00.000Z",
+        "ce-vssschedulename": "cleanup",
+        "ce-vssnamespace": "default",
+        "ce-vssschedulesource": "static",
+        "ce-vssexpression": "* * * * *"
+      }
+    },
+    {
+      "description": "queue CloudEvent type",
+      "method": "POST",
+      "headers": {
+        "ce-specversion": "1.0",
+        "ce-type": "com.vercel.queue.v2beta",
+        "ce-source": "/schedule/default/cleanup",
+        "ce-id": "execution-1",
+        "ce-vssscheduleid": "schedule-1",
+        "ce-vssscheduledat": "2026-09-02T12:00:00.000Z",
+        "ce-vssschedulename": "cleanup",
+        "ce-vssnamespace": "default",
+        "ce-vssschedulesource": "static",
+        "ce-vssexpression": "* * * * *"
+      }
+    },
+    {
+      "description": "future schedule CloudEvent type",
+      "method": "POST",
+      "headers": {
+        "ce-specversion": "1.0",
+        "ce-type": "com.vercel.schedule.v2",
+        "ce-source": "/schedule/default/cleanup",
+        "ce-id": "execution-1",
+        "ce-vssscheduleid": "schedule-1",
+        "ce-vssscheduledat": "2026-09-02T12:00:00.000Z",
+        "ce-vssschedulename": "cleanup",
+        "ce-vssnamespace": "default",
+        "ce-vssschedulesource": "static",
+        "ce-vssexpression": "* * * * *"
+      }
+    },
+    {
+      "description": "missing ce-vssscheduledat, even with ce-time",
+      "method": "POST",
+      "headers": {
+        "ce-specversion": "1.0",
+        "ce-type": "com.vercel.schedule.v1beta",
+        "ce-source": "/schedule/default/cleanup",
+        "ce-id": "execution-1",
+        "ce-vssscheduleid": "schedule-1",
+        "ce-time": "2026-09-02T12:00:00.000Z",
+        "ce-vssschedulename": "cleanup",
+        "ce-vssnamespace": "default",
+        "ce-vssschedulesource": "static",
+        "ce-vssexpression": "* * * * *"
+      }
+    },
+    {
+      "description": "invalid ce-vssscheduledat",
+      "method": "POST",
+      "headers": {
+        "ce-specversion": "1.0",
+        "ce-type": "com.vercel.schedule.v1beta",
+        "ce-source": "/schedule/default/cleanup",
+        "ce-id": "execution-1",
+        "ce-vssscheduleid": "schedule-1",
+        "ce-vssscheduledat": "not-a-date",
+        "ce-vssschedulename": "cleanup",
+        "ce-vssnamespace": "default",
+        "ce-vssschedulesource": "static",
+        "ce-vssexpression": "* * * * *"
+      }
+    },
+    {
+      "description": "missing ce-vssschedulename",
+      "method": "POST",
+      "headers": {
+        "ce-specversion": "1.0",
+        "ce-type": "com.vercel.schedule.v1beta",
+        "ce-source": "/schedule/default/cleanup",
+        "ce-id": "execution-1",
+        "ce-vssscheduleid": "schedule-1",
+        "ce-vssscheduledat": "2026-09-02T12:00:00.000Z",
+        "ce-vssnamespace": "default",
+        "ce-vssschedulesource": "static",
+        "ce-vssexpression": "* * * * *"
+      }
+    },
+    {
+      "description": "missing ce-vssexpression",
+      "method": "POST",
+      "headers": {
+        "ce-specversion": "1.0",
+        "ce-type": "com.vercel.schedule.v1beta",
+        "ce-source": "/schedule/default/cleanup",
+        "ce-id": "01JABCDEF0123456789012345:1788350400000",
+        "ce-vssscheduleid": "01JABCDEF0123456789012345",
+        "ce-vssscheduledat": "2026-09-02T12:00:00.000Z",
+        "ce-vssschedulename": "cleanup",
+        "ce-vssnamespace": "default",
+        "ce-vssschedulesource": "static",
+        "x-vercel-schedules-token": "opaque"
+      }
+    }
+  ]
+}

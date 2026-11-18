@@ -12,8 +12,8 @@ Schedules fire on a cron cadence or once at a fixed instant, and dispatch to a
 Vercel Queue topic, a function, or a path. A schedule is identified by its name within a
 namespace. Manage them with `create_schedule` and friends.
 
-A schedule command runs once per firing; read the firing with
-`ScheduleMetadata.from_env()`.
+Declare a recurring schedule in code with `@schedule`. A schedule command runs
+once per firing; read the firing with `ScheduleMetadata.from_env()`.
 
 Requests authenticate with the deployment's Vercel OIDC token. Locally, run
 `vercel env pull`, or pass
@@ -58,6 +58,11 @@ from vercel.schedules._internal.options import (
     SyncSchedulesCredentialsFactory as SchedulesCredentialsFactory,
     SyncSchedulesServiceOptions as SchedulesServiceOptions,
     sync_static_credentials_factory as static_credentials_factory,
+)
+from vercel.schedules._internal.registry import (
+    RegisteredSchedule,
+    get_registered_schedules,
+    schedule,
 )
 from vercel.schedules._internal.service import SchedulesService, get_sync_schedules_service
 from vercel.schedules._internal.sync_runtime import (
@@ -283,6 +288,7 @@ __all__ = [
     "OneOffExpression",
     "PathTarget",
     "QueueTarget",
+    "RegisteredSchedule",
     "Schedule",
     "ScheduleEventParseError",
     "ScheduleExpression",
@@ -303,9 +309,11 @@ __all__ = [
     "delete_schedule",
     "disable_schedule",
     "enable_schedule",
+    "get_registered_schedules",
     "get_schedule",
     "invoke_schedule",
     "query_schedules",
+    "schedule",
     "static_credentials_factory",
     "update_schedule",
 ]
