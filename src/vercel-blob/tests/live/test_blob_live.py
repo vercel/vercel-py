@@ -495,3 +495,36 @@ def test_sync_collections(store: LiveStore) -> None:
             assert not list(blob.sync.query_blobs(prefix=prefix))
         finally:
             blob.sync.delete_blob([source, destination])
+
+
+def test_presigned_round_trip(store: LiveStore) -> None:
+    pathname = _pathname("presigned.txt")
+    with session():
+        token = blob.sync.issue_blob_signed_token(
+            pathname=pathname, operations=["put", "get", "head"], expires_in=300
+        )
+        put_url = blob.sync.presign_blob_url(
+            token, pathname, operation="put", allowed_content_types=["text/plain"]
+        )
+        get_url = blob.sync.presign_blob_url(
+            token, pathname, operation="get", access=store.access, expires_in=60
+        )
+        try:
+            with httpx.Client() as client:
+                uploaded = client.put(
+                    put_url,
+                    content=b"presigned",
+                    headers={
+                        "x-api-version": "12",
+                        "x-vercel-blob-access": store.access,
+                        "x-content-type": "text/plain",
+                    },
+                )
+                assert uploaded.status_code == 200, uploaded.text
+                downloaded = client.get(get_url)
+                assert downloaded.status_code == 200, downloaded.text
+                assert downloaded.content == b"presigned"
+                tampered = client.get(get_url.replace("presigned.txt", "other.txt"))
+                assert tampered.status_code >= 400
+        finally:
+            blob.sync.delete_blob(pathname)
