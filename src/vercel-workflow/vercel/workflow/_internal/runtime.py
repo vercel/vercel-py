@@ -104,6 +104,14 @@ def classify_run_error(error: Exception) -> str:
     return "USER_ERROR"
 
 
+@dataclasses.dataclass(kw_only=True, frozen=True)
+class _EventCreationContext:
+    world: w.World
+    run_id: str
+    queue_name: str
+    immediate_replay_reasons: set[str]
+
+
 @dataclasses.dataclass(kw_only=True)
 class BaseSuspension(abc.ABC):
     correlation_id: str
@@ -120,10 +128,23 @@ class BaseSuspension(abc.ABC):
             return None
         return ctx
 
+    def create_event(self, tg: anyio.abc.TaskGroup, context: _EventCreationContext) -> bool:
+        return False
+
 
 @dataclasses.dataclass(kw_only=True)
 class FutureSuspension(BaseSuspension, Generic[T]):
     future: asyncio.Future[T] = dataclasses.field(default_factory=asyncio.Future)
+
+    @abc.abstractmethod
+    async def _create_event(self, context: _EventCreationContext) -> None:
+        """Persist this suspension's event outside the workflow replay loop."""
+
+    def create_event(self, tg: anyio.abc.TaskGroup, context: _EventCreationContext) -> bool:
+        if self.has_created_event:
+            return False
+        tg.start_soon(self._create_event, context)
+        return True
 
     def set_result(self, result: T) -> None:
         if self._unfinished_context() is None:
@@ -140,6 +161,27 @@ class FutureSuspension(BaseSuspension, Generic[T]):
 class Suspension(FutureSuspension[T], Generic[T]):
     step: core.Step[Any, T]
     input: bytes
+
+    async def _create_event(self, context: _EventCreationContext) -> None:
+        data = w.StepCreatedEventData(step_name=self.step.name, input=self.input)
+        try:
+            await context.world.events_create(context.run_id, data.into_event(self.correlation_id))
+        except w.EntityConflictError:
+            logger.debug("Workflow step %r has already been created", self.correlation_id)
+        # We enqueue the invoke whether or not the events_create had an EntityConflictError, since a
+        # previous invoker may have crashed between creating the event and enqueueing.
+        #
+        # Instead we use an idempotency_key to prevent duplicate queueing.
+        await context.world.queue(
+            context.queue_name,
+            w.WorkflowInvokePayload(
+                run_id=context.run_id,
+                step_id=self.correlation_id,
+                step_name=self.step.name,
+                requested_at=datetime.now(UTC),
+            ),
+            idempotency_key=self.correlation_id,
+        )
 
     def receive_outcome(self, data: bytes, *, is_error: bool) -> None:
         ctx = self._unfinished_context()
@@ -223,11 +265,30 @@ class CallbackCancelFuture(asyncio.Future[T]):
 class Wait(FutureSuspension[None]):
     resume_at: datetime
 
+    async def _create_event(self, context: _EventCreationContext) -> None:
+        data = w.WaitCreatedEventData(resume_at=self.resume_at)
+        try:
+            await context.world.events_create(context.run_id, data.into_event(self.correlation_id))
+        except w.EntityConflictError:
+            logger.debug("Workflow wait %r has already been created", self.correlation_id)
+
 
 @dataclasses.dataclass(kw_only=True)
 class Attributes(FutureSuspension[None]):
     changes: list[w.AttributeChange]
     allow_reserved: bool = False
+
+    async def _create_event(self, context: _EventCreationContext) -> None:
+        data = w.AttrSetEventData(
+            changes=self.changes,
+            writer=w.WorkflowAttributeWriter(),
+            allow_reserved_attributes=True if self.allow_reserved else None,
+        )
+        try:
+            await context.world.events_create(context.run_id, data.into_event(self.correlation_id))
+        except w.EntityConflictError:
+            logger.debug("Workflow attributes %r have already been set", self.correlation_id)
+        context.immediate_replay_reasons.add("attr_set")
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -1947,69 +2008,15 @@ async def _workflow_replay_pass(
         return None
 
     events_created, immediate_replay_reasons = await _flush_hook_lifecycle_events(context)
+    event_context = _EventCreationContext(
+        world=world,
+        run_id=run_id,
+        queue_name=w.get_queue_name(workflow_run.workflow_name, namespace),
+        immediate_replay_reasons=immediate_replay_reasons,
+    )
     async with anyio.create_task_group() as tg:
         for sus in context.suspensions.values():
-            if sus.has_created_event or isinstance(sus, Hook):
-                pass
-
-            elif isinstance(sus, Suspension):
-
-                async def create_step(s=sus):
-                    step_data = w.StepCreatedEventData(step_name=s.step.name, input=s.input)
-                    try:
-                        await world.events_create(run_id, step_data.into_event(s.correlation_id))
-                    except w.EntityConflictError:
-                        logger.debug(f"Workflow step {s.correlation_id!r} has already been created")
-                    # We enqueue the invoke whether or not the
-                    # events_create had an EntityConflictError, since
-                    # a previous invoker may have crashed between
-                    # creating the event and enqueueing.
-                    #
-                    # Instead we use an idempotency_key to prevent
-                    # duplicate queueing.
-                    await world.queue(
-                        w.get_queue_name(workflow_run.workflow_name, namespace),
-                        w.WorkflowInvokePayload(
-                            run_id=run_id,
-                            step_id=s.correlation_id,
-                            step_name=s.step.name,
-                            requested_at=datetime.now(UTC),
-                        ),
-                        idempotency_key=s.correlation_id,
-                    )
-
-                tg.start_soon(create_step)
-                events_created = True
-
-            elif isinstance(sus, Wait):
-
-                async def create_wait(s=sus):
-                    wait_data = w.WaitCreatedEventData(resume_at=s.resume_at)
-                    try:
-                        await world.events_create(run_id, wait_data.into_event(s.correlation_id))
-                    except w.EntityConflictError:
-                        logger.debug(f"Workflow wait {s.correlation_id!r} has already been created")
-
-                tg.start_soon(create_wait)
-                events_created = True
-
-            elif isinstance(sus, Attributes):
-
-                async def set_attr(s=sus):
-                    data = w.AttrSetEventData(
-                        changes=s.changes,
-                        writer=w.WorkflowAttributeWriter(),
-                        allow_reserved_attributes=True if s.allow_reserved else None,
-                    )
-                    try:
-                        await world.events_create(run_id, data.into_event(s.correlation_id))
-                    except w.EntityConflictError:
-                        logger.debug(
-                            f"Workflow attributes {s.correlation_id!r} have already been set"
-                        )
-                    immediate_replay_reasons.add("attr_set")
-
-                tg.start_soon(set_attr)
+            if sus.create_event(tg, event_context):
                 events_created = True
 
     if not context.suspensions and events_created:
