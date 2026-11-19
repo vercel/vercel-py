@@ -2559,7 +2559,13 @@ async def get_all_workflow_run_events(
     has_more = True
 
     world = w.get_world()
+    requested_cursors: set[str | None] = set()
     while has_more:
+        if cursor in requested_cursors:
+            raise w.WorkflowWorldError(
+                "Event listing did not advance cursor", status=0, code="WORLD_CONTRACT_ERROR"
+            )
+        requested_cursors.add(cursor)
         response = await world.events_list(
             run_id,
             pagination=w.PaginationOptions(
@@ -2571,6 +2577,10 @@ async def get_all_workflow_run_events(
         all_events.extend(event for event in response.data if event.event_type != "noop")
         has_more = response.has_more
         cursor = response.cursor
+        if has_more and cursor is None:
+            raise w.WorkflowWorldError(
+                "Event listing has more events but no cursor", status=0, code="WORLD_CONTRACT_ERROR"
+            )
     return _LoadedEvents(all_events, cursor)
 
 

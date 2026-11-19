@@ -1505,13 +1505,16 @@ class LocalWorld(w.World):
         *,
         pagination: w.PaginationOptions | None = None,
     ) -> w.PaginatedResult[w.Event]:
-        desc = False
-        if pagination:
-            if any([pagination.cursor, pagination.limit]):
-                raise NotImplementedError()
-            if pagination.sort_order == "desc":
-                desc = True
-
+        pagination = pagination or w.PaginationOptions()
+        desc = pagination.sort_order == "desc"
+        limit = pagination.limit if pagination.limit is not None else w.get_max_events_per_run()
+        cursor = pagination.cursor
+        if cursor is not None:
+            if not cursor.startswith("eid:") or not cursor.removeprefix("eid:"):
+                raise w.WorkflowWorldError(
+                    "Invalid event cursor", status=400, code="WORLD_CONTRACT_ERROR"
+                )
+            cursor = cursor.removeprefix("eid:")
         directory = self._run_dir("events", run_id)
         items = (
             [
@@ -1523,13 +1526,22 @@ class LocalWorld(w.World):
             else []
         )
         # Filter out None items and ensure all items have server_props
-        valid_items = [item for item in items if item is not None and item.server_props is not None]
-        valid_items.sort(
-            key=lambda item: (item.server_props.created_at, item.server_props.event_id),  # type: ignore[union-attr]
-            reverse=desc,
-        )
+        valid_items = [
+            (item.server_props.event_id, item)
+            for item in items
+            if item is not None and item.server_props is not None
+        ]
+        valid_items.sort(key=lambda pair: pair[0], reverse=desc)
+        if cursor is not None:
+            valid_items = [
+                (event_id, item)
+                for event_id, item in valid_items
+                if (event_id < cursor if desc else event_id > cursor)
+            ]
+        page = [item for _, item in valid_items[:limit]]
+        last = page[-1].server_props if page else None
         return w.PaginatedResult(
-            data=valid_items,
-            cursor=None,
-            has_more=False,
+            data=page,
+            cursor=f"eid:{last.event_id}" if last is not None else None,
+            has_more=len(valid_items) > limit,
         )

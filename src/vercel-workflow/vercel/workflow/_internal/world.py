@@ -992,8 +992,17 @@ EventAdaptor: WireAdaptor[Event] = WireAdaptor(Event)
 HOOK_EVENTS_REQUIRING_EXISTENCE = frozenset({"hook_disposed", "hook_received"})
 
 
+def get_max_events_per_run() -> int:
+    """Local full-log response ceiling; hosted Worlds own their event limit."""
+    try:
+        value = int(os.environ.get("WORKFLOW_MAX_EVENTS", "25000"))
+    except ValueError:
+        return 25_000
+    return value if value > 0 else 25_000
+
+
 class PaginationOptions(BaseModel):
-    limit: int | None = pydantic.Field(default=None, exclude_if=lambda e: not e)
+    limit: int | None = pydantic.Field(default=None, gt=0, exclude_if=lambda e: e is None)
     cursor: str | None = pydantic.Field(default=None, exclude_if=lambda e: not e)
     sort_order: Literal["asc", "desc"] | None = pydantic.Field(
         default=None, serialization_alias="sortOrder", exclude_if=lambda e: e is None
@@ -1303,7 +1312,13 @@ class World(metaclass=abc.ABCMeta):
         run_id: str,
         *,
         pagination: PaginationOptions | None = None,
-    ) -> PaginatedResult[Event]: ...
+    ) -> PaginatedResult[Event]:
+        """Read the remaining log, or one page when ``limit`` is provided.
+
+        Worlds may cap a full response and return ``has_more``. The cursor
+        remains an incremental resume point even on the final nonempty page.
+        """
+        ...
 
     # ── streams ────────────────────────────────────────────────────────────
     #

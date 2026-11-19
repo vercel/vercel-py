@@ -37,6 +37,14 @@ A World is the storage and queueing backend for runs, chosen once per process.
 - [[src/vercel-workflow/vercel/workflow/_internal/worlds/vercel.py#VercelWorld]] talks to the hosted Workflow service and sends through [[vercel-queue]].
 - [[src/vercel-workflow/vercel/workflow/_internal/worlds/local.py#LocalWorld]] writes JSON files that the `workflow` CLI can inspect, and delivers through the embedded queue from [[vercel-queue#Local emulation]]. Event and step files live one directory per run (`events/<runId>/`, `steps/<runId>/`), matching `@workflow/world-local`. On startup [[src/vercel-workflow/vercel/workflow/_internal/worlds/local.py#_wipe_flat_layout]] deletes a data directory holding only the old flat layout and raises [[src/vercel-workflow/vercel/workflow/_internal/worlds/local.py#DataDirLayoutError]] for mixed or unknown contents.
 
+### Event pagination
+
+Replay reads request the remaining event log and follow continuation pages when a World caps its response.
+
+[[src/vercel-workflow/vercel/workflow/_internal/world.py#World#events_list]] treats an omitted limit as a full remaining-log request and an explicit positive limit as one page. [[src/vercel-workflow/vercel/workflow/_internal/worlds/local.py#LocalWorld#events_list]] orders by event ID, supports exclusive cursors in both directions, and retains the last event cursor on the final nonempty page for incremental reads. Its omitted-limit ceiling comes from [[src/vercel-workflow/vercel/workflow/_internal/world.py#get_max_events_per_run]]; this is a response bound, not a runtime failure threshold.
+
+[[src/vercel-workflow/vercel/workflow/_internal/runtime.py#get_all_workflow_run_events]] follows bounded custom Worlds, drops seals without rewinding the cursor, and rejects missing or cyclic continuation cursors. [[src/vercel-workflow/tests/unit/test_workflow_event_pagination.py]] covers page composition, ceilings, slot ordering, incremental reads, and stalled pagination.
+
 ### HTTP request retries
 
 The Vercel world retries safe Workflow API requests after transport failures so a brief network interruption can recover within the current call.
