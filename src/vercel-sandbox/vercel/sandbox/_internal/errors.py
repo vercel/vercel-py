@@ -18,6 +18,14 @@ class SandboxUserAlreadyExistsError(SandboxError):
         self.username = username
 
 
+class SandboxGroupAlreadyExistsError(SandboxError):
+    """Raised when create_group() is called for an existing Linux group name."""
+
+    def __init__(self, groupname: str) -> None:
+        super().__init__(f"Failed to create Linux group {groupname!r}: group already exists")
+        self.groupname = groupname
+
+
 class SandboxInvalidHandleError(SandboxError):
     """Raised when a Sandbox handle is unattached or mode-invalid."""
 
