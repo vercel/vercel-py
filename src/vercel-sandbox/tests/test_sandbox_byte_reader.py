@@ -1,6 +1,5 @@
 import inspect
 import io
-import json
 import math
 import queue
 import subprocess
@@ -13,6 +12,12 @@ import httpx2 as httpx
 import pytest
 from hypothesis import example, given, settings, strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, initialize, invariant, rule
+from sandbox_fixtures import (
+    COMMAND_STREAM_HEADERS,
+    command_stream_body,
+    command_stream_item,
+    command_stream_response,
+)
 
 from vercel._internal.core.http import StreamingResponse
 from vercel.sandbox._internal import byte_reader
@@ -57,17 +62,16 @@ class _TestStreamingResponse(StreamingResponse):
 
 
 def _streaming(response: httpx.Response) -> StreamingResponse:
+    response.headers.update(COMMAND_STREAM_HEADERS)
     return _TestStreamingResponse(response)
 
 
 def _logs_response(*records: object) -> StreamingResponse:
-    return _streaming(
-        httpx.Response(200, text="\n".join(json.dumps(record) for record in records) + "\n")
-    )
+    return _streaming(command_stream_response(*records))
 
 
 def _logs_body(*records: object) -> bytes:
-    return ("\n".join(json.dumps(record) for record in records) + "\n").encode()
+    return command_stream_body(*records)
 
 
 async def _no_sleep(seconds: float) -> None:
@@ -147,7 +151,7 @@ async def test_async_byte_reader_rejects_concurrent_reads(anyio_backend: str) ->
         async def __aiter__(self) -> AsyncIterator[bytes]:
             started.set()
             await release.wait()
-            yield b'{"stream":"stdout","data":"done\\n"}\n'
+            yield command_stream_item({"stream": "stdout", "data": "done\n"})
 
     async def open_response() -> StreamingResponse:
         return _streaming(httpx.Response(200, stream=PendingStream()))
@@ -342,10 +346,7 @@ def test_sync_readers_deliver_interrupted_output_exactly_once(
     }
 
     def body(records: list[tuple[str, str]]) -> bytes:
-        return "".join(
-            json.dumps({"stream": stream, "data": data}, ensure_ascii=False) + "\n"
-            for stream, data in records
-        ).encode()
+        return command_stream_body(*({"stream": stream, "data": data} for stream, data in records))
 
     def rechunk(records: list[tuple[str, str]]) -> list[tuple[str, str]]:
         # Re-split the expected output at the replay's own record boundaries.

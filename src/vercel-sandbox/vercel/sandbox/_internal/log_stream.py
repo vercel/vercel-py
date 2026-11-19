@@ -1,17 +1,17 @@
 """Shared command stream decoding and connection recovery for Sandbox streams.
 
-Command output reaches the SDK over long-lived NDJSON responses that the
+Command output reaches the SDK over long-lived CBOR Sequence responses that the
 network can cut off at any point. The logs endpoint replays a command's output
 from the beginning on every connection, so an interrupted stream is resumed by
 reconnecting and skipping the output that was already delivered.
 """
 
-import codecs
-import json
+import io
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
+from enum import IntEnum
 from typing import TypeVar
 
-from pydantic import BaseModel
+import cbor2
 
 from vercel._internal.core.http import StreamingResponse
 from vercel._internal.core.http._compat import transport_errors
@@ -31,16 +31,22 @@ _RETRY_BACKOFF_SECONDS = 0.2
 # HTTP 410 when it happens before the first record.
 STREAM_CLOSED_ERROR_CODE = "sandbox_stream_closed"
 
+# A CBOR Sequence (RFC 8742) of ``[type, payload]`` arrays. Output payloads are
+# byte strings, so output arrives exactly as the command wrote it.
+COMMAND_STREAM_MEDIA_TYPE = "application/vnd.vercel.sandbox.command-stream+cbor-seq"
 
-class _CommandLogPayload(BaseModel):
-    """Adapt the current text wire format to the byte output contract."""
 
-    stream: ProcessLogStream
-    data: str
+class _ItemType(IntEnum):
+    STDOUT = 1
+    STDERR = 2
+    ERROR = 3
+    COMMAND = 0x80
 
-    def to_log(self) -> ProcessLog:
-        # Temporary compatibility shim until the service provides native bytes.
-        return ProcessLog(stream=self.stream, data=self.data.encode("utf-8"))
+
+_OUTPUT_STREAMS: dict[int, ProcessLogStream] = {
+    _ItemType.STDOUT: ProcessLogStream.STDOUT,
+    _ItemType.STDERR: ProcessLogStream.STDERR,
+}
 
 
 class _TruncatedStreamError(SandboxResponseError):
@@ -75,57 +81,71 @@ async def _with_transient_retries(
     return await _with_request_retries(operation, sleep=sleep, is_retryable=_is_transient_error)
 
 
-async def _ndjson_lines(response: StreamingResponse) -> AsyncIterator[tuple[str, bool]]:
-    """Yield decoded NDJSON lines and whether each one was newline-terminated.
-
-    Only a line cut short by the end of the response can be unterminated, which
-    lets callers tell a complete final record from a truncated one.
-    """
-    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-    pending: list[str] = []
-    async for chunk in response:
-        *lines, rest = decoder.decode(chunk).split("\n")
-        for line in lines:
-            pending.append(line)
-            yield "".join(pending), True
-            pending.clear()
-        if rest:
-            pending.append(rest)
-    pending.append(decoder.decode(b"", final=True))
-    if tail := "".join(pending):
-        yield tail, False
-
-
-def _parse_command_log_record(line: str, *, terminated: bool = True) -> ProcessLog | None:
-    """Decode one wire log record, skipping unsupported or malformed input.
+async def _command_stream_items(
+    response: StreamingResponse,
+) -> AsyncIterator[tuple[int, object]]:
+    """Yield the ``(type, payload)`` items of a command stream response.
 
     Raises:
-        SandboxStreamError: If the record reports an in-band stream failure.
-        _TruncatedStreamError: If an unterminated final record is incomplete.
+        SandboxResponseError: If the response is not a well-formed command stream.
+        _TruncatedStreamError: If the response ends in the middle of an item.
     """
-    try:
-        record = json.loads(line)
-    except json.JSONDecodeError:
-        if not terminated:
-            raise _TruncatedStreamError(
-                "Sandbox log stream ended in the middle of a record", data=line
-            ) from None
-        return None
-    if not isinstance(record, dict):
-        return None
+    content_type = response.response.headers.get("content-type", "")
+    if content_type.partition(";")[0].strip().lower() != COMMAND_STREAM_MEDIA_TYPE:
+        raise SandboxResponseError(
+            "Sandbox command stream response has an unexpected content type",
+            data=content_type,
+        )
+    buffer = bytearray()
+    async for chunk in response:
+        buffer += chunk
+        reader = io.BytesIO(buffer)
+        decoder = cbor2.CBORDecoder(reader)
+        consumed = 0
+        while consumed < len(buffer):
+            try:
+                item = decoder.decode()
+            except cbor2.CBORDecodeEOF:
+                break
+            except cbor2.CBORDecodeError as exc:
+                raise SandboxResponseError(
+                    "Sandbox command stream included malformed CBOR", data=bytes(buffer)
+                ) from exc
+            consumed = reader.tell()
+            if not isinstance(item, list) or len(item) != 2 or type(item[0]) is not int:
+                raise SandboxResponseError(
+                    "Sandbox command stream included a malformed item", data=item
+                )
+            yield item[0], item[1]
+        del buffer[:consumed]
+    if buffer:
+        raise _TruncatedStreamError(
+            "Sandbox command stream ended in the middle of an item", data=bytes(buffer)
+        )
 
-    stream = record.get("stream")
-    data = record.get("data")
-    if stream in {"stdout", "stderr"} and isinstance(data, str):
-        return _CommandLogPayload.model_validate(record).to_log()
-    if stream != "error" or not isinstance(data, dict):
-        return None
 
-    code = data.get("code")
-    message = data.get("message")
-    if isinstance(code, str) and isinstance(message, str):
-        raise SandboxStreamError(message, code=code)
-    return None
+def _command_output(item_type: int, payload: object) -> ProcessLog | None:
+    """Decode an output or stream error item, or return ``None`` for other items.
+
+    Raises:
+        SandboxStreamError: If the item reports an in-band stream failure.
+        SandboxResponseError: If an output or error item has a malformed payload.
+    """
+    stream = _OUTPUT_STREAMS.get(item_type)
+    if stream is not None:
+        if not isinstance(payload, bytes):
+            raise SandboxResponseError(
+                "Sandbox command stream output is not a byte string", data=payload
+            )
+        return ProcessLog(stream=stream, data=payload)
+    if item_type != _ItemType.ERROR:
+        return None
+    if isinstance(payload, dict):
+        code = payload.get("code")
+        message = payload.get("message")
+        if isinstance(code, str) and isinstance(message, str):
+            raise SandboxStreamError(message, code=code)
+    raise SandboxResponseError("Sandbox command stream included a malformed error", data=payload)
 
 
 class _OutputOffsets:
@@ -173,10 +193,8 @@ async def _iter_command_logs(
             response = await open_response()
             opened = True
             try:
-                async for line, terminated in _ndjson_lines(response):
-                    if not line.strip():
-                        continue
-                    event = _parse_command_log_record(line, terminated=terminated)
+                async for item_type, payload in _command_stream_items(response):
+                    event = _command_output(item_type, payload)
                     if event is None:
                         continue
                     data = replay.skip(event)

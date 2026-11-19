@@ -16,6 +16,7 @@ from vercel.sandbox._internal.errors import (
     SandboxFilesystemWriteError,
     SandboxPathNotFoundError,
     SandboxUserAlreadyExistsError,
+    _output_text,
 )
 from vercel.sandbox._internal.filesystem_handle_core import FilesystemOperationBinding
 from vercel.sandbox._internal.models import (
@@ -274,7 +275,7 @@ class UserContext:
             if result.process.returncode != 0:
                 raise SandboxError(
                     f"Failed to create Linux user {self.username!r}: "
-                    f"{(result.stderr or b'').decode('utf-8')}"
+                    f"{_output_text(result.stderr or b'')}"
                 )
             await self.resolve(session_id)
 
@@ -350,8 +351,7 @@ class UserService(SandboxService):
             gid = (result.stdout or b"").decode("utf-8").strip()
             if result.process.returncode != 0 or not re.fullmatch(r"[0-9]+", gid):
                 raise SandboxError(
-                    "Cannot resolve sandbox default group: "
-                    f"{(result.stderr or b'').decode('utf-8')}"
+                    f"Cannot resolve sandbox default group: {_output_text(result.stderr or b'')}"
                 )
             self._default_gid = (session_id, gid)
         return self._default_gid[1]
@@ -397,8 +397,8 @@ class UserService(SandboxService):
                     operation,
                     paths=tuple(paths),
                     exit_code=result.process.returncode,
-                    stdout=(result.stdout or b"").decode("utf-8"),
-                    stderr=(result.stderr or b"").decode("utf-8"),
+                    stdout=_output_text(result.stdout or b""),
+                    stderr=_output_text(result.stderr or b""),
                 )
 
     async def _wrap(
@@ -632,10 +632,10 @@ class UserService(SandboxService):
                 "listdir",
                 paths=(path,),
                 exit_code=state.returncode,
-                stdout=stdout,
-                stderr=stderr,
+                stdout=_output_text(stdout),
+                stderr=_output_text(stderr),
             )
-        parts = stdout.split("\0")
+        parts = stdout.decode("utf-8", "surrogateescape").split("\0")
         kinds: dict[str, Literal["file", "directory", "symlink", "other"]] = {
             "f": "file",
             "d": "directory",
@@ -671,8 +671,8 @@ class UserService(SandboxService):
                 operation,
                 paths=(path,),
                 exit_code=state.returncode,
-                stdout=b"".join(stdout).decode("utf-8"),
-                stderr=b"".join(stderr).decode("utf-8"),
+                stdout=_output_text(b"".join(stdout)),
+                stderr=_output_text(b"".join(stderr)),
             )
             if "No such file or directory" in error.stderr:
                 raise SandboxPathNotFoundError(

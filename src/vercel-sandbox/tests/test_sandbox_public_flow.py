@@ -15,7 +15,11 @@ import httpx as legacy_httpx
 import httpx2 as httpx
 import pytest
 from pydantic import BaseModel, ValidationError
-from sandbox_fixtures import sandbox_service_options as _session_options
+from sandbox_fixtures import (
+    command_stream_item,
+    command_stream_response,
+    sandbox_service_options as _session_options,
+)
 
 import vendor.respx as respx
 from vercel import sandbox
@@ -310,13 +314,7 @@ def _snapshot_response(
 
 
 def _logs_response(*records: object) -> httpx.Response:
-    return httpx.Response(
-        200,
-        text="\n".join(
-            record if isinstance(record, str) else json.dumps(record) for record in records
-        )
-        + "\n",
-    )
+    return command_stream_response(*records)
 
 
 def _network_policy_matcher() -> NetworkPolicyRequestMatcher:
@@ -488,7 +486,7 @@ class _PendingLogStream(httpx.AsyncByteStream):
         self.closed = False
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
-        yield b'{"stream": "stdout", "data": "partial\\n"}\n'
+        yield command_stream_item({"stream": "stdout", "data": "partial\n"})
         self.waiting.set()
         await asyncio.Event().wait()
 

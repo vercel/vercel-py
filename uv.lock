@@ -2811,6 +2811,7 @@ name = "vercel-sandbox"
 source = { editable = "src/vercel-sandbox" }
 dependencies = [
     { name = "anyio" },
+    { name = "cbor2" },
     { name = "httpx2", extra = ["ws"] },
     { name = "pydantic" },
     { name = "vercel-internal-core" },
@@ -2820,6 +2821,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "anyio", specifier = ">=4.11.0,<5" },
+    { name = "cbor2", specifier = ">=6.0,<7" },
     { name = "httpx2", extras = ["ws"], specifier = ">=2" },
     { name = "pydantic", specifier = ">=2.7.0,<3" },
     { name = "vercel-internal-core", editable = "src/vercel-internal-core" },

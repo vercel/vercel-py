@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, Mock
 import httpx2 as httpx
 import pytest
 from hypothesis import given, strategies as st
-from sandbox_fixtures import sandbox_service_options
+from sandbox_fixtures import command_stream_response, sandbox_service_options
 
 import vendor.respx as respx
 from vercel import sandbox
@@ -95,7 +95,7 @@ async def test_create_user_distinguishes_existing_accounts_from_provisioning_err
             {"stream": "stderr", "data": "" if is_lookup else stderr},
             {"command": {**state, "exitCode": 0 if is_lookup else status}},
         ]
-        return httpx.Response(200, text="\n".join(json.dumps(record) for record in records))
+        return command_stream_response(*records)
 
     respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_test/cmd").mock(side_effect=command)
 
@@ -162,7 +162,7 @@ async def test_user_upload_keeps_payload_out_of_commands(
             {"stream": "stderr", "data": "metadata failed" if name == failure else ""},
             {"command": {**state, "exitCode": 1 if name == failure else 0}},
         ]
-        return httpx.Response(200, text="\n".join(json.dumps(record) for record in records))
+        return command_stream_response(*records)
 
     def upload(request: httpx.Request) -> httpx.Response:
         events.append("upload")

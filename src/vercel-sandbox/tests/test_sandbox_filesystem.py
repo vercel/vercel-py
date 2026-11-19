@@ -8,7 +8,7 @@ from typing import Any, cast
 import httpx2 as httpx
 import pytest
 from hypothesis import HealthCheck, given, settings, strategies as st
-from sandbox_fixtures import sandbox_service_options as _session_options
+from sandbox_fixtures import command_stream_response, sandbox_service_options as _session_options
 
 import vendor.respx as respx
 from vercel import sandbox
@@ -92,13 +92,13 @@ def _command_response(
     }
 
 
-def _logs_response(stdout: str = "", stderr: str = "") -> httpx.Response:
+def _logs_response(stdout: str | bytes = "", stderr: str | bytes = "") -> httpx.Response:
     records = []
     if stdout:
         records.append({"stream": "stdout", "data": stdout})
     if stderr:
         records.append({"stream": "stderr", "data": stderr})
-    return httpx.Response(200, text="".join(json.dumps(item) + "\n" for item in records))
+    return command_stream_response(*records)
 
 
 def _tar_entries(content: bytes) -> dict[str, tuple[bytes, int]]:
@@ -1079,6 +1079,55 @@ async def test_filesystem_failures_use_filesystem_error_contract(mock_env_clear:
         assert failed.value.exit_code == 2
         assert failed.value.stdout == "partial"
         assert failed.value.stderr == "cannot list"
+
+
+@pytest.mark.parametrize("sync", [False, True], ids=["async", "sync"])
+@respx.mock
+async def test_filesystem_listdir_and_errors_survive_non_utf8_output(
+    mock_env_clear: None, sync: bool
+) -> None:
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
+        side_effect=[
+            httpx.Response(200, json=_command_response("listed")),
+            httpx.Response(200, json=_command_response("failed")),
+        ]
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/listed").mock(
+        return_value=httpx.Response(200, json=_command_response("listed", exit_code=0))
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/listed/logs").mock(
+        return_value=_logs_response(b"ok\0file\0caf\xe9\0file\0caf\xef\xbf\xbd\0directory\0")
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/failed").mock(
+        return_value=httpx.Response(200, json=_command_response("failed", exit_code=2))
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/failed/logs").mock(
+        return_value=_logs_response(b"out \xff", b"err \xfe")
+    )
+
+    if sync:
+        with session(service_options=_session_options(sync=True)):
+            sync_box = sandbox_sync.create_sandbox(name="preview")
+            entries = sync_box.fs.listdir("directory")
+            with pytest.raises(SandboxFilesystemCommandError) as failed:
+                sync_box.fs.listdir("directory")
+    else:
+        async with session(service_options=_session_options()):
+            box = await sandbox.create_sandbox(name="preview")
+            entries = await box.fs.listdir("directory")
+            with pytest.raises(SandboxFilesystemCommandError) as failed:
+                await box.fs.listdir("directory")
+
+    assert entries == [
+        DirectoryEntry(path="caf\udce9", kind="file"),
+        DirectoryEntry(path="caf\ufffd", kind="directory"),
+        DirectoryEntry(path="ok", kind="file"),
+    ]
+    assert entries[0].path.encode("utf-8", "surrogateescape") == b"caf\xe9"
+    assert (failed.value.stdout, failed.value.stderr) == ("out \ufffd", "err \ufffd")
 
 
 @respx.mock
