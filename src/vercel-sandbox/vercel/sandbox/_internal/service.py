@@ -214,6 +214,17 @@ def _compile_drive_query(query: DriveQuery | None) -> _DriveQueryCriteria:
     raise TypeError(f"Unsupported drive query type: {type(query)!r}")
 
 
+def _check_drive_name(name: str, label: str) -> str:
+    # URL parsing drops an empty path segment and resolves `.` and `..`, so these
+    # names would address a Sandbox route instead of a Drive. The rule matches
+    # `vercel-drive`, which this deprecated client does not import.
+    if not isinstance(name, str):
+        raise TypeError(f"{label} must be a string")
+    if name.strip() in ("", ".", ".."):
+        raise ValueError(f"{label} {name!r} is not a valid Drive name")
+    return name
+
+
 def _sandbox_status(sandbox: SandboxState) -> SandboxStatus | None:
     if sandbox.current_session is not None and sandbox.current_session.status is not None:
         return sandbox.current_session.status
@@ -700,11 +711,15 @@ class SandboxService:
 
     async def fork_drive(self, *, name: str, fork_name: str) -> DriveState:
         self._ensure_open()
-        return await self._api_client.fork_drive(name=name, fork_name=fork_name)
+        return await self._api_client.fork_drive(
+            name=_check_drive_name(name, "source"), fork_name=_check_drive_name(fork_name, "name")
+        )
 
     async def get_drive(self, *, name_or_id: str) -> DriveState:
         self._ensure_open()
-        return await self._api_client.get_drive(name_or_id=name_or_id)
+        return await self._api_client.get_drive(
+            name_or_id=_check_drive_name(name_or_id, "name_or_id")
+        )
 
     async def get_or_create_drive(
         self,
@@ -715,7 +730,7 @@ class SandboxService:
     ) -> tuple[DriveState, bool]:
         self._ensure_open()
         return await self._api_client.get_or_create_drive(
-            name=name,
+            name=_check_drive_name(name, "name"),
             max_size_bytes=max_size_bytes,
             region=region,
         )
@@ -739,7 +754,7 @@ class SandboxService:
 
     async def delete_drive(self, *, name: str) -> DriveState:
         self._ensure_open()
-        return await self._api_client.delete_drive(name=name)
+        return await self._api_client.delete_drive(name=_check_drive_name(name, "name"))
 
     async def query_snapshots_page(
         self,

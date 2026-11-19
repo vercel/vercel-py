@@ -176,6 +176,8 @@ Sandbox keeps its own Drive client from before [[vercel-drive]] existed, unchang
 
 Each of those functions, and `fork`, `snapshot`, and `delete` on the handles, calls [[src/vercel-sandbox/vercel/sandbox/_internal/runtime_common.py#warn_drive_deprecated]], which names the `vercel.drive` replacement. Sandbox imports nothing from [[vercel-drive]]'s internals, so its dependency has no upper bound. Moving a caller to `vercel.drive` also moves its configuration from `SandboxServiceOptions` to `DriveServiceOptions`.
 
+The one change to the deprecated client is [[src/vercel-sandbox/vercel/sandbox/_internal/service.py#_check_drive_name]]: empty and dot-segment names are rejected before a request, as in [[vercel-drive]]. URL normalization resolves them, so `delete_drive(name=".")` used to send `DELETE /v2/sandboxes/drives`, the route that deletes a sandbox named `drives`. [[src/vercel-sandbox/tests/test_sandbox_public_flow.py#test_deprecated_drive_calls_reject_names_that_would_change_the_route|A test]] checks both APIs send nothing for such names.
+
 [[src/vercel-sandbox/tests/test_sandbox_public_flow.py#test_drive_entry_points_are_deprecated_in_favor_of_vercel_drive|The deprecation test]] checks the warning from every entry point on all four surfaces, and that each replacement it names exists. [[src/vercel-sandbox/tests/live/test_sandbox_live.py#test_drive_fork_and_fork_by_name_copy_committed_data_independently|The live fork test]] still verifies the deprecated fork APIs against committed data, inherited metadata, lineage, and independent writes.
 
 ## Interactive PTY sessions

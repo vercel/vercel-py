@@ -6,7 +6,7 @@ import pydoc
 import warnings
 from collections.abc import AsyncIterator, Callable
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, nullcontext
 from datetime import timedelta
 from itertools import islice
 from pathlib import PurePosixPath
@@ -4911,6 +4911,32 @@ def _close_sync(client: Any) -> Callable[[], Any]:
         client.close()
 
     return close
+
+
+@respx.mock
+@pytest.mark.parametrize("sync", [False, True])
+@pytest.mark.parametrize("name", ["", " ", ".", ".."])
+async def test_deprecated_drive_calls_reject_names_that_would_change_the_route(
+    mock_env_clear: None, sync: bool, name: str
+) -> None:
+    # Unchecked, `delete_drive(name=".")` sends `DELETE /v2/sandboxes/drives`,
+    # which deletes a sandbox named `drives`.
+    api: Any = sandbox_sync if sync else sandbox
+    with session(service_options=_session_options(sync=True)) if sync else nullcontext():
+        async with nullcontext() if sync else session(service_options=_session_options()):
+            for operation, kwargs in (
+                (api.get_drive, {"name_or_id": name}),
+                (api.get_or_create_drive, {"name": name}),
+                (api.fork_drive, {"source": name, "name": "cache-fork"}),
+                (api.fork_drive, {"source": "cache", "name": name}),
+                (api.delete_drive, {"name": name}),
+            ):
+                with pytest.raises(ValueError, match="not a valid Drive name"):
+                    result = operation(**kwargs)
+                    if inspect.isawaitable(result):
+                        await result
+
+    assert not respx.calls
 
 
 @respx.mock
