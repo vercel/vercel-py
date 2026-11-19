@@ -92,6 +92,23 @@ uv run poe fix
 
 The workspace task system is documented in `scripts/poe/README.md`.
 
+### Turborepo lint MVP
+
+CI runs lint and formatting through Turborepo's experimental Python workspace
+support. With Node.js 22 and uv installed, run the same checks locally:
+
+```sh
+uv sync --all-packages --locked --python 3.12
+npx --yes turbo@2.11.10 run lint lint-root --cache=local:rw
+npx --yes turbo@2.11.10 run format format-root --cache=local:rw -- --check
+```
+
+For package checks, use `--filter=vercel-oidc` with `lint` or `format`.
+The `lint-root` and `format-root` tasks cover root tests and examples.
+Poe remains available for local workflows, typechecking, tests, hooks, and
+releases. See the [migration assessment](scripts/poe/README.md#turborepo-mvp)
+for the remaining work.
+
 ## Knowledge Graph
 
 Architecture, design decisions, and cross-package conventions are documented

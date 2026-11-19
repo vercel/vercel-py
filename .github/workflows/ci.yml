@@ -31,8 +31,16 @@ jobs:
       - name: Sync dependencies
         run: uv sync --all-packages --locked --python 3.12
 
+      - name: Install Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+
       - name: Lint
-        run: uv run poe lint
+        run: npx --yes turbo@2.11.10 run lint lint-root --cache=local:rw
+
+      - name: Check formatting
+        run: npx --yes turbo@2.11.10 run format format-root --cache=local:rw -- --check
 
       - name: Typecheck
         run: uv run poe typecheck

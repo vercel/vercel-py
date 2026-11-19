@@ -1,0 +1,21 @@
+{
+  "$schema": "https://turborepo.dev/schema.json",
+  "futureFlags": {
+    "experimentalPythonWorkspaces": true,
+    "experimentalTaskCommand": true
+  },
+  "tasks": {
+    "lint": {},
+    "format": {
+      "cache": false
+    },
+    "vercel-py#lint-root": {
+      "cache": false,
+      "command": ["uv", "run", "--frozen", "ruff", "check", "tests", "examples"]
+    },
+    "vercel-py#format-root": {
+      "cache": false,
+      "command": ["uv", "run", "--frozen", "ruff", "format", "tests", "examples"]
+    }
+  }
+}

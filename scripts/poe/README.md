@@ -4,6 +4,57 @@ This directory contains the shared task system for workspace package checks. It
 keeps package `pyproject.toml` files small while still letting each package own
 its local configuration differences.
 
+## Turborepo MVP
+
+CI lint and formatting use Turborepo 2.11.10's
+[experimental Python support](https://turborepo.dev/docs/guides/tools/python).
+The root `turbo.json` enables native uv workspace discovery; `[tool.turbo].name`
+in the root `pyproject.toml` identifies the synthetic `vercel-py` workspace
+package. No `package.json` files or parallel workspace manifests are needed.
+The commands are in [CONTRIBUTING.md](../../CONTRIBUTING.md#turborepo-lint-mvp).
+
+Turbo detects Ruff in the root dev group. An unfiltered `lint` or `format`
+invocation runs it once over all discovered members, preserving per-file Ruff
+configuration, including `integrations/ruff.toml`. The extra `lint-root` and
+`format-root` commands cover `tests/` and `examples/`, matching the existing
+Poe lint scope. Formatting passes `--check` explicitly; both format tasks and
+the custom root commands are uncached. Native lint uses Turbo's Python,
+uv, configuration, source, and resolved-dependency inputs with a local cache.
+
+Package filtering and planning work directly:
+
+```sh
+npx --yes turbo@2.11.10 ls --output=json
+npx --yes turbo@2.11.10 run lint --filter=vercel-oidc --dry=json
+npx --yes turbo@2.11.10 run lint --filter=vercel-oidc --cache=local:rw
+npx --yes turbo@2.11.10 run format --filter=vercel-oidc -- --check
+```
+
+Replacing the workspace dispatcher incrementally is feasible, but a full
+replacement needs these adaptations:
+
+- **Dependency graph:** Turbo discovers all 17 members, but 2.11.10 drops edges
+  declared only through our dynamic Hatch dependency hook. For example,
+  `turbo ls vercel-sandbox --output=json` reports no dependencies, while
+  `uv run python scripts/workspace.py list --names --topological` uses the
+  resolved graph. Static integration dependencies are recognized. Fix this
+  upstream or expose the dependencies in a supported form before relying on
+  `--affected`, dependent filters, or dependency-ordered builds. CI lint runs
+  the full workspace.
+- **Tests and types:** Root-declared pytest maps to one root test invocation,
+  which uses the root `testpaths` and misses member suites. Preserve package
+  pytest configuration, ggt selection, Django's Python-version gate, no-op
+  tasks, example opt-in, and credential handling through explicit task commands.
+  Mypy also needs the shared config, namespace paths, and package overrides.
+  Live tests and the mutable AnyIO matrix need explicit cache/environment
+  policies before enabling task caching.
+- **Contributor workflows:** Keep file scopes, staged-index and pushed-commit
+  snapshots, Git hooks, and tool argument forwarding until their Turbo
+  equivalents are implemented. Package filters alone do not replace these.
+- **Releases:** Native `build` runs `uv build`; publishing also needs
+  `--no-sources`, dynamic version/dependency updates, bundle assembly, and
+  installed-wheel verification. Keep the release and publishing tools.
+
 ## Layout
 
 - `poe.toml` is the shared Poe include. Workspace members include this file from
