@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence
 from contextlib import AbstractAsyncContextManager
+from dataclasses import replace
 from typing import Literal, overload
 
 from vercel._internal.core.session import get_active_session
@@ -33,6 +34,7 @@ from .errors import (
     BlobStoreNotFoundError,
     BlobStoreSuspendedError,
     BlobStreamError,
+    BlobTimeoutError,
     BlobUnknownError,
 )
 from .models import (
@@ -116,7 +118,8 @@ async def get_blob(
     """Download the complete object into memory and close its response."""
     async with stream_blob(url_or_pathname, access=access) as download:
         body = b"".join([chunk async for chunk in download])
-    return GetResult(metadata=download.metadata, body=body)
+    # The size header can be absent or describe an encoded body; the bytes are exact.
+    return GetResult(metadata=replace(download.metadata, size=len(body)), body=body)
 
 
 def multipart_upload_blob(
@@ -263,6 +266,7 @@ __all__ = [
     "BlobStoreNotFoundError",
     "BlobStoreSuspendedError",
     "BlobStreamError",
+    "BlobTimeoutError",
     "BlobUnknownError",
     "CopyResult",
     "CredentialKind",

@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from datetime import timedelta
 
 from vercel._internal.core.options import ServiceOptions
 from vercel.blob.models import BlobCredentialsFactory, SyncBlobCredentialsFactory
 
 from .credentials import default_async_credentials, default_sync_credentials
+
+_DEFAULT_TRANSFER_TIMEOUT = timedelta(minutes=5)
 
 
 class _BlobServiceOptionsKey(ServiceOptions):
@@ -23,16 +26,22 @@ class _BlobServiceOptionsKey(ServiceOptions):
 
 @dataclass(frozen=True, slots=True, init=False)
 class BlobServiceOptions(_BlobServiceOptionsKey):
-    """Configure Blob for one asynchronous SDK session."""
+    """Configure Blob for one asynchronous SDK session.
+
+    `transfer_timeout` replaces the session's HTTP timeout for uploads, multipart
+    parts and completion, and copies, whose duration grows with object size.
+    """
 
     base_url: str
     credentials_factory: BlobCredentialsFactory
+    transfer_timeout: timedelta
 
     def __init__(
         self,
         *,
         base_url: str | None = None,
         credentials_factory: BlobCredentialsFactory | None = None,
+        transfer_timeout: timedelta | None = None,
     ) -> None:
         raw_url = (
             base_url
@@ -47,20 +56,31 @@ class BlobServiceOptions(_BlobServiceOptionsKey):
             "credentials_factory",
             credentials_factory or default_async_credentials,
         )
+        object.__setattr__(
+            self,
+            "transfer_timeout",
+            transfer_timeout if transfer_timeout is not None else _DEFAULT_TRANSFER_TIMEOUT,
+        )
 
 
 @dataclass(frozen=True, slots=True, init=False)
 class SyncBlobServiceOptions(_BlobServiceOptionsKey):
-    """Configure Blob for one synchronous SDK session."""
+    """Configure Blob for one synchronous SDK session.
+
+    `transfer_timeout` replaces the session's HTTP timeout for uploads, multipart
+    parts and completion, and copies, whose duration grows with object size.
+    """
 
     base_url: str
     credentials_factory: SyncBlobCredentialsFactory
+    transfer_timeout: timedelta
 
     def __init__(
         self,
         *,
         base_url: str | None = None,
         credentials_factory: SyncBlobCredentialsFactory | None = None,
+        transfer_timeout: timedelta | None = None,
     ) -> None:
         raw_url = (
             base_url
@@ -74,4 +94,9 @@ class SyncBlobServiceOptions(_BlobServiceOptionsKey):
             self,
             "credentials_factory",
             credentials_factory or default_sync_credentials,
+        )
+        object.__setattr__(
+            self,
+            "transfer_timeout",
+            transfer_timeout if transfer_timeout is not None else _DEFAULT_TRANSFER_TIMEOUT,
         )

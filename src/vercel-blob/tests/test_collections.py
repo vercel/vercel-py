@@ -62,7 +62,7 @@ async def test_query_blobs_pagination_and_metadata(sync: bool) -> None:
         assert request.method == "GET"
         assert request.headers["authorization"] == "Bearer oidc-test"
         assert request.headers["x-vercel-blob-store-id"] == "teststore123"
-        assert request.headers["x-api-version"] == "12"
+        assert request.headers["x-api-version"] == "13"
         assert request.url.params["prefix"] == "folder/雪 &"
         assert request.url.params["limit"] == "1"
         assert "mode" not in request.url.params

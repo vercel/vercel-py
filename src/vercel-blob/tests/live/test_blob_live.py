@@ -163,7 +163,7 @@ def test_sync_lifecycle(store: LiveStore, payload: bytes) -> None:
 
 
 def test_encoded_pathname_and_metadata(store: LiveStore) -> None:
-    pathname = _pathname("space + ?% café.txt")
+    pathname = _pathname("space + ?% café (1)!*'.txt")
     content_type = "text/plain; charset=utf-8"
     with session():
         uploaded = blob.sync.put_blob(
@@ -186,6 +186,9 @@ def test_encoded_pathname_and_metadata(store: LiveStore) -> None:
 
             for target in (pathname, uploaded.url, uploaded.download_url):
                 result = blob.sync.get_blob(target, access=store.access)
+                if target == pathname:
+                    # A delivery URL built from a pathname matches the service's encoding.
+                    assert result.metadata.url == uploaded.url
                 assert result.body == b"hello"
                 assert result.metadata.content_type == content_type
                 assert result.metadata.etag == uploaded.etag

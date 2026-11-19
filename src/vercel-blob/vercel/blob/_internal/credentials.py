@@ -49,63 +49,74 @@ def normalize_credentials(credentials: BlobCredentials) -> BlobCredentials:
     return BlobCredentials(credentials.token, store_id, kind)
 
 
-async def default_async_credentials() -> BlobCredentials:
-    oidc_token: str | None = None
+async def _async_oidc_token() -> str | None:
     try:
         from vercel.oidc import VercelOidcTokenError
         from vercel.oidc.aio import get_vercel_oidc_token
-
-        try:
-            oidc_token = await get_vercel_oidc_token()
-        except VercelOidcTokenError:
-            oidc_token = None
     except ImportError:
-        oidc_token = None
+        return None
+    try:
+        return await get_vercel_oidc_token()
+    except VercelOidcTokenError:
+        return None
 
-    raw_store = os.environ.get("BLOB_STORE_ID", "").strip()
-    if raw_store and oidc_token:
-        store_id = normalize_store_id(raw_store)
-        return BlobCredentials(oidc_token, store_id, CredentialKind.OIDC)
 
+def _sync_oidc_token() -> str | None:
+    try:
+        from vercel.oidc import VercelOidcTokenError, get_vercel_oidc_token_sync
+    except ImportError:
+        return None
+    try:
+        return get_vercel_oidc_token_sync()
+    except VercelOidcTokenError:
+        return None
+
+
+def _read_write_credentials() -> BlobCredentials | None:
     token = os.environ.get("BLOB_READ_WRITE_TOKEN") or os.environ.get(
         "VERCEL_BLOB_READ_WRITE_TOKEN"
     )
-    if token:
-        token = token.strip()
-        return BlobCredentials(token, store_from_read_write_token(token), CredentialKind.READ_WRITE)
+    if not token:
+        return None
+    token = token.strip()
+    return BlobCredentials(token, store_from_read_write_token(token), CredentialKind.READ_WRITE)
 
+
+def _missing_credentials(oidc_token: str | None) -> BlobCredentialsError:
     if oidc_token:
-        raise BlobCredentialsError("BLOB_STORE_ID is required with Vercel OIDC credentials")
-    raise BlobCredentialsError("Missing Blob credentials")
+        return BlobCredentialsError("BLOB_STORE_ID is required with Vercel OIDC credentials")
+    return BlobCredentialsError("Missing Blob credentials")
+
+
+# OIDC is only usable with BLOB_STORE_ID, so the token is fetched only when the store ID
+# is set. Fetching it can refresh the token over the network and write it to disk and
+# the environment, which is wasted work when a read-write token will be used anyway.
+async def default_async_credentials() -> BlobCredentials:
+    raw_store = os.environ.get("BLOB_STORE_ID", "").strip()
+    if raw_store:
+        oidc_token = await _async_oidc_token()
+        if oidc_token:
+            return BlobCredentials(oidc_token, normalize_store_id(raw_store), CredentialKind.OIDC)
+
+    read_write = _read_write_credentials()
+    if read_write is not None:
+        return read_write
+
+    raise _missing_credentials(None if raw_store else await _async_oidc_token())
 
 
 def default_sync_credentials() -> BlobCredentials:
-    oidc_token: str | None = None
-    try:
-        from vercel.oidc import VercelOidcTokenError, get_vercel_oidc_token_sync
-
-        try:
-            oidc_token = get_vercel_oidc_token_sync()
-        except VercelOidcTokenError:
-            oidc_token = None
-    except ImportError:
-        oidc_token = None
-
     raw_store = os.environ.get("BLOB_STORE_ID", "").strip()
-    if raw_store and oidc_token:
-        store_id = normalize_store_id(raw_store)
-        return BlobCredentials(oidc_token, store_id, CredentialKind.OIDC)
+    if raw_store:
+        oidc_token = _sync_oidc_token()
+        if oidc_token:
+            return BlobCredentials(oidc_token, normalize_store_id(raw_store), CredentialKind.OIDC)
 
-    token = os.environ.get("BLOB_READ_WRITE_TOKEN") or os.environ.get(
-        "VERCEL_BLOB_READ_WRITE_TOKEN"
-    )
-    if token:
-        token = token.strip()
-        return BlobCredentials(token, store_from_read_write_token(token), CredentialKind.READ_WRITE)
+    read_write = _read_write_credentials()
+    if read_write is not None:
+        return read_write
 
-    if oidc_token:
-        raise BlobCredentialsError("BLOB_STORE_ID is required with Vercel OIDC credentials")
-    raise BlobCredentialsError("Missing Blob credentials")
+    raise _missing_credentials(None if raw_store else _sync_oidc_token())
 
 
 def adapt_sync_credentials_factory(

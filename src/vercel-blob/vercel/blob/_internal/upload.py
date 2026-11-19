@@ -24,8 +24,10 @@ from vercel.blob._internal.validation import (
     validate_content_length,
     validate_optional_content_length,
 )
-from vercel.blob.errors import BlobContentLengthError, BlobUnknownError
+from vercel.blob.errors import BlobContentLengthError
 from vercel.blob.models import PutBody, SyncPutBody
+
+from .transport_errors import transport_failure
 
 # Every body accepted by the sync or async public ``put_blob``. Each runtime rejects
 # the half of this union that belongs to the other surface.
@@ -238,11 +240,11 @@ async def _transport_write(
         try:
             stream_resp = await streaming_request.finish()
         except _STREAMING_TRANSPORT_ERRORS:
-            raise BlobUnknownError() from exc
+            raise transport_failure(exc) from exc
         await stream_resp.aclose()
         if not stream_resp.response.is_success:
             raise map_http_error(stream_resp.response) from exc
-        raise BlobUnknownError() from exc
+        raise transport_failure(exc) from exc
 
 
 async def _write_exact_length(
@@ -283,7 +285,7 @@ async def send_streaming_upload(
         try:
             streaming_response = await streaming_request.finish()
         except _STREAMING_TRANSPORT_ERRORS as exc:
-            raise BlobUnknownError() from exc
+            raise transport_failure(exc) from exc
         await streaming_response.aclose()
         response = streaming_response.response
         if not response.is_success:
