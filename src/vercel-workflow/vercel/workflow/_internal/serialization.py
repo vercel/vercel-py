@@ -104,7 +104,7 @@ def _encode_devalue(value: Any) -> bytes:
 class PayloadEncoder:
     """Encode workflow payload values and errors."""
 
-    compression: bool = False
+    compression: compression.CompressionMode = "none"
     encryption_key: bytes | None = None
     recipient_public_key: bytes | None = None
 
@@ -127,7 +127,7 @@ class PayloadEncoder:
         return self._wrap(encoded)
 
     def _wrap(self, encoded: bytes) -> bytes:
-        encoded = compression.maybe_compress(encoded, enabled=self.compression)
+        encoded = compression.maybe_compress(encoded, mode=self.compression)
         if self.recipient_public_key is not None:
             return SEALED + encryption.seal_envelope(self.recipient_public_key, encoded)
         if self.encryption_key is not None:

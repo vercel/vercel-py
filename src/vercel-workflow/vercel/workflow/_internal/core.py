@@ -120,6 +120,10 @@ class _Configurable(abc.ABC, Generic[Res]):
         """Return a new configuration pinning run data and queue dispatch to a region."""
         return self.configure(dataclasses.replace(self.get_config(), region=region))
 
+    def with_deployment_id(self, deployment_id: str) -> Res:
+        """Return a new configuration targeting a deployment ID or ``"latest"``."""
+        return self.configure(dataclasses.replace(self.get_config(), deployment_id=deployment_id))
+
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class Configuration(_Configurable["Configuration"]):
@@ -127,6 +131,7 @@ class Configuration(_Configurable["Configuration"]):
 
     compress_arguments: bool = True
     region: str | None = None
+    deployment_id: str | None = None
 
     def get_config(self) -> Configuration:
         return self

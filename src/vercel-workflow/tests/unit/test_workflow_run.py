@@ -27,6 +27,8 @@ from vercel.workflow import (
 )
 from vercel.workflow._internal import (
     core,
+    deployment,
+    encryption,
     py_sandbox,
     run as run_mod,
     runtime,
@@ -950,12 +952,20 @@ async def test_region_configuration_is_reusable(monkeypatch):
             {"order_id": f"order_{i}", "region": "business", "deployment_id": "argument"}
         ]
     for call in world.queue.call_args_list:
-        assert call.kwargs == {"region": "fra1", "deployment_id": expected}
+        assert call.kwargs == {
+            "region": "fra1",
+            "deployment_id": expected,
+            "spec_version": w.SPEC_VERSION_CURRENT,
+        }
         assert call.args[1].run_input.deployment_id == expected
         assert call.args[1].run_input.execution_context["queueNamespace"] == "orders"
     await start(workflow, "order_3", region="business", deployment_id="argument")
     assert world.create_run_id.call_args.kwargs == {"region": None}
-    assert world.queue.call_args.kwargs == {"deployment_id": "dpl_current", "region": None}
+    assert world.queue.call_args.kwargs == {
+        "deployment_id": "dpl_current",
+        "region": None,
+        "spec_version": w.SPEC_VERSION_CURRENT,
+    }
 
 
 async def test_start_rejects_missing_arguments_before_preparing_run(start_world):
@@ -981,3 +991,212 @@ async def test_start_failure_preserves_durable_write_order(start_world, failure_
     assert caught.value is error
     assert start_world.events_create.await_count == (failure_stage != "prepare")
     assert start_world.queue.await_count == (failure_stage == "queue")
+
+
+@pytest.mark.parametrize(
+    "answer,expected",
+    [
+        (None, 5),
+        ({"healthy": True, "format": "text"}, 2),
+        ({"format": "json", "specVersion": True}, 3),
+        ({"specVersion": 3}, 3),
+        ({"specVersion": 99}, 5),
+    ],
+)
+def test_target_spec(answer, expected):
+    assert deployment._spec_version(answer) == expected
+
+
+@pytest.mark.parametrize(
+    "version,node,expected",
+    [
+        (None, None, "none"),
+        ("5.0.0-beta.17", "24.0.0", "none"),
+        ("5.0.0-beta.18", None, "gzip"),
+        ("5.0.0-beta.18", "22.14.0", "gzip"),
+        ("5.0.0-beta.18", "22.15.0", "auto"),
+        ("5.0.0", "23.8.0", "auto"),
+    ],
+)
+def test_target_compression(version, node, expected):
+    assert (
+        deployment._compression_mode({"workflowCoreVersion": version, "nodeVersion": node})
+        == expected
+    )
+
+
+@pytest.mark.parametrize("latest", [False, True])
+@pytest.mark.parametrize("standalone_config", [False, True])
+async def test_start_targets_deployment_and_seals_arguments(monkeypatch, latest, standalone_config):
+    registry = core.Workflows(as_vercel_job=False, namespace="orders")
+
+    @registry.workflow
+    async def workflow(value: str) -> str:
+        return value
+
+    world = Mock(spec=w.World)
+    world.get_deployment_id = AsyncMock(return_value="dpl_current")
+    world.resolve_latest_deployment_id = AsyncMock(return_value="dpl_target")
+    world.create_run_id.return_value = "unique"
+    world.get_environment.return_value = "preview"
+    world.events_create = AsyncMock()
+    world.queue = AsyncMock()
+    world.run_key = AsyncMock()
+    monkeypatch.setattr(w, "get_world", lambda: world)
+    key = b"k" * 32
+    public_key = encryption.derive_run_public_key(key)
+    probe = AsyncMock(
+        return_value={
+            "healthy": True,
+            "format": "json",
+            "specVersion": 3,
+            "encryptionPublicKey": public_key,
+            "hookResumeInputVersion": 1,
+        }
+    )
+    monkeypatch.setattr(deployment, "_probe", probe)
+    deployment_id = "latest" if latest else "dpl_target"
+    configured = (
+        workflow.configure(Configuration().with_deployment_id(deployment_id).with_region("fra1"))
+        if standalone_config
+        else workflow.with_deployment_id(deployment_id).with_region("fra1")
+    )
+    result = await start(configured, "payload" * 1000)
+    world.run_key.assert_not_awaited()
+    event = world.events_create.call_args.args[1]
+    assert event.spec_version == 3
+    assert event.event_data.deployment_id == "dpl_target"
+    assert event.event_data.input.startswith(ser.SEALED)
+    assert ser.hydrate(event.event_data.input, what="input", key=key) == [
+        {"value": "payload" * 1000}
+    ]
+    assert world.queue.call_args.kwargs == {
+        "deployment_id": "dpl_target",
+        "region": "fra1",
+        "spec_version": 3,
+    }
+    assert world.queue.call_args.args[1].run_input.spec_version == 3
+    assert result.run_id == "wrun_unique"
+
+
+@pytest.mark.parametrize("standalone_config", [False, True])
+def test_deployment_configuration_is_immutable(standalone_config):
+    registry = core.Workflows(as_vercel_job=False)
+
+    @registry.workflow
+    async def workflow(value: str) -> str:
+        return value
+
+    source = Configuration() if standalone_config else workflow
+    base = source.with_region("fra1").without_argument_compression()
+    target = base.with_deployment_id("latest")
+    assert base.get_config().deployment_id is None
+    assert target.get_config().deployment_id == "latest"
+    assert target.get_config().region == "fra1"
+    assert target.get_config().compress_arguments is False
+    assert target.with_region("iad1").get_config().deployment_id == "latest"
+
+
+@pytest.mark.parametrize("hint", [None, "latest", "dpl_target"])
+async def test_start_without_current_deployment_requires_explicit_target(
+    start_world, monkeypatch, hint
+):
+    start_world.get_deployment_id.side_effect = RuntimeError("no current deployment")
+    start_world.resolve_latest_deployment_id = AsyncMock(return_value="dpl_latest")
+    probe = AsyncMock(return_value=None)
+    monkeypatch.setattr(deployment, "_probe", probe)
+    configured = upload if hint is None else upload.with_deployment_id(hint)
+    if hint != "dpl_target":
+        with pytest.raises(RuntimeError, match="no current deployment"):
+            await start(configured, "payload", compress_arguments=True)
+        start_world.events_create.assert_not_awaited()
+        start_world.queue.assert_not_awaited()
+        start_world.resolve_latest_deployment_id.assert_not_awaited()
+        probe.assert_not_awaited()
+    else:
+        result = await start(configured, "payload", compress_arguments=True)
+        probe.assert_awaited_once_with(start_world, "dpl_target", result.run_id, "uploads")
+        event = start_world.events_create.call_args.args[1]
+        assert event.event_data.deployment_id == "dpl_target"
+        assert event.spec_version == w.SPEC_VERSION_CURRENT
+        assert "hookResumeInputVersion" not in event.event_data.execution_context
+        assert event.event_data.input.startswith(ser.DEVALUE_V1)
+
+
+@pytest.mark.parametrize("hint", ["dpl_current", "latest"])
+async def test_start_targeting_current_deployment_skips_probe(start_world, monkeypatch, hint):
+    start_world.resolve_latest_deployment_id = AsyncMock(return_value="dpl_current")
+    probe = AsyncMock()
+    monkeypatch.setattr(deployment, "_probe", probe)
+    await start(upload.with_deployment_id(hint), "payload", compress_arguments=True)
+    probe.assert_not_awaited()
+    event = start_world.events_create.call_args.args[1]
+    assert (
+        event.event_data.execution_context["hookResumeInputVersion"] == w.HOOK_RESUME_INPUT_VERSION
+    )
+
+
+@pytest.mark.parametrize(
+    "spec,node,prefix",
+    [(3, "24.0.0", ser.DEVALUE_V1), (5, None, ser.GZIP), (5, "22.15.0", ser.ZSTD)],
+)
+async def test_cross_deployment_argument_compression_uses_target_runtime(
+    start_world, monkeypatch, spec, node, prefix
+):
+    monkeypatch.delenv("WORKFLOW_COMPRESSION_CODEC", raising=False)
+    monkeypatch.delenv("WORKFLOW_DISABLE_COMPRESSION", raising=False)
+    probe = AsyncMock(
+        return_value={
+            "healthy": True,
+            "format": "json",
+            "specVersion": spec,
+            "workflowCoreVersion": "5.0.0-beta.18",
+            "nodeVersion": node,
+        }
+    )
+    monkeypatch.setattr(deployment, "_probe", probe)
+    await start(upload.with_deployment_id("dpl_target"), "payload" * 1000, compress_arguments=True)
+    event = start_world.events_create.call_args.args[1]
+    assert event.event_data.input.startswith(prefix)
+    assert ser.hydrate(event.event_data.input, what="input") == [
+        {"data": "payload" * 1000, "compress_arguments": True}
+    ]
+    assert event.spec_version == spec
+    assert "hookResumeInputVersion" not in event.event_data.execution_context
+    assert ("nodeVersion" in event.event_data.execution_context) == (node is not None)
+
+
+async def test_legacy_spec_one_target_is_rejected_before_creating_run(start_world, monkeypatch):
+    monkeypatch.setattr(deployment, "_probe", AsyncMock(return_value={"specVersion": 1}))
+    with pytest.raises(RuntimeError, match="legacy spec version 1"):
+        await start(upload.with_deployment_id("dpl_old"), "payload", compress_arguments=True)
+    start_world.events_create.assert_not_awaited()
+    start_world.queue.assert_not_awaited()
+
+
+@pytest.mark.parametrize("public_key", [None, "malformed"])
+async def test_cross_deployment_falls_back_to_symmetric_key(start_world, monkeypatch, public_key):
+    key = b"k" * 32
+    start_world.run_key.return_value = key
+    monkeypatch.setattr(
+        deployment,
+        "_probe",
+        AsyncMock(return_value={"specVersion": 5, "encryptionPublicKey": public_key}),
+    )
+    result = await start(
+        upload.with_deployment_id("dpl_target"), "payload", compress_arguments=True
+    )
+    start_world.run_key.assert_awaited_once_with(result.run_id, deployment_id="dpl_target")
+    event = start_world.events_create.call_args.args[1]
+    assert event.event_data.input.startswith(ser.ENCRYPTED)
+    assert event.event_data.encryption_public_key == encryption.derive_run_public_key(key)
+    assert ser.hydrate(event.event_data.input, what="input", key=key) == [
+        {"data": "payload", "compress_arguments": True}
+    ]
+
+
+async def test_explicit_empty_deployment_is_rejected_before_creating_run(start_world):
+    with pytest.raises(ValueError, match="non-empty"):
+        await start(upload.with_deployment_id(""), "payload", compress_arguments=True)
+    start_world.events_create.assert_not_awaited()
+    start_world.queue.assert_not_awaited()
