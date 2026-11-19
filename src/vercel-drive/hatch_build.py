@@ -3,15 +3,13 @@
 from __future__ import annotations
 
 import tomllib
-from fnmatch import fnmatchcase
 from importlib.util import module_from_spec, spec_from_file_location
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from types import ModuleType
 
 from hatchling.metadata.plugin.interface import MetadataHookInterface
 
 PACKAGED_HOOK = "_vercel_hatch_build.py"
-WORKSPACE_HOOK = "scripts/hatch_build.py"
 
 
 def get_metadata_hook() -> type[MetadataHookInterface]:
@@ -30,61 +28,44 @@ def _load_shared_hook() -> ModuleType:
 
 
 def _shared_hook_path(package: Path) -> Path:
-    """Choose the hook to execute without trusting directories outside the package.
+    """Choose the hook to execute using only what the package itself says.
 
     A source archive and a generated bundle ship their own copy of the hook, and
     it is the only one they may run. The directories above an unpacked archive
     belong to whoever is building it, such as a shared temporary directory, so a
     hook found there could be anyone's code.
 
-    Only a workspace checkout has no packaged copy. There the hook belongs to
-    the uv workspace that declares this package as a member.
+    Only a checkout has no packaged copy. It runs the file its own
+    `pyproject.toml` would package as that copy.
     """
     packaged = package / PACKAGED_HOOK
     if packaged.is_file():
         return packaged
     if (package / "PKG-INFO").exists():
         raise RuntimeError(f"source archive is missing its Hatch metadata hook, {PACKAGED_HOOK}")
-    workspace = _workspace_root(package)
-    if workspace is None:
-        raise RuntimeError(f"{package} is neither a source archive nor a uv workspace member")
-    hook = workspace / WORKSPACE_HOOK
-    if not hook.is_file():
-        raise RuntimeError(f"uv workspace {workspace} has no {WORKSPACE_HOOK}")
-    return hook
+    return _declared_hook_source(package)
 
 
-def _workspace_root(package: Path) -> Path | None:
-    """Return the nearest uv workspace whose `members` include *package*.
+def _declared_hook_source(package: Path) -> Path:
+    """Return the file this package's sdist `force-include` ships as its hook.
 
-    The root is identified by its `[tool.uv.workspace]` table, as uv does,
-    not by how many directories it is above the package.
+    The package names that file once, for Hatch, so a checkout build runs
+    exactly what a source archive would carry. Nothing is discovered: no
+    directory above the package can claim it or redirect the lookup.
     """
-    for candidate in package.parents:
-        pyproject = candidate / "pyproject.toml"
-        if not pyproject.is_file():
-            continue
-        with pyproject.open("rb") as fp:
-            workspace = tomllib.load(fp).get("tool", {}).get("uv", {}).get("workspace")
-        if not isinstance(workspace, dict):
-            continue
-        member = PurePosixPath(package.relative_to(candidate).as_posix())
-        if _matches_any(member, workspace.get("members", ())) and not _matches_any(
-            member, workspace.get("exclude", ())
-        ):
-            return candidate
-    return None
-
-
-def _matches_any(member: PurePosixPath, patterns: object) -> bool:
-    if not isinstance(patterns, (list, tuple)):
-        return False
-    return any(isinstance(pattern, str) and _matches(member, pattern) for pattern in patterns)
-
-
-def _matches(member: PurePosixPath, pattern: str) -> bool:
-    # A `*` matches one directory name, never a path separator.
-    globs = PurePosixPath(pattern).parts
-    return len(globs) == len(member.parts) and all(
-        fnmatchcase(part, glob) for part, glob in zip(member.parts, globs, strict=True)
-    )
+    with (package / "pyproject.toml").open("rb") as fp:
+        hatch = tomllib.load(fp).get("tool", {}).get("hatch", {})
+    included = hatch.get("build", {}).get("targets", {}).get("sdist", {}).get("force-include", {})
+    sources = [
+        source
+        for source, target in included.items()
+        if isinstance(target, str) and target.lstrip("/") == PACKAGED_HOOK
+    ]
+    if len(sources) != 1:
+        raise RuntimeError(
+            f"pyproject.toml must force-include exactly one file as {PACKAGED_HOOK} in its sdist"
+        )
+    hook = (package / sources[0]).resolve()
+    if not hook.is_file():
+        raise RuntimeError(f"Hatch metadata hook {hook} does not exist")
+    return hook
