@@ -1,1 +1,1 @@
-Deliver command output exactly as the command wrote it, including bytes that are not valid UTF-8, by requesting command output from the Sandbox API as a CBOR Sequence instead of NDJSON.
+Deliver command output exactly as the command wrote it, including bytes that are not valid UTF-8, by requesting command output from the Sandbox API as a CBOR Sequence instead of NDJSON. `fs.listdir()` returns non-UTF-8 names decoded with `surrogateescape`, like `os.listdir`.

@@ -21,6 +21,7 @@ from vercel.sandbox._internal.errors import (
     SandboxPathNotFoundError,
     SandboxResponseError,
     SandboxUploadSizeMismatchError,
+    _output_text,
 )
 from vercel.sandbox._internal.log_stream import (
     AsyncSleep,
@@ -101,7 +102,7 @@ _SESSION_STATUSES_WITHOUT_LIVE_POLICY = frozenset(
     {SandboxStatus.STOPPED, SandboxStatus.STOPPING, SandboxStatus.ABORTED, SandboxStatus.FAILED}
 )
 _READY_POLL_INTERVAL_SECONDS = 0.5
-ProcessOutputCollector = Callable[[ProcessState], Awaitable[tuple[str, str]]]
+ProcessOutputCollector = Callable[[ProcessState], Awaitable[tuple[bytes, bytes]]]
 _MISSING_PATH_ERROR_CODES = frozenset({"not_found", "path_not_found", "file_not_found", "ENOENT"})
 _PREDICATE_SCRIPT = """\
 case "$1" in
@@ -1049,7 +1050,7 @@ class SandboxService:
         args: list[str],
         cwd: str | None,
         collect_output: ProcessOutputCollector,
-    ) -> tuple[ProcessState, str, str]:
+    ) -> tuple[ProcessState, bytes, bytes]:
         command = await self._wait_process(
             session_id=session_id,
             command="sh",
@@ -1085,8 +1086,8 @@ class SandboxService:
             operation,
             paths=(path,),
             exit_code=command.returncode,
-            stdout=stdout,
-            stderr=stderr,
+            stdout=_output_text(stdout),
+            stderr=_output_text(stderr),
         )
 
     async def exists(
@@ -1161,10 +1162,10 @@ class SandboxService:
                 "listdir",
                 paths=(path,),
                 exit_code=command.returncode,
-                stdout=stdout,
-                stderr=stderr,
+                stdout=_output_text(stdout),
+                stderr=_output_text(stderr),
             )
-        return _listdir_entries(stdout)
+        return _listdir_entries(stdout.decode("utf-8", "surrogateescape"))
 
     async def remove(
         self,
@@ -1189,8 +1190,8 @@ class SandboxService:
                 "remove",
                 paths=(path,),
                 exit_code=command.returncode,
-                stdout=stdout,
-                stderr=stderr,
+                stdout=_output_text(stdout),
+                stderr=_output_text(stderr),
             )
 
     async def rename(
@@ -1215,8 +1216,8 @@ class SandboxService:
                 "rename",
                 paths=(source, destination),
                 exit_code=command.returncode,
-                stdout=stdout,
-                stderr=stderr,
+                stdout=_output_text(stdout),
+                stderr=_output_text(stderr),
             )
 
     async def send_process_signal(

@@ -137,6 +137,11 @@ class SandboxFilesystemCommandError(SandboxFilesystemError):
         self.stderr = stderr
 
 
+def _output_text(data: bytes) -> str:
+    """Decode command output for an error message, which must not fail to decode."""
+    return data.decode("utf-8", "replace")
+
+
 class SandboxFilesystemWriteError(SandboxFilesystemError):
     """Raised when a filesystem write rejects a file or batch."""
 
