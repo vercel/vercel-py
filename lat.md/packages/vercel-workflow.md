@@ -20,6 +20,14 @@ Correlation IDs are assigned by position, so the body must issue the same operat
 
 Step failures retry up to `max_retries`. [[src/vercel-workflow/vercel/workflow/_internal/errors.py#FatalError]] fails the step immediately, and [[src/vercel-workflow/vercel/workflow/_internal/errors.py#RetryableError]] retries after a chosen delay.
 
+### Step dispatch recovery
+
+Replay dispatches steps with no recorded start even when their creation event already exists, recovering a lost creation response or failed queue send.
+
+[[src/vercel-workflow/vercel/workflow/_internal/runtime.py#Suspension#create_event]] schedules dispatch until a step has started; [[src/vercel-workflow/vercel/workflow/_internal/runtime.py#Suspension#_create_event]] skips an already-recorded creation but still enqueues the step. [[src/vercel-workflow/vercel/workflow/_internal/runtime.py#WorkflowOrchestratorContext#_replay_next_event]] records step starts so replay leaves running steps and delayed retries to their existing messages.
+
+[[src/vercel-workflow/tests/unit/test_workflow_step_retry_dispatch.py#test_replay_recovers_step_dispatch]] covers persisted creation recovery and creation conflicts at spec 5/6. [[src/vercel-workflow/tests/unit/test_workflow_step_retry_dispatch.py#test_replay_does_not_redispatch_started_or_terminal_steps]] checks running, retrying, and terminal states. [[src/vercel-workflow/tests/unit/test_workflow_step_retry_dispatch.py#test_replay_dispatches_step_after_lost_creation_response]] covers recovery through the Vercel HTTP adapter.
+
 ## Deterministic sandbox
 
 Workflow bodies run in an isolated event loop inside a module sandbox that blocks sources of nondeterminism.

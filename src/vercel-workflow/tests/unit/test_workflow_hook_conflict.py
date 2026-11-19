@@ -701,7 +701,13 @@ async def test_get_conflict_continues_while_a_parallel_step_runs(tmp_path, monke
 
     assert world.event_list_calls == 2
     assert (await world.runs_get(run_id)).status == "running"
-    assert len(world.queued) == 1
+    # The hook's immediate replay recovers dispatch of the not-yet-started
+    # step too, retaining its identity while refreshing the request timestamp.
+    assert len(world.queued) == 2
+    assert world.queued[0][0] == world.queued[1][0]
+    assert world.queued[0][1].model_dump(exclude={"requested_at"}) == world.queued[1][1].model_dump(
+        exclude={"requested_at"}
+    )
     queued = world.queued[0][1]
     assert isinstance(queued, w.WorkflowInvokePayload)
     await runtime._execute_step(
