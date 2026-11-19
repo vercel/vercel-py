@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1 - 2026-11-18
+
+### Internal
+
+- Add a shared `UNSET` sentinel for arguments where `None` is itself a valid value. (#395)
+
 ## 0.3.0 - 2026-11-12
 
 ### Breaking Changes
