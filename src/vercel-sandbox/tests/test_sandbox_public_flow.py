@@ -21,7 +21,7 @@ from pydantic import BaseModel, ValidationError
 from sandbox_fixtures import sandbox_service_options as _session_options
 
 import vendor.respx as respx
-from vercel import drive, sandbox
+from vercel import drives, sandbox
 from vercel._internal.core.session import get_active_session
 from vercel.api import session
 from vercel.errors import VercelSessionClosedError
@@ -75,7 +75,7 @@ from vercel.sandbox._internal.state import (
 
 # The Drive tests exercise the deprecated `vercel.sandbox` entry points on purpose.
 pytestmark = pytest.mark.filterwarnings(
-    r"ignore:.* is deprecated; use vercel\.drive\.:DeprecationWarning"
+    r"ignore:.* is deprecated; use vercel\.drives\.:DeprecationWarning"
 )
 
 
@@ -4841,7 +4841,7 @@ def test_sync_drive_get_or_create_query_and_delete(mock_env_clear: None) -> None
 @respx.mock
 @pytest.mark.parametrize("standalone", [False, True])
 @pytest.mark.parametrize("sync", [False, True])
-async def test_drive_entry_points_are_deprecated_in_favor_of_vercel_drive(
+async def test_drive_entry_points_are_deprecated_in_favor_of_vercel_drives(
     mock_env_clear: None, sync: bool, standalone: bool
 ) -> None:
     from vercel.sandbox.client import SandboxClient
@@ -4859,7 +4859,7 @@ async def test_drive_entry_points_are_deprecated_in_favor_of_vercel_drive(
     )
     api: Any = client if standalone else (sandbox_sync if sync else sandbox)
     owner = type(client).__name__ if standalone else api.__name__
-    replacement = "vercel.drive.sync" if sync else "vercel.drive"
+    replacement = "vercel.drives.sync" if sync else "vercel.drives"
     handle_type = sandbox_sync.SyncDrive if sync else sandbox.Drive
 
     async def call(legacy: str, promoted: str, operation: Callable[..., Any], **kwargs: Any) -> Any:
@@ -4940,7 +4940,7 @@ async def test_deprecated_drive_calls_reject_names_that_would_change_the_route(
 
 
 @respx.mock
-async def test_vercel_drive_handles_mount_into_sandboxes(mock_env_clear: None) -> None:
+async def test_handles_from_vercel_drives_mount_into_sandboxes(mock_env_clear: None) -> None:
     for name in ("cache", "shared"):
         respx.get(f"https://drive.test/v1/drives/{name}").mock(
             return_value=httpx.Response(200, json=_drive_response(name=name, region="sfo1"))
@@ -4949,16 +4949,16 @@ async def test_vercel_drive_handles_mount_into_sandboxes(mock_env_clear: None) -
         return_value=httpx.Response(200, json=_sandbox_response())
     )
 
-    async def credentials() -> drive.DriveCredentials:
-        return drive.DriveCredentials(token="token", team_id="team_123", project_id="prj_123")
+    async def credentials() -> drives.DriveCredentials:
+        return drives.DriveCredentials(token="token", team_id="team_123", project_id="prj_123")
 
-    drive_options = drive.DriveServiceOptions(
+    drive_options = drives.DriveServiceOptions(
         base_url="https://drive.test", credentials_factory=credentials
     )
     async with session(service_options=[*_session_options(), drive_options]):
-        cache = await drive.get_drive(name_or_id="cache")
-        shared = await drive.get_drive(name_or_id="shared")
-        mounts: dict[str, drive.Drive | drive.DriveMount] = {
+        cache = await drives.get_drive(name_or_id="cache")
+        shared = await drives.get_drive(name_or_id="shared")
+        mounts: dict[str, drives.Drive | drives.DriveMount] = {
             "/cache": cache,
             "/readonly": shared.snapshot(),
         }

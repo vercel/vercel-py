@@ -9,9 +9,9 @@ from typing import Self
 
 from vercel._internal.core.iter_coroutine import iter_coroutine
 from vercel._internal.core.region import RegionInput, resolve_region
-from vercel.drive._internal.handle import DriveHandleBase
-from vercel.drive._internal.models import DriveQuery, QueryDrivesPage, QueryDrivesParams
-from vercel.drive._internal.service import DriveService
+from vercel.drives._internal.handle import DriveHandleBase
+from vercel.drives._internal.models import DriveQuery, QueryDrivesPage, QueryDrivesParams
+from vercel.drives._internal.service import DriveService
 
 
 class SyncDrive(DriveHandleBase):

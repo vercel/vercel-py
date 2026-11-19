@@ -8,10 +8,10 @@ from typing import Any
 
 import pytest
 
-from vercel import drive
+from vercel import drives
 from vercel._internal.core.session import SdkSession, SyncSdkSession
 from vercel.api import session
-from vercel.drive import DriveCredentials, RegionInput, sync as drive_sync
+from vercel.drives import DriveCredentials, RegionInput, sync as drives_sync
 
 pytest_plugins = ["vendor.respx.plugin"]
 
@@ -72,27 +72,27 @@ def delays(monkeypatch: pytest.MonkeyPatch) -> list[float]:
 
 
 class DriveApi:
-    """Run one scenario against `vercel.drive` or `vercel.drive.sync`.
+    """Run one scenario against `vercel.drives` or `vercel.drives.sync`.
 
     Every call is awaitable, so a test reads the same in both modes.
     """
 
     def __init__(self, *, sync: bool) -> None:
         self.sync = sync
-        self.module: ModuleType = drive_sync if sync else drive
-        self.handle_type: type = drive_sync.SyncDrive if sync else drive.Drive
+        self.module: ModuleType = drives_sync if sync else drives
+        self.handle_type: type = drives_sync.SyncDrive if sync else drives.Drive
 
     def options(self, *, region: RegionInput = None) -> Any:
         credentials = DriveCredentials(token="token", team_id="team_123", project_id="prj_123")
         if self.sync:
-            return drive_sync.DriveServiceOptions(
+            return drives_sync.DriveServiceOptions(
                 base_url=TEST_BASE_URL, credentials_factory=lambda: credentials, region=region
             )
 
         async def credentials_factory() -> DriveCredentials:
             return credentials
 
-        return drive.DriveServiceOptions(
+        return drives.DriveServiceOptions(
             base_url=TEST_BASE_URL, credentials_factory=credentials_factory, region=region
         )
 

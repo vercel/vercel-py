@@ -7,14 +7,14 @@ from uuid import uuid4
 
 from dotenv import load_dotenv
 
-from vercel import drive, sandbox
+from vercel import drives, sandbox
 
 load_dotenv()
 
 
 async def main() -> None:
     suffix = uuid4().hex[:12]
-    source, _ = await drive.get_or_create_drive(name=f"drive-source-{suffix}")
+    source, _ = await drives.get_or_create_drive(name=f"drive-source-{suffix}")
     forked = None
     try:
         async with sandbox.create_sandbox(

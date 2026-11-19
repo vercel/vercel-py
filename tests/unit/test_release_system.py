@@ -1640,7 +1640,7 @@ def _load_package_hatch_build(path: Path) -> ModuleType:
     return module
 
 
-@pytest.mark.parametrize("package", ["vercel-headers", "vercel-drive"])
+@pytest.mark.parametrize("package", ["vercel-headers", "vercel-drives"])
 def test_package_hatch_build_loader_uses_shared_hook(package: str) -> None:
     module = _load_package_hatch_build(Path("src") / package / "hatch_build.py")
 
@@ -1660,10 +1660,10 @@ def test_unpacked_source_archive_never_runs_a_hook_from_outside_it(
 ) -> None:
     # pip unpacks a source archive two levels below a temporary directory that
     # other local users may be able to write to.
-    archive = tmp_path / "build" / "vercel_drive-1.0.0"
+    archive = tmp_path / "build" / "vercel_drives-1.0.0"
     archive.mkdir(parents=True)
     (archive / "PKG-INFO").write_text("Metadata-Version: 2.4\n", encoding="utf-8")
-    shutil.copy2("src/vercel-drive/hatch_build.py", archive / "hatch_build.py")
+    shutil.copy2("src/vercel-drives/hatch_build.py", archive / "hatch_build.py")
     if ships_hook:
         (archive / "_vercel_hatch_build.py").write_text(
             "def get_metadata_hook():\n    return 'packaged'\n", encoding="utf-8"
@@ -1688,9 +1688,9 @@ def test_checkout_runs_only_the_hook_its_own_pyproject_names(
     # Another user who can write to the shared `src/` directory, but not to the
     # package or the repository root, claims the package for their own workspace.
     repository = tmp_path / "repository"
-    package = repository / "src" / "vercel-drive"
+    package = repository / "src" / "vercel-drives"
     package.mkdir(parents=True)
-    shutil.copy2("src/vercel-drive/hatch_build.py", package / "hatch_build.py")
+    shutil.copy2("src/vercel-drives/hatch_build.py", package / "hatch_build.py")
     (repository / "scripts").mkdir()
     (repository / "scripts" / "hatch_build.py").write_text(
         "def get_metadata_hook():\n    return 'declared'\n", encoding="utf-8"
@@ -1700,7 +1700,7 @@ def test_checkout_runs_only_the_hook_its_own_pyproject_names(
         f"[tool.hatch.build.targets.sdist]\nforce-include = {{ {declared} }}\n", encoding="utf-8"
     )
     (repository / "src" / "pyproject.toml").write_text(
-        '[tool.uv.workspace]\nmembers = ["vercel-drive"]\n', encoding="utf-8"
+        '[tool.uv.workspace]\nmembers = ["vercel-drives"]\n', encoding="utf-8"
     )
     planted = repository / "src" / "scripts" / "hatch_build.py"
     planted.parent.mkdir()
@@ -2027,7 +2027,7 @@ def test_apscheduler_bundle_keeps_apscheduler_peer_dependency(
     [
         ("vercel-sandbox", "pydantic>=2.7.0,<3"),
         ("vercel-connect", "pydantic>=2.7.0,<3"),
-        ("vercel-drive", "pydantic>=2.7.0,<3"),
+        ("vercel-drives", "pydantic>=2.7.0,<3"),
         ("vercel-blob", "pydantic>=2.7.0,<3"),
         ("vercel-passport", "pydantic>=2.10.0,<3"),
         ("vercel-schedules", "pydantic>=2.12.0,<3"),

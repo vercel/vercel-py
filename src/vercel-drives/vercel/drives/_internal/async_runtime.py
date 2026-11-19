@@ -4,9 +4,9 @@ from collections.abc import AsyncIterator
 from typing import Self
 
 from vercel._internal.core.region import RegionInput, resolve_region
-from vercel.drive._internal.handle import DriveHandleBase
-from vercel.drive._internal.models import DriveQuery, QueryDrivesPage, QueryDrivesParams
-from vercel.drive._internal.service import DriveService
+from vercel.drives._internal.handle import DriveHandleBase
+from vercel.drives._internal.models import DriveQuery, QueryDrivesPage, QueryDrivesParams
+from vercel.drives._internal.service import DriveService
 
 
 class Drive(DriveHandleBase):

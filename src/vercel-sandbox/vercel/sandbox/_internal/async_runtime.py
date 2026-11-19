@@ -15,7 +15,7 @@ from pydantic import Field, SkipValidation, field_validator
 from vercel._internal.core.byte_stream import AsyncByteStreamRuntime
 from vercel._internal.core.region import RegionInput, ResolvedRegion, resolve_region
 from vercel._internal.core.time import parse_duration_seconds, parse_required_duration_seconds
-from vercel.drive import DriveMount, DriveQuery
+from vercel.drives import DriveMount, DriveQuery
 from vercel.sandbox._internal.async_filesystem_handle import (
     SandboxBinaryReader,
     SandboxBinaryWriter,
@@ -443,7 +443,7 @@ class Drive(DriveHandleBase):
     """Operate on a project-local persistent Drive.
 
     .. deprecated::
-        Use ``vercel.drive.Drive``, which sandbox mounts accept.
+        Use ``vercel.drives.Drive``, which sandbox mounts accept.
     """
 
     __slots__ = ("_service",)
@@ -460,18 +460,18 @@ class Drive(DriveHandleBase):
         (404) and conflicting or uninitialized Drives (409).
 
         .. deprecated::
-            Use ``vercel.drive.Drive.fork()``.
+            Use ``vercel.drives.Drive.fork()``.
         """
-        warn_drive_deprecated("vercel.sandbox.Drive.fork", "vercel.drive.Drive.fork")
+        warn_drive_deprecated("vercel.sandbox.Drive.fork", "vercel.drives.Drive.fork")
         return await fork_drive(self._service, source=self.name, name=name)
 
     def snapshot(self) -> DriveMount:
         """Return a read-only snapshot mount for this Drive.
 
         .. deprecated::
-            Use ``vercel.drive.Drive.snapshot()``.
+            Use ``vercel.drives.Drive.snapshot()``.
         """
-        warn_drive_deprecated("vercel.sandbox.Drive.snapshot", "vercel.drive.Drive.snapshot")
+        warn_drive_deprecated("vercel.sandbox.Drive.snapshot", "vercel.drives.Drive.snapshot")
         return DriveMount(self, mode="snapshot")
 
     async def delete(self) -> Self:
@@ -481,9 +481,9 @@ class Drive(DriveHandleBase):
         Drive, this method deletes that replacement and updates this handle to it.
 
         .. deprecated::
-            Use ``vercel.drive.Drive.delete()``.
+            Use ``vercel.drives.Drive.delete()``.
         """
-        warn_drive_deprecated("vercel.sandbox.Drive.delete", "vercel.drive.Drive.delete")
+        warn_drive_deprecated("vercel.sandbox.Drive.delete", "vercel.drives.Drive.delete")
         payload = await self._service.delete_drive(name=self.name)
         self._apply_payload(payload)
         return self

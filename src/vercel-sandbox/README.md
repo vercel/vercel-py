@@ -172,13 +172,13 @@ To place resources in the same region as the current Vercel Function, pass
 `CURRENT_REGION` explicitly:
 
 ```python
-from vercel import drive, sandbox
+from vercel import drives, sandbox
 from vercel.api import session
 from vercel.sandbox import CURRENT_REGION, SandboxServiceOptions
 
 async with session():
     instance = await sandbox.create_sandbox(region=CURRENT_REGION)
-    cache, created = await drive.get_or_create_drive(name="cache", region=CURRENT_REGION)
+    cache, created = await drives.get_or_create_drive(name="cache", region=CURRENT_REGION)
 
 # Opt in for all creation calls in a session or standalone client instead.
 async with session(service_options=[SandboxServiceOptions(region=CURRENT_REGION)]):
@@ -197,7 +197,7 @@ to retain that placement behavior.
 The same sentinel and `RegionInput` type are exported from
 `vercel.sandbox.sync`. Both APIs and standalone clients accept it for
 `create_sandbox`, `get_or_create_sandbox`, `fork_sandbox`, and explicit
-`Sandbox.update(region=...)` calls. `vercel.drive` accepts the same sentinel.
+`Sandbox.update(region=...)` calls. `vercel.drives` accepts the same sentinel.
 Call-level regions override `SandboxServiceOptions.region`; passing `None`
 uses the service option for creation. Updates only send an explicitly supplied
 region and do not use the service option.
@@ -290,18 +290,18 @@ with sandbox.fork_sandbox(source_sandbox="production-agent") as forked:
 ## Sandbox Drives
 
 Drives are named persistent filesystems. A Drive belongs to one project and one
-region. Manage them with [`vercel-drive`](https://pypi.org/project/vercel-drive/),
+region. Manage them with [`vercel-drives`](https://pypi.org/project/vercel-drives/),
 which is installed with this package, then mount them when you create a sandbox:
 
 ```python
 import asyncio
 from pathlib import PurePosixPath
 
-from vercel import drive, sandbox
+from vercel import drives, sandbox
 
 
 async def main() -> None:
-    cache, _ = await drive.get_or_create_drive(
+    cache, _ = await drives.get_or_create_drive(
         name="cache",
         region="sfo1",
         max_size_bytes=10 * 1024**3,
@@ -312,7 +312,7 @@ async def main() -> None:
             # Mount a read-write drive
             "/cache": cache,
             # You can mount an existing drive by name as a point-in-time read-only snapshot
-            "/readonly": drive.DriveMount("shared-source", mode="snapshot"),
+            "/readonly": drives.DriveMount("shared-source", mode="snapshot"),
             # You can also provide a PurePosixPath as the mount point
             PurePosixPath("/scratch"): "scratch",
         },
@@ -353,7 +353,7 @@ data first. See [the Drive fork example](examples/sandbox_10_drive_fork.py).
 The Drive functions on `vercel.sandbox` and the standalone clients
 (`get_drive`, `get_or_create_drive`, `fork_drive`, `delete_drive`, and
 `query_drives`) and the handles they return are deprecated and emit
-`DeprecationWarning`. Use `vercel.drive`, which is configured by its own
+`DeprecationWarning`. Use `vercel.drives`, which is configured by its own
 `DriveServiceOptions` and not by `SandboxServiceOptions`.
 
 ## Interactive PTY sessions

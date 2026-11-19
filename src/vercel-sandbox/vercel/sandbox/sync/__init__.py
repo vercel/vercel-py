@@ -4,7 +4,7 @@ from collections.abc import Iterator, Mapping
 
 from vercel._internal.core.region import CURRENT_REGION, CurrentRegion, RegionInput
 from vercel._internal.core.session import get_active_sync_session
-from vercel.drive import (
+from vercel.drives import (
     DriveHandle,
     DriveMount,
     DriveQuery,
@@ -456,9 +456,9 @@ def fork_drive(*, source: str, name: str) -> SyncDrive:
         name: Project-local name for the new Drive.
 
     .. deprecated::
-        Use ``vercel.drive.sync.fork_drive()``.
+        Use ``vercel.drives.sync.fork_drive()``.
     """
-    warn_drive_deprecated("vercel.sandbox.sync.fork_drive", "vercel.drive.sync.fork_drive")
+    warn_drive_deprecated("vercel.sandbox.sync.fork_drive", "vercel.drives.sync.fork_drive")
     return _fork_drive(_service(), source=source, name=name)
 
 
@@ -468,9 +468,9 @@ def get_drive(*, name_or_id: str) -> SyncDrive:
     Raises SandboxApiError with status code 404 if the Drive does not exist.
 
     .. deprecated::
-        Use ``vercel.drive.sync.get_drive()``.
+        Use ``vercel.drives.sync.get_drive()``.
     """
-    warn_drive_deprecated("vercel.sandbox.sync.get_drive", "vercel.drive.sync.get_drive")
+    warn_drive_deprecated("vercel.sandbox.sync.get_drive", "vercel.drives.sync.get_drive")
     return _get_drive(_service(), name_or_id=name_or_id)
 
 
@@ -495,10 +495,10 @@ def get_or_create_drive(
         the Drive, and false when it returned an existing Drive.
 
     .. deprecated::
-        Use ``vercel.drive.sync.get_or_create_drive()``.
+        Use ``vercel.drives.sync.get_or_create_drive()``.
     """
     warn_drive_deprecated(
-        "vercel.sandbox.sync.get_or_create_drive", "vercel.drive.sync.get_or_create_drive"
+        "vercel.sandbox.sync.get_or_create_drive", "vercel.drives.sync.get_or_create_drive"
     )
     return _get_or_create_drive(
         _service(),
@@ -521,9 +521,9 @@ def delete_drive(*, name: str) -> SyncDrive:
         The Drive returned by the deletion request.
 
     .. deprecated::
-        Use ``vercel.drive.sync.delete_drive()``.
+        Use ``vercel.drives.sync.delete_drive()``.
     """
-    warn_drive_deprecated("vercel.sandbox.sync.delete_drive", "vercel.drive.sync.delete_drive")
+    warn_drive_deprecated("vercel.sandbox.sync.delete_drive", "vercel.drives.sync.delete_drive")
     return _delete_drive(_service(), name=name)
 
 
@@ -544,9 +544,9 @@ def query_drives(
         An iterator that transparently follows pagination cursors.
 
     .. deprecated::
-        Use ``vercel.drive.sync.query_drives()``.
+        Use ``vercel.drives.sync.query_drives()``.
     """
-    warn_drive_deprecated("vercel.sandbox.sync.query_drives", "vercel.drive.sync.query_drives")
+    warn_drive_deprecated("vercel.sandbox.sync.query_drives", "vercel.drives.sync.query_drives")
     return _query_drives(
         _service(),
         query=query,

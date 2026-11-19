@@ -10,7 +10,7 @@ from vercel._internal.core.byte_stream import (
 )
 from vercel._internal.core.http import StreamingResponse
 from vercel._internal.core.region import ResolvedRegion
-from vercel.drive import DriveQuery, DriveQueryByCreatedAt, DriveQueryByName, DriveQueryByUpdatedAt
+from vercel.drives import DriveQuery, DriveQueryByCreatedAt, DriveQueryByName, DriveQueryByUpdatedAt
 from vercel.sandbox._internal.api_client import (
     SandboxApiClient,
     _completed_process_state,
@@ -217,7 +217,7 @@ def _compile_drive_query(query: DriveQuery | None) -> _DriveQueryCriteria:
 def _check_drive_name(name: str, label: str) -> str:
     # URL parsing drops an empty path segment and resolves `.` and `..`, so these
     # names would address a Sandbox route instead of a Drive. The rule matches
-    # `vercel-drive`, which this deprecated client does not import.
+    # `vercel-drives`, which this deprecated client does not import.
     if not isinstance(name, str):
         raise TypeError(f"{label} must be a string")
     if name.strip() in ("", ".", ".."):

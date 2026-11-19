@@ -6,7 +6,7 @@ from typing import Self
 from vercel._internal.core.options import collect_service_options
 from vercel._internal.core.region import RegionInput
 from vercel._internal.core.session import HttpxClientFactory, SdkSession
-from vercel.drive import DriveQuery
+from vercel.drives import DriveQuery
 from vercel.sandbox._internal.async_runtime import (
     CreateSandboxOperation,
     Drive,
@@ -262,9 +262,9 @@ class SandboxClient:
             name: Project-local name for the new Drive.
 
         .. deprecated::
-            Use ``vercel.drive.fork_drive()``.
+            Use ``vercel.drives.fork_drive()``.
         """
-        warn_drive_deprecated("SandboxClient.fork_drive", "vercel.drive.fork_drive")
+        warn_drive_deprecated("SandboxClient.fork_drive", "vercel.drives.fork_drive")
         return await _fork_drive(self._service, source=source, name=name)
 
     async def get_drive(self, *, name_or_id: str) -> Drive:
@@ -273,9 +273,9 @@ class SandboxClient:
         Raises SandboxApiError with status code 404 if the Drive does not exist.
 
         .. deprecated::
-            Use ``vercel.drive.get_drive()``.
+            Use ``vercel.drives.get_drive()``.
         """
-        warn_drive_deprecated("SandboxClient.get_drive", "vercel.drive.get_drive")
+        warn_drive_deprecated("SandboxClient.get_drive", "vercel.drives.get_drive")
         return await _get_drive(self._service, name_or_id=name_or_id)
 
     async def get_or_create_drive(
@@ -288,10 +288,10 @@ class SandboxClient:
         """Return a named Drive, creating it when necessary.
 
         .. deprecated::
-            Use ``vercel.drive.get_or_create_drive()``.
+            Use ``vercel.drives.get_or_create_drive()``.
         """
         warn_drive_deprecated(
-            "SandboxClient.get_or_create_drive", "vercel.drive.get_or_create_drive"
+            "SandboxClient.get_or_create_drive", "vercel.drives.get_or_create_drive"
         )
         return await _get_or_create_drive(
             self._service,
@@ -304,9 +304,9 @@ class SandboxClient:
         """Delete a Drive by project-local name.
 
         .. deprecated::
-            Use ``vercel.drive.delete_drive()``.
+            Use ``vercel.drives.delete_drive()``.
         """
-        warn_drive_deprecated("SandboxClient.delete_drive", "vercel.drive.delete_drive")
+        warn_drive_deprecated("SandboxClient.delete_drive", "vercel.drives.delete_drive")
         return await _delete_drive(self._service, name=name)
 
     def query_drives(
@@ -319,9 +319,9 @@ class SandboxClient:
         """Iterate over Drives in a project.
 
         .. deprecated::
-            Use ``vercel.drive.query_drives()``.
+            Use ``vercel.drives.query_drives()``.
         """
-        warn_drive_deprecated("SandboxClient.query_drives", "vercel.drive.query_drives")
+        warn_drive_deprecated("SandboxClient.query_drives", "vercel.drives.query_drives")
         return _query_drives(
             self._service,
             query=query,

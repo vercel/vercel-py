@@ -15,7 +15,7 @@ from vercel._internal.core.byte_stream import SyncByteStreamRuntime
 from vercel._internal.core.iter_coroutine import iter_coroutine
 from vercel._internal.core.region import RegionInput, resolve_region
 from vercel._internal.core.time import parse_duration_seconds, parse_required_duration_seconds
-from vercel.drive import DriveMount, DriveQuery
+from vercel.drives import DriveMount, DriveQuery
 from vercel.sandbox._internal.byte_reader import SyncByteReader, _sync_byte_readers
 from vercel.sandbox._internal.errors import (
     SandboxApiError,
@@ -460,7 +460,7 @@ class SyncDrive(DriveHandleBase):
     """Operate synchronously on a project-local persistent Drive.
 
     .. deprecated::
-        Use ``vercel.drive.sync.SyncDrive``, which sandbox mounts accept.
+        Use ``vercel.drives.sync.SyncDrive``, which sandbox mounts accept.
     """
 
     __slots__ = ("_service",)
@@ -477,10 +477,10 @@ class SyncDrive(DriveHandleBase):
         (404) and conflicting or uninitialized Drives (409).
 
         .. deprecated::
-            Use ``vercel.drive.sync.SyncDrive.fork()``.
+            Use ``vercel.drives.sync.SyncDrive.fork()``.
         """
         warn_drive_deprecated(
-            "vercel.sandbox.sync.SyncDrive.fork", "vercel.drive.sync.SyncDrive.fork"
+            "vercel.sandbox.sync.SyncDrive.fork", "vercel.drives.sync.SyncDrive.fork"
         )
         return fork_drive(self._service, source=self.name, name=name)
 
@@ -488,10 +488,10 @@ class SyncDrive(DriveHandleBase):
         """Return a read-only snapshot mount for this Drive.
 
         .. deprecated::
-            Use ``vercel.drive.sync.SyncDrive.snapshot()``.
+            Use ``vercel.drives.sync.SyncDrive.snapshot()``.
         """
         warn_drive_deprecated(
-            "vercel.sandbox.sync.SyncDrive.snapshot", "vercel.drive.sync.SyncDrive.snapshot"
+            "vercel.sandbox.sync.SyncDrive.snapshot", "vercel.drives.sync.SyncDrive.snapshot"
         )
         return DriveMount(self, mode="snapshot")
 
@@ -502,10 +502,10 @@ class SyncDrive(DriveHandleBase):
         Drive, this method deletes that replacement and updates this handle to it.
 
         .. deprecated::
-            Use ``vercel.drive.sync.SyncDrive.delete()``.
+            Use ``vercel.drives.sync.SyncDrive.delete()``.
         """
         warn_drive_deprecated(
-            "vercel.sandbox.sync.SyncDrive.delete", "vercel.drive.sync.SyncDrive.delete"
+            "vercel.sandbox.sync.SyncDrive.delete", "vercel.drives.sync.SyncDrive.delete"
         )
         payload = iter_coroutine(self._service.delete_drive(name=self.name))
         self._apply_payload(payload)

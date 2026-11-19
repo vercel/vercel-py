@@ -3,7 +3,7 @@ requires = ["hatchling>=1.27.0,<2"]
 build-backend = "hatchling.build"
 
 [project]
-name = "vercel-drive"
+name = "vercel-drives"
 dynamic = ["version", "dependencies"]
 description = "Python SDK for Vercel Drives"
 readme = "README.md"
@@ -33,13 +33,13 @@ vercel-internal-core = { workspace = true }
 vercel-oidc = { workspace = true }
 
 [tool.hatch.version]
-path = "vercel/drive/version.py"
+path = "vercel/drives/version.py"
 
 [tool.hatch.build.targets.sdist]
 force-include = { "../../scripts/hatch_build.py" = "/_vercel_hatch_build.py" }
 include = [
-    "/vercel/drive/**/*.py",
-    "/vercel/drive/py.typed",
+    "/vercel/drives/**/*.py",
+    "/vercel/drives/py.typed",
     "/README.md",
     "/pyproject.toml",
     "/hatch_build.py",
@@ -49,7 +49,7 @@ exclude = ["/**/__pycache__"]
 
 [tool.hatch.build.targets.wheel]
 dev-mode-dirs = ["."]
-only-include = ["/vercel/drive"]
+only-include = ["/vercel/drives"]
 exclude = ["/**/__pycache__"]
 
 [tool.pytest.ini_options]
@@ -64,9 +64,9 @@ include = "../../scripts/poe/poe.toml"
 verbosity = -1
 
 [tool.mypy]
-cache_dir = "../../.mypy_cache/vercel-drive"
+cache_dir = "../../.mypy_cache/vercel-drives"
 explicit_package_bases = true
-packages = ["vercel.drive"]
+packages = ["vercel.drives"]
 
 [tool.poe.tasks.typecheck]
 cmd = "$MYPY"

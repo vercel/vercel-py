@@ -7,8 +7,8 @@ from typing import Any, Protocol
 from vercel._internal.core.http import DEFAULT_API_BASE_URL
 from vercel._internal.core.options import ServiceOptions
 from vercel._internal.core.region import RegionInput
-from vercel.drive._internal.errors import DriveCredentialsError
-from vercel.drive._internal.models import DriveValueModel
+from vercel.drives._internal.errors import DriveCredentialsError
+from vercel.drives._internal.models import DriveValueModel
 
 DEFAULT_DRIVE_API_BASE_URL = DEFAULT_API_BASE_URL
 """The Vercel API endpoint that serves Drives."""
@@ -72,7 +72,7 @@ class _DriveServiceOptionsKey(ServiceOptions):
 
 
 class DriveServiceOptions(DriveValueModel, _DriveServiceOptionsKey):
-    """Configuration for `vercel.drive` calls in an SDK session.
+    """Configuration for `vercel.drives` calls in an SDK session.
 
     A session that does not receive this option still constructs one with the
     default API base URL and credential resolver. Supplying the option
@@ -118,7 +118,7 @@ class DriveServiceOptions(DriveValueModel, _DriveServiceOptionsKey):
 
 
 class SyncDriveServiceOptions(DriveValueModel, _DriveServiceOptionsKey):
-    """Configuration for `vercel.drive.sync` calls in an SDK session.
+    """Configuration for `vercel.drives.sync` calls in an SDK session.
 
     Fields have the same meaning as in `DriveServiceOptions`, except that
     `credentials_factory` is a plain callable, which may block.

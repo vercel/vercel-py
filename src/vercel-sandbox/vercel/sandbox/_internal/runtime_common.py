@@ -325,7 +325,7 @@ class _ProcessStartHook(Generic[_ProcessHandleT]):
 
 
 def warn_drive_deprecated(legacy: str, replacement: str) -> None:
-    """Warn that a Sandbox Drive entry point is superseded by ``vercel-drive``."""
+    """Warn that a Sandbox Drive entry point is superseded by ``vercel-drives``."""
     warnings.warn(
         f"{legacy}() is deprecated; use {replacement}() instead",
         DeprecationWarning,

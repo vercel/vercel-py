@@ -9,9 +9,9 @@ import pytest
 from conftest import DRIVES_URL, SCOPE, DriveApi, drive_json
 
 import vendor.respx as respx
-from vercel import drive
+from vercel import drives
 from vercel.api import session
-from vercel.drive import (
+from vercel.drives import (
     CURRENT_REGION,
     DEFAULT_DRIVE_API_BASE_URL,
     DriveApiError,
@@ -24,7 +24,7 @@ from vercel.drive import (
     DriveResponseError,
     DriveServiceOptions,
     RegionInput,
-    sync as drive_sync,
+    sync as drives_sync,
 )
 from vercel.errors import VercelError
 
@@ -72,7 +72,7 @@ async def test_get_or_create_returns_the_drive_and_whether_it_was_created(
 
     request = route.calls.last.request
     assert request.headers["authorization"] == "Bearer token"
-    assert request.headers["user-agent"].startswith("vercel-drive/")
+    assert request.headers["user-agent"].startswith("vercel-drives/")
     assert dict(request.url.params) == {"teamId": "team_123"}
     assert json.loads(request.content) == {
         "projectId": "prj_123",
@@ -373,10 +373,10 @@ async def test_missing_credentials_raise_before_any_request(api: DriveApi) -> No
 def test_async_options_do_not_configure_a_sync_session(mock_env_clear: None) -> None:
     with session(service_options=[DriveServiceOptions()]):
         with pytest.raises(VercelError, match="use SyncDriveServiceOptions"):
-            drive_sync.get_drive(name_or_id="cache")
+            drives_sync.get_drive(name_or_id="cache")
 
 
-@pytest.mark.parametrize("module", [drive, drive_sync])
+@pytest.mark.parametrize("module", [drives, drives_sync])
 def test_drive_mount_serializes_a_handle_or_name_as_the_drive_name(module: Any) -> None:
     class Handle:
         name = "cache"

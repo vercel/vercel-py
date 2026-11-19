@@ -5,7 +5,7 @@ from collections.abc import Awaitable, Callable
 from typing import TypeVar
 
 from vercel._internal.core.http._compat import transport_errors
-from vercel.drive._internal.errors import DriveApiError
+from vercel.drives._internal.errors import DriveApiError
 
 AsyncSleep = Callable[[float], Awaitable[None]]
 _ResultT = TypeVar("_ResultT")
