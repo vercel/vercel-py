@@ -28,6 +28,12 @@ A firing runs its job the way a stock executor would, inside the schedule's requ
 
 [[integrations/vercel-apscheduler/vercel/integrations/apscheduler/_jobs.py#fire]] skips a minute the trigger doesn't run in and a run later than an explicit `misfire_grace_time`. Without one, a job runs however late its firing arrives, because the integration defaults the grace to `None`: stock APScheduler's one-second grace would skip most firings, which arrive up to about a minute late. A firing scheduled off the minute was invoked by hand, so it runs the job at once. `max_instances` counts runs in the function instance, and trigger jitter becomes a sleep before the run. Coroutine jobs run on the event loop and other jobs in a worker thread, and listeners receive executed, error, missed and max-instances events. A job that raises fails the firing.
 
+## Pausing and resuming
+
+`pause()`, `resume()`, `pause_job()` and `resume_job()` disable and enable the deployment's schedules through the Schedules API, which keeps the state across deployments.
+
+[[integrations/vercel-apscheduler/vercel/integrations/apscheduler/_lifecycle.py#pause]] and its siblings call the sync API, since APScheduler's methods are sync. A web function doesn't know which service deploys a scheduler, so [[integrations/vercel-apscheduler/vercel/integrations/apscheduler/_lifecycle.py#_deployed_names]] lists the deployment's static schedules and picks the one targeting a service function whose name is that service followed by the job id. A job no schedule runs, or one that two services deploy, raises. Each call is idempotent, so a call that fails partway through can be repeated.
+
 ## Fixed jobs
 
 A deployment's schedules come from code, so the scheduler can't change jobs at runtime.

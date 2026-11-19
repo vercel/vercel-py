@@ -47,6 +47,7 @@ extend = "../ruff.toml"
 ]
 
 [tool.pytest.ini_options]
+pythonpath = [".", "../.."]
 addopts = "--no-header --capture=tee-sys"
 asyncio_mode = "auto"
 testpaths = ["tests"]
@@ -84,3 +85,7 @@ exclude = [
 [tool.poe]
 include = "../../scripts/poe/poe.toml"
 verbosity = -1
+
+[tool.ty.environment]
+# Tests import the vendored respx from the workspace root.
+extra-paths = ["../.."]

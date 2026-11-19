@@ -19,6 +19,7 @@ from ._imports import (
     undefined,
 )
 from ._jobs import declare, in_firing
+from ._lifecycle import pause, pause_job, resume, resume_job
 from ._triggers import EPOCH
 
 __all__ = ["install_vercel_apscheduler_integration"]
@@ -38,6 +39,8 @@ def install_vercel_apscheduler_integration() -> None:
     it, each job a scheduler adds deploys as a schedule named after the job's
     id, and runs when that schedule fires. The scheduler itself never starts:
     `start()` and `shutdown()` do nothing, and jobs can't change at runtime.
+    `pause()`, `resume()`, `pause_job()` and `resume_job()` disable and enable
+    the deployment's schedules.
     """
     if _originals:
         return
@@ -47,6 +50,10 @@ def install_vercel_apscheduler_integration() -> None:
     _patch(BaseScheduler, "add_jobstore", _add_jobstore)
     for name in _IMMUTABLE:
         _patch(BaseScheduler, name, _immutable(name))
+    _patch(BaseScheduler, "pause", _scheduler_lifecycle(pause))
+    _patch(BaseScheduler, "resume", _scheduler_lifecycle(resume))
+    _patch(BaseScheduler, "pause_job", _job_lifecycle(pause_job))
+    _patch(BaseScheduler, "resume_job", _job_lifecycle(resume_job))
     _patch(IntervalTrigger, "__init__", _interval_init)
     _patch(DateTrigger, "__init__", _date_init)
     if CalendarIntervalTrigger is not None:
@@ -159,6 +166,31 @@ def _immutable(name: str) -> Callable[[Any], Any]:
                 f"{name}() can't change a job: each job deploys as a Vercel schedule, so "
                 "change its declaration and deploy"
             )
+
+        return method
+
+    return make
+
+
+def _scheduler_lifecycle(change: Callable[[BaseScheduler], None]) -> Callable[[Any], Any]:
+    def make(original: Any) -> Any:
+        del original
+
+        def method(self: BaseScheduler) -> None:
+            change(self)
+
+        return method
+
+    return make
+
+
+def _job_lifecycle(change: Callable[[BaseScheduler, str], Any]) -> Callable[[Any], Any]:
+    def make(original: Any) -> Any:
+        del original
+
+        def method(self: BaseScheduler, job_id: str, jobstore: str | None = None) -> Any:
+            del jobstore
+            return change(self, job_id)
 
         return method
 
