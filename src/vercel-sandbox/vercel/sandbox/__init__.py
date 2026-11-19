@@ -169,7 +169,7 @@ def create_sandbox(
         name: Requested sandbox name. The service generates one when omitted.
         image: Vercel Container Registry image reference. The backend validates
             and resolves the reference.
-        architecture: CPU architecture of the sandbox, ``"amd64"`` or ``"arm64"``.
+        architecture: CPU architecture of the sandbox. The service chooses one when omitted.
         source: Git, tarball, or snapshot source used to initialize the sandbox.
         ports: Ports to expose from the sandbox.
         execution_time_limit: Maximum session runtime in seconds or as a
@@ -348,7 +348,7 @@ async def get_or_create_sandbox(
         include_system_routes: Whether to include platform-managed routes.
         image: Vercel Container Registry image reference. The backend validates
             and resolves the reference.
-        architecture: CPU architecture of the sandbox, ``"amd64"`` or ``"arm64"``.
+        architecture: CPU architecture of the sandbox. The service chooses one when omitted.
         source: Git, tarball, or snapshot source used to initialize the sandbox.
         ports: Ports to expose from the sandbox.
         execution_time_limit: Maximum session runtime in seconds or as a

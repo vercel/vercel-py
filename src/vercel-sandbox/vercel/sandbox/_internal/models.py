@@ -985,7 +985,11 @@ class SandboxResources(_InputModel):
     memory: int | None = None
 
 
-SandboxArchitecture: TypeAlias = Literal["amd64", "arm64"]
+class SandboxArchitecture(StrEnum):
+    """CPU architecture a sandbox runs on."""
+
+    AMD64 = "amd64"
+    ARM64 = "arm64"
 
 
 class SandboxManagedCredentials(_InputModel):

@@ -579,7 +579,7 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
     async with session(service_options=_session_options(project_id="prj_other")):
         handle = await sandbox.create_sandbox(
             name="preview",
-            architecture="arm64",
+            architecture=sandbox.SandboxArchitecture.ARM64,
             source=GitSource(
                 url="https://github.com/vercel/vercel-py",
                 revision="main",
@@ -1921,7 +1921,10 @@ def test_sync_create_sandbox_serializes_image_without_runtime(mock_env_clear: No
 
     with session(service_options=_session_options()):
         handle = sandbox_sync.create_sandbox(
-            name="preview", image=image, architecture="arm64", network_id="network_123"
+            name="preview",
+            image=image,
+            architecture=sandbox_sync.SandboxArchitecture.ARM64,
+            network_id="network_123",
         )
 
     assert json.loads(route.calls.last.request.content) == {
@@ -2534,7 +2537,7 @@ async def test_async_get_or_create_returns_existing_or_created_sandbox(
         )
         created, was_created = await sandbox.get_or_create_sandbox(
             name="missing",
-            architecture="arm64",
+            architecture=sandbox.SandboxArchitecture.ARM64,
             persistent=True,
             credentials=sandbox.SandboxManagedCredentials(npm=True),
             tags={"purpose": "test"},
@@ -2740,7 +2743,7 @@ def test_sync_get_or_create_defaults_to_resume_and_returns_created_flag(
         created, was_created = sandbox_sync.get_or_create_sandbox(
             name="missing",
             image="missing-repository:latest",
-            architecture="arm64",
+            architecture=sandbox_sync.SandboxArchitecture.ARM64,
             credentials=sandbox_sync.SandboxManagedCredentials(npm=True),
         )
 
