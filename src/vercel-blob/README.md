@@ -64,9 +64,12 @@ finally:
 | `query_blob_entries` | Optional directory prefix, page size, and starting cursor | Iterator of `ListBlob \| BlobPrefix` at one directory level |
 | `copy_blob` | Source pathname or Blob delivery URL, destination pathname, required `access` | `CopyResult` from the copy response |
 | `multipart_upload_blob` | Pathname, required `access`, upload options | Context yielding a sequential part uploader; `result: PutResult` after successful exit |
+| `issue_blob_signed_token` | Optional pathname, operations, expiry, and upload limits | `BlobSignedToken` for presigning URLs |
+| `presign_blob_url` | `BlobSignedToken`, pathname, operation, per-URL options | Presigned URL `str`, signed locally |
 
-`put_blob`, `get_blob`, `head_blob`, `copy_blob`, and `delete_blob` are awaited in
-the async API. Iterate over `query_blobs` or `query_blob_entries` with `async for`,
+`put_blob`, `get_blob`, `head_blob`, `copy_blob`, `delete_blob`, and
+`issue_blob_signed_token` are awaited in the async API; `presign_blob_url` sends
+no request and is an ordinary call in both APIs. Iterate over `query_blobs` or `query_blob_entries` with `async for`,
 without awaiting the call. Enter
 `stream_blob` with `async with`. The sync API uses ordinary calls, iterates over
 `query_blobs` with `for`, and enters `stream_blob` with `with`.
@@ -330,6 +333,50 @@ object's ETag. Invalid sizes and batch preconditions fail locally.
 For synchronous usage, iterate over `blob.sync.query_blobs` and call `blob.sync.copy_blob` and
 `blob.sync.delete_blob` without `await`. The package examples exercise cursor
 pagination, conditional copy, and batch cleanup in both runtimes.
+
+### Presigned URLs
+
+A presigned URL lets a client without Blob credentials perform one operation on
+one pathname until it expires. Issue a signed token on the server with the
+session's credentials, then sign URLs from it locally:
+
+```python
+from datetime import timedelta
+
+from vercel import blob
+
+async def share(pathname: str) -> tuple[str, str]:
+	token = await blob.issue_blob_signed_token(
+		pathname=pathname,
+		operations=["get", "put"],
+		expires_in=timedelta(hours=1),
+		allowed_content_types=["image/*"],
+	)
+	download = blob.presign_blob_url(
+		token, pathname, operation="get", access="private", expires_in=300
+	)
+	upload = blob.presign_blob_url(
+		token, pathname, operation="put", allowed_content_types=["image/png"]
+	)
+	return download, upload
+```
+
+The token's scope is the ceiling for every URL signed from it: the pathname
+(omit it or pass `"*"` for any), the allowed operations, the expiry, and the
+upload size and content-type limits. `presign_blob_url` checks a request against
+that scope before signing and can narrow it, but never widen it. A URL expires
+with its token unless `expires_in` is shorter.
+
+`get` and `head` URLs point at the delivery host and require `access`; pass
+`use_cache=False` to bypass the cache for private reads. `put` and `delete` URLs
+point at the Blob API. Upload options such as `maximum_size_in_bytes`,
+`allow_overwrite`, `ttl_days`, and `callback_url` apply only to `put`, and
+`if_match` applies to `put` and `delete`. The URL carries these options in its
+signature, so the client cannot change them.
+
+`BlobSignedToken.client_signing_token` can sign any URL within the token's
+scope. Keep it on the server and hand out only presigned URLs. Signatures match
+the TypeScript SDK's `presignUrl`.
 
 ### Downloads and ownership
 

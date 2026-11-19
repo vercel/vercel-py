@@ -31,6 +31,7 @@ from vercel._internal.core.http import (
     StreamingResponse,
 )
 from vercel._internal.core.http._compat import http_errors
+from vercel._internal.core.time import from_epoch_ms
 from vercel.blob.errors import (
     BlobAccessError,
     BlobContentTypeNotAllowedError,
@@ -50,10 +51,12 @@ from vercel.blob.models import (
     Access,
     BlobCredentials,
     BlobPrefix,
+    BlobSignedToken,
     CopyResult,
     DownloadMetadata,
     HeadResult,
     ListBlob,
+    PresignOperation,
     PutResult,
 )
 
@@ -195,6 +198,31 @@ class _FoldedListResponse(_ListResponse):
 
 class _DeleteRequest(_ApiModel):
     urls: list[str]
+
+
+class _SignedTokenRequest(_ApiModel):
+    pathname: str | None = None
+    operations: list[PresignOperation] | None = None
+    valid_until: int | None = Field(default=None, serialization_alias="validUntil")
+    maximum_size_in_bytes: int | None = Field(
+        default=None, serialization_alias="maximumSizeInBytes"
+    )
+    allowed_content_types: list[str] | None = Field(
+        default=None, serialization_alias="allowedContentTypes"
+    )
+
+
+class _SignedTokenResponse(_ApiModel):
+    delegation_token: str = Field(alias="delegationToken", min_length=1)
+    client_signing_token: str = Field(alias="clientSigningToken", min_length=1)
+    valid_until: int | float = Field(alias="validUntil")
+
+    def _to_result(self) -> BlobSignedToken:
+        return BlobSignedToken(
+            delegation_token=self.delegation_token,
+            client_signing_token=self.client_signing_token,
+            valid_until=from_epoch_ms(self.valid_until),
+        )
 
 
 class _MultipartCreated(_ApiModel):
@@ -438,6 +466,10 @@ class BlobApiClient:
         self._base_url = base_url.rstrip("/")
         self._transport = transport
 
+    @property
+    def base_url(self) -> str:
+        return self._base_url
+
     @staticmethod
     def _headers(credentials: BlobCredentials | None) -> dict[str, str]:
         headers = {"x-api-version": "12"}
@@ -634,6 +666,17 @@ class BlobApiClient:
             body=JSONBody(request.model_dump()),
             headers={"x-if-match": if_match} if if_match is not None else None,
         )
+
+    async def issue_signed_token(
+        self, request: _SignedTokenRequest, *, credentials: BlobCredentials
+    ) -> BlobSignedToken:
+        response = await self._request(
+            "POST",
+            "/signed-token",
+            credentials=credentials,
+            body=JSONBody(request.model_dump(by_alias=True, exclude_none=True)),
+        )
+        return _parse_response(response, _SignedTokenResponse, "signed token")._to_result()
 
     async def open_download(
         self, url: str, *, credentials: BlobCredentials | None

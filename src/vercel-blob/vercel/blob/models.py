@@ -11,6 +11,7 @@ from typing import Any, Literal, Protocol, TypeAlias
 from vercel._internal.core.byte_stream import AsyncByteReader, SyncByteReader
 
 Access: TypeAlias = Literal["public", "private"]
+PresignOperation: TypeAlias = Literal["get", "head", "put", "delete"]
 
 PutBody: TypeAlias = AsyncByteReader | AsyncIterable[bytes]
 SyncPutBody: TypeAlias = SyncByteReader | Iterable[bytes]
@@ -38,6 +39,24 @@ BlobCredentialsFactory: TypeAlias = (
 
 class SyncBlobCredentialsFactory(Protocol):
     def __call__(self) -> BlobCredentials: ...
+
+
+@dataclass(frozen=True, slots=True)
+class BlobSignedToken:
+    """Delegated, scoped Blob access issued by the API for presigning URLs.
+
+    ``client_signing_token`` signs URLs and must stay on the server.
+    """
+
+    delegation_token: str
+    client_signing_token: str
+    valid_until: datetime
+
+    def __repr__(self) -> str:
+        return (
+            f"BlobSignedToken(delegation_token={self.delegation_token!r}, "
+            f"client_signing_token='***', valid_until={self.valid_until!r})"
+        )
 
 
 @dataclass(frozen=True, slots=True)
