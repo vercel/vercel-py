@@ -106,7 +106,6 @@ def classify_run_error(error: Exception) -> str:
 
 @dataclasses.dataclass(kw_only=True, frozen=True)
 class _EventCreationContext:
-    task_group: anyio.abc.TaskGroup
     world: w.World
     run_id: str
     queue_name: str
@@ -129,7 +128,7 @@ class BaseSuspension(abc.ABC):
             return None
         return ctx
 
-    def create_event(self, context: _EventCreationContext) -> bool:
+    def create_event(self, tg: anyio.abc.TaskGroup, context: _EventCreationContext) -> bool:
         return False
 
 
@@ -141,10 +140,10 @@ class FutureSuspension(BaseSuspension, Generic[T]):
     async def _create_event(self, context: _EventCreationContext) -> None:
         """Persist this suspension's event outside the workflow replay loop."""
 
-    def create_event(self, context: _EventCreationContext) -> bool:
+    def create_event(self, tg: anyio.abc.TaskGroup, context: _EventCreationContext) -> bool:
         if self.has_created_event:
             return False
-        context.task_group.start_soon(self._create_event, context)
+        tg.start_soon(self._create_event, context)
         return True
 
     def set_result(self, result: T) -> None:
@@ -2009,16 +2008,15 @@ async def _workflow_replay_pass(
         return None
 
     events_created, immediate_replay_reasons = await _flush_hook_lifecycle_events(context)
+    event_context = _EventCreationContext(
+        world=world,
+        run_id=run_id,
+        queue_name=w.get_queue_name(workflow_run.workflow_name, namespace),
+        immediate_replay_reasons=immediate_replay_reasons,
+    )
     async with anyio.create_task_group() as tg:
-        event_context = _EventCreationContext(
-            task_group=tg,
-            world=world,
-            run_id=run_id,
-            queue_name=w.get_queue_name(workflow_run.workflow_name, namespace),
-            immediate_replay_reasons=immediate_replay_reasons,
-        )
         for sus in context.suspensions.values():
-            if sus.create_event(event_context):
+            if sus.create_event(tg, event_context):
                 events_created = True
 
     if not context.suspensions and events_created:
