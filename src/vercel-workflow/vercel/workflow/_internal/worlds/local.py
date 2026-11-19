@@ -990,7 +990,7 @@ class LocalWorld(w.World):
         # Idempotent for a run already running: the runtime issues `run_started`
         # on every delivery, so appending one per replay would be unbounded.
         if data.event_type == "run_started" and current_run and current_run.status == "running":
-            return w.EventResult(run=current_run)
+            return self._with_started_preload(effective_run_id, w.EventResult(run=current_run))
 
         stored = data.model_dump()
         # `eventData` is transport for the resilient path above; it belongs to
@@ -1328,10 +1328,24 @@ class LocalWorld(w.World):
         event_path = self._event_path(effective_run_id, event_id)
         write_json(event_path, event_record(event))
 
-        return w.EventResult(
+        result = w.EventResult(
             event=event,
             run=run,
             step=step,
+        )
+        if data.event_type == "run_started":
+            return self._with_started_preload(effective_run_id, result)
+        return result
+
+    def _with_started_preload(self, run_id: str, result: w.EventResult) -> w.EventResult:
+        page = self._list_run_events(run_id)
+        return result.model_copy(
+            update={
+                "events": page.data,
+                "cursor": page.cursor,
+                "has_more": page.has_more,
+                "max_events": w.get_max_events_per_run(),
+            }
         )
 
     def write_manifest(self, manifest: dict[str, Any]) -> pathlib.Path | None:
@@ -1504,6 +1518,11 @@ class LocalWorld(w.World):
         run_id: str,
         *,
         pagination: w.PaginationOptions | None = None,
+    ) -> w.PaginatedResult[w.Event]:
+        return self._list_run_events(run_id, pagination=pagination)
+
+    def _list_run_events(
+        self, run_id: str, *, pagination: w.PaginationOptions | None = None
     ) -> w.PaginatedResult[w.Event]:
         pagination = pagination or w.PaginationOptions()
         desc = pagination.sort_order == "desc"

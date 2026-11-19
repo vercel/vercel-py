@@ -53,6 +53,14 @@ Vercel event listings consume v4 binary frames and preserve validated events whe
 
 [[src/vercel-workflow/vercel/workflow/_internal/worlds/vercel.py#VercelWorld#events_list]] translates an omitted limit to the service's full-log query, while explicit limits retain single-page behavior. Only interrupted full reads with cursor progress resume after the last validated event, at most twice. Schema and control-frame errors propagate without resuming. Responses close on success, failure, and cancellation. [[src/vercel-workflow/tests/unit/test_workflow_event_frames.py]] verifies framing, query translation, opaque payloads, recovery, retry bounds, and cleanup.
 
+### Replay preloading
+
+The first replay pass can use the event log returned by run_started, avoiding a separate initial listing.
+
+[[src/vercel-workflow/vercel/workflow/_internal/worlds/vercel.py#VercelWorld#_create_run_started]] sends a v4 frame and reconstructs the run from lifecycle and attribute events without hydrating payloads. Interrupted or bounded POST responses continue through GETs after the accepted prefix; the write is not resent to fetch the remainder. The service ceiling is carried in [[src/vercel-workflow/vercel/workflow/_internal/world.py#EventResult]].
+
+[[src/vercel-workflow/vercel/workflow/_internal/worlds/local.py#LocalWorld#_with_started_preload]] returns a bounded preload for both new and idempotently retried starts. [[src/vercel-workflow/vercel/workflow/_internal/runtime.py#get_all_workflow_run_events]] follows partial preloads and retains the fallback for custom Worlds without complete page metadata. [[src/vercel-workflow/vercel/workflow/_internal/runtime.py#workflow_handler]] uses its preload once, so an immediate replay observes newly committed events. [[src/vercel-workflow/tests/unit/test_workflow_event_preload.py]] covers wire reconstruction, POST recovery, local preloads, and fallback.
+
 ### HTTP request retries
 
 The Vercel world retries safe Workflow API requests after transport failures so a brief network interruption can recover within the current call.

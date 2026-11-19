@@ -23,7 +23,7 @@ from vercel.headers import REQUEST_ID_HEADER_NAME, get_headers
 from vercel.oidc import VercelOidcTokenError
 from vercel.oidc.aio import get_vercel_oidc_token
 
-from .. import encryption, ulid, world as w
+from .. import attributes as attrs, encryption, ulid, world as w
 from . import event_frames
 
 MAX_DELAY_SECONDS = float(
@@ -864,6 +864,8 @@ class VercelWorld(w.World):
             raise
 
     async def events_create(self, run_id: str | None, data: w.Event) -> w.EventResult:
+        if isinstance(data, w.RunStartedEvent) and run_id is not None:
+            return await self._create_run_started(run_id, data)
         run_id_path = "null" if run_id is None else run_id
         remote_ref_behavior = "resolve" if data.event_type in _EVENTS_NEEDING_RESOLVE else "lazy"
         body = data.model_dump() | {"remoteRefBehavior": remote_ref_behavior}
@@ -908,6 +910,107 @@ class VercelWorld(w.World):
             ):
                 raise w.HookNotFoundError(hook_id=correlation_id) from err
             raise
+
+    async def _create_run_started(self, run_id: str, data: w.RunStartedEvent) -> w.EventResult:
+        meta = data.model_dump(exclude={"event_data"})
+        fields = data.event_data.model_dump(exclude_none=True) if data.event_data else {}
+        payload = fields.pop("input", b"")
+        if not isinstance(payload, bytes):
+            raise TypeError("run_started input must be encoded bytes")
+        meta.update(fields)
+        meta["remoteRefBehavior"] = "resolve"
+        if (request_id := _vercel_request_id()) is not None:
+            meta["vercelId"] = request_id
+        headers = await self._auth_headers()
+        headers["Accept"] = event_frames.CONTENT_TYPE
+        headers["Content-Type"] = "application/octet-stream"
+        headers["X-Request-Time"] = datetime.datetime.now(UTC).isoformat()
+        endpoint = f"/v4/runs/{_quote(run_id)}/events/run_started"
+        events: list[w.Event] = []
+        async with httpx.AsyncClient(base_url=self._base_url, headers=headers) as client:
+            response = await self._send_frame_request(
+                client, "POST", endpoint, content=event_frames.encode_frame(meta, payload)
+            )
+            try:
+                try:
+                    max_events = int(response.headers.get("x-wf-max-events", ""))
+                    if max_events <= 0:
+                        raise ValueError
+                except ValueError as error:
+                    raise w.WorkflowWorldError(
+                        "Invalid run_started max-events header", status=0, code="SCHEMA_VALIDATION"
+                    ) from error
+                try:
+                    end = await self._consume_event_response(response, events)
+                    cursor, has_more = end.next, end.has_more
+                except (event_frames.IncompleteFrameError, httpx.TransportError):
+                    last = events[-1].server_props if events else None
+                    if last is None:
+                        raise
+                    cursor, has_more = f"eid:{last.event_id}", True
+            finally:
+                with anyio.CancelScope(shield=True):
+                    await response.aclose()
+
+        # The POST has committed. Complete a partial response with safe GETs,
+        # never by re-sending the write merely to obtain its replay log.
+        requested: set[str] = set()
+        while has_more:
+            if not cursor or cursor in requested:
+                raise w.WorkflowWorldError(
+                    "run_started preload did not advance cursor",
+                    status=0,
+                    code="WORLD_CONTRACT_ERROR",
+                )
+            requested.add(cursor)
+            page = await self.events_list(
+                run_id, pagination=w.PaginationOptions(cursor=cursor, sort_order="asc")
+            )
+            events.extend(page.data)
+            cursor, has_more = page.cursor, page.has_more
+
+        created = next((event for event in events if isinstance(event, w.RunCreatedEvent)), None)
+        started = next((event for event in events if isinstance(event, w.RunStartedEvent)), None)
+        if (
+            created is None
+            or started is None
+            or created.server_props is None
+            or started.server_props is None
+        ):
+            raise w.WorkflowWorldError(
+                "run_started preload missing lifecycle events", status=0, code="SCHEMA_VALIDATION"
+            )
+        attributes = dict(created.event_data.attributes or {})
+        updated_at = started.server_props.created_at
+        for event in events:
+            if isinstance(event, w.AttrSetEvent):
+                attributes = attrs.apply_attribute_changes(
+                    attributes, ((change.key, change.value) for change in event.event_data.changes)
+                )
+                assert event.server_props is not None
+                updated_at = event.server_props.created_at
+        run = w.NonFinalWorkflowRun(
+            run_id=created.server_props.run_id,
+            status="running",
+            spec_version=created.spec_version,
+            deployment_id=created.event_data.deployment_id,
+            workflow_name=created.event_data.workflow_name,
+            input=created.event_data.input,
+            execution_context=created.event_data.execution_context,
+            attributes=attributes,
+            encryption_public_key=created.event_data.encryption_public_key,
+            started_at=started.server_props.created_at,
+            created_at=created.server_props.created_at,
+            updated_at=updated_at,
+        )
+        return w.EventResult(
+            event=started,
+            run=run,
+            events=events,
+            cursor=cursor,
+            has_more=has_more,
+            max_events=max_events,
+        )
 
     async def events_list(
         self,

@@ -250,6 +250,64 @@ async def test_setup_takes_the_run_entity_from_the_response(registry: core.Workf
     assert fake.events_list_calls == [RUN_ID]
 
 
+async def test_handler_consumes_the_preload_only_on_its_first_pass(registry, monkeypatch):
+    fake = FakeWorld()
+    w.set_world(fake)
+    passes = []
+
+    async def replay(**kwargs):
+        passes.append(kwargs["preloaded"])
+        return runtime._REPLAY_IMMEDIATELY if len(passes) == 1 else None
+
+    monkeypatch.setattr(runtime, "_workflow_replay_pass", replay)
+    await _invoke(registry)
+
+    assert isinstance(passes[0], w.EventResult)
+    assert passes[0].run is fake.started_run
+    assert passes[1] is None
+
+
+async def test_complete_empty_preload_skips_listing(registry, monkeypatch):
+    fake = FakeWorld()
+    w.set_world(fake)
+    original = fake.events_create
+
+    async def create(run_id, data):
+        result = await original(run_id, data)
+        if isinstance(data, w.RunStartedEvent):
+            result.events = []
+            result.has_more = False
+        return result
+
+    monkeypatch.setattr(fake, "events_create", create)
+    await _invoke(registry)
+    assert fake.events_list_calls == []
+
+
+async def test_terminal_preload_stops_before_replay_or_hook_writes(registry):
+    fake = FakeWorld()
+    w.set_world(fake)
+    result = await runtime._workflow_replay_pass(
+        req=w.WorkflowInvokePayload(run_id=RUN_ID),
+        workflow_run=_run(),
+        workflow_started_at=int(NOW.timestamp() * 1000),
+        registry=registry,
+        namespace=None,
+        preloaded=w.EventResult(
+            events=[
+                w.RunCancelledEvent(
+                    server_props=w.ServerProps(
+                        run_id=RUN_ID, event_id="evnt_terminal", created_at=NOW
+                    )
+                )
+            ],
+            has_more=False,
+            cursor="eid:evnt_terminal",
+        ),
+    )
+    assert result is None and fake.events == [] and fake.events_list_calls == []
+
+
 async def test_started_at_comes_from_the_response(registry: core.Workflows) -> None:
     """The missing-timestamp check reads the response entity, so this pins where
     the handler gets the run from."""

@@ -1651,6 +1651,7 @@ async def workflow_handler(
         # Workflow has already completed or failed, so we can skip it
         return None
 
+    preloaded: w.EventResult | None = result
     while True:
         replay_result = await _workflow_replay_pass(
             req=req,
@@ -1658,7 +1659,9 @@ async def workflow_handler(
             workflow_started_at=workflow_started_at,
             registry=registry,
             namespace=namespace,
+            preloaded=preloaded,
         )
+        preloaded = None
         if not isinstance(replay_result, _ReplayImmediately):
             return replay_result
 
@@ -1800,14 +1803,17 @@ async def _workflow_replay_pass(
     workflow_started_at: int,
     registry: core.Workflows,
     namespace: str | None,
+    preloaded: w.EventResult | None = None,
 ) -> w.QueueContinuation | _ReplayImmediately | None:
     world = w.get_world()
     run_id = req.run_id
 
     # Load all events into memory before running
-    loaded = await get_all_workflow_run_events(run_id)
+    loaded = await get_all_workflow_run_events(run_id, preloaded=preloaded)
     events = loaded.events
     events_cursor = loaded.cursor
+    if _has_terminal_run_event(events, run_id):
+        return None
 
     # This message carries a hook payload whose event may not exist yet, so write
     # it before replaying.
@@ -2552,11 +2558,23 @@ class _LoadedEvents:
 
 
 async def get_all_workflow_run_events(
-    run_id: str, *, after_cursor: str | None = None
+    run_id: str, *, after_cursor: str | None = None, preloaded: w.EventResult | None = None
 ) -> _LoadedEvents:
     all_events: list[w.Event] = []
     cursor: str | None = after_cursor
     has_more = True
+
+    # Older custom Worlds may omit the page flags: retain their full-load path.
+    if preloaded is not None and preloaded.events is not None and preloaded.has_more is not None:
+        all_events.extend(event for event in preloaded.events if event.event_type != "noop")
+        cursor = preloaded.cursor
+        has_more = preloaded.has_more
+        if has_more and not cursor:
+            raise w.WorkflowWorldError(
+                "Preloaded events have more events but no cursor",
+                status=0,
+                code="WORLD_CONTRACT_ERROR",
+            )
 
     world = w.get_world()
     requested_cursors: set[str | None] = set()
