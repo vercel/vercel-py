@@ -45,6 +45,14 @@ Replay reads request the remaining event log and follow continuation pages when 
 
 [[src/vercel-workflow/vercel/workflow/_internal/runtime.py#get_all_workflow_run_events]] follows bounded custom Worlds, drops seals without rewinding the cursor, and rejects missing or cyclic continuation cursors. [[src/vercel-workflow/tests/unit/test_workflow_event_pagination.py]] covers page composition, ceilings, slot ordering, incremental reads, and stalled pagination.
 
+### Vercel event streams
+
+Vercel event listings consume v4 binary frames and preserve validated events when a full-log response is interrupted.
+
+[[src/vercel-workflow/vercel/workflow/_internal/worlds/event_frames.py#consume_event_stream]] handles arbitrary chunk boundaries and validates events and the terminal sentinel. Payload bodies remain encoded until runtime hydration; legacy CBOR structured errors are decoded by [[src/vercel-workflow/vercel/workflow/_internal/worlds/event_frames.py#decode_event]]. This framing is separate from user workflow streams.
+
+[[src/vercel-workflow/vercel/workflow/_internal/worlds/vercel.py#VercelWorld#events_list]] translates an omitted limit to the service's full-log query, while explicit limits retain single-page behavior. Only interrupted full reads with cursor progress resume after the last validated event, at most twice. Schema and control-frame errors propagate without resuming. Responses close on success, failure, and cancellation. [[src/vercel-workflow/tests/unit/test_workflow_event_frames.py]] verifies framing, query translation, opaque payloads, recovery, retry bounds, and cleanup.
+
 ### HTTP request retries
 
 The Vercel world retries safe Workflow API requests after transport failures so a brief network interruption can recover within the current call.
