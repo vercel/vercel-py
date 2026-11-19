@@ -9,7 +9,6 @@ from vercel.sandbox._internal.value_model import SandboxValueModel
 MAX_QUERY_SANDBOXES_PAGE_SIZE = 50
 MAX_QUERY_SESSIONS_PAGE_SIZE = 50
 MAX_QUERY_SNAPSHOTS_PAGE_SIZE = 50
-MAX_QUERY_DRIVES_PAGE_SIZE = 50
 
 
 PageItemT = TypeVar("PageItemT")
@@ -34,11 +33,6 @@ class QuerySessionsPage(SandboxValueModel, Generic[PageItemT]):
 
 class QuerySnapshotsPage(SandboxValueModel, Generic[PageItemT]):
     snapshots: list[PageItemT]
-    next_cursor: str | None
-
-
-class QueryDrivesPage(SandboxValueModel, Generic[PageItemT]):
-    drives: list[PageItemT]
     next_cursor: str | None
 
 
@@ -77,18 +71,10 @@ class QuerySnapshotsParams(_PageParams):
     _label = "query_snapshots"
 
 
-class QueryDrivesParams(_PageParams):
-    _max_page_size = MAX_QUERY_DRIVES_PAGE_SIZE
-    _label = "query_drives"
-
-
 __all__ = [
-    "MAX_QUERY_DRIVES_PAGE_SIZE",
     "MAX_QUERY_SANDBOXES_PAGE_SIZE",
     "MAX_QUERY_SESSIONS_PAGE_SIZE",
     "MAX_QUERY_SNAPSHOTS_PAGE_SIZE",
-    "QueryDrivesPage",
-    "QueryDrivesParams",
     "QuerySandboxesPage",
     "QuerySandboxesParams",
     "QuerySessionsPage",

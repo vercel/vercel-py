@@ -2,7 +2,6 @@
 
 import json
 from datetime import timedelta
-from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
@@ -81,14 +80,6 @@ def test_network_policy_validates_and_roundtrips_nested_data() -> None:
     )
     assert json.loads(policy.model_dump_json(exclude_none=True)) == data
     assert sandbox.NetworkPolicy.model_validate_json(policy.model_dump_json()) == policy
-
-
-def test_drive_mount_serializes_handle_as_name() -> None:
-    drive = SimpleNamespace(name="data", project_id="project", region="iad1")
-    mount = sandbox.DriveMount(drive)
-    expected = {"drive": "data", "mode": "read-write"}
-    assert mount.model_dump() == expected
-    assert json.loads(mount.model_dump_json()) == expected
 
 
 def test_managed_credentials_require_an_enabled_provider() -> None:

@@ -13,6 +13,7 @@ import anyio
 from pydantic import Field, SkipValidation, field_validator
 
 from vercel._internal.core.byte_stream import AsyncByteStreamRuntime
+from vercel._internal.core.region import RegionInput, ResolvedRegion, resolve_region
 from vercel._internal.core.time import parse_duration_seconds, parse_required_duration_seconds
 from vercel.sandbox._internal.async_filesystem_handle import (
     SandboxBinaryReader,
@@ -50,10 +51,8 @@ from vercel.sandbox._internal.models import (
     CommandSignal,
     CompletedCommand,
     DirectoryEntry,
-    DriveMount,
     DriveMountInput,
     DriveMountsInput,
-    DriveQuery,
     DurationInput,
     FailoverRegionsInput,
     NetworkIdUpdate,
@@ -76,8 +75,6 @@ from vercel.sandbox._internal.models import (
     normalize_failover_regions,
 )
 from vercel.sandbox._internal.pagination import (
-    QueryDrivesPage,
-    QueryDrivesParams,
     QuerySandboxesPage,
     QuerySandboxesParams,
     QuerySessionsPage,
@@ -102,9 +99,7 @@ from vercel.sandbox._internal.recovery import (
     classify_sandbox_lifecycle_error,
     execute_with_sandbox_recovery,
 )
-from vercel.sandbox._internal.region import RegionInput, ResolvedRegion, resolve_region
 from vercel.sandbox._internal.runtime_common import (
-    DriveHandleBase,
     RuntimeSessionHandleBase,
     SandboxHandleBase,
     SnapshotHandleBase,
@@ -119,7 +114,6 @@ from vercel.sandbox._internal.runtime_common import (
 )
 from vercel.sandbox._internal.service import SandboxService, _SandboxTerminalState
 from vercel.sandbox._internal.state import (
-    DriveState,
     InteractiveSessionState,
     ProcessState,
     SandboxRuntimeSessionState,
@@ -435,39 +429,6 @@ class Snapshot(SnapshotHandleBase):
     async def delete(self) -> Self:
         """Delete the snapshot and refresh this handle."""
         payload = await self._service.delete_snapshot(snapshot_id=self.id)
-        self._apply_payload(payload)
-        return self
-
-
-class Drive(DriveHandleBase):
-    """Operate on a project-local persistent Drive."""
-
-    __slots__ = ("_service",)
-
-    def __init__(self, *, payload: DriveState, service: SandboxService) -> None:
-        super().__init__(payload)
-        self._service = service
-
-    async def fork(self, *, name: str) -> "Drive":
-        """Fork this Drive's committed data, inheriting its region and maximum size.
-
-        Return a new handle using the same service without changing this Drive.
-        API failures propagate as SandboxApiError, including missing source
-        (404) and conflicting or uninitialized Drives (409).
-        """
-        return await fork_drive(self._service, source=self.name, name=name)
-
-    def snapshot(self) -> DriveMount:
-        """Return a read-only snapshot mount for this Drive."""
-        return DriveMount(self, mode="snapshot")
-
-    async def delete(self) -> Self:
-        """Delete by project and name, then refresh this handle from the response.
-
-        Deletion does not use the Drive ID. If the name now refers to a replacement
-        Drive, this method deletes that replacement and updates this handle to it.
-        """
-        payload = await self._service.delete_drive(name=self.name)
         self._apply_payload(payload)
         return self
 
@@ -2640,75 +2601,6 @@ def resume_sandbox_operation(
             private_parameters=private_parameters,
         ),
     )
-
-
-async def fork_drive(service: SandboxService, *, source: str, name: str) -> Drive:
-    return Drive(
-        payload=await service.fork_drive(name=source, fork_name=name),
-        service=service,
-    )
-
-
-async def get_drive(service: SandboxService, *, name_or_id: str) -> Drive:
-    return Drive(
-        payload=await service.get_drive(name_or_id=name_or_id),
-        service=service,
-    )
-
-
-async def get_or_create_drive(
-    service: SandboxService,
-    *,
-    name: str,
-    max_size_bytes: int | None = None,
-    region: RegionInput = None,
-) -> tuple[Drive, bool]:
-    state, created = await service.get_or_create_drive(
-        name=name,
-        max_size_bytes=max_size_bytes,
-        region=resolve_region(region, fallback=service.options.region),
-    )
-    return Drive(payload=state, service=service), created
-
-
-async def delete_drive(service: SandboxService, *, name: str) -> Drive:
-    return Drive(
-        payload=await service.delete_drive(name=name),
-        service=service,
-    )
-
-
-async def query_drives_page(service: SandboxService, **kwargs: Any) -> QueryDrivesPage[Drive]:
-    page = await service.query_drives_page(**kwargs)
-    return QueryDrivesPage(
-        drives=[Drive(payload=state, service=service) for state in page.drives],
-        next_cursor=page.next_cursor,
-    )
-
-
-def query_drives(
-    service: SandboxService,
-    *,
-    query: DriveQuery | None = None,
-    page_size: int | None = None,
-    cursor: str | None = None,
-) -> AsyncIterator[Drive]:
-    async def iterate() -> AsyncIterator[Drive]:
-        params = QueryDrivesParams(page_size=page_size, cursor=cursor)
-        while True:
-            page = await query_drives_page(
-                service,
-                query=query,
-                page_size=params.page_size,
-                cursor=params.cursor,
-            )
-            for drive in page.drives:
-                yield drive
-            if page.next_cursor is None or not page.drives:
-                return
-            params = params.with_cursor(page.next_cursor)
-
-    return iterate()
 
 
 async def query_sandboxes_page(

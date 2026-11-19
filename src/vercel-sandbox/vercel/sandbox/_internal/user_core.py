@@ -333,6 +333,7 @@ class UserService(SandboxService):
             ensure_open=parent._ensure_open,
             sleep=parent._sleep,
             staging_file_runtime=parent.staging_file_runtime,
+            drive_service=parent.drive_service,
         )
         self._parent = parent
         self._context = context

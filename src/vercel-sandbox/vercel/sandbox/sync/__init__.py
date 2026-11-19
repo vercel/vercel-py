@@ -2,7 +2,25 @@
 
 from collections.abc import Iterator, Mapping
 
+from vercel._internal.core.region import CURRENT_REGION, CurrentRegion, RegionInput
 from vercel._internal.core.session import get_active_sync_session
+from vercel.drive import (
+    DriveHandle,
+    DriveMount,
+    DriveQuery,
+    DriveQueryByCreatedAt,
+    DriveQueryByName,
+    DriveQueryByUpdatedAt,
+    DriveReference,
+)
+from vercel.drive._internal.sync_runtime import (
+    SyncDrive,
+    delete_drive as _delete_drive,
+    fork_drive as _fork_drive,
+    get_drive as _get_drive,
+    get_or_create_drive as _get_or_create_drive,
+    query_drives as _query_drives,
+)
 from vercel.sandbox._internal.byte_reader import SyncByteReader
 from vercel.sandbox._internal.errors import (
     SandboxApiError,
@@ -29,14 +47,7 @@ from vercel.sandbox._internal.models import (
     CommandStatus,
     CompletedCommand,
     DirectoryEntry,
-    DriveHandle,
-    DriveMount,
     DriveMountsInput,
-    DriveQuery,
-    DriveQueryByCreatedAt,
-    DriveQueryByName,
-    DriveQueryByUpdatedAt,
-    DriveReference,
     DurationInput,
     FailoverRegionsInput,
     GitSource,
@@ -78,7 +89,6 @@ from vercel.sandbox._internal.options import (
     SyncSandboxServiceOptions as SandboxServiceOptions,
 )
 from vercel.sandbox._internal.process_stdin import SyncCommandStdin
-from vercel.sandbox._internal.region import CURRENT_REGION, CurrentRegion, RegionInput
 from vercel.sandbox._internal.service import SandboxService, get_sync_sandbox_service
 from vercel.sandbox._internal.state import SnapshotRetentionState
 from vercel.sandbox._internal.sync_filesystem_handle import (
@@ -89,7 +99,6 @@ from vercel.sandbox._internal.sync_filesystem_handle import (
 )
 from vercel.sandbox._internal.sync_runtime import (
     SyncCommand,
-    SyncDrive,
     SyncInteractiveSession,
     SyncInteractiveSessionOperation,
     SyncInteractiveStream,
@@ -100,15 +109,10 @@ from vercel.sandbox._internal.sync_runtime import (
     SyncSnapshot,
     _ManagedSyncSandbox,
     create_sandbox as _create_sandbox,
-    delete_drive as _delete_drive,
-    fork_drive as _fork_drive,
     fork_sandbox as _fork_sandbox,
-    get_drive as _get_drive,
-    get_or_create_drive as _get_or_create_drive,
     get_or_create_sandbox as _get_or_create_sandbox,
     get_sandbox as _get_sandbox,
     get_snapshot as _get_snapshot,
-    query_drives as _query_drives,
     query_sandboxes as _query_sandboxes,
     query_sessions as _query_sessions,
     query_snapshots as _query_snapshots,
@@ -452,7 +456,7 @@ def fork_drive(*, source: str, name: str) -> SyncDrive:
         source: Project-local source Drive name.
         name: Project-local name for the new Drive.
     """
-    return _fork_drive(_service(), source=source, name=name)
+    return _fork_drive(_service().drive_service, source=source, name=name)
 
 
 def get_drive(*, name_or_id: str) -> SyncDrive:
@@ -460,7 +464,7 @@ def get_drive(*, name_or_id: str) -> SyncDrive:
 
     Raises SandboxApiError with status code 404 if the Drive does not exist.
     """
-    return _get_drive(_service(), name_or_id=name_or_id)
+    return _get_drive(_service().drive_service, name_or_id=name_or_id)
 
 
 def get_or_create_drive(
@@ -484,7 +488,7 @@ def get_or_create_drive(
         the Drive, and false when it returned an existing Drive.
     """
     return _get_or_create_drive(
-        _service(),
+        _service().drive_service,
         name=name,
         max_size_bytes=max_size_bytes,
         region=region,
@@ -503,7 +507,7 @@ def delete_drive(*, name: str) -> SyncDrive:
     Returns:
         The Drive returned by the deletion request.
     """
-    return _delete_drive(_service(), name=name)
+    return _delete_drive(_service().drive_service, name=name)
 
 
 def query_drives(
@@ -523,7 +527,7 @@ def query_drives(
         An iterator that transparently follows pagination cursors.
     """
     return _query_drives(
-        _service(),
+        _service().drive_service,
         query=query,
         page_size=page_size,
         cursor=cursor,

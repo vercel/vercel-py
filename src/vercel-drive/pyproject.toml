@@ -1,0 +1,72 @@
+[build-system]
+requires = ["hatchling>=1.27.0,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vercel-drive"
+dynamic = ["version", "dependencies"]
+description = "Python SDK for Vercel Drives"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE", "LICENSE.*"]
+
+[tool.hatch.metadata.hooks.custom]
+path = "hatch_build.py"
+
+[tool.vercel.release.dependencies]
+dependencies = [
+    # The lower bound is regenerated from the workspace version at build time,
+    # which picks up the shared region sentinel.
+    "vercel-internal-core>=0.3.0,<0.4.0",
+    "vercel-oidc>=0.6.0",
+    "anyio>=4.11.0,<5",
+    # HTTP goes through internal-core's transports, but `httpx2.Response` is part
+    # of this package's public surface (`DriveApiError.response`) and is
+    # imported directly, so the bound is declared rather than inherited.
+    "httpx2>=2",
+    "pydantic>=2.7.0,<3",
+]
+
+[tool.uv.sources]
+vercel-internal-core = { workspace = true }
+vercel-oidc = { workspace = true }
+
+[tool.hatch.version]
+path = "vercel/drive/version.py"
+
+[tool.hatch.build.targets.sdist]
+force-include = { "../../scripts/hatch_build.py" = "/_vercel_hatch_build.py" }
+include = [
+    "/vercel/drive/**/*.py",
+    "/vercel/drive/py.typed",
+    "/README.md",
+    "/pyproject.toml",
+    "/hatch_build.py",
+    "/LICENSE",
+]
+exclude = ["/**/__pycache__"]
+
+[tool.hatch.build.targets.wheel]
+dev-mode-dirs = ["."]
+only-include = ["/vercel/drive"]
+exclude = ["/**/__pycache__"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "../.."]
+addopts = "--no-header --capture=tee-sys -m 'not live'"
+asyncio_mode = "auto"
+markers = ["live: requires live Vercel API credentials"]
+
+[tool.poe]
+include = "../../scripts/poe/poe.toml"
+verbosity = -1
+
+[tool.mypy]
+cache_dir = "../../.mypy_cache/vercel-drive"
+explicit_package_bases = true
+packages = ["vercel.drive"]
+
+[tool.poe.tasks.typecheck]
+cmd = "$MYPY"
