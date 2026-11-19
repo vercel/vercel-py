@@ -4,15 +4,7 @@ from collections.abc import AsyncIterator, Mapping
 
 from vercel._internal.core.region import CURRENT_REGION, CurrentRegion, RegionInput
 from vercel._internal.core.session import get_active_session
-from vercel.drives import (
-    DriveHandle,
-    DriveMount,
-    DriveQuery,
-    DriveQueryByCreatedAt,
-    DriveQueryByName,
-    DriveQueryByUpdatedAt,
-    DriveReference,
-)
+from vercel.drives import DriveHandle, DriveMount, DriveReference
 from vercel.sandbox._internal.async_filesystem_handle import (
     SandboxBinaryReader,
     SandboxBinaryWriter,
@@ -76,6 +68,10 @@ from vercel.sandbox._internal.models import (
     CompletedCommand,
     DirectoryEntry,
     DriveMountsInput,
+    DriveQuery,
+    DriveQueryByCreatedAt,
+    DriveQueryByName,
+    DriveQueryByUpdatedAt,
     DurationInput,
     FailoverRegionsInput,
     GitSource,

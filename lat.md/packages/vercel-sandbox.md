@@ -160,11 +160,11 @@ Public API regressions verify native HTTP payload transport, ownership, binary r
 
 ## Drives
 
-Sandboxes mount Drives at creation. Drives themselves are managed with [[vercel-drives]]; Sandbox shares that package's mount and query types and nothing else.
+Sandboxes mount Drives at creation. Drives themselves are managed with [[vercel-drives]]; Sandbox shares that package's mount types, extends its query types, and uses nothing else.
 
 A mount is read-write by default, or a point-in-time read-only snapshot. Mount paths are canonicalized and validated in [[src/vercel-sandbox/vercel/sandbox/_internal/models.py#_serialize_drive_mounts]]: absolute, non-overlapping, no `..`, never `/`. Each drive must be in the sandbox's region, and mounted sandboxes cannot use failover regions. A read-write drive attached to another running sandbox is rejected by the API, and a drive must be unmounted before it can be deleted.
 
-A mount takes a [[src/vercel-drives/vercel/drives/_internal/models.py#DriveMount]], a Drive name, or anything with the name, project, and region of [[src/vercel-drives/vercel/drives/_internal/models.py#DriveHandle]]. That structural check is the whole integration: a `vercel.drives` handle and its `snapshot()` mount work without Sandbox knowing the handle's class. `vercel.sandbox` re-exports those types and the Drive query types from [[vercel-drives]]'s public API, so the names keep working and mean the same objects in both packages.
+A mount takes a [[src/vercel-drives/vercel/drives/_internal/models.py#DriveMount]], a Drive name, or anything with the name, project, and region of [[src/vercel-drives/vercel/drives/_internal/models.py#DriveHandle]]. That structural check is the whole integration: a `vercel.drives` handle and its `snapshot()` mount work without Sandbox knowing the handle's class. `vercel.sandbox` re-exports those types from [[vercel-drives]]'s public API, so the names keep working and mean the same objects in both packages. Its Drive query types, such as [[src/vercel-sandbox/vercel/sandbox/_internal/models.py#DriveQueryByName]], instead subclass the `vercel.drives` ones to keep the 1.0 `to_api_dict()`, which the `vercel.drives` types leave to their API client; [[src/vercel-sandbox/tests/test_public_models.py#test_drive_queries_keep_their_sandbox_api_and_work_with_vercel_drives|a test]] holds both halves.
 
 [[src/vercel-sandbox/tests/test_sandbox_public_flow.py#test_handles_from_vercel_drives_mount_into_sandboxes|The mount test]] creates handles with `vercel.drives` and verifies region validation and the serialized mount map.
 

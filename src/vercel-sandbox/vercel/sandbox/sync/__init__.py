@@ -4,15 +4,7 @@ from collections.abc import Iterator, Mapping
 
 from vercel._internal.core.region import CURRENT_REGION, CurrentRegion, RegionInput
 from vercel._internal.core.session import get_active_sync_session
-from vercel.drives import (
-    DriveHandle,
-    DriveMount,
-    DriveQuery,
-    DriveQueryByCreatedAt,
-    DriveQueryByName,
-    DriveQueryByUpdatedAt,
-    DriveReference,
-)
+from vercel.drives import DriveHandle, DriveMount, DriveReference
 from vercel.sandbox._internal.byte_reader import SyncByteReader
 from vercel.sandbox._internal.errors import (
     SandboxApiError,
@@ -40,6 +32,10 @@ from vercel.sandbox._internal.models import (
     CompletedCommand,
     DirectoryEntry,
     DriveMountsInput,
+    DriveQuery,
+    DriveQueryByCreatedAt,
+    DriveQueryByName,
+    DriveQueryByUpdatedAt,
     DurationInput,
     FailoverRegionsInput,
     GitSource,

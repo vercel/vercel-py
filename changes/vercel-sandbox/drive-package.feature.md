@@ -5,5 +5,6 @@ clients, and `fork`, `snapshot`, and `delete` on the handles they return, keep
 working unchanged and now emit `DeprecationWarning`.
 
 Sandbox mounts accept `vercel.drives` handles and mounts. `DriveMount`,
-`DriveHandle`, `DriveReference`, and the Drive query types exported by
-`vercel.sandbox` are now the `vercel.drives` types.
+`DriveHandle`, and `DriveReference` exported by `vercel.sandbox` are now the
+`vercel.drives` types, and its Drive query types extend the `vercel.drives`
+ones, so queries from either package work with both.
