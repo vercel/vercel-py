@@ -64,6 +64,7 @@ from vercel.sandbox._internal.models import (
     NetworkPolicyReadback,
     PrivateSandboxParameters,
     ProcessLog,
+    SandboxArchitecture,
     SandboxManagedCredentials,
     SandboxResources,
     SandboxSource,
@@ -242,6 +243,7 @@ class _SandboxCreationOverridesRequest(_ApiRequestModel):
 class _CreateSandboxRequest(_SandboxCreationOverridesRequest):
     project_id: str = Field(serialization_alias="projectId")
     image: str | None = None
+    architecture: SandboxArchitecture | None = None
     source: SandboxSource | None = None
 
 
@@ -478,6 +480,7 @@ class _SandboxPayload(_ApiModel):
         serialization_alias="currentSessionId",
     )
     image: str | None = None
+    architecture: str | None = None
     status: SandboxStatus | None = None
     persistent: bool | None = None
     current_snapshot_id: str | None = Field(
@@ -880,6 +883,7 @@ def _sandbox_state(
         name=payload.name,
         current_session_id=payload.current_session_id,
         image=payload.image,
+        architecture=payload.architecture,
         status=payload.status,
         persistent=payload.persistent,
         current_snapshot_id=payload.current_snapshot_id,
@@ -1194,6 +1198,7 @@ class SandboxApiClient:
         project_id: str | None = None,
         name: str | None = None,
         image: str | None = None,
+        architecture: SandboxArchitecture | None = None,
         source: SandboxSource | None = None,
         ports: list[int] | None = None,
         execution_time_limit: timedelta | None = None,
@@ -1225,6 +1230,7 @@ class SandboxApiClient:
             project_id=resolved_project_id,
             name=name,
             image=image,
+            architecture=architecture,
             source=source,
             ports=ports,
             timeout=execution_time_limit,
@@ -1289,6 +1295,7 @@ class SandboxApiClient:
         project_id: str | None = None,
         name: str | None = None,
         image: str | None = None,
+        architecture: SandboxArchitecture | None = None,
         source: SandboxSource | None = None,
         ports: list[int] | None = None,
         execution_time_limit: timedelta | None = None,
@@ -1310,6 +1317,7 @@ class SandboxApiClient:
             project_id=project_id,
             name=name,
             image=image,
+            architecture=architecture,
             source=source,
             ports=ports,
             execution_time_limit=execution_time_limit,

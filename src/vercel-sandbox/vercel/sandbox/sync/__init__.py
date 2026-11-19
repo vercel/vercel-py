@@ -53,6 +53,7 @@ from vercel.sandbox._internal.models import (
     NetworkPolicyRule,
     NetworkPolicySubnets,
     NetworkPolicyTransform,
+    SandboxArchitecture,
     SandboxManagedCredentials,
     SandboxMount,
     SandboxQuery,
@@ -128,6 +129,7 @@ def create_sandbox(
     *,
     name: str | None = None,
     image: str | None = None,
+    architecture: SandboxArchitecture | None = None,
     source: SandboxSource | None = None,
     ports: list[int] | None = None,
     execution_time_limit: DurationInput = None,
@@ -157,6 +159,7 @@ def create_sandbox(
         name: Requested sandbox name. The service generates one when omitted.
         image: Vercel Container Registry image reference. The backend validates
             and resolves the reference.
+        architecture: CPU architecture of the sandbox. The service chooses one when omitted.
         source: Git, tarball, or snapshot source used to initialize the sandbox.
         ports: Ports to expose from the sandbox.
         execution_time_limit: Maximum session runtime in seconds or as a
@@ -189,6 +192,7 @@ def create_sandbox(
         _service(),
         name=name,
         image=image,
+        architecture=architecture,
         source=source,
         ports=ports,
         execution_time_limit=execution_time_limit,
@@ -300,6 +304,7 @@ def get_or_create_sandbox(
     resume: bool = True,
     include_system_routes: bool | None = None,
     image: str | None = None,
+    architecture: SandboxArchitecture | None = None,
     source: SandboxSource | None = None,
     ports: list[int] | None = None,
     execution_time_limit: DurationInput = None,
@@ -330,6 +335,7 @@ def get_or_create_sandbox(
         include_system_routes: Whether to include platform-managed routes.
         image: Vercel Container Registry image reference. The backend validates
             and resolves the reference.
+        architecture: CPU architecture of the sandbox. The service chooses one when omitted.
         source: Git, tarball, or snapshot source used to initialize the sandbox.
         ports: Ports to expose from the sandbox.
         execution_time_limit: Maximum session runtime in seconds or as a
@@ -361,6 +367,7 @@ def get_or_create_sandbox(
         resume=resume,
         include_system_routes=include_system_routes,
         image=image,
+        architecture=architecture,
         source=source,
         ports=ports,
         execution_time_limit=execution_time_limit,
@@ -688,6 +695,7 @@ __all__ = [
     "SandboxQueryByStatusUpdatedAt",
     "SandboxResponseError",
     "SandboxInteractiveError",
+    "SandboxArchitecture",
     "SandboxManagedCredentials",
     "SandboxStdinError",
     "SandboxStreamError",

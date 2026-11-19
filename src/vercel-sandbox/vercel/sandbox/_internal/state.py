@@ -71,6 +71,7 @@ class SandboxState(SandboxValueModel):
     name: str
     current_session_id: str
     image: str | None = None
+    architecture: str | None = None
     status: SandboxStatus | None = None
     persistent: bool | None = None
     current_snapshot_id: str | None = None

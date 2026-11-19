@@ -92,6 +92,14 @@ Sandbox creation can opt into Vercel-managed npm credentials without exposing to
 
 Vercel injects team `NPM_RC` or `NPM_TOKEN` credentials into matching `GET` and `HEAD` requests, supporting private package installs while leaving publishing unauthenticated. [[src/vercel-sandbox/tests/test_sandbox_public_flow.py#test_public_create_sandbox_encodes_protocol_and_observed_state|Creation tests]] and [[src/vercel-sandbox/tests/test_public_models.py#test_managed_credentials_require_an_enabled_provider|model tests]] cover wire serialization and the enabled-only provider value.
 
+## Architecture
+
+Sandbox creation can choose the CPU architecture the sandbox runs on.
+
+[[src/vercel-sandbox/vercel/sandbox/_internal/models.py#SandboxArchitecture]] is a string enum of the supported architectures, `amd64` and `arm64`. The async and sync `create_sandbox` and `get_or_create_sandbox` APIs, including standalone clients, send it as the creation request's `architecture` field, and the API chooses when it is omitted. Existing sandboxes returned by get-or-create are unchanged, and a fork takes its source's architecture.
+
+`Sandbox.architecture` reports the architecture the API returned for the sandbox. [[src/vercel-sandbox/tests/test_sandbox_public_flow.py#test_public_create_sandbox_encodes_protocol_and_observed_state|Creation tests]] cover the request field and the reported value.
+
 ## Sandbox updates
 
 `Sandbox.update()` changes the live current session before saving sandbox configuration, and does not resume a stopped session.
