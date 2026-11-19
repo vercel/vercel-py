@@ -2,7 +2,7 @@
 
 Runtime Cache clients with namespaced keys and tag invalidation, falling back to an in-memory cache wherever Runtime Cache is unavailable.
 
-Lives in [[src/vercel-cache]] and is exposed as [[src/vercel-cache/vercel/cache/__init__.py|vercel.cache]], with an async entry point in [[src/vercel-cache/vercel/cache/aio.py|vercel.cache.aio]]. [[vercel-celery]], [[vercel-dramatiq]], [[vercel-django-tasks]], and [[vercel-apscheduler]] build on it.
+Lives in [[src/vercel-cache]] and is exposed as [[src/vercel-cache/vercel/cache/__init__.py|vercel.cache]], with an async entry point in [[src/vercel-cache/vercel/cache/aio.py|vercel.cache.aio]]. [[vercel-celery]], [[vercel-dramatiq]], and [[vercel-django-tasks]] build on it.
 
 ## Backend resolution
 
