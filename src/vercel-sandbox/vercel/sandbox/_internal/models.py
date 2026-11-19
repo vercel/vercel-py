@@ -851,6 +851,36 @@ class SandboxStatus(StrEnum):
     SNAPSHOTTING = "snapshotting"
 
 
+class SessionStopReason(StrEnum):
+    """Why a runtime session stopped.
+
+    This is an open enum: a reason the service adds after this SDK release
+    parses as a pseudo-member whose value is the reported string, instead of
+    failing. Compare reasons by value, and handle unknown reasons in a
+    fallback branch rather than assuming the members below are exhaustive.
+    """
+
+    REQUESTED = "requested"
+    """The session was stopped through the API."""
+    SNAPSHOT = "snapshot"
+    """The session was stopped to take a snapshot."""
+    TIMEOUT = "timeout"
+    """The session reached its execution time limit."""
+    EXITED = "exited"
+    """The session exited on its own."""
+    ERROR = "error"
+    """The session failed, failed to boot, or was stopped by the platform."""
+
+    @classmethod
+    def _missing_(cls, value: object) -> "SessionStopReason | None":
+        if not isinstance(value, str):
+            return None
+        member = str.__new__(cls, value)
+        member._name_ = value
+        member._value_ = value
+        return member
+
+
 class CommandStatus(StrEnum):
     """Lifecycle status derived for a sandbox command."""
 

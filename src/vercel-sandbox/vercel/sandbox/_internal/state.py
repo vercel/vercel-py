@@ -10,6 +10,7 @@ from vercel.sandbox._internal.models import (
     NetworkPolicyReadback,
     SandboxMount,
     SandboxStatus,
+    SessionStopReason,
 )
 from vercel.sandbox._internal.value_model import SandboxValueModel
 
@@ -57,7 +58,7 @@ class SandboxRuntimeSessionState(SandboxValueModel):
     requested_at: int | None = None
     started_at: int | None = None
     stopped_at: int | None = None
-    stop_reason: str | None = None
+    stop_reason: SessionStopReason | None = None
 
 
 class SnapshotRetentionState(SandboxValueModel):
