@@ -1679,6 +1679,46 @@ def test_unpacked_source_archive_never_runs_a_hook_from_outside_it(
     assert not planted.with_name("executed").exists()
 
 
+@pytest.mark.parametrize(
+    ("workspace", "package_dir", "expected"),
+    [
+        ('members = ["src/*"]', "src/vercel-drive", "workspace"),
+        ('members = ["src/*", "integrations/*"]', "integrations/vercel-drive", "workspace"),
+        ('members = ["src/*"]', "other/vercel-drive", None),
+        ('members = ["src/*"]', "src/nested/vercel-drive", None),
+        ('members = ["src/*"]\nexclude = ["src/vercel-drive"]', "src/vercel-drive", None),
+        (None, "src/vercel-drive", None),
+    ],
+)
+def test_checkout_runs_only_the_hook_of_the_uv_workspace_that_lists_it(
+    tmp_path: Path, workspace: str | None, package_dir: str, expected: str | None
+) -> None:
+    # The hook sits where the old loader looked: two directories above the package.
+    if workspace is not None:
+        (tmp_path / "pyproject.toml").write_text(
+            f"[tool.uv.workspace]\n{workspace}\n", encoding="utf-8"
+        )
+    hook = tmp_path / "scripts" / "hatch_build.py"
+    hook.parent.mkdir()
+    hook.write_text(
+        "from pathlib import Path\n"
+        "Path(__file__).with_name('executed').touch()\n"
+        "def get_metadata_hook():\n    return 'workspace'\n",
+        encoding="utf-8",
+    )
+    package = tmp_path / package_dir
+    package.mkdir(parents=True)
+    shutil.copy2("src/vercel-drive/hatch_build.py", package / "hatch_build.py")
+    module = _load_package_hatch_build(package / "hatch_build.py")
+
+    if expected is None:
+        with pytest.raises(RuntimeError, match="uv workspace member"):
+            module.get_metadata_hook()
+    else:
+        assert module.get_metadata_hook() == expected
+    assert hook.with_name("executed").exists() is (expected is not None)
+
+
 def test_vendored_eligibility_is_derived_from_package_layout(tmp_path: Path) -> None:
     queue = workspace.Package(
         "vercel-queue",
