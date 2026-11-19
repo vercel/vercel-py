@@ -57,6 +57,7 @@ class SandboxRuntimeSessionState(SandboxValueModel):
     requested_at: int | None = None
     started_at: int | None = None
     stopped_at: int | None = None
+    stop_reason: str | None = None
 
 
 class SnapshotRetentionState(SandboxValueModel):
@@ -85,6 +86,7 @@ class SandboxState(SandboxValueModel):
     network_id: str | None = None
     snapshot_expiration: timedelta | None = None
     snapshot_retention: SnapshotRetentionState | None = None
+    expiry_notification_lead_time: timedelta | None = None
     status_updated_at: int | None = None
     created_at: int | None = None
     updated_at: int | None = None
