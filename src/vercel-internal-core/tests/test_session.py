@@ -1,10 +1,17 @@
 from dataclasses import dataclass
+from datetime import timedelta
+from typing import Any, cast
 
 import httpx2 as httpx
 import pytest
 
 from vercel._internal.core.errors import VercelSessionClosedError, VercelSessionError
-from vercel._internal.core.http import AsyncTransport, SyncTransport
+from vercel._internal.core.http import (
+    AsyncTransport,
+    SyncTransport,
+    TransportOptions,
+    create_base_client,
+)
 from vercel._internal.core.options import ServiceOptions
 from vercel._internal.core.session import (
     SdkSession,
@@ -213,3 +220,35 @@ async def test_async_session_rejects_and_closes_sync_factory_client() -> None:
             get_active_session().get_transport()
 
     assert sync_client.close_calls == 1
+
+
+def _pool_keepalive_expiry(client: httpx.Client | httpx.AsyncClient) -> float | None:
+    return cast(Any, client)._transport._pool._keepalive_expiry
+
+
+def test_sync_default_client_keeps_idle_connections_for_a_minute() -> None:
+    with session():
+        transport = get_active_sync_session().get_transport()
+        assert _pool_keepalive_expiry(transport._client) == 60.0
+
+
+@pytest.mark.asyncio
+async def test_async_default_client_keeps_idle_connections_for_a_minute() -> None:
+    async with session():
+        client = get_active_session()._client_for_running_loop()
+        assert _pool_keepalive_expiry(client) == 60.0
+
+
+def test_transport_options_without_keepalive_keep_httpx_default() -> None:
+    client = create_base_client(
+        TransportOptions(
+            timeout=timedelta(seconds=30),
+            base_url=None,
+            max_connections=100,
+            enable_http2=False,
+        )
+    )
+    try:
+        assert _pool_keepalive_expiry(client) == httpx.Limits().keepalive_expiry
+    finally:
+        client.close()

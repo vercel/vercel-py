@@ -20,6 +20,8 @@ An SDK session scopes service configuration and pooled HTTP clients, and is boun
 
 [[src/vercel-internal-core/vercel/_internal/core/session.py#session]] returns a context manager usable with `with` (binding a [[src/vercel-internal-core/vercel/_internal/core/session.py#SyncSdkSession]]) or `async with` (binding a [[src/vercel-internal-core/vercel/_internal/core/session.py#SdkSession]]). Sessions are held in a context variable, nest by merging their options over the parent's, and close their clients on exit. Without an explicit session, services use a process-wide default. Sessions apply only to packages built on the shared transports (see [[runtime#Sync and async parity]]).
 
+The default clients a session builds keep idle connections for [[src/vercel-internal-core/vercel/_internal/core/http/config.py#DEFAULT_KEEPALIVE_EXPIRY]] (60 seconds) rather than HTTPX's 5 second default, because SDK callers such as agents often pause between requests for longer than that. [[src/vercel-internal-core/tests/test_session.py#test_async_default_client_keeps_idle_connections_for_a_minute|Session tests]] cover both modes.
+
 A session's mode must match the API being called: sync APIs raise inside an async session and vice versa, which keeps blocking and async clients from being mixed.
 
 Each service contributes its own [[src/vercel-internal-core/vercel/_internal/core/options.py#ServiceOptions]] subclass; a session accepts at most one options object per logical service. A session can also take an `httpx_client_factory`, which is the supported way to plug in a custom or legacy `httpx` client.

@@ -1,0 +1,1 @@
+Keep idle connections in the default SDK session clients for 60 seconds instead of HTTPX's 5 second default, so requests separated by a pause reuse the pooled connection instead of opening a new TCP and TLS connection.
