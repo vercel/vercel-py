@@ -1,6 +1,6 @@
 # Tooling
 
-Repository tooling for checks, changelogs, releases, and publishing, all driven from the workspace root through Poe tasks.
+Repository tooling for checks, changelogs, releases, and publishing, all driven from the workspace root through Poe tasks, with Turborepo caching them in CI.
 
 Contributor commands are listed in [[CONTRIBUTING.md]]; this page explains the design behind them.
 
@@ -11,6 +11,16 @@ Lint, typecheck, and test tasks are defined once and inherited by every package,
 Packages include the shared [[scripts/poe/poe.toml]] and only override tasks for genuine differences. The runner in [[scripts/poe/workspace_poe.py]] maps scopes — package names, `root`, or paths — to owning packages and runs them in parallel; the full design is in [[scripts/poe/README.md]].
 
 Example tests are opt-in: a package declares its own `test-examples` task and owns discovery, credentials, setup, and cleanup, so live examples skip safely when secrets are missing.
+
+### Turborepo in CI
+
+CI runs lint, typecheck, and test through Turborepo, which skips a package's task when a cached run already covers the same inputs.
+
+[[turbo.json]] defines `poe:lint`, `poe:typecheck`, and `poe:test`, each running the Poe task of the same name in one package through Turborepo's experimental uv workspace support. A task's hash covers the package's files, the shared files and CI variables named in [[turbo.json]], and, for typecheck and test, the importable code of its workspace dependencies. A change to `vercel-oidc` therefore reruns the tests of every package that depends on it, and a change to its tests reruns only `vercel-oidc`.
+
+Turborepo reads dependencies from static `[project]` metadata and misses our [[tooling#Releases#Dynamic dependencies]], so [[scripts/turbo_graph.py#source_tasks]] generates a `<package>#sources` task per member from the uv graph. [[tests/unit/test_turbo_graph.py#test_turbo_json_matches_the_uv_workspace_graph]] fails when the file is stale, and [[tests/unit/test_turbo_graph.py#test_packages_import_only_their_workspace_dependencies]] fails when a package imports a member outside that graph.
+
+[[.github/workflows/ci.yml]] keeps the cache in GitHub Actions, one per job and matrix cell. Pull requests restore the cache of the latest run on main; pushes to main and `release` pull requests start empty and run everything. [[scripts/turbo_summary.py#collect]] fails the job when a package's task is missing from the run, so a skipped package cannot pass unnoticed.
 
 ### Git hooks
 

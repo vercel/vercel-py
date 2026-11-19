@@ -9,6 +9,14 @@ on:
 
 permissions: {}
 
+env:
+  # Turborepo skips a task whose inputs match a cached run. Pull requests start
+  # from the cache of the latest run on main; pushes to main and release pull
+  # requests start empty, so they run every task.
+  TURBO_RESTORE: >-
+    ${{ github.event_name == 'pull_request' &&
+    !contains(github.event.pull_request.labels.*.name, 'release') }}
+
 jobs:
   lint-and-typecheck:
     name: Lint and typecheck
@@ -16,6 +24,8 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+    env:
+      CI_PYTHON: "3.12"
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -28,14 +38,35 @@ jobs:
           version: '0.13.5'
           enable-cache: false
 
+      - name: Install Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+
       - name: Sync dependencies
         run: uv sync --all-packages --locked --python 3.12
 
-      - name: Lint
-        run: uv run poe lint
+      - name: Restore Turborepo cache
+        if: env.TURBO_RESTORE == 'true'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .turbo/cache
+          key: turbo-lint-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: turbo-lint-
 
-      - name: Typecheck
-        run: uv run poe typecheck
+      - name: Lint and typecheck
+        run: scripts/turbo.sh run poe:lint poe:typecheck --continue --summarize --output-logs=new-only
+
+      - name: Report Turborepo tasks
+        if: ${{ !cancelled() }}
+        run: uv run --no-sync python scripts/turbo_summary.py poe:lint poe:typecheck
+
+      - name: Save Turborepo cache
+        if: ${{ !cancelled() }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .turbo/cache
+          key: turbo-lint-${{ github.run_id }}-${{ github.run_attempt }}
 
   lat-check:
     name: lat.md check
@@ -99,7 +130,12 @@ jobs:
     env:
       # Keep nested task runners from restoring the locked AnyIO version.
       UV_NO_SYNC: "1"
+      TURBO_CACHE_KEY: turbo-test-${{ matrix.os.name }}-py${{ matrix.python-version }}-anyio-${{ matrix.anyio }}
       ANYIO_VERSION: ${{ matrix.anyio }}
+      CI_PYTHON: ${{ matrix.python-version }}
+      # Tests that need credentials skip without them, so a run without
+      # secrets must not share cached results with a run that has them.
+      CI_LIVE_CREDENTIALS: ${{ secrets.VERCEL_TOKEN != '' }}
       APSCHEDULER_TEST_REDIS_URL: ${{ matrix.os.redis-url }}
       BLOB_READ_WRITE_TOKEN: ${{ secrets.BLOB_READ_WRITE_TOKEN }}
       VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
@@ -156,19 +192,41 @@ jobs:
       - name: Sync dependencies
         run: uv sync --all-packages --locked --python ${{ matrix.python-version }}
 
+      # The installed AnyIO version is not in uv.lock, so it is exported for
+      # Turborepo to hash.
       - name: Select AnyIO boundary
         run: |
           requirement=$(uv run --no-sync python scripts/anyio_version.py "$ANYIO_VERSION")
           uv pip install "$requirement"
+          echo "CI_ANYIO=$requirement" >> "$GITHUB_ENV"
+
+      - name: Restore Turborepo cache
+        if: env.TURBO_RESTORE == 'true'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .turbo/cache
+          key: ${{ env.TURBO_CACHE_KEY }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: ${{ env.TURBO_CACHE_KEY }}-
 
       - name: Test
-        run: uv run poe test
+        run: scripts/turbo.sh run poe:test --continue --summarize --output-logs=new-only
         env:
           VERCEL_DEVALUE_JS: ${{ runner.temp }}/devalue
           VERCEL_WORKFLOW_CLI: ${{ runner.temp }}/workflow-cli/node_modules/workflow
           # For tests using pytest, dump thread stacks after 120 seconds to
           # diagnose hangs before the job timeout. ggt ignores this variable.
           PYTEST_ADDOPTS: -o faulthandler_timeout=120
+
+      - name: Report Turborepo tasks
+        if: ${{ !cancelled() }}
+        run: uv run --no-sync python scripts/turbo_summary.py poe:test
+
+      - name: Save Turborepo cache
+        if: ${{ !cancelled() }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .turbo/cache
+          key: ${{ env.TURBO_CACHE_KEY }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Test examples
         if: matrix.python-version == '3.12'
