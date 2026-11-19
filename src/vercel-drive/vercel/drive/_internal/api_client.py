@@ -182,11 +182,7 @@ class _DrivesResponse(_ApiModel):
 
 
 class DriveApiClient:
-    """Wire-level access to the Vercel Drives API.
-
-    `api_error` and `response_error` let an embedding SDK, such as
-    `vercel-sandbox`, raise subclasses that also belong to its own hierarchy.
-    """
+    """Wire-level access to the Vercel Drives API."""
 
     def __init__(
         self,
@@ -196,8 +192,6 @@ class DriveApiClient:
         transport: BaseTransport,
         request_timeout: timedelta | None = None,
         sleep: AsyncSleep = anyio.sleep,
-        api_error: type[DriveApiError] = DriveApiError,
-        response_error: type[DriveResponseError] = DriveResponseError,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._credentials_factory = credentials_factory
@@ -206,8 +200,6 @@ class DriveApiClient:
             NO_READ_TIMEOUT if request_timeout is None else request_timeout
         )
         self._sleep = sleep
-        self._api_error = api_error
-        self.response_error = response_error
 
     async def get_drive(self, *, name_or_id: str) -> DriveState:
         """GET /v1/drives/:nameOrId."""
@@ -313,7 +305,7 @@ class DriveApiClient:
             )
             if not response.is_success:
                 message, data = extract_structured_error(response)
-                raise self._api_error(response, message, data=data)
+                raise DriveApiError(response, message, data=data)
             return response
 
         return await with_request_retries(send, sleep=self._sleep)
@@ -322,13 +314,13 @@ class DriveApiClient:
         try:
             data = response.json()
         except ValueError as exc:
-            raise self.response_error(
+            raise DriveResponseError(
                 "Drives API response body could not be decoded as JSON"
             ) from exc
         try:
             return model.model_validate(data)
         except ValidationError as exc:
-            raise self.response_error(
+            raise DriveResponseError(
                 "Drives API response did not match the expected shape", data=data
             ) from exc
 

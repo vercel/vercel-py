@@ -7,14 +7,6 @@ from vercel._internal.core.options import collect_service_options
 from vercel._internal.core.region import RegionInput
 from vercel._internal.core.session import HttpxClientFactory, SyncSdkSession
 from vercel.drive import DriveQuery
-from vercel.drive._internal.sync_runtime import (
-    SyncDrive,
-    delete_drive as _delete_sync_drive,
-    fork_drive as _fork_sync_drive,
-    get_drive as _get_sync_drive,
-    get_or_create_drive as _get_or_create_sync_drive,
-    query_drives as _query_sync_drives,
-)
 from vercel.sandbox._internal.models import (
     DriveMountsInput,
     DurationInput,
@@ -31,17 +23,24 @@ from vercel.sandbox._internal.models import (
     normalize_private_parameters as _normalize_private_parameters,
 )
 from vercel.sandbox._internal.options import SyncSandboxServiceOptions
+from vercel.sandbox._internal.runtime_common import warn_drive_deprecated
 from vercel.sandbox._internal.service import SandboxService, get_sync_sandbox_service
 from vercel.sandbox._internal.sync_runtime import (
+    SyncDrive,
     SyncSandbox,
     SyncSandboxRuntimeSession,
     SyncSnapshot,
     _ManagedSyncSandbox,
     create_sandbox as _create_sync_sandbox,
+    delete_drive as _delete_sync_drive,
+    fork_drive as _fork_sync_drive,
     fork_sandbox as _fork_sync_sandbox,
+    get_drive as _get_sync_drive,
+    get_or_create_drive as _get_or_create_sync_drive,
     get_or_create_sandbox as _get_or_create_sync_sandbox,
     get_sandbox as _get_sync_sandbox,
     get_snapshot as _get_sync_snapshot,
+    query_drives as _query_sync_drives,
     query_sandboxes as _query_sync_sandboxes,
     query_sessions as _query_sync_sessions,
     query_snapshots as _query_sync_snapshots,
@@ -259,15 +258,23 @@ class SyncSandboxClient:
         Args:
             source: Project-local source Drive name.
             name: Project-local name for the new Drive.
+
+        .. deprecated::
+            Use ``vercel.drive.sync.fork_drive()``.
         """
-        return _fork_sync_drive(self._service.drive_service, source=source, name=name)
+        warn_drive_deprecated("SyncSandboxClient.fork_drive", "vercel.drive.sync.fork_drive")
+        return _fork_sync_drive(self._service, source=source, name=name)
 
     def get_drive(self, *, name_or_id: str) -> SyncDrive:
         """Look up a Drive by name or ID without creating it.
 
         Raises SandboxApiError with status code 404 if the Drive does not exist.
+
+        .. deprecated::
+            Use ``vercel.drive.sync.get_drive()``.
         """
-        return _get_sync_drive(self._service.drive_service, name_or_id=name_or_id)
+        warn_drive_deprecated("SyncSandboxClient.get_drive", "vercel.drive.sync.get_drive")
+        return _get_sync_drive(self._service, name_or_id=name_or_id)
 
     def get_or_create_drive(
         self,
@@ -276,15 +283,29 @@ class SyncSandboxClient:
         max_size_bytes: int | None = None,
         region: RegionInput = None,
     ) -> tuple[SyncDrive, bool]:
+        """Return a named Drive, creating it when necessary.
+
+        .. deprecated::
+            Use ``vercel.drive.sync.get_or_create_drive()``.
+        """
+        warn_drive_deprecated(
+            "SyncSandboxClient.get_or_create_drive", "vercel.drive.sync.get_or_create_drive"
+        )
         return _get_or_create_sync_drive(
-            self._service.drive_service,
+            self._service,
             name=name,
             max_size_bytes=max_size_bytes,
             region=region,
         )
 
     def delete_drive(self, *, name: str) -> SyncDrive:
-        return _delete_sync_drive(self._service.drive_service, name=name)
+        """Delete a Drive by project-local name.
+
+        .. deprecated::
+            Use ``vercel.drive.sync.delete_drive()``.
+        """
+        warn_drive_deprecated("SyncSandboxClient.delete_drive", "vercel.drive.sync.delete_drive")
+        return _delete_sync_drive(self._service, name=name)
 
     def query_drives(
         self,
@@ -293,8 +314,14 @@ class SyncSandboxClient:
         page_size: int | None = None,
         cursor: str | None = None,
     ) -> Iterator[SyncDrive]:
+        """Iterate over Drives in a project.
+
+        .. deprecated::
+            Use ``vercel.drive.sync.query_drives()``.
+        """
+        warn_drive_deprecated("SyncSandboxClient.query_drives", "vercel.drive.sync.query_drives")
         return _query_sync_drives(
-            self._service.drive_service,
+            self._service,
             query=query,
             page_size=page_size,
             cursor=cursor,

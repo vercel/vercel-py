@@ -172,13 +172,13 @@ To place resources in the same region as the current Vercel Function, pass
 `CURRENT_REGION` explicitly:
 
 ```python
-from vercel import sandbox
+from vercel import drive, sandbox
 from vercel.api import session
 from vercel.sandbox import CURRENT_REGION, SandboxServiceOptions
 
 async with session():
     instance = await sandbox.create_sandbox(region=CURRENT_REGION)
-    cache, created = await sandbox.get_or_create_drive(name="cache", region=CURRENT_REGION)
+    cache, created = await drive.get_or_create_drive(name="cache", region=CURRENT_REGION)
 
 # Opt in for all creation calls in a session or standalone client instead.
 async with session(service_options=[SandboxServiceOptions(region=CURRENT_REGION)]):
@@ -196,8 +196,8 @@ to retain that placement behavior.
 
 The same sentinel and `RegionInput` type are exported from
 `vercel.sandbox.sync`. Both APIs and standalone clients accept it for
-`create_sandbox`, `get_or_create_sandbox`, `fork_sandbox`,
-`get_or_create_drive`, and explicit `Sandbox.update(region=...)` calls.
+`create_sandbox`, `get_or_create_sandbox`, `fork_sandbox`, and explicit
+`Sandbox.update(region=...)` calls. `vercel.drive` accepts the same sentinel.
 Call-level regions override `SandboxServiceOptions.region`; passing `None`
 uses the service option for creation. Updates only send an explicitly supplied
 region and do not use the service option.
@@ -350,11 +350,11 @@ and each Drive must use the sandbox region. The API defaults new Drives to
 To fork a Drive, mount the source read-write and stop its session to commit
 data first. See [the Drive fork example](examples/sandbox_10_drive_fork.py).
 
-`vercel.sandbox` also exposes `get_drive`, `get_or_create_drive`, `fork_drive`,
-`delete_drive`, and `query_drives`, on both APIs and the standalone clients.
-They return the same `Drive` and `SyncDrive` handles as `vercel.drive`, use the
-project resolved by the configured Sandbox credentials, and raise
-`SandboxApiError`.
+The Drive functions on `vercel.sandbox` and the standalone clients
+(`get_drive`, `get_or_create_drive`, `fork_drive`, `delete_drive`, and
+`query_drives`) and the handles they return are deprecated and emit
+`DeprecationWarning`. Use `vercel.drive`, which is configured by its own
+`DriveServiceOptions` and not by `SandboxServiceOptions`.
 
 ## Interactive PTY sessions
 

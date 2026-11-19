@@ -15,6 +15,7 @@ from vercel._internal.core.byte_stream import SyncByteStreamRuntime
 from vercel._internal.core.iter_coroutine import iter_coroutine
 from vercel._internal.core.region import RegionInput, resolve_region
 from vercel._internal.core.time import parse_duration_seconds, parse_required_duration_seconds
+from vercel.drive import DriveMount, DriveQuery
 from vercel.sandbox._internal.byte_reader import SyncByteReader, _sync_byte_readers
 from vercel.sandbox._internal.errors import (
     SandboxApiError,
@@ -66,6 +67,8 @@ from vercel.sandbox._internal.models import (
     normalize_failover_regions,
 )
 from vercel.sandbox._internal.pagination import (
+    QueryDrivesPage,
+    QueryDrivesParams,
     QuerySandboxesPage,
     QuerySandboxesParams,
     QuerySessionsPage,
@@ -91,6 +94,7 @@ from vercel.sandbox._internal.recovery import (
     execute_with_sandbox_recovery,
 )
 from vercel.sandbox._internal.runtime_common import (
+    DriveHandleBase,
     RuntimeSessionHandleBase,
     SandboxHandleBase,
     SnapshotHandleBase,
@@ -102,9 +106,11 @@ from vercel.sandbox._internal.runtime_common import (
     _signal_number,
     _UploadFileEntry,
     _validate_file_mode,
+    warn_drive_deprecated,
 )
 from vercel.sandbox._internal.service import SandboxService, _SandboxTerminalState
 from vercel.sandbox._internal.state import (
+    DriveState,
     InteractiveSessionState,
     ProcessState,
     RuntimeSessionStopState,
@@ -446,6 +452,62 @@ class SyncSnapshot(SnapshotHandleBase):
     def delete(self) -> Self:
         """Delete the snapshot and refresh this handle."""
         payload = iter_coroutine(self._service.delete_snapshot(snapshot_id=self.id))
+        self._apply_payload(payload)
+        return self
+
+
+class SyncDrive(DriveHandleBase):
+    """Operate synchronously on a project-local persistent Drive.
+
+    .. deprecated::
+        Use ``vercel.drive.sync.SyncDrive``, which sandbox mounts accept.
+    """
+
+    __slots__ = ("_service",)
+
+    def __init__(self, *, payload: DriveState, service: SandboxService) -> None:
+        super().__init__(payload)
+        self._service = service
+
+    def fork(self, *, name: str) -> "SyncDrive":
+        """Fork this Drive's committed data, inheriting its region and maximum size.
+
+        Return a new handle using the same service without changing this Drive.
+        API failures propagate as SandboxApiError, including missing source
+        (404) and conflicting or uninitialized Drives (409).
+
+        .. deprecated::
+            Use ``vercel.drive.sync.SyncDrive.fork()``.
+        """
+        warn_drive_deprecated(
+            "vercel.sandbox.sync.SyncDrive.fork", "vercel.drive.sync.SyncDrive.fork"
+        )
+        return fork_drive(self._service, source=self.name, name=name)
+
+    def snapshot(self) -> DriveMount:
+        """Return a read-only snapshot mount for this Drive.
+
+        .. deprecated::
+            Use ``vercel.drive.sync.SyncDrive.snapshot()``.
+        """
+        warn_drive_deprecated(
+            "vercel.sandbox.sync.SyncDrive.snapshot", "vercel.drive.sync.SyncDrive.snapshot"
+        )
+        return DriveMount(self, mode="snapshot")
+
+    def delete(self) -> Self:
+        """Delete by project and name, then refresh this handle from the response.
+
+        Deletion does not use the Drive ID. If the name now refers to a replacement
+        Drive, this method deletes that replacement and updates this handle to it.
+
+        .. deprecated::
+            Use ``vercel.drive.sync.SyncDrive.delete()``.
+        """
+        warn_drive_deprecated(
+            "vercel.sandbox.sync.SyncDrive.delete", "vercel.drive.sync.SyncDrive.delete"
+        )
+        payload = iter_coroutine(self._service.delete_drive(name=self.name))
         self._apply_payload(payload)
         return self
 
@@ -2384,6 +2446,73 @@ def resume_sandbox(
         destroy_on_exit=False,
         include_system_routes=include_system_routes,
     )
+
+
+def fork_drive(service: SandboxService, *, source: str, name: str) -> SyncDrive:
+    return SyncDrive(
+        payload=iter_coroutine(service.fork_drive(name=source, fork_name=name)),
+        service=service,
+    )
+
+
+def get_drive(service: SandboxService, *, name_or_id: str) -> SyncDrive:
+    return SyncDrive(
+        payload=iter_coroutine(service.get_drive(name_or_id=name_or_id)),
+        service=service,
+    )
+
+
+def get_or_create_drive(
+    service: SandboxService,
+    *,
+    name: str,
+    max_size_bytes: int | None = None,
+    region: RegionInput = None,
+) -> tuple[SyncDrive, bool]:
+    state, created = iter_coroutine(
+        service.get_or_create_drive(
+            name=name,
+            max_size_bytes=max_size_bytes,
+            region=resolve_region(region, fallback=service.options.region),
+        )
+    )
+    return SyncDrive(payload=state, service=service), created
+
+
+def delete_drive(service: SandboxService, *, name: str) -> SyncDrive:
+    return SyncDrive(
+        payload=iter_coroutine(service.delete_drive(name=name)),
+        service=service,
+    )
+
+
+def query_drives_page(service: SandboxService, **kwargs: Any) -> QueryDrivesPage[SyncDrive]:
+    page = iter_coroutine(service.query_drives_page(**kwargs))
+    return QueryDrivesPage(
+        drives=[SyncDrive(payload=state, service=service) for state in page.drives],
+        next_cursor=page.next_cursor,
+    )
+
+
+def query_drives(
+    service: SandboxService,
+    *,
+    query: DriveQuery | None = None,
+    page_size: int | None = None,
+    cursor: str | None = None,
+) -> Iterator[SyncDrive]:
+    params = QueryDrivesParams(page_size=page_size, cursor=cursor)
+    while True:
+        page = query_drives_page(
+            service,
+            query=query,
+            page_size=params.page_size,
+            cursor=params.cursor,
+        )
+        yield from page.drives
+        if page.next_cursor is None or not page.drives:
+            return
+        params = params.with_cursor(page.next_cursor)
 
 
 def query_sandboxes_page(service: SandboxService, **kwargs: Any) -> QuerySandboxesPage[SyncSandbox]:

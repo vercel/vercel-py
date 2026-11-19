@@ -5,12 +5,10 @@ runtimes share one implementation.
 """
 
 from collections.abc import Callable
-from datetime import timedelta
 from typing import TYPE_CHECKING
 
 from vercel._internal.core.region import RegionInput, ResolvedRegion
 from vercel.drive._internal.api_client import DriveApiClient
-from vercel.drive._internal.errors import DriveApiError, DriveResponseError
 from vercel.drive._internal.models import DriveQuery, DrivesPageState, DriveState
 from vercel.drive._internal.options import (
     DriveCredentials,
@@ -52,11 +50,6 @@ class DriveService:
     def region(self) -> RegionInput:
         """The region used for Drives created without an explicit one."""
         return self._region
-
-    @property
-    def response_error(self) -> type[DriveResponseError]:
-        """The error raised for a successful response the SDK cannot accept."""
-        return self._api_client.response_error
 
     async def get_drive(self, *, name_or_id: str) -> DriveState:
         self._ensure_open()
@@ -111,11 +104,15 @@ def adapt_sync_credentials_factory(
 def get_drive_service(session: "SdkSession") -> DriveService:
     def factory() -> DriveService:
         options = session.get_service_option(DriveServiceOptions) or DriveServiceOptions()
-        return create_drive_service(
-            session,
-            base_url=options.base_url,
-            credentials_factory=options.credentials_factory,
-            request_timeout=options.request_timeout,
+        return DriveService(
+            api_client=DriveApiClient(
+                base_url=options.base_url,
+                credentials_factory=options.credentials_factory,
+                transport=session.get_transport(),
+                request_timeout=options.request_timeout,
+                sleep=session.sleep,
+            ),
+            ensure_open=session.check_open,
             region=options.region,
         )
 
@@ -125,51 +122,24 @@ def get_drive_service(session: "SdkSession") -> DriveService:
 def get_sync_drive_service(session: "SyncSdkSession") -> DriveService:
     def factory() -> DriveService:
         options = session.get_service_option(SyncDriveServiceOptions) or SyncDriveServiceOptions()
-        return create_drive_service(
-            session,
-            base_url=options.base_url,
-            credentials_factory=adapt_sync_credentials_factory(options.credentials_factory),
-            request_timeout=options.request_timeout,
+        return DriveService(
+            api_client=DriveApiClient(
+                base_url=options.base_url,
+                credentials_factory=adapt_sync_credentials_factory(options.credentials_factory),
+                transport=session.get_transport(),
+                request_timeout=options.request_timeout,
+                sleep=session.sleep,
+            ),
+            ensure_open=session.check_open,
             region=options.region,
         )
 
     return session.get_or_create_service(DriveService, factory)
 
 
-def create_drive_service(
-    session: "SdkSession | SyncSdkSession",
-    *,
-    base_url: str,
-    credentials_factory: DriveCredentialsFactory,
-    request_timeout: timedelta | None,
-    region: RegionInput,
-    api_error: type[DriveApiError] = DriveApiError,
-    response_error: type[DriveResponseError] = DriveResponseError,
-) -> DriveService:
-    """Build a Drive service on a session's transport, without caching it.
-
-    `vercel-sandbox` uses this to run Drive operations with its own service
-    options and error types.
-    """
-    return DriveService(
-        api_client=DriveApiClient(
-            base_url=base_url,
-            credentials_factory=credentials_factory,
-            transport=session.get_transport(),
-            request_timeout=request_timeout,
-            sleep=session.sleep,
-            api_error=api_error,
-            response_error=response_error,
-        ),
-        ensure_open=session.check_open,
-        region=region,
-    )
-
-
 __all__ = [
     "DriveService",
     "adapt_sync_credentials_factory",
-    "create_drive_service",
     "get_drive_service",
     "get_sync_drive_service",
 ]

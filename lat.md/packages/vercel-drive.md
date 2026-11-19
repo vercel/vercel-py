@@ -2,7 +2,7 @@
 
 Client for Vercel Drives: named persistent filesystems that belong to one project and region, and that sandboxes mount.
 
-Lives in [[src/vercel-drive]] and is exposed as [[src/vercel-drive/vercel/drive/__init__.py|vercel.drive]] (async) and [[src/vercel-drive/vercel/drive/sync.py|vercel.drive.sync]], which use identical names and arguments. It was extracted from [[vercel-sandbox]], as the TypeScript `@vercel/drives` was from `@vercel/sandbox`, and Sandbox depends on it for [[vercel-sandbox#Drives]].
+Lives in [[src/vercel-drive]] and is exposed as [[src/vercel-drive/vercel/drive/__init__.py|vercel.drive]] (async) and [[src/vercel-drive/vercel/drive/sync.py|vercel.drive.sync]], which use identical names and arguments. It supersedes the Drive functions of [[vercel-sandbox]], as the TypeScript `@vercel/drives` does for `@vercel/sandbox`. Sandbox depends only on its public mount and query types; see [[vercel-sandbox#Drives]].
 
 ## Layering
 
@@ -10,7 +10,7 @@ Drives follows [[runtime#Service packages]]: one async-only service, thin sync a
 
 [[src/vercel-drive/vercel/drive/_internal/api_client.py#DriveApiClient]] speaks the public Drives API under `/v1/drives`: list, get by name or ID, get-or-create by name, fork, and delete. Its request models render camelCase names and turn a [[src/vercel-drive/vercel/drive/_internal/models.py#DriveQuery]] into `sortBy`, `sortOrder`, and `namePrefix`. Every request carries the team and project of its credentials, so Drives always belong to the project the credentials resolve to. The API answers get-or-create with 201 only when it created the Drive, which is how callers learn `created`.
 
-[[src/vercel-drive/vercel/drive/_internal/service.py#DriveService]] rejects names that URL parsing would redirect to another route, then returns [[src/vercel-drive/vercel/drive/_internal/models.py#DriveState]] records. [[src/vercel-drive/vercel/drive/_internal/async_runtime.py#Drive]] and [[src/vercel-drive/vercel/drive/_internal/sync_runtime.py#SyncDrive]] wrap that state; [[src/vercel-drive/vercel/drive/_internal/handle.py#DriveHandleBase]] holds their shared read-only properties. Timestamps stay millisecond integers, matching the other Sandbox handles these were extracted from.
+[[src/vercel-drive/vercel/drive/_internal/service.py#DriveService]] rejects names that URL parsing would redirect to another route, then returns [[src/vercel-drive/vercel/drive/_internal/models.py#DriveState]] records. [[src/vercel-drive/vercel/drive/_internal/async_runtime.py#Drive]] and [[src/vercel-drive/vercel/drive/_internal/sync_runtime.py#SyncDrive]] wrap that state; [[src/vercel-drive/vercel/drive/_internal/handle.py#DriveHandleBase]] holds their shared read-only properties. Timestamps stay millisecond integers, matching the deprecated Sandbox handles these replace.
 
 The snapshot and filesystem routes of the Drives API are private and feature-flagged, and are not implemented.
 
@@ -32,15 +32,13 @@ A session configures Drives with its own options, independent of the Sandbox opt
 
 Creation omits region unless the call or the service option requests one. [[src/vercel-internal-core/vercel/_internal/core/region.py#CURRENT_REGION]] opts into the current function's region, resolved once in the runtime entry points before the service runs.
 
-[[src/vercel-drive/vercel/drive/_internal/service.py#create_drive_service]] builds a service on a session's transport without caching it. [[vercel-sandbox]] calls it with its own options and error types; see [[vercel-sandbox#Drives#Drive operations]].
-
 ## Errors and retries
 
 Requests retry transient failures with the Sandbox policy, and error responses keep the API's status, code, and body.
 
 [[src/vercel-drive/vercel/drive/_internal/retry.py#with_request_retries]] retries transport failures, HTTP 429, and HTTP 5xx twice, with randomized exponential backoff and short numeric `Retry-After` waits, including for mutations. The policy is a copy of the Sandbox one, keyed on this package's error type. Requests have no read timeout unless the options set one.
 
-A non-2xx response raises [[src/vercel-drive/vercel/drive/_internal/errors.py#DriveApiError]], so a missing Drive is `status_code == 404`. [[src/vercel-drive/vercel/drive/_internal/api_client.py#DriveApiClient]] takes the error classes it raises, which lets Sandbox substitute subclasses from its own hierarchy.
+A non-2xx response raises [[src/vercel-drive/vercel/drive/_internal/errors.py#DriveApiError]], so a missing Drive is `status_code == 404`.
 
 ## Tests
 

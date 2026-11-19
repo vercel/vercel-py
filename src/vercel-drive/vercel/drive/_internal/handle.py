@@ -1,5 +1,6 @@
 """Drive handle state shared by the sync and async runtimes."""
 
+from vercel.drive._internal.errors import DriveResponseError
 from vercel.drive._internal.models import DriveMount, DriveState
 from vercel.drive._internal.service import DriveService
 
@@ -72,7 +73,7 @@ class DriveHandleBase:
 
     def _apply_payload(self, payload: DriveState) -> None:
         if payload.name != self.name or payload.project_id != self.project_id:
-            raise self._service.response_error(
+            raise DriveResponseError(
                 "Drive mutation response returned a different name or project",
                 data=payload,
             )

@@ -3,7 +3,6 @@
 import httpx2 as httpx
 
 from vercel._internal.core.errors import VercelError
-from vercel.drive import DriveApiError, DriveResponseError
 from vercel.sandbox._internal.models import SandboxStatus
 
 
@@ -78,29 +77,6 @@ class SandboxResponseError(SandboxError):
     def __init__(self, message: str, *, data: object | None = None) -> None:
         super().__init__(message)
         self.data = data
-
-
-class SandboxDriveApiError(SandboxApiError, DriveApiError):
-    """A Drives API error raised through `vercel.sandbox`.
-
-    Drive operations moved to `vercel-drive`, so this is both the
-    `SandboxApiError` existing callers catch and a `DriveApiError`.
-    """
-
-    def __init__(
-        self,
-        response: httpx.Response,
-        message: str,
-        *,
-        data: object | None = None,
-    ) -> None:
-        # Both bases take the same arguments and set the same attributes, so
-        # one of them initializes the instance for both.
-        DriveApiError.__init__(self, response, message, data=data)
-
-
-class SandboxDriveResponseError(SandboxResponseError, DriveResponseError):
-    """A malformed Drives API response received through `vercel.sandbox`."""
 
 
 class SandboxTimeoutError(SandboxError):
