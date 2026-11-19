@@ -61,6 +61,7 @@ from vercel.sandbox._internal.models import (
     PrivateSandboxParameters,
     ProcessLog,
     RemotePath,
+    SandboxArchitecture,
     SandboxManagedCredentials,
     SandboxQuery,
     SandboxResources,
@@ -2091,6 +2092,7 @@ class _CreateSandboxParams(SandboxValueModel):
     project_id: str | None = None
     name: str | None = None
     image: str | None = None
+    architecture: SandboxArchitecture | None = None
     source: SandboxSource | None = None
     ports: list[int] | None = None
     execution_time_limit: timedelta | None = None
@@ -2152,6 +2154,7 @@ class CreateSandboxOperation:
             project_id=self._params.project_id,
             name=self._params.name,
             image=self._params.image,
+            architecture=self._params.architecture,
             source=self._params.source,
             ports=self._params.ports,
             execution_time_limit=self._params.execution_time_limit,
@@ -2419,6 +2422,7 @@ def create_sandbox_operation(
     project_id: str | None = None,
     name: str | None = None,
     image: str | None = None,
+    architecture: SandboxArchitecture | None = None,
     source: SandboxSource | None = None,
     ports: list[int] | None = None,
     execution_time_limit: DurationInput = None,
@@ -2443,6 +2447,7 @@ def create_sandbox_operation(
             project_id=project_id,
             name=name,
             image=image,
+            architecture=architecture,
             source=source,
             ports=ports,
             execution_time_limit=parse_duration_seconds(execution_time_limit),
@@ -2543,6 +2548,7 @@ async def get_or_create_sandbox(
     resume: bool = True,
     include_system_routes: bool | None = None,
     image: str | None = None,
+    architecture: SandboxArchitecture | None = None,
     source: SandboxSource | None = None,
     ports: list[int] | None = None,
     execution_time_limit: DurationInput = None,
@@ -2567,6 +2573,7 @@ async def get_or_create_sandbox(
             resume=resume,
             include_system_routes=include_system_routes,
             image=image,
+            architecture=architecture,
             source=source,
             ports=ports,
             execution_time_limit=parse_duration_seconds(execution_time_limit),

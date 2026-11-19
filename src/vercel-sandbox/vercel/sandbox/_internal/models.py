@@ -985,6 +985,9 @@ class SandboxResources(_InputModel):
     memory: int | None = None
 
 
+SandboxArchitecture: TypeAlias = Literal["amd64", "arm64"]
+
+
 class SandboxManagedCredentials(_InputModel):
     """Configure Vercel-managed credential providers for a sandbox."""
 

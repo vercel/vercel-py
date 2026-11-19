@@ -510,6 +510,7 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
         assert json.loads(request.content) == {
             "projectId": "prj_other",
             "name": "preview",
+            "architecture": "arm64",
             "source": {
                 "type": "git",
                 "url": "https://github.com/vercel/vercel-py",
@@ -533,6 +534,7 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
         payload = response["sandbox"]
         assert isinstance(payload, dict)
         payload["tags"] = {"env": "test"}
+        payload["architecture"] = "arm64"
         return httpx.Response(200, json=response)
 
     route = respx.post("https://sandbox.test/v3/sandboxes").mock(side_effect=handler)
@@ -577,6 +579,7 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
     async with session(service_options=_session_options(project_id="prj_other")):
         handle = await sandbox.create_sandbox(
             name="preview",
+            architecture="arm64",
             source=GitSource(
                 url="https://github.com/vercel/vercel-py",
                 revision="main",
@@ -596,6 +599,7 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
             failover_regions=("sfo1", "cle1"),
         )
         assert handle.image == "vercel/sandbox/universal:latest"
+        assert handle.architecture == "arm64"
         assert handle.region == "iad1"
         assert handle.network_id == "network_123"
         assert handle.failover_regions == ("sfo1", "cle1")
@@ -1916,12 +1920,15 @@ def test_sync_create_sandbox_serializes_image_without_runtime(mock_env_clear: No
     )
 
     with session(service_options=_session_options()):
-        handle = sandbox_sync.create_sandbox(name="preview", image=image, network_id="network_123")
+        handle = sandbox_sync.create_sandbox(
+            name="preview", image=image, architecture="arm64", network_id="network_123"
+        )
 
     assert json.loads(route.calls.last.request.content) == {
         "projectId": "prj_123",
         "name": "preview",
         "image": image,
+        "architecture": "arm64",
         "networkId": "network_123",
     }
     assert handle.image == "my-repository@sha256:resolved"
@@ -2508,6 +2515,7 @@ async def test_async_get_or_create_returns_existing_or_created_sandbox(
         assert body == {
             "projectId": "prj_other",
             "name": "missing",
+            "architecture": "arm64",
             "persistent": True,
             "credentials": {"npm": True},
             "tags": {"purpose": "test"},
@@ -2526,6 +2534,7 @@ async def test_async_get_or_create_returns_existing_or_created_sandbox(
         )
         created, was_created = await sandbox.get_or_create_sandbox(
             name="missing",
+            architecture="arm64",
             persistent=True,
             credentials=sandbox.SandboxManagedCredentials(npm=True),
             tags={"purpose": "test"},
@@ -2714,6 +2723,7 @@ def test_sync_get_or_create_defaults_to_resume_and_returns_created_flag(
             "projectId": "prj_123",
             "name": "missing",
             "image": "missing-repository:latest",
+            "architecture": "arm64",
             "credentials": {"npm": True},
         }
         return httpx.Response(
@@ -2730,6 +2740,7 @@ def test_sync_get_or_create_defaults_to_resume_and_returns_created_flag(
         created, was_created = sandbox_sync.get_or_create_sandbox(
             name="missing",
             image="missing-repository:latest",
+            architecture="arm64",
             credentials=sandbox_sync.SandboxManagedCredentials(npm=True),
         )
 
