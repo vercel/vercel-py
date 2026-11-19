@@ -1267,6 +1267,37 @@ async def test_text_reader_preserves_crlf_split_across_chunks(
                 assert await reader.read() == suffix
 
 
+@given(
+    chunks=st.lists(st.binary(min_size=1, max_size=8), max_size=6),
+    first_read=st.integers(min_value=0, max_value=24),
+)
+@settings(deadline=1000, suppress_health_check=[HealthCheck.function_scoped_fixture])
+async def test_binary_reader_returns_the_file_in_order_across_read_sizes(
+    mock_env_clear: None,
+    chunks: list[bytes],
+    first_read: int,
+) -> None:
+    content = b"".join(chunks)
+
+    with respx.mock:
+        respx.post("https://sandbox.test/v3/sandboxes").mock(
+            return_value=httpx.Response(200, json=_sandbox_response())
+        )
+        respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+            return_value=httpx.Response(200, json=_sandbox_response())
+        )
+        respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/read").mock(
+            return_value=httpx.Response(200, stream=_TrackedAsyncStream(chunks))
+        )
+
+        async with session(service_options=_session_options()):
+            box = await sandbox.create_sandbox(name="preview")
+            async with box.fs.open("data.bin", "rb") as reader:
+                assert await reader.read(first_read) == content[:first_read]
+                assert await reader.read() == content[first_read:]
+                assert await reader.read() == b""
+
+
 @respx.mock
 async def test_read_bytes_response_closed_after_streaming_read(mock_env_clear: None) -> None:
     respx.post("https://sandbox.test/v3/sandboxes").mock(

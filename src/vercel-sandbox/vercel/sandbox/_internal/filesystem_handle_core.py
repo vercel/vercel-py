@@ -142,31 +142,45 @@ class BinaryReaderCore(_HandleInfo):
             self._mark_closed()
             raise
 
-    async def _pump(self) -> None:
+    async def _next_chunk(self) -> bytes:
+        """Return the next chunk of the response, or nothing once it has ended."""
         if self._eof:
-            return
+            return b""
         assert self._response is not None
         try:
-            chunk = await anext(self._response)
+            return await anext(self._response)
         except StopAsyncIteration:
             self._eof = True
             await self._close_response()
+            return b""
         except BaseException:
             self._eof = True
             await self._close_response()
             raise
-        else:
-            self._buffer.extend(chunk)
+
+    async def _pump(self) -> None:
+        self._buffer.extend(await self._next_chunk())
+
+    async def _read_all(self) -> bytes:
+        # Joined once at the end: growing the buffer by a chunk at a time
+        # copies a large file several times over.
+        chunks = [bytes(self._buffer)]
+        self._buffer.clear()
+        try:
+            while not self._eof:
+                chunks.append(await self._next_chunk())
+        except BaseException:
+            self._buffer.extend(b"".join(chunks))
+            raise
+        return b"".join(chunks)
 
     async def read(self, size: int = -1) -> bytes:
         self._ensure_active()
         _validate_read_size(size)
-        while not self._eof and (size < 0 or len(self._buffer) < size):
-            await self._pump()
         if size < 0:
-            result = bytes(self._buffer)
-            self._buffer.clear()
-            return result
+            return await self._read_all()
+        while not self._eof and len(self._buffer) < size:
+            await self._pump()
         result = bytes(self._buffer[:size])
         del self._buffer[:size]
         return result

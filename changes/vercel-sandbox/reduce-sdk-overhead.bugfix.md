@@ -1,0 +1,1 @@
+Reduce the SDK's CPU overhead for command output and file reads. `run_command` spends about half as long on the output of commands that print many lines, async `communicate()` and output readers about a quarter as long, and reading a large file with `fs.read_bytes()` or a file handle's `read()` no longer copies the data repeatedly as it arrives.

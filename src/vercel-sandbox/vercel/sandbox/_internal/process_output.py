@@ -54,8 +54,11 @@ class ProcessOutputRouter:
             self._stderr = _resolve_target(stderr, inherited=sys.stderr, name="stderr")
 
     def route(self, event: ProcessLog) -> None:
-        target = self._stdout if event.stream is ProcessLogStream.STDOUT else self._stderr
-        target.write(event.data)
+        self.write(event.stream, event.data)
+
+    def write(self, stream: ProcessLogStream, data: bytes) -> None:
+        target = self._stdout if stream is ProcessLogStream.STDOUT else self._stderr
+        target.write(data)
 
     def captured(self) -> tuple[bytes | None, bytes | None]:
         stdout = self._stdout.captured()
