@@ -2,12 +2,14 @@ name: News Fragments
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
 
 permissions: {}
 
 jobs:
   check-news-fragments:
     name: Check news fragments
+    if: github.head_ref != 'release-packages' || !github.event.pull_request.draft
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

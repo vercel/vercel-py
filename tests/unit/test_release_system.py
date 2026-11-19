@@ -910,6 +910,80 @@ Features
     assert "Previous release" not in body
 
 
+def test_rolling_release_preparation_accumulates_main_changes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    body_path = tmp_path / "release-pr.md"
+
+    def git(*args: str) -> str:
+        return subprocess.check_output(["git", *args], cwd=root, text=True).strip()
+
+    git("init", "-q")
+    git("config", "user.name", "Release test")
+    git("config", "user.email", "release@example.com")
+    git("config", "commit.gpgsign", "false")
+    packages: dict[str, workspace.Package] = {}
+    for name, version, dependencies in [("lib", "0.6.0", ()), ("app", "1.2.3", ("lib",))]:
+        path = root / name
+        path.mkdir()
+        version_file = path / "version.py"
+        version_file.write_text(f'__version__ = "{version}"\n', encoding="utf-8")
+        (path / "CHANGELOG.md").write_text(
+            f"# Changelog\n\n## {version} - 2026-01-01\n\n- Previous release.\n",
+            encoding="utf-8",
+        )
+        packages[name] = workspace.Package(name, path, version_file, dependencies)
+    fragments = root / "changes/lib"
+    fragments.mkdir(parents=True)
+    (fragments / "first.bugfix.md").write_text("Fix library.\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-qm", "lib: Fix library (#123)")
+
+    monkeypatch.setattr(release, "ROOT", root)
+    monkeypatch.setattr(release, "CHANGES", root / "changes")
+    monkeypatch.setattr(workspace, "packages", lambda: packages)
+    lock_runs: list[Path] = []
+
+    def lock(cmd: list[str], *, cwd: Path) -> None:
+        assert cmd == ["uv", "lock"]
+        lock_runs.append(cwd)
+
+    monkeypatch.setattr(release.subprocess, "check_call", lock)
+
+    for expected_version in ("0.6.1", "0.7.0"):
+        assert release.main(["prepare", "--pr-body", str(body_path)]) == 0
+        body = body_path.read_text(encoding="utf-8")
+        assert "Mark it ready for review" in body
+        assert "lib\n---" in body and "app\n---" in body
+        assert "Fix library. (#123)" in body
+        assert "Update dependencies." in body
+        assert "Previous release." not in body
+        assert workspace.read_version(packages["lib"].version_file) == expected_version
+        assert workspace.read_version(packages["app"].version_file) == "1.2.4"
+        assert not fragments.exists()
+        if expected_version == "0.6.1":
+            # The next push starts from main, retaining its unconsumed fragments
+            # and released versions rather than the previous PR candidate.
+            git("reset", "--hard", "HEAD")
+            (fragments / "second.feature.md").write_text("Add library feature.\n", encoding="utf-8")
+            git("add", "-A")
+            git("commit", "-qm", "lib: Add feature (#124)")
+        else:
+            assert "Add library feature. (#124)" in body
+
+    assert lock_runs == [root, root]
+    # Once merged, there is no candidate diff or old release body to reuse.
+    git("add", "-A")
+    git("commit", "-qm", "Release Packages")
+    assert release.main(["prepare", "--pr-body", str(body_path)]) == 0
+    assert git("status", "--porcelain") == ""
+    assert "No pending releases." in body_path.read_text(encoding="utf-8")
+    assert "Fix library." not in body_path.read_text(encoding="utf-8")
+    assert lock_runs == [root, root]
+
+
 def test_github_release_body_uses_package_latest_changelog_entry(tmp_path: Path) -> None:
     package_path = tmp_path / "pkg"
     other_package_path = tmp_path / "other"

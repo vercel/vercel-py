@@ -1,0 +1,59 @@
+name: Release PR
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+# All runs refresh the same branch. Never interrupt a branch/PR update.
+concurrency:
+  group: release-pr
+  cancel-in-progress: false
+
+jobs:
+  release-pr:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      # Start from current main, even when an older push was queued. Regenerate
+      # from its fragments rather than bumping the previous release candidate.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: '0.13.5'
+          enable-cache: false
+          python-version: '3.12'
+
+      - name: Prepare pending releases
+        run: uv run --locked python scripts/release.py prepare --pr-body "$RUNNER_TEMP/release-pr.md"
+
+      # GITHUB_TOKEN suppresses the bot's PR events, so draft updates do not
+      # start CI. A maintainer's ready_for_review event starts the PR workflows.
+      - name: Create or update draft release PR
+        uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676 # v7
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.hooksPath
+          GIT_CONFIG_VALUE_0: /dev/null
+        with:
+          token: ${{ github.token }}
+          base: main
+          branch: release-packages
+          title: Release Packages
+          commit-message: Release Packages
+          sign-commits: true
+          draft: always-true
+          labels: release
+          body-path: ${{ runner.temp }}/release-pr.md
+          delete-branch: true
