@@ -25,6 +25,7 @@ build a schema for are passed through unchanged.
 
 from __future__ import annotations
 
+import functools
 import inspect
 import logging
 import typing
@@ -32,6 +33,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 import pydantic
+from pydantic_core import ErrorType, core_schema
 
 from vercel._internal.core import typeutils
 
@@ -42,6 +44,7 @@ logger = logging.getLogger("vercel.workflow")
 # We set arbitrary_types_allowed so that types that pydantic doesn't
 # recognize (maybe ones using @serializable) aren't rejected.
 _ARBITRARY = pydantic.ConfigDict(arbitrary_types_allowed=True)
+_VALIDATION_CODES = frozenset(typing.get_args(ErrorType))
 
 
 class TypeValidationError(FatalError):
@@ -74,6 +77,77 @@ def _build_adapter(annotation: Any) -> pydantic.TypeAdapter[Any] | None:
     return adapter if adapter.pydantic_complete else None
 
 
+@functools.cache
+def _schema_child_fields() -> tuple[frozenset[str], frozenset[str]]:
+    schema_types = set(typing.get_args(core_schema.CoreSchema))
+    field_kinds = set(typing.get_args(core_schema.CoreSchemaFieldType))
+    for candidate in vars(core_schema).values():
+        if isinstance(candidate, type) and "type" in getattr(candidate, "__annotations__", {}):
+            kind = typing.get_type_hints(candidate)["type"]
+            if typing.get_origin(kind) is typing.Literal and field_kinds.intersection(
+                typing.get_args(kind)
+            ):
+                schema_types.add(candidate)
+
+    def contains_schema(annotation: Any) -> bool:
+        return (isinstance(annotation, type) and annotation in schema_types) or any(
+            contains_schema(arg) for arg in typing.get_args(annotation)
+        )
+
+    children: set[str] = set()
+    mappings: set[str] = set()
+    for schema_type in schema_types:
+        for key, annotation in typing.get_type_hints(schema_type).items():
+            if contains_schema(annotation):
+                children.add(key)
+                if typing.get_origin(annotation) is dict:
+                    mappings.add(key)
+    return frozenset(children), frozenset(mappings)
+
+
+def _validation_field_names(schema: Any) -> set[str]:
+    child_fields, mapping_fields = _schema_child_fields()
+    names: set[str] = set()
+    pending = [schema]
+    seen: set[int] = set()
+    while pending:
+        node = pending.pop()
+        if not isinstance(node, (dict, list, tuple)) or id(node) in seen:
+            continue
+        seen.add(id(node))
+        if isinstance(node, dict):
+            if node.get("type") in ("model-fields", "typed-dict"):
+                names.update(node["fields"])
+            elif node.get("type") == "dataclass-field":
+                names.add(node["name"])
+            alias = node.get("validation_alias")
+            if isinstance(alias, str):
+                names.add(alias)
+            for key in child_fields & node.keys():
+                child = node[key]
+                if key in mapping_fields and isinstance(child, dict):
+                    pending.extend(child.values())
+                else:
+                    pending.append(child)
+        else:
+            pending.extend(node)
+    return names
+
+
+def _validation_location(location: tuple[str | int, ...], value: Any, names: set[str]) -> str:
+    parts = []
+    for part in location:
+        index = type(part) is int and isinstance(value, (list, tuple)) and 0 <= part < len(value)
+        parts.append(str(part) if index or part in names else "*")
+        if isinstance(value, dict):
+            value = value.get(part)
+        elif index:
+            value = value[part]
+        else:
+            value = None
+    return ".".join(parts) or "<root>"
+
+
 class TypeCodec:
     """Dump and validate values against one annotation.
 
@@ -104,7 +178,20 @@ class TypeCodec:
         try:
             return self._adapter.validate_python(value)
         except pydantic.ValidationError as error:
-            raise TypeValidationError(f"{what} does not match: {error}") from error
+            # Pydantic's messages, locations, and custom codes may contain input values.
+            try:
+                names = _validation_field_names(self._adapter.core_schema)
+                details = "; ".join(
+                    f"{_validation_location(item['loc'], value, names)}: "
+                    f"{item['type'] if item['type'] in _VALIDATION_CODES else 'value_error'}"
+                    for item in error.errors(
+                        include_input=False, include_context=False, include_url=False
+                    )
+                )
+            except Exception:
+                # Formatting errors must also keep the input out of the traceback.
+                details = "<root>: value_error"
+            raise TypeValidationError(f"{what} does not match: {details}") from None
 
 
 class SignatureCodec:
@@ -197,7 +284,7 @@ class SignatureCodec:
         ]
 
         validated_kwargs = {
-            key: self._validate(mapping[key], value, what=f"argument {key!r}")
+            key: self._validate(mapping[key], value, what=f"argument {mapping[key]!r}")
             for key, value in kwargs.items()
         }
 

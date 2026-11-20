@@ -524,7 +524,190 @@ def test_a_value_that_does_not_match_names_the_callee_and_the_parameter() -> Non
 
     assert "fulfil" in str(ei.value)
     assert "'order'" in str(ei.value)
-    assert isinstance(ei.value.__cause__, pydantic.ValidationError)
+    assert ei.value.__cause__ is None
+    assert str(ei.value).endswith("does not match: quantity: missing; total: missing")
+
+
+def test_validation_diagnostics_keep_each_nested_field_error() -> None:
+    from vercel.workflow._internal.signature_codec import TypeCodec
+
+    with pytest.raises(TypeValidationError) as raised:
+        TypeCodec(list[Order]).validate(
+            [{"sku": "abc", "quantity": "many"}, {"sku": "def", "quantity": "several"}],
+            what="argument 'orders'",
+        )
+
+    assert (
+        str(raised.value) == "argument 'orders' does not match: "
+        "0.quantity: int_parsing; 0.total: missing; 1.quantity: int_parsing; 1.total: missing"
+    )
+
+
+@pytest.mark.parametrize(
+    ("annotation", "payload", "location", "code"),
+    [
+        (dict[str, int], {"private-key": "private-value"}, "*", "int_parsing"),
+        (dict[int, int], {987654321: "private-value"}, "*", "int_parsing"),
+        (dict[str, list[int]], {"private-key": ["private-value"]}, "*.0", "int_parsing"),
+        (
+            list[Address],
+            [{"street": "private-value", "zip_code": None}],
+            "0.zip_code",
+            "string_type",
+        ),
+    ],
+)
+def test_validation_diagnostics_keep_only_schema_names_and_indexes(
+    annotation: Any, payload: Any, location: str, code: str
+) -> None:
+    from vercel.workflow._internal.signature_codec import TypeCodec
+
+    with pytest.raises(TypeValidationError) as raised:
+        TypeCodec(annotation).validate(payload, what="argument 'payload'")
+    assert str(raised.value) == f"argument 'payload' does not match: {location}: {code}"
+
+
+def test_validation_diagnostics_preserve_declared_aliases() -> None:
+    from vercel.workflow._internal.signature_codec import TypeCodec
+
+    class Aliased(pydantic.BaseModel):
+        quantity: int = pydantic.Field(alias="count")
+
+    with pytest.raises(TypeValidationError) as raised:
+        TypeCodec(list[Aliased]).validate([{"count": "private-value"}], what="argument 'items'")
+    assert str(raised.value) == "argument 'items' does not match: 0.count: int_parsing"
+
+
+def test_validation_diagnostics_redact_forbidden_extra_keys() -> None:
+    from vercel.workflow._internal.signature_codec import TypeCodec
+
+    class Closed(pydantic.BaseModel):
+        model_config = pydantic.ConfigDict(extra="forbid")
+        quantity: int
+
+    with pytest.raises(TypeValidationError) as raised:
+        TypeCodec(Closed).validate({"quantity": 1, "private-key": 2}, what="argument 'order'")
+    assert str(raised.value) == "argument 'order' does not match: *: extra_forbidden"
+
+
+def test_validation_diagnostics_redact_discriminator_values() -> None:
+    from vercel.workflow._internal.signature_codec import TypeCodec
+
+    class Cat(pydantic.BaseModel):
+        kind: typing.Literal["cat"]
+
+    class Dog(pydantic.BaseModel):
+        kind: typing.Literal["dog"]
+
+    annotation = typing.Annotated[Cat | Dog, pydantic.Field(discriminator="kind")]
+    with pytest.raises(TypeValidationError) as raised:
+        TypeCodec(annotation).validate({"kind": "private-value"}, what="argument 'pet'")
+    assert str(raised.value) == "argument 'pet' does not match: <root>: union_tag_invalid"
+
+
+def test_validation_diagnostics_redact_custom_codes_and_context() -> None:
+    import traceback
+
+    from pydantic_core import PydanticCustomError
+
+    from vercel.workflow._internal.signature_codec import TypeCodec
+
+    secret = "private-value"
+
+    class Rejected(pydantic.BaseModel):
+        token: str
+
+        @pydantic.field_validator("token")
+        @classmethod
+        def reject(cls, value: str) -> str:
+            raise PydanticCustomError(value, "Rejected: {value}", {"value": value})
+
+    with pytest.raises(TypeValidationError) as raised:
+        TypeCodec(Rejected).validate({"token": secret}, what="argument 'payload'")
+    assert str(raised.value) == "argument 'payload' does not match: token: value_error"
+    assert secret not in "".join(traceback.format_exception(raised.value))
+
+
+def test_validation_diagnostics_ignore_schema_shaped_defaults_and_metadata() -> None:
+    from vercel.workflow._internal.signature_codec import TypeCodec
+
+    class Payload(pydantic.BaseModel):
+        quantity: int = pydantic.Field(json_schema_extra={"type": "typed-dict"})
+        options: dict[str, str] = {"type": "typed-dict"}
+
+    with pytest.raises(TypeValidationError) as raised:
+        TypeCodec(Payload).validate({"quantity": "private-value"}, what="argument 'payload'")
+    assert str(raised.value) == "argument 'payload' does not match: quantity: int_parsing"
+
+
+def test_validation_schema_children_follow_pydantic_annotations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pydantic_core import core_schema
+
+    from vercel.workflow._internal import signature_codec
+
+    monkeypatch.setattr(
+        core_schema.ListSchema,
+        "__annotations__",
+        {
+            **core_schema.ListSchema.__annotations__,
+            "future_items": core_schema.CoreSchema,
+            "future_choices": dict[str, core_schema.CoreSchema],
+        },
+    )
+    signature_codec._schema_child_fields.cache_clear()
+    try:
+        children, mappings = signature_codec._schema_child_fields()
+        assert not {"default", "metadata", "config", "custom_error_context"} & children
+        assert {"fields", "choices", "future_choices"} <= mappings
+        assert signature_codec._validation_field_names(
+            {
+                "type": "list",
+                "future_items": {
+                    "type": "typed-dict",
+                    "fields": {"quantity": {"type": "typed-dict-field", "schema": {"type": "int"}}},
+                },
+            }
+        ) == {"quantity"}
+    finally:
+        signature_codec._schema_child_fields.cache_clear()
+
+
+@pytest.mark.parametrize("helper", ["_validation_field_names", "_validation_location"])
+def test_validation_diagnostics_fail_closed(monkeypatch: pytest.MonkeyPatch, helper: str) -> None:
+    import traceback
+
+    from vercel.workflow._internal import signature_codec
+
+    secret = "private-value"
+
+    def fail_diagnostics(*args: Any) -> Any:
+        raise RuntimeError(secret)
+
+    monkeypatch.setattr(signature_codec, helper, fail_diagnostics)
+    with pytest.raises(TypeValidationError) as raised:
+        signature_codec.TypeCodec(int).validate(secret, what="argument 'quantity'")
+
+    assert str(raised.value) == "argument 'quantity' does not match: <root>: value_error"
+    assert raised.value.__cause__ is None
+    assert secret not in "".join(traceback.format_exception(raised.value))
+    persisted = ser.hydrate_error(PLAIN_ENCODER.encode_error(raised.value), what="failure")
+    assert secret not in str(persisted)
+    assert secret not in str(getattr(persisted, "stack", ""))
+    assert persisted.__cause__ is None
+
+
+def test_validation_diagnostics_use_declared_variadic_parameter_name() -> None:
+    registry = _registry()
+
+    @registry.step
+    async def fulfil(**orders: Order) -> None: ...
+
+    with pytest.raises(TypeValidationError) as raised:
+        _round_trip(fulfil, **{"private-key": {}})
+    assert "argument 'orders' does not match:" in str(raised.value)
+    assert "private-key" not in str(raised.value)
 
 
 def test_a_mismatch_is_fatal_rather_than_retryable() -> None:

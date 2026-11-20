@@ -19,17 +19,38 @@ from unittest.mock import AsyncMock
 import httpx2 as httpx
 import pydantic
 import pytest
+from pydantic_core import PydanticCustomError
 
 import vendor.respx as respx
 from tests.payloads import PLAIN_ENCODER
 from vercel.workflow import FatalError, StepNotRegisteredError
-from vercel.workflow._internal import core, runtime, serialization as ser, world as w
+from vercel.workflow._internal import (
+    core,
+    runtime,
+    serialization as ser,
+    signature_codec,
+    world as w,
+)
 
 from ..world_stubs import NoStreams
 
 
 class Order(pydantic.BaseModel):
     sku: str
+
+
+class RejectedPayload(pydantic.BaseModel):
+    token: str
+
+    @pydantic.field_validator("token")
+    @classmethod
+    def reject(cls, value: str) -> str:
+        raise PydanticCustomError(value, "Rejected: {value}", {"value": value})
+
+
+class PayloadWithSchemaLikeData(pydantic.BaseModel):
+    quantity: int = pydantic.Field(json_schema_extra={"type": "typed-dict"})
+    options: dict[str, str] = {"type": "typed-dict"}
 
 
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
@@ -557,6 +578,72 @@ async def test_input_that_does_not_match_the_annotation_is_fatal(
     recorded = ser.hydrate_error(fake.events[0].event_data.error, what="the recorded error")
     assert isinstance(recorded, FatalError)
     assert "does not match" in str(recorded)
+
+
+@pytest.mark.parametrize(
+    "case", ["missing", "dictionary", "validator", "variadic", "schema_data", "fallback"]
+)
+async def test_encrypted_argument_validation_does_not_log_plaintext(
+    registry: core.Workflows,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
+    key = bytes(range(32))
+    secret = "private-input-must-not-be-logged"
+
+    @registry.step
+    async def my_step(order: Order) -> str:
+        raise AssertionError("invalid arguments must not reach user code")
+
+    @registry.step
+    async def dictionary_step(order: dict[str, int]) -> None:
+        raise AssertionError("invalid arguments must not reach user code")
+
+    @registry.step
+    async def validator_step(order: RejectedPayload) -> None:
+        raise AssertionError("invalid arguments must not reach user code")
+
+    @registry.step
+    async def variadic_step(**orders: int) -> None:
+        raise AssertionError("invalid arguments must not reach user code")
+
+    @registry.step
+    async def schema_data_step(order: PayloadWithSchemaLikeData) -> None:
+        raise AssertionError("invalid arguments must not reach user code")
+
+    if case == "fallback":
+        monkeypatch.setattr(signature_codec, "_VALIDATION_CODES", None)
+
+    cases: dict[str, tuple[core.Step[Any, Any], dict[str, Any], str]] = {
+        "missing": (my_step, {"order": {"confidential": secret}}, "sku: missing"),
+        "dictionary": (dictionary_step, {"order": {secret: secret}}, "*: int_parsing"),
+        "validator": (validator_step, {"order": {"token": secret}}, "token: value_error"),
+        "variadic": (variadic_step, {secret: secret}, "<root>: int_parsing"),
+        "schema_data": (schema_data_step, {"order": {"quantity": secret}}, "quantity: int_parsing"),
+        "fallback": (my_step, {"order": {"confidential": secret}}, "<root>: value_error"),
+    }
+    step, kwargs, diagnostic = cases[case]
+
+    fake = FakeWorld(
+        run_key=key,
+        started_step=_running_step(
+            step.name,
+            attempt=1,
+            input=ser.PayloadEncoder(encryption_key=key).encode(ser.step_arguments((), kwargs)),
+        ),
+    )
+    w.set_world(fake)
+    await _invoke(registry, step.name)
+    assert secret not in caplog.text
+    assert f"does not match: {diagnostic}" in caplog.text
+    assert any(record.exc_info is not None for record in caplog.records)
+    failed = fake.events[0]
+    recorded = ser.hydrate_error(failed.event_data.error, what="step failure", key=key)
+    assert secret not in str(recorded)
+    assert secret not in str(getattr(recorded, "stack", ""))
+    assert str(recorded).endswith(f"does not match: {diagnostic}")
+    assert recorded.__cause__ is None
 
 
 async def test_local_world_step_started_too_early_raises(tmp_path, monkeypatch) -> None:
