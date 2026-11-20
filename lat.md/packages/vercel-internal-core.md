@@ -42,9 +42,10 @@ Small utilities let one async-shaped implementation serve both public API modes.
 - [[src/vercel-internal-core/vercel/_internal/core/byte_stream.py]] adapts sync and async byte sources to one `ReadableByteStream` protocol. The async runtime accepts only buffers and async readers and rejects blocking readers rather than offloading them to worker threads. It also provides a `StagingFileRuntime` for spooling uploads, with sync and async runtimes supplied by the session.
 - [[src/vercel-internal-core/vercel/_internal/core/time.py#coerce_duration]] and its siblings normalize numeric and `timedelta` durations.
 - [[src/vercel-internal-core/vercel/_internal/core/sentinel.py#UNSET]] marks an argument as not supplied where `None` is itself meaningful, such as clearing a field in a partial update.
+- [[src/vercel-internal-core/vercel/_internal/core/region.py#CURRENT_REGION]] opts a creation call into the current function's `VERCEL_REGION`, and [[src/vercel-internal-core/vercel/_internal/core/region.py#resolve_region]] turns it into a [[src/vercel-internal-core/vercel/_internal/core/region.py#ResolvedRegion]] once, at the public API boundary. [[vercel-sandbox]] and [[vercel-drive]] share it.
 
 ## Agent detection
 
 The SDK reports which coding agent, if any, is driving the process, mirroring `@vercel/detect-agent`.
 
-[[src/vercel-internal-core/vercel/_internal/core/detect_agent.py#detect_agent_name]] applies the same environment-variable rules as the JavaScript package; its filesystem-based Devin check is deliberately omitted. [[vercel-sandbox]] adds the result to its user agent unless `VERCEL_TELEMETRY_DISABLED` or `VERCEL_SANDBOX_TELEMETRY_DISABLED` is set.
+[[src/vercel-internal-core/vercel/_internal/core/detect_agent.py#detect_agent_name]] applies the same environment-variable rules as the JavaScript package; its filesystem-based Devin check is deliberately omitted. [[vercel-sandbox]] adds the result to its user agent unless `VERCEL_TELEMETRY_DISABLED` or `VERCEL_SANDBOX_TELEMETRY_DISABLED` is set, and [[vercel-drive]] does the same, also honoring `VERCEL_DRIVES_TELEMETRY_DISABLED`.
