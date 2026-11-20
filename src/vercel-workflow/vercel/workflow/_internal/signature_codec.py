@@ -87,15 +87,17 @@ class TypeCodec:
         self._adapter = _build_adapter(annotation)
         self._validation_adapter: pydantic.TypeAdapter[Any] | None = None
         if self._adapter is not None:
-            schema = self._adapter.core_schema
-            # Reuse the original schema so user validators still run. A separate
-            # TypeAdapter hides inputs without changing the user's model config.
+            # Generate the schema through this adapter's handler so recursive
+            # and shared model references are registered with the new adapter.
             validation_annotation: Any = typing.Annotated[
-                Any, pydantic.GetPydanticSchema(lambda _source, _handler: schema)
+                Any,
+                pydantic.GetPydanticSchema(
+                    lambda _source, handler: handler.generate_schema(annotation)
+                ),
             ]
             self._validation_adapter = pydantic.TypeAdapter(
                 validation_annotation,
-                config=pydantic.ConfigDict(hide_input_in_errors=True),
+                config=pydantic.ConfigDict(arbitrary_types_allowed=True, hide_input_in_errors=True),
             )
 
     def dump(self, value: Any) -> Any:

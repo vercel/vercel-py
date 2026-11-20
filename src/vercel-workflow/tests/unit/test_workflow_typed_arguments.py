@@ -550,6 +550,56 @@ def test_validation_hides_input_without_changing_model_config(in_list: bool) -> 
     assert secret in str(original.value)
 
 
+@pytest.mark.parametrize("case", ["recursive", "recursive_list", "pair", "tuple"])
+def test_validation_resolves_recursive_and_shared_model_references(case: str) -> None:
+    import traceback
+
+    from vercel.workflow._internal.signature_codec import TypeCodec
+
+    class Node(pydantic.BaseModel):
+        model_config = pydantic.ConfigDict(hide_input_in_errors=False)
+        value: int
+        children: list[Node] = pydantic.Field(default_factory=list)
+
+    class Item(pydantic.BaseModel):
+        model_config = pydantic.ConfigDict(hide_input_in_errors=False)
+        value: int
+
+    class Pair(pydantic.BaseModel):
+        left: Item
+        right: Item
+
+    secret = "private-input-must-not-be-logged"
+    tree = {"value": "1", "children": [{"value": "2"}]}
+    invalid_tree = {"value": 1, "children": [{"value": secret}]}
+    cases: dict[str, tuple[Any, Any, Any]] = {
+        "recursive": (Node, tree, invalid_tree),
+        "recursive_list": (list[Node], [tree], [invalid_tree]),
+        "pair": (
+            Pair,
+            {"left": {"value": "1"}, "right": {"value": "2"}},
+            {"left": {"value": 1}, "right": {"value": secret}},
+        ),
+        "tuple": (
+            tuple[Item, Item],
+            ({"value": "1"}, {"value": "2"}),
+            ({"value": 1}, {"value": secret}),
+        ),
+    }
+    annotation, valid, invalid = cases[case]
+    adapter = pydantic.TypeAdapter(annotation)
+    expected = adapter.validate_python(valid)
+    codec = TypeCodec(annotation)
+    result = codec.validate(valid, what="payload")
+    assert result == expected
+    assert codec.dump(result) == adapter.dump_python(expected)
+
+    with pytest.raises(TypeValidationError) as raised:
+        codec.validate(invalid, what="payload")
+    assert "int_parsing" in str(raised.value)
+    assert secret not in "".join(traceback.format_exception(raised.value))
+
+
 def test_validation_preserves_custom_field_and_model_validators() -> None:
     from vercel.workflow._internal.signature_codec import TypeCodec
 
