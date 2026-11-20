@@ -32,7 +32,6 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 import pydantic
-from pydantic_core import CoreConfig, SchemaValidator
 
 from vercel._internal.core import typeutils
 
@@ -86,13 +85,18 @@ class TypeCodec:
     def __init__(self, annotation: Any) -> None:
         self.annotation = annotation
         self._adapter = _build_adapter(annotation)
-        # Reuse the schema's model and field validators without changing user
-        # model configuration. A raw validator bypasses Pydantic plugin hooks.
-        self._validator = (
-            SchemaValidator(self._adapter.core_schema, config=CoreConfig(hide_input_in_errors=True))
-            if self._adapter is not None
-            else None
-        )
+        self._validation_adapter: pydantic.TypeAdapter[Any] | None = None
+        if self._adapter is not None:
+            schema = self._adapter.core_schema
+            # Reuse the original schema so user validators still run. A separate
+            # TypeAdapter hides inputs without changing the user's model config.
+            validation_annotation: Any = typing.Annotated[
+                Any, pydantic.GetPydanticSchema(lambda _source, _handler: schema)
+            ]
+            self._validation_adapter = pydantic.TypeAdapter(
+                validation_annotation,
+                config=pydantic.ConfigDict(hide_input_in_errors=True),
+            )
 
     def dump(self, value: Any) -> Any:
         """*value*, as the annotation puts it on the wire."""
@@ -107,10 +111,10 @@ class TypeCodec:
 
     def validate(self, value: Any, *, what: str) -> Any:
         """*value* as the annotation reads it, or `TypeValidationError` naming *what*."""
-        if self._validator is None:
+        if self._validation_adapter is None:
             return value
         try:
-            return self._validator.validate_python(value)
+            return self._validation_adapter.validate_python(value)
         except pydantic.ValidationError as error:
             raise TypeValidationError(f"{what} does not match: {error}") from error
 

@@ -550,7 +550,7 @@ def test_validation_hides_input_without_changing_model_config(in_list: bool) -> 
     assert secret in str(original.value)
 
 
-def test_core_validation_preserves_custom_field_and_model_validators() -> None:
+def test_validation_preserves_custom_field_and_model_validators() -> None:
     from vercel.workflow._internal.signature_codec import TypeCodec
 
     calls: list[str] = []
@@ -599,6 +599,52 @@ def test_core_validation_preserves_custom_field_and_model_validators() -> None:
         codec.validate({"child": {"quantity": "-3"}}, what="payload")
     with pytest.raises(TypeValidationError, match="quantity too large"):
         codec.validate({"child": {"quantity": "8"}}, what="payload")
+
+
+def test_validation_adapter_preserves_plugin_event_hooks(monkeypatch: pytest.MonkeyPatch) -> None:
+    from pydantic.plugin import _loader
+
+    from vercel.workflow._internal.signature_codec import TypeCodec
+
+    events: list[str] = []
+    observed_errors: list[str] = []
+
+    class Handler:
+        def on_enter(self, *args: Any, **kwargs: Any) -> None:
+            events.append("enter")
+
+        def on_success(self, result: Any) -> None:
+            events.append("success")
+
+        def on_error(self, error: pydantic.ValidationError) -> None:
+            events.append("error")
+            observed_errors.append(str(error))
+
+        def on_exception(self, error: Exception) -> None:
+            events.append("exception")
+
+    class Plugin:
+        def new_schema_validator(self, *args: Any) -> tuple[Handler, None, None]:
+            return Handler(), None, None
+
+    # Simulate an installed plugin without modifying process-wide package metadata.
+    monkeypatch.setattr(_loader, "_plugins", {"test": Plugin()})
+
+    class Payload(pydantic.BaseModel):
+        model_config = pydantic.ConfigDict(hide_input_in_errors=False)
+        quantity: int
+
+    codec = TypeCodec(Payload)
+    assert isinstance(codec.validate({"quantity": 2}, what="payload"), Payload)
+    assert events == ["enter", "success"]
+
+    events.clear()
+    secret = "private-input-must-not-be-logged"
+    with pytest.raises(TypeValidationError):
+        codec.validate({"quantity": secret}, what="payload")
+    assert events == ["enter", "error"]
+    assert len(observed_errors) == 1
+    assert secret not in observed_errors[0]
 
 
 def test_a_mismatch_is_fatal_rather_than_retryable() -> None:
