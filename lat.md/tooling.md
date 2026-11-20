@@ -44,6 +44,8 @@ Published dependency lists are generated at build time so workspace lower bounds
 
 Packages declare dependencies under `[tool.vercel.release.dependencies]` and mark `project.dependencies` dynamic. [[scripts/hatch_build.py#WorkspaceDependenciesMetadataHook]] rewrites workspace requirements to the current sibling versions while preserving markers, extras, and upper bounds. Local development resolves the same packages through `[tool.uv.sources]` workspace links.
 
+Each package's `hatch_build.py` only locates that shared hook and runs it. A source archive and a generated bundle carry their own copy, and [[src/vercel-drive/hatch_build.py#_shared_hook_path]] runs that copy and nothing else, because the directories above an unpacked archive may be writable by other users. It falls back to `scripts/hatch_build.py` only in a workspace checkout, which has no packaged copy. [[tests/unit/test_release_system.py#test_unpacked_source_archive_never_runs_a_hook_from_outside_it|A regression test]] plants a hook above an unpacked archive and checks it never runs.
+
 The workspace root itself is not buildable: [[scripts/no_root_build.py]] is its build backend and always fails.
 
 ### Publishing

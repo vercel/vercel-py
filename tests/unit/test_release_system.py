@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import dataclasses
 import importlib.util
+import shutil
 import subprocess
 import tempfile
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
+from types import ModuleType
 from typing import cast
 
 import pytest
@@ -1630,15 +1632,51 @@ def test_edit_news_fragment_rejects_empty_content(monkeypatch: pytest.MonkeyPatc
         release.edit_news_fragment("pkg", "docs", editor_runner=fake_runner)
 
 
-def test_package_hatch_build_loader_uses_shared_hook() -> None:
-    spec = importlib.util.spec_from_file_location(
-        "test_package_hatch_build", Path("src/vercel-headers/hatch_build.py")
-    )
+def _load_package_hatch_build(path: Path) -> ModuleType:
+    spec = importlib.util.spec_from_file_location("test_package_hatch_build", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("package", ["vercel-headers", "vercel-drive"])
+def test_package_hatch_build_loader_uses_shared_hook(package: str) -> None:
+    module = _load_package_hatch_build(Path("src") / package / "hatch_build.py")
 
     assert module.get_metadata_hook().__name__ == "WorkspaceDependenciesMetadataHook"
+
+
+@pytest.mark.parametrize("ships_hook", [True, False])
+def test_unpacked_source_archive_never_runs_a_hook_from_outside_it(
+    tmp_path: Path, ships_hook: bool
+) -> None:
+    # pip unpacks a source archive two levels below a temporary directory that
+    # other local users may be able to write to.
+    archive = tmp_path / "build" / "vercel_drive-1.0.0"
+    archive.mkdir(parents=True)
+    (archive / "PKG-INFO").write_text("Metadata-Version: 2.4\n", encoding="utf-8")
+    shutil.copy2("src/vercel-drive/hatch_build.py", archive / "hatch_build.py")
+    if ships_hook:
+        (archive / "_vercel_hatch_build.py").write_text(
+            "def get_metadata_hook():\n    return 'packaged'\n", encoding="utf-8"
+        )
+    planted = tmp_path / "scripts" / "hatch_build.py"
+    planted.parent.mkdir()
+    planted.write_text(
+        "from pathlib import Path\n"
+        "Path(__file__).with_name('executed').touch()\n"
+        "def get_metadata_hook():\n    return 'planted'\n",
+        encoding="utf-8",
+    )
+    module = _load_package_hatch_build(archive / "hatch_build.py")
+
+    if ships_hook:
+        assert module.get_metadata_hook() == "packaged"
+    else:
+        with pytest.raises(RuntimeError, match="missing its Hatch metadata hook"):
+            module.get_metadata_hook()
+    assert not planted.with_name("executed").exists()
 
 
 def test_vendored_eligibility_is_derived_from_package_layout(tmp_path: Path) -> None:
