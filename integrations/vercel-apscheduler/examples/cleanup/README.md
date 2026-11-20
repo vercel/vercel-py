@@ -1,21 +1,33 @@
 # APScheduler cleanup example
 
-This example deploys a FastAPI app and one queue-driven APScheduler subscriber.
+This example deploys a FastAPI app and the APScheduler jobs in `scheduler.py`
+as Vercel schedules.
 
-The subscriber is declared in `pyproject.toml`:
+`vercel.json` names the module that declares the jobs:
 
-```toml
-[[tool.vercel.subscribers]]
-entrypoint = "scheduler:scheduler"
+```json
+{
+    "schedules": {
+        "jobs": { "root": ".", "runtime": "python", "entrypoint": "scheduler" }
+    }
+}
 ```
 
-`scheduler.py` declares an ordinary scheduler with no job store; the
-integration injects its managed store. The Python builder derives the
-scheduler identity from the subscriber entrypoint and extracts its internal
-Queue subscriptions automatically. No topic, store, or trigger configuration
-is needed.
+The build imports `scheduler.py` and deploys each job as a schedule named
+after the job's id:
 
-Set `APSCHEDULER_ADMIN_SECRET`, then deploy:
+| Schedule | Cron | Timezone |
+| --- | --- | --- |
+| `jobs.cleanup-expired-sessions` | `0 4 * * *` | UTC |
+| `jobs.refresh-exchange-rates` | `*/15 * * * *` | UTC |
+| `jobs.month-end-report` | `30 23 28-31 * *` | UTC |
+
+The month-end report fires on days 28 to 31, and runs only on the last day of
+the month. The Vercel Python builder installs `vercel-apscheduler` itself, so
+the project only depends on APScheduler.
+
+Python schedules are experimental. Set `VERCEL_EXPERIMENTAL_PYTHON_SCHEDULES=1`
+for the build, then deploy:
 
 ```bash
 cd integrations/vercel-apscheduler/examples/cleanup
@@ -23,28 +35,5 @@ vc link
 vc deploy --prod
 ```
 
-Production activates the scheduler automatically on its first request. For
-example:
-
-```bash
-curl https://your-deployment.example/
-```
-
-Previews are inactive by default. To keep a preview active while it is
-receiving traffic, add:
-
-```toml
-[tool.vercel.apscheduler.previews]
-enabled = true
-idle_timeout = "30m"
-```
-
-The example exposes authenticated `/scheduler/start`, `/scheduler/pause`, and
-`/scheduler/resume` routes for operational control. Do not expose these routes
-without authentication.
-
-These calls affect the deployment serving the request. Repeated and concurrent
-lifecycle calls are safe: the driver fences generations and permits only one
-current wake chain. Pausing does not cancel a job already executing, but it
-prevents that generation from publishing another wake. Resuming skips
-occurrences that fell inside the paused interval.
+The app's `/` route lists the jobs from the same scheduler. It never starts the
+scheduler: the deployment's schedules run the jobs.

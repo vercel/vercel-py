@@ -1,45 +1,35 @@
 # vercel-apscheduler
 
-Runs APScheduler 3.x schedules as one durable chain of delayed Vercel Queue messages per deployment, on a managed job store in Runtime Cache.
+Runs the jobs of an APScheduler 3.x scheduler as Vercel schedules: each job deploys as one cron schedule, and each firing runs the job in a function.
 
-Lives in [[integrations/vercel-apscheduler]] and is exposed as [[integrations/vercel-apscheduler/vercel/integrations/apscheduler/__init__.py|vercel.integrations.apscheduler]]. The full state machine and failure model are in [[integrations/vercel-apscheduler/SCHEDULER.md]]. It builds on [[vercel-queue]] and [[vercel-cache]].
+Lives in [[integrations/vercel-apscheduler]] and is exposed as [[integrations/vercel-apscheduler/vercel/integrations/apscheduler/__init__.py|vercel.integrations.apscheduler]]. It builds on the `@schedule` registry of [[vercel-schedules#Declared schedules]].
 
-## Subscriber contract
+## Declaring jobs as schedules
 
-Applications declare an ordinary scheduler; the builder activates the integration, which registers internal start and wake subscriptions on it.
+A `vercel.json` Python schedule names the module that declares the jobs; importing it registers one `@schedule` per job, named after the job's id.
 
-The project's `[[tool.vercel.subscribers]]` entry points at the scheduler object. Before importing it for discovery, the Vercel builder activates the integration ([[integrations/vercel-apscheduler/vercel/integrations/apscheduler/_adapter.py#install_vercel_apscheduler_integration]]). The scheduler then registers two [[vercel-queue#Subscriptions|subscriptions]] through [[integrations/vercel-apscheduler/vercel/integrations/apscheduler/_subscriber.py#register_scheduler]]: *start* activates a generation and reserves its first wake, and *wake* evaluates due jobs and reserves the next wake. Topic names are implementation details that applications never configure.
+The Vercel builder calls [[integrations/vercel-apscheduler/vercel/integrations/apscheduler/_install.py#install_vercel_apscheduler_integration]] before it imports the module, and the runtime calls it before importing a deployment's code. It patches `BaseScheduler.add_job`, so each job goes through [[integrations/vercel-apscheduler/vercel/integrations/apscheduler/_jobs.py#declare]], which registers a handler with the job's covering cron. The build reads the registry like any other schedule module, so the same deployment path serves both.
 
-The scheduler's durable identity is the builder-assigned subscriber ID, not the entrypoint, so renaming a variable or moving a module never orphans its state. The `scheduler_id` option pins an identity explicitly. Imports during discovery have no external effects.
+A job id must stay the same in every process, because it names the schedule: a job without an explicit id is rejected, and so is an id two schedulers declare. Declaring an id again replaces its schedule only with `replace_existing`, which `scheduled_job()` sets, as a stock scheduler would on start.
 
-## Wake chain
+The scheduler never starts. `start()` and `shutdown()` do nothing, so a web app can import the same scheduler, and a stock background thread can't run the jobs a second time. `start()` also ends declaration: a later `add_job()`, or one from a running job, raises, since its schedule could never deploy.
 
-A wake message asks the scheduler to evaluate every job at one logical time, rather than representing a single job.
+## Covering crons
 
-[[integrations/vercel-apscheduler/vercel/integrations/apscheduler/_adapter.py#SchedulerAdapter]] processes each wake, runs due jobs on [[integrations/vercel-apscheduler/vercel/integrations/apscheduler/_executor.py#VercelInlineExecutor]], and publishes exactly one successor timed for the next due job. Chain progress travels in the messages themselves. Racing finishers compute the same canonical successor under the same idempotency key, so the queue accepts it once, and an evicted cache document cannot fork or strand the chain. There is no idle heartbeat: the chain sleeps until the next job is due.
+A schedule fires at most once a minute on a five-field cron, so each trigger deploys as the narrowest cron that fires in every minute it can run in.
 
-Only the current [[integrations/vercel-apscheduler/vercel/integrations/apscheduler/_types.py#WakeToken]] can run and reserve a successor. `pause()` fences the current generation, and `resume()` creates a new one, skipping occurrences that fell inside the pause. These are chain guarantees, not exactly-once execution: delivery is at least once, so jobs must be idempotent.
+[[integrations/vercel-apscheduler/vercel/integrations/apscheduler/_triggers.py#cover]] maps each trigger field to the set of values it can take and renders them as a cron in the trigger's timezone. Fields a cron can't express, such as `last`, `3rd fri`, `week`, `year`, start and end dates, and intervals that don't divide an hour or a day, widen to a cron that fires more often. Vercel rejects a cron that restricts both the day of month and the day of week, so the field that fires on fewer days is kept, and the day of week is always a list, because Vercel translates a step in it wrongly. Combined triggers combine their children's fields, and any other trigger, or a timezone without an IANA name, fires every minute.
 
-## Managed job store
+Each firing then asks [[integrations/vercel-apscheduler/vercel/integrations/apscheduler/_triggers.py#run_time_in_minute]] whether the trigger runs in the firing's scheduled minute. The answer depends only on the trigger and the minute, so every function instance agrees, without shared state. To keep it that way, the trigger is copied without jitter ([[integrations/vercel-apscheduler/vercel/integrations/apscheduler/_triggers.py#without_jitter]]), an interval without a start date counts from the Unix epoch instead of from process start, and a date trigger without `run_date` or a calendar interval longer than a day without `start_date` is rejected. [[integrations/vercel-apscheduler/vercel/integrations/apscheduler/_triggers.py#runs_more_than_once_a_minute]] rejects triggers no schedule can fire.
 
-Runtime Cache is evictable and per-region, so each guarantee is carried by something that can actually keep it.
+## Firings
 
-- Jobs declared in code are durable because the code is the backup: reconciliation rewrites them whenever the store's documents are missing.
-- Jobs added at runtime and lifecycle flags are best-effort and can be lost to eviction. `pause()` also publishes a queue-borne control message so it reaches the process serving the chain.
-- Under `vercel dev`, the cache falls back to process memory, which gives a zero-infrastructure development mode.
+A firing runs its job the way a stock executor would, inside the schedule's request.
 
-The store lives under [[integrations/vercel-apscheduler/vercel/integrations/apscheduler/_backends/cache]]. Stores under other aliases are read-only source stores whose schedules an external system owns.
+[[integrations/vercel-apscheduler/vercel/integrations/apscheduler/_jobs.py#fire]] skips a minute the trigger doesn't run in and a run later than an explicit `misfire_grace_time`. Without one, a job runs however late its firing arrives, because the integration defaults the grace to `None`: stock APScheduler's one-second grace would skip most firings, which arrive up to about a minute late. A firing scheduled off the minute was invoked by hand, so it runs the job at once. `max_instances` counts runs in the function instance, and trigger jitter becomes a sleep before the run. Coroutine jobs run on the event loop and other jobs in a worker thread, and listeners receive executed, error, missed and max-instances events. A job that raises fails the firing.
 
-## Activation and environments
+## Fixed jobs
 
-Production schedulers activate on their first real request; preview schedulers are inactive unless the project opts in.
+A deployment's schedules come from code, so the scheduler can't change jobs at runtime.
 
-[[integrations/vercel-apscheduler/vercel/integrations/apscheduler/_automatic.py#register_automatic_activation]] defers the first durable transition until the runtime has installed the request's OIDC credentials, so builds never enqueue messages. A deployment that has never received a request cannot start on its own.
-
-State is scoped by environment in production and by deployment in previews ([[integrations/vercel-apscheduler/vercel/integrations/apscheduler/_options.py#resolve_state_scope]]). Preview scheduling, when enabled under `[tool.vercel.apscheduler.previews]`, has an idle timeout renewed by incoming requests. One production deployment owns the chain at a time; taking ownership syncs the store to that code's declarations, and a demoted deployment's actions are inert.
-
-## Restrictions
-
-The first version deliberately narrows APScheduler's surface to what the durable chain can guarantee.
-
-It supports APScheduler 3.x only, with the managed store as the sole `default` store and the default inline executor; other executors and third-party default stores are rejected. Jobs declared in code need explicit stable IDs. Runtime job changes require the scheduler to be active in that Function instance, either automatically or after an explicit `scheduler.start()`.
+`modify_job()`, `reschedule_job()`, `remove_job()` and `remove_all_jobs()` raise, and so does adding a job store other than the memory store, because its jobs aren't declared in code. Executors are not used, and `next_run_time` is rejected because a job runs only when its trigger fires.

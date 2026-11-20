@@ -4,15 +4,8 @@ version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
     "APScheduler>=3.10.4,<4",
-    "vercel-apscheduler>=0.1.0",
-    "fastapi>=0.115.6,<0.116",
+    "fastapi>=0.115.6,<1",
 ]
 
 [tool.uv]
 package = false
-
-[[tool.vercel.subscribers]]
-entrypoint = "scheduler:scheduler"
-
-[tool.uv.sources]
-vercel-apscheduler = { git = "https://github.com/vercel/vercel-py.git", branch = "main", subdirectory = "integrations/vercel-apscheduler" }

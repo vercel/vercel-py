@@ -34,4 +34,4 @@ Adapters that run existing task frameworks on Vercel Queues, keeping results or 
 - [[vercel-celery]] — Celery broker transport and result backend.
 - [[vercel-dramatiq]] — Dramatiq broker and result backend.
 - [[vercel-django-tasks]] — Django tasks backend.
-- [[vercel-apscheduler]] — APScheduler 3.x schedules driven by delayed queue messages.
+- [[vercel-apscheduler]] — APScheduler 3.x jobs deployed as Vercel schedules.

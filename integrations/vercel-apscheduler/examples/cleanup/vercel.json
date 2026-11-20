@@ -1,3 +1,6 @@
 {
-    "regions": ["iad1"]
+    "regions": ["iad1"],
+    "schedules": {
+        "jobs": { "root": ".", "runtime": "python", "entrypoint": "scheduler" }
+    }
 }

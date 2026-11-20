@@ -4,21 +4,25 @@ build-backend = "hatchling.build"
 
 [project]
 name = "vercel-apscheduler"
-dynamic = ["version"]
-description = "APScheduler integration for Vercel Queues"
+dynamic = ["version", "dependencies"]
+description = "APScheduler integration for Vercel Schedules"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE", "LICENSE.*"]
+
+[tool.hatch.metadata.hooks.custom]
+path = "hatch_build.py"
+
+[tool.vercel.release.dependencies]
 dependencies = [
     "APScheduler>=3.10.4,<4",
-    "vercel-cache>=0.7.1",
-    "vercel-queue>=0.6.0",
+    "anyio>=4.11.0,<5",
+    "vercel-schedules",
 ]
 
 [tool.uv.sources]
-vercel-cache = { workspace = true }
-vercel-queue = { workspace = true }
+vercel-schedules = { workspace = true }
 
 [tool.ruff]
 extend = "../ruff.toml"
@@ -35,43 +39,8 @@ extend = "../ruff.toml"
     "SLF001",
     "PLC2701",
 ]
-"vercel/integrations/apscheduler/_adapter.py" = [
-    "BLE001",  # APScheduler itself treats job store/executor failures broadly.
-    "FBT001",  # patched APScheduler signatures must match upstream.
-    "FBT002",  # patched APScheduler signatures must match upstream.
-    "N806",  # scheduler class names imported lazily mirror upstream names.
-    "PLR0904",  # adapter intentionally owns one scheduler's full integration lifecycle.
-    "PLC0415",  # optional scheduler classes are imported only when patching.
-    "SLF001",  # integration relies on APScheduler private extension points.
-    "TRY400",  # executor lookup failure is logged with APScheduler context.
-]
-"vercel/integrations/apscheduler/_automatic.py" = [
-    "PLC0415",  # runtime-only imports avoid a hard runtime dependency and an adapter cycle.
-]
-"vercel/integrations/apscheduler/_backends/cache/*.py" = [
-    "S301",  # job persistence mirrors upstream APScheduler's pickle format.
-    "S311",  # jitter for write retries is not cryptographic.
-    "S403",  # job persistence mirrors upstream APScheduler's pickle format.
-    "SLF001",  # store/coordinator coupling relies on APScheduler private hooks.
-]
-"vercel/integrations/apscheduler/_backends/cache/_driver.py" = [
-    "PLR0904",  # the Driver protocol dictates the full public surface.
-]
-"vercel/integrations/apscheduler/_backends/__init__.py" = [
-    "PLC0415",  # only the selected backend imports, so its transitive deps load once.
-    "SLF001",  # autodetection reads the scheduler's private job-store registry.
-]
-"vercel/integrations/apscheduler/_executor.py" = [
-    "BLE001",  # mirrors APScheduler BaseExecutor error handling.
-    "S101",  # mirrors APScheduler executor invariants.
-    "SLF001",  # APScheduler job metadata is private.
-    "TID251",  # async job support needs stdlib event-loop detection.
-]
 "vercel/integrations/apscheduler/_imports.py" = [
     "PLW0717",  # grouped optional APScheduler import guard.
-]
-"vercel/integrations/apscheduler/_payload.py" = [
-    "TRY004",  # payload parse failures are reported uniformly as ValueError.
 ]
 "vercel/integrations/apscheduler/version.py" = [
     "D100",
@@ -86,11 +55,12 @@ testpaths = ["tests"]
 path = "vercel/integrations/apscheduler/version.py"
 
 [tool.hatch.build.targets.sdist]
+force-include = { "../../scripts/hatch_build.py" = "/_vercel_hatch_build.py" }
 include = [
     "/vercel/integrations/apscheduler/**/*.py",
     "/vercel/integrations/apscheduler/py.typed",
     "/README.md",
-    "/SCHEDULER.md",
+    "/hatch_build.py",
     "/examples/**/*.md",
     "/examples/**/*.py",
     "/examples/**/*.json",

@@ -1,234 +1,104 @@
 # Vercel APScheduler integration
 
-Run APScheduler 3.x schedules through delayed Vercel Queue messages, on a
-managed job store. No scheduler infrastructure to provision or operate.
+Run the jobs of an APScheduler 3.x scheduler as Vercel schedules. Each job
+deploys as one schedule, and each firing runs the job in a function. There is
+no scheduler process, job store, or queue to operate.
 
-## Configure the scheduler
+## Declare the jobs
 
-Declare an ordinary scheduler; do not configure a job store. The integration
-injects its managed store and uses it for lifecycle coordination:
+Declare the scheduler and its jobs in a module, with an `id` for each job:
 
 ```python
+# scheduler.py
 from apscheduler.schedulers.blocking import BlockingScheduler
 
 scheduler = BlockingScheduler(timezone="UTC")
 
 
-@scheduler.scheduled_job(
-    "cron",
-    hour=4,
-    id="cleanup",
-)
+@scheduler.scheduled_job("cron", hour=4, id="cleanup")
 def cleanup() -> None: ...
+
+
+@scheduler.scheduled_job("interval", minutes=15, id="refresh")
+async def refresh() -> None: ...
 ```
 
-Declare that object as a Python subscriber:
+Name the module in `vercel.json` as a Python schedule:
 
-```toml
-[[tool.vercel.subscribers]]
-entrypoint = "scheduler:scheduler"
+```json
+{
+    "schedules": {
+        "jobs": { "root": ".", "runtime": "python", "entrypoint": "scheduler" }
+    }
+}
 ```
 
-The Vercel Python builder detects APScheduler before importing the subscriber,
-installs the integration, and extracts its internal Queue subscriptions from
-the same registry used by Celery and Dramatiq. Topic names, consumer groups,
-scheduler IDs, and installation hooks are not application configuration.
+The build imports the module and deploys each job as a schedule named
+`<key>.<job id>`, here `jobs.cleanup` and `jobs.refresh`. The Vercel Python
+builder installs this package when the project depends on APScheduler. Python
+schedules are experimental: set `VERCEL_EXPERIMENTAL_PYTHON_SCHEDULES=1` for
+the build.
 
-The scheduler's durable identity derives from the builder-assigned subscriber
-id, so renaming variables or moving modules never orphans state. The
-`scheduler_id` integration option pins an identity explicitly.
+`start()` and `shutdown()` do nothing on Vercel, so a web app can import the
+same scheduler, for example to list its jobs.
 
-Job stores under other aliases are treated as source stores — read-only views
-whose schedules an external system (typically a database) owns.
+## Triggers
 
-## Automatic activation
+A schedule fires at most once a minute, on a five-field cron. Each job deploys
+as the narrowest cron that fires in every minute its trigger can run in, and
+each firing runs the job only if its trigger runs in that minute.
 
-Production deployments activate automatically on their first real request.
-The integration is registered while the application imports, but the durable
-transition and first Queue send are deferred until the runtime has installed
-that request's OIDC credentials. Builds never enqueue messages.
+| Trigger | Deployed cron | Runs |
+| --- | --- | --- |
+| `cron`, `hour=4` | `0 4 * * *` | Every firing |
+| `cron`, `day_of_week="mon-fri"` | `0 0 * * 1-5` | Every firing |
+| `cron`, `day="last"` | `0 0 28-31 * *` | On the last day of the month |
+| `cron`, `day="3rd fri"` | `0 0 15-21 * *` | On the third Friday |
+| `cron` with `week`, `year`, `start_date` or `end_date` | The other fields | When the trigger runs |
+| `interval`, `minutes=15` | `*/15 * * * *` | Every firing |
+| `interval`, `minutes=7` | `* * * * *` | Every seventh firing |
+| `calendarinterval`, `months=1`, `hour=3`, `start_date=...` | `0 3 * * *` | On the interval's days |
+| `date`, `run_date=...` | Its minute, hour, day and month | Once, in its year |
+| `or` and `and` of the above | Their crons combined | When the trigger runs |
+| Any other trigger | `* * * * *` | When the trigger runs |
 
-Preview deployments are inactive by default. Opt a project into request-driven
-preview scheduling with:
+- An interval without `start_date` counts from the Unix epoch, so
+  `minutes=15` runs at :00, :15, :30 and :45.
+- A calendar interval longer than a day needs `start_date`, and a date trigger
+  needs `run_date`.
+- A cron whose timezone has no IANA name, such as a fixed offset, deploys as
+  `* * * * *`.
+- A trigger that runs more than once a minute is rejected.
+- Invoking a schedule by hand, such as from the dashboard, runs its job now.
 
-```toml
-[tool.vercel.apscheduler.previews]
-enabled = true
-idle_timeout = "30m"
-```
+## Job options
 
-Each active Function runtime renews the preview's durable activity deadline on
-incoming requests, throttled to at most once every five minutes (or one third
-of a shorter timeout). This is not a background timer and it does not emit
-periodic Queue messages. If no request renews the deadline:
+| Option | Behavior |
+| --- | --- |
+| `misfire_grace_time` | Unset, a job runs however late its firing arrives. Set, a firing later than that is skipped. |
+| `max_instances` | Counts the runs in one function instance, as a stock scheduler counts the runs in its process. |
+| `jitter` | The firing sleeps for a random time up to `jitter` seconds before running the job. |
+| `coalesce` | No effect: each firing runs a job at most once. |
+| `next_run_time` | Rejected: a job runs only when its trigger fires. |
 
-- a queued start or wake becomes stale before it can run;
-- an in-flight wake may finish its current work but cannot publish a
-  successor; and
-- the next request creates one new generation and skips occurrences from the
-  inactive interval.
+A firing arrives up to about a minute after its time, and firings can overlap
+or, rarely, repeat. Jobs must be idempotent. Listeners added with
+`add_listener()` receive each job's executed, error, missed and
+max-instances events. A job that raises fails its firing.
 
-An explicit `pause()` remains paused across later requests; automatic
-activation never overrides it. Production scheduling has no idle timeout.
-In either environment, a deployment that has never received a request cannot
-start automatically because it has not received request-scoped OIDC
-credentials.
+## Jobs are fixed at deploy
 
-## Start, pause, and resume
+A deployment's schedules come from the jobs its module declares, so jobs can't
+change at runtime:
 
-On Vercel, the normal APScheduler lifecycle methods operate the durable Queue
-driver for the deployment executing the call:
+- `add_job()` after `start()`, or from a running job, raises.
+- `modify_job()`, `reschedule_job()`, `remove_job()` and `remove_all_jobs()`
+  raise.
+- Job stores other than the memory store raise, because their jobs aren't in
+  code.
 
-```python
-scheduler.start()  # idempotently start
-scheduler.pause()  # idempotently pause
-scheduler.resume()  # idempotently resume
-```
+Change a job by changing its declaration and deploying. For a schedule created
+at runtime, use `vercel.schedules.create_schedule()`.
 
-Use these methods when explicit operational control is needed. Call them from
-an authenticated runtime route or another trusted runtime entrypoint.
-
-```python
-from fastapi import FastAPI
-
-from scheduler import scheduler
-
-app = FastAPI()
-
-
-@app.post("/scheduler/start", status_code=202)
-def start_scheduler() -> dict[str, str]:
-    scheduler.start()
-    return {"state": "running"}
-
-
-@app.post("/scheduler/pause")
-def pause_scheduler() -> dict[str, str]:
-    scheduler.pause()
-    return {"state": "paused"}
-
-
-@app.post("/scheduler/resume", status_code=202)
-def resume_scheduler() -> dict[str, str]:
-    scheduler.resume()
-    return {"state": "running"}
-```
-
-There is no separate control object, start token, or public message-publishing
-API. Each deployment controls only its own scheduler.
-
-Off Vercel, these methods retain their normal APScheduler behavior.
-
-## Runtime job changes
-
-The chain sleeps until the next persisted job is due. It emits no idle
-heartbeat. `add_job()`, `modify_job()`, `reschedule_job()`, `pause_job()`,
-`resume_job()`, and removals update the managed store and rearm the one
-current wake as needed.
-
-Automatic activation establishes the runtime-mutation boundary before the
-user application handles a production request (or an opted-in preview
-request). In environments without automatic activation, call
-`scheduler.start()` first in each Function instance that changes jobs; before
-that boundary, `add_job()` calls are treated as module-level declarations.
-The call is idempotent:
-
-```python
-@app.post("/jobs")
-def add_job() -> dict[str, str]:
-    scheduler.start()
-    scheduler.add_job(
-        send_report,
-        "date",
-        run_date="2026-08-01 09:00:00+00:00",
-        id="report-2026-08-01",
-    )
-    return {"state": "scheduled"}
-```
-
-Job writes and wake rearming are coordinated through the managed store; raw
-writes to its cache keys are unsupported.
-
-## The managed job store
-
-The managed store runs on the Vercel Runtime Cache, which is evictable and
-per-region. The integration therefore keeps every guarantee on something that
-can actually carry it:
-
-- **One wake chain, no forks.** Chain progress travels in the queue messages
-  themselves: racing finishers compute the same canonical successor under the
-  same idempotency key, and the queue accepts it once. An evicted document
-  never strands the chain.
-- **Code-declared jobs are durable because code is the backup.** Whenever the
-  store's documents are missing, reconciliation rewrites declared jobs from
-  the declarations.
-- **Runtime-added jobs and lifecycle flags are best-effort.** They can be
-  lost to cache eviction. `pause()` additionally publishes a queue-borne
-  control message so the flag reaches the process serving the chain even
-  where cache state does not.
-
-Under `vercel dev` the cache client falls back to per-process memory, which
-makes the integration a zero-infrastructure development mode: the
-queue-serving sidecar drives the schedule, and chain progress travels in the
-messages rather than shared state.
-
-## Guarantees
-
-The driver stores one lifecycle generation and one current wake token per
-scheduler, scoped by environment in production and by deployment in previews.
-This gives the driver the following guarantees:
-
-- Concurrent or repeated `start()` calls converge on one start message.
-- Only the current wake token can run and reserve one successor.
-- `pause()` fences the current generation.
-- `resume()` creates one new generation, even under concurrent calls.
-- Rapid `pause()`/`resume()` cannot overlap a new generation with an in-flight
-  handler from the old generation.
-- Runtime job changes cannot create a second chain.
-- A crash between reserving and publishing a successor is repaired by a retry.
-- Occurrences during a pause are skipped on resume instead of replayed in a
-  catch-up burst.
-- Production schedules and the wake chain survive promotions: one deployment
-  owns the chain at a time, taking ownership syncs the store to that code's
-  declarations (a job deleted from code never runs again, a changed trigger
-  takes effect), and a demoted deployment's touches are inert.
-- A wake whose queue message died is presumed lost once it is well past due
-  with no live owner, and republished by the owner.
-- Concurrent first requests converge on one automatic generation and one
-  start identity.
-- Preview idle expiry fences both claims and successor publication.
-- A later preview request creates one new generation; concurrent requests
-  converge on that generation.
-
-`start()` and job mutation calls are durable after they return successfully.
-If a process dies before returning, an idempotent `start()` repairs any pending
-publication, and repeating an interrupted mutation republishes the pending
-wake even when the retry itself fails on a conflicting job id. With no idle
-heartbeat, an ambiguous failure while publishing the first wake for a dormant
-scheduler is repaired by a later `start()` or mutation call, not by a periodic
-timer. Unless a job chooses its own `misfire_grace_time`, occurrences run when
-their wake arrives, however late; set a finite `misfire_grace_time` on jobs
-that must not run late.
-
-These are chain guarantees, not exactly-once job execution. Vercel Queues is
-at-least-once, so a delivery interrupted after a job's side effect may run that
-job again. Scheduled work must still be idempotent. A job already running when
-`pause()` commits may finish, but it cannot extend the paused chain.
-
-## v1 restrictions
-
-- APScheduler 3.x only.
-- The managed job store only as the one named `default`; a third-party
-  default store (Redis, MongoDB, SQLAlchemy, ...) is rejected. Other aliases
-  hold source stores, which the scheduler reads but never manages.
-- The default inline executor only; custom thread/process executors are
-  rejected.
-- Jobs declared in code need explicit stable IDs.
-- When the same ID is already persisted, declare it with
-  `replace_existing=True`. `scheduled_job()` already enables replacement.
-- Runtime mutation APIs require prior activation in that Function instance,
-  either automatically on the request or through `scheduler.start()`.
-- Job execution is at-least-once.
-
-See [SCHEDULER.md](SCHEDULER.md) for the state machine and failure model. A
-deployable example is in [examples/cleanup](examples/cleanup).
+Executors are not used: a firing runs a coroutine function on the event loop
+and any other job in a worker thread.

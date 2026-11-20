@@ -1,31 +1,23 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
-
 from apscheduler.schedulers.blocking import BlockingScheduler
 
-scheduler = BlockingScheduler(timezone=UTC)
+scheduler = BlockingScheduler(timezone="UTC")
 
 
-@scheduler.scheduled_job(
-    "interval",
-    minutes=1,
-    jitter=5,
-    start_date=datetime(2026, 7, 10, tzinfo=UTC),
-    id="every-minute-cleanup",
-)
+@scheduler.scheduled_job("cron", hour=4, id="cleanup-expired-sessions")
 def cleanup_expired_sessions() -> None:
-    print("running every minute with 5 seconds jitter")
+    print("deleting expired sessions")
 
 
-@scheduler.scheduled_job(
-    "interval",
-    seconds=30,
-    start_date=datetime(2026, 1, 1, tzinfo=UTC),
-    id="frequent-cleanup",
-)
-def frequent_cleanup() -> None:
-    print("running every 30 seconds")
+@scheduler.scheduled_job("interval", minutes=15, jitter=30, id="refresh-exchange-rates")
+def refresh_exchange_rates() -> None:
+    print("refreshing exchange rates")
+
+
+@scheduler.scheduled_job("cron", day="last", hour=23, minute=30, id="month-end-report")
+async def month_end_report() -> None:
+    print("sending the month-end report")
 
 
 if __name__ == "__main__":
