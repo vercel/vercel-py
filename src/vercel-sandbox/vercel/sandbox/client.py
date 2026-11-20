@@ -6,8 +6,8 @@ from typing import Self
 from vercel._internal.core.options import collect_service_options
 from vercel._internal.core.region import RegionInput
 from vercel._internal.core.session import HttpxClientFactory, SdkSession
-from vercel.drive import DriveQuery
-from vercel.drive._internal.async_runtime import (
+from vercel.drives import DriveQuery
+from vercel.drives._internal.async_runtime import (
     Drive,
     delete_drive as _delete_drive,
     fork_drive as _fork_drive,

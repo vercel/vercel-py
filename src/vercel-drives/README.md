@@ -1,11 +1,11 @@
-# vercel-drive
+# vercel-drives
 
 Python SDK for Vercel Drives: named persistent filesystems that belong to one
 project and one region, and mount into sandboxes created with
 [`vercel-sandbox`](https://pypi.org/project/vercel-sandbox/).
 
 ```sh
-pip install vercel-drive
+pip install vercel-drives
 ```
 
 ## Manage Drives
@@ -13,11 +13,11 @@ pip install vercel-drive
 ```python
 import asyncio
 
-from vercel import drive
+from vercel import drives
 
 
 async def main() -> None:
-    cache, created = await drive.get_or_create_drive(
+    cache, created = await drives.get_or_create_drive(
         name="cache",
         region="sfo1",
         max_size_bytes=10 * 1024**3,
@@ -25,9 +25,9 @@ async def main() -> None:
     print(cache.id, cache.region, created)
 
     # Look up an existing Drive by project-local name or Drive ID.
-    cache = await drive.get_drive(name_or_id="cache")
+    cache = await drives.get_drive(name_or_id="cache")
 
-    async for item in drive.query_drives(query=drive.DriveQueryByName(name_prefix="cache")):
+    async for item in drives.query_drives(query=drives.DriveQueryByName(name_prefix="cache")):
         print(item.name, item.max_size_bytes)
 
     await cache.delete()
@@ -50,16 +50,16 @@ its region and maximum size.
 ```python
 import asyncio
 
-from vercel import drive
+from vercel import drives
 
 
 async def main() -> None:
-    cache = await drive.get_drive(name_or_id="cache")
+    cache = await drives.get_drive(name_or_id="cache")
     forked = await cache.fork(name="cache-fork")
     print(forked.parent_drive_id, forked.root_drive_id)
 
     # Or fork by name, without a lookup.
-    other = await drive.fork_drive(source="cache", name="cache-fork-2")
+    other = await drives.fork_drive(source="cache", name="cache-fork-2")
 
 
 asyncio.run(main())
@@ -73,17 +73,17 @@ mounts. A mount is read-write unless it is a snapshot.
 ```python
 import asyncio
 
-from vercel import drive, sandbox
+from vercel import drives, sandbox
 
 
 async def main() -> None:
-    cache, _ = await drive.get_or_create_drive(name="cache")
+    cache, _ = await drives.get_or_create_drive(name="cache")
     async with sandbox.create_sandbox(
         region=cache.region,
         mounts={
             "/cache": cache,
             # A point-in-time, read-only view of a Drive.
-            "/readonly": drive.DriveMount("shared-source", mode="snapshot"),
+            "/readonly": drives.DriveMount("shared-source", mode="snapshot"),
         },
     ) as box:
         await box.fs.write_text("/cache/message.txt", "hello\n")
@@ -94,14 +94,14 @@ asyncio.run(main())
 
 ## Synchronous API
 
-`vercel.drive.sync` mirrors every function without `await` and returns
+`vercel.drives.sync` mirrors every function without `await` and returns
 `SyncDrive` handles.
 
 ```python
-from vercel.drive import sync as drive
+from vercel.drives import sync as drives
 
-cache, _ = drive.get_or_create_drive(name="cache")
-for item in drive.query_drives():
+cache, _ = drives.get_or_create_drive(name="cache")
+for item in drives.query_drives():
     print(item.name)
 ```
 
@@ -117,9 +117,9 @@ To supply credentials yourself, configure the session:
 ```python
 import asyncio
 
-from vercel import drive
+from vercel import drives
 from vercel.api import session
-from vercel.drive import DriveCredentials, DriveServiceOptions
+from vercel.drives import DriveCredentials, DriveServiceOptions
 
 
 async def credentials() -> DriveCredentials:
@@ -129,7 +129,7 @@ async def credentials() -> DriveCredentials:
 async def main() -> None:
     options = DriveServiceOptions(credentials_factory=credentials)
     async with session(service_options=[options]):
-        async for item in drive.query_drives():
+        async for item in drives.query_drives():
             print(item.name)
 
 

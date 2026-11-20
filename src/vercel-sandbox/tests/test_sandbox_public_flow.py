@@ -24,10 +24,10 @@ from sandbox_fixtures import (
 )
 
 import vendor.respx as respx
-from vercel import drive, sandbox
+from vercel import drives, sandbox
 from vercel._internal.core.session import get_active_session
 from vercel.api import session
-from vercel.drive import sync as drive_sync
+from vercel.drives import sync as drives_sync
 from vercel.errors import VercelSessionClosedError
 from vercel.sandbox import (
     CURRENT_REGION,
@@ -4774,7 +4774,7 @@ async def test_drive_get_or_create_query_delete_and_mount_serialization(
 @respx.mock
 @pytest.mark.parametrize("standalone", [False, True])
 @pytest.mark.parametrize("sync", [False, True])
-async def test_drive_operations_run_on_vercel_drive_with_sandbox_options(
+async def test_drive_operations_run_on_vercel_drives_with_sandbox_options(
     mock_env_clear: None, sync: bool, standalone: bool
 ) -> None:
     from vercel.sandbox.client import SandboxClient
@@ -4806,16 +4806,16 @@ async def test_drive_operations_run_on_vercel_drive_with_sandbox_options(
         result = operation(**kwargs)
         return await result if inspect.isawaitable(result) else result
 
-    # Drive options in the same session configure `vercel.drive`, not these calls.
+    # Drive options in the same session configure `vercel.drives`, not these calls.
     sandbox_options = _session_options(project_id="prj_other", sync=sync)
-    drive_options: Any = (drive_sync if sync else drive).DriveServiceOptions(
+    drive_options: Any = (drives_sync if sync else drives).DriveServiceOptions(
         base_url="https://drive.test"
     )
     client: Any = (SyncSandboxClient if sync else SandboxClient).create(
         options=cast(Any, sandbox_options[0])
     )
     api: Any = client if standalone else (sandbox_sync if sync else sandbox)
-    handle_type = drive_sync.SyncDrive if sync else drive.Drive
+    handle_type = drives_sync.SyncDrive if sync else drives.Drive
     async with AsyncExitStack() as stack:
         stack.push_async_callback(call, client.close if sync else client.aclose)
         context = session(service_options=[*sandbox_options, drive_options])
@@ -4834,13 +4834,13 @@ async def test_drive_operations_run_on_vercel_drive_with_sandbox_options(
         with pytest.raises(SandboxResponseError) as response_error:
             await call(api.get_drive, name_or_id="malformed")
 
-    assert sandbox.Drive is drive.Drive and sandbox_sync.SyncDrive is drive_sync.SyncDrive
+    assert sandbox.Drive is drives.Drive and sandbox_sync.SyncDrive is drives_sync.SyncDrive
     assert [type(item) for item in (found, forked, *listed, deleted)] == [handle_type] * 4
     assert (found.name, forked.name, deleted.name) == ("cache", "cache-fork", "cache")
-    assert isinstance(api_error.value, drive.DriveApiError)
+    assert isinstance(api_error.value, drives.DriveApiError)
     assert (api_error.value.status_code, api_error.value.code) == (404, "not_found")
     assert api_error.value.data == not_found
-    assert isinstance(response_error.value, drive.DriveResponseError)
+    assert isinstance(response_error.value, drives.DriveResponseError)
     for route in routes:
         request = route.calls.last.request
         assert request.headers["authorization"] == "Bearer token"

@@ -4,7 +4,7 @@ from collections.abc import Iterator, Mapping
 
 from vercel._internal.core.region import CURRENT_REGION, CurrentRegion, RegionInput
 from vercel._internal.core.session import get_active_sync_session
-from vercel.drive import (
+from vercel.drives import (
     DriveHandle,
     DriveMount,
     DriveQuery,
@@ -13,7 +13,7 @@ from vercel.drive import (
     DriveQueryByUpdatedAt,
     DriveReference,
 )
-from vercel.drive._internal.sync_runtime import (
+from vercel.drives._internal.sync_runtime import (
     SyncDrive,
     delete_drive as _delete_drive,
     fork_drive as _fork_drive,

@@ -3,7 +3,7 @@
 import httpx2 as httpx
 
 from vercel._internal.core.errors import VercelError
-from vercel.drive import DriveApiError, DriveResponseError
+from vercel.drives import DriveApiError, DriveResponseError
 from vercel.sandbox._internal.models import SandboxStatus
 
 
@@ -83,7 +83,7 @@ class SandboxResponseError(SandboxError):
 class SandboxDriveApiError(SandboxApiError, DriveApiError):
     """A Drives API error raised through `vercel.sandbox`.
 
-    Drive operations moved to `vercel-drive`, so this is both the
+    Drive operations moved to `vercel-drives`, so this is both the
     `SandboxApiError` existing callers catch and a `DriveApiError`.
     """
 

@@ -164,21 +164,21 @@ Public API regressions verify native HTTP payload transport, ownership, binary r
 
 ## Drives
 
-Sandboxes mount Drives at creation. The Drives themselves, their handles, and [[src/vercel-drive/vercel/drive/_internal/models.py#DriveMount]] belong to [[vercel-drive]].
+Sandboxes mount Drives at creation. The Drives themselves, their handles, and [[src/vercel-drives/vercel/drives/_internal/models.py#DriveMount]] belong to [[vercel-drives]].
 
-A mount is read-write by default, or a point-in-time read-only snapshot. Mount paths are canonicalized and validated in [[src/vercel-sandbox/vercel/sandbox/_internal/models.py#_serialize_drive_mounts]]: absolute, non-overlapping, no `..`, never `/`. Each drive must be in the sandbox's region, and mounted sandboxes cannot use failover regions. A read-write drive attached to another running sandbox is rejected by the API, and a drive must be unmounted before it can be deleted. A mount takes anything with the name, project, and region of [[src/vercel-drive/vercel/drive/_internal/models.py#DriveHandle]], or a Drive name.
+A mount is read-write by default, or a point-in-time read-only snapshot. Mount paths are canonicalized and validated in [[src/vercel-sandbox/vercel/sandbox/_internal/models.py#_serialize_drive_mounts]]: absolute, non-overlapping, no `..`, never `/`. Each drive must be in the sandbox's region, and mounted sandboxes cannot use failover regions. A read-write drive attached to another running sandbox is rejected by the API, and a drive must be unmounted before it can be deleted. A mount takes anything with the name, project, and region of [[src/vercel-drives/vercel/drives/_internal/models.py#DriveHandle]], or a Drive name.
 
 ### Drive operations
 
-The Drive functions on `vercel.sandbox` and its standalone clients predate [[vercel-drive]] and now delegate to it, keeping their Sandbox configuration and error types.
+The Drive functions on `vercel.sandbox` and its standalone clients predate [[vercel-drives]] and now delegate to it, keeping their Sandbox configuration and error types.
 
-[[src/vercel-sandbox/vercel/sandbox/_internal/service.py#_sandbox_drive_service]] builds one [[src/vercel-drive/vercel/drive/_internal/service.py#DriveService]] per Sandbox service from [[src/vercel-sandbox/vercel/sandbox/_internal/options.py#SandboxServiceOptions]]: the same base URL, credentials, request timeout, and default region, on the session's transport. A `DriveServiceOptions` in the same session configures `vercel.drive` and does not affect these calls. The public modules pass [[src/vercel-sandbox/vercel/sandbox/_internal/service.py#SandboxService#drive_service]] to the [[vercel-drive]] runtimes, so the handles they return are `vercel.drive` handles.
+[[src/vercel-sandbox/vercel/sandbox/_internal/service.py#_sandbox_drive_service]] builds one [[src/vercel-drives/vercel/drives/_internal/service.py#DriveService]] per Sandbox service from [[src/vercel-sandbox/vercel/sandbox/_internal/options.py#SandboxServiceOptions]]: the same base URL, credentials, request timeout, and default region, on the session's transport. A `DriveServiceOptions` in the same session configures `vercel.drives` and does not affect these calls. The public modules pass [[src/vercel-sandbox/vercel/sandbox/_internal/service.py#SandboxService#drive_service]] to the [[vercel-drives]] runtimes, so the handles they return are `vercel.drives` handles.
 
 API failures raise [[src/vercel-sandbox/vercel/sandbox/_internal/errors.py#SandboxDriveApiError]], which is both the `SandboxApiError` existing callers catch and a `DriveApiError`; [[src/vercel-sandbox/vercel/sandbox/_internal/errors.py#SandboxDriveResponseError]] does the same for malformed responses. Requests go to `/v1/drives` in place of the deprecated `/v2/sandboxes/drives`. Roles and project scopes grant both alike, but a Vercel app token scoped only to Sandbox needs the matching Drive scope.
 
-Sandbox imports [[vercel-drive]] internals for this, so it bounds that dependency below the next minor version, as it does [[vercel-internal-core]].
+Sandbox imports [[vercel-drives]] internals for this, so it bounds that dependency below the next minor version, as it does [[vercel-internal-core]].
 
-[[src/vercel-sandbox/tests/test_sandbox_public_flow.py#test_drive_operations_run_on_vercel_drive_with_sandbox_options|The delegation test]] runs every operation on both APIs and both standalone clients, and checks the request scope, handle types, and both error hierarchies. [[src/vercel-sandbox/tests/live/test_sandbox_live.py#test_drive_fork_and_fork_by_name_copy_committed_data_independently|The live fork test]] verifies both fork APIs against committed data, inherited metadata, lineage, and independent writes, and cleans up all allocated resources.
+[[src/vercel-sandbox/tests/test_sandbox_public_flow.py#test_drive_operations_run_on_vercel_drives_with_sandbox_options|The delegation test]] runs every operation on both APIs and both standalone clients, and checks the request scope, handle types, and both error hierarchies. [[src/vercel-sandbox/tests/live/test_sandbox_live.py#test_drive_fork_and_fork_by_name_copy_committed_data_independently|The live fork test]] verifies both fork APIs against committed data, inherited metadata, lineage, and independent writes, and cleans up all allocated resources.
 
 ## Interactive PTY sessions
 

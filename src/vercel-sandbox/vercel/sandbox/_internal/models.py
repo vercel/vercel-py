@@ -33,7 +33,7 @@ from pydantic import (
 
 from vercel._internal.core.region import ResolvedRegion
 from vercel._internal.core.time import SECOND, coerce_duration, to_ms_int
-from vercel.drive import DriveMount, DriveMountMode, DriveReference
+from vercel.drives import DriveMount, DriveMountMode, DriveReference
 from vercel.sandbox._internal.value_model import SandboxValueModel
 
 JSONValue: TypeAlias = PydanticJsonValue

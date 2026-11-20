@@ -10,8 +10,8 @@ from vercel._internal.core.byte_stream import (
 )
 from vercel._internal.core.http import StreamingResponse
 from vercel._internal.core.region import ResolvedRegion
-from vercel.drive import DriveCredentials
-from vercel.drive._internal.service import DriveService, create_drive_service
+from vercel.drives import DriveCredentials
+from vercel.drives._internal.service import DriveService, create_drive_service
 from vercel.sandbox._internal.api_client import (
     SandboxApiClient,
     _completed_process_state,
@@ -1296,9 +1296,9 @@ def _adapt_sync_credentials_factory(
 def _sandbox_drive_service(
     session: "SdkSession | SyncSdkSession", options: SandboxServiceOptions
 ) -> DriveService:
-    """Run `vercel-drive` with this session's Sandbox configuration.
+    """Run `vercel-drives` with this session's Sandbox configuration.
 
-    The Drive functions on `vercel.sandbox` predate `vercel-drive`, so they keep
+    The Drive functions on `vercel.sandbox` predate `vercel-drives`, so they keep
     the Sandbox credentials, base URL, timeout, region, and error types instead
     of reading `DriveServiceOptions`.
     """

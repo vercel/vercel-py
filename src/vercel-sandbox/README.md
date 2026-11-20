@@ -290,18 +290,18 @@ with sandbox.fork_sandbox(source_sandbox="production-agent") as forked:
 ## Sandbox Drives
 
 Drives are named persistent filesystems. A Drive belongs to one project and one
-region. Manage them with [`vercel-drive`](https://pypi.org/project/vercel-drive/),
+region. Manage them with [`vercel-drives`](https://pypi.org/project/vercel-drives/),
 which is installed with this package, then mount them when you create a sandbox:
 
 ```python
 import asyncio
 from pathlib import PurePosixPath
 
-from vercel import drive, sandbox
+from vercel import drives, sandbox
 
 
 async def main() -> None:
-    cache, _ = await drive.get_or_create_drive(
+    cache, _ = await drives.get_or_create_drive(
         name="cache",
         region="sfo1",
         max_size_bytes=10 * 1024**3,
@@ -312,7 +312,7 @@ async def main() -> None:
             # Mount a read-write drive
             "/cache": cache,
             # You can mount an existing drive by name as a point-in-time read-only snapshot
-            "/readonly": drive.DriveMount("shared-source", mode="snapshot"),
+            "/readonly": drives.DriveMount("shared-source", mode="snapshot"),
             # You can also provide a PurePosixPath as the mount point
             PurePosixPath("/scratch"): "scratch",
         },
@@ -327,7 +327,7 @@ asyncio.run(main())
 ```
 
 By default, a `Drive` handle or Drive name mounts it read-write. Use
-`drive.snapshot()` or `DriveMount(name, mode="snapshot")` for a point-in-time
+`drives.snapshot()` or `DriveMount(name, mode="snapshot")` for a point-in-time
 read-only mount. Drives must be unmounted from any running Sandbox before they
 can be deleted.
 
@@ -352,7 +352,7 @@ data first. See [the Drive fork example](examples/sandbox_10_drive_fork.py).
 
 `vercel.sandbox` also exposes `get_drive`, `get_or_create_drive`, `fork_drive`,
 `delete_drive`, and `query_drives`, on both APIs and the standalone clients.
-They return the same `Drive` and `SyncDrive` handles as `vercel.drive`, use the
+They return the same `Drive` and `SyncDrive` handles as `vercel.drives`, use the
 project resolved by the configured Sandbox credentials, and raise
 `SandboxApiError`.
 

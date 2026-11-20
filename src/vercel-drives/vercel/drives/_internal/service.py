@@ -9,10 +9,10 @@ from datetime import timedelta
 from typing import TYPE_CHECKING
 
 from vercel._internal.core.region import RegionInput, ResolvedRegion
-from vercel.drive._internal.api_client import DriveApiClient
-from vercel.drive._internal.errors import DriveApiError, DriveResponseError
-from vercel.drive._internal.models import DriveQuery, DrivesPageState, DriveState
-from vercel.drive._internal.options import (
+from vercel.drives._internal.api_client import DriveApiClient
+from vercel.drives._internal.errors import DriveApiError, DriveResponseError
+from vercel.drives._internal.models import DriveQuery, DrivesPageState, DriveState
+from vercel.drives._internal.options import (
     DriveCredentials,
     DriveCredentialsFactory,
     DriveServiceOptions,

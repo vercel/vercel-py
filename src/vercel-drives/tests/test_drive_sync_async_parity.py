@@ -4,8 +4,8 @@ import inspect
 
 import pytest
 
-from vercel import drive
-from vercel.drive import sync as drive_sync
+from vercel import drives
+from vercel.drives import sync as drives_sync
 
 ASYNC_OPERATIONS = ["get_drive", "get_or_create_drive", "fork_drive", "delete_drive"]
 ITERATOR_OPERATIONS = ["query_drives"]
@@ -20,15 +20,15 @@ ASYNC_ONLY = {"sync", "__version__"}
 
 
 def test_public_names_match() -> None:
-    async_names = {MODE_SPECIFIC.get(name, name) for name in drive.__all__} - ASYNC_ONLY
+    async_names = {MODE_SPECIFIC.get(name, name) for name in drives.__all__} - ASYNC_ONLY
 
-    assert async_names == set(drive_sync.__all__)
+    assert async_names == set(drives_sync.__all__)
 
 
 @pytest.mark.parametrize("name", OPERATIONS)
 def test_operations_match_apart_from_awaiting(name: str) -> None:
-    async_operation = getattr(drive, name)
-    sync_operation = getattr(drive_sync, name)
+    async_operation = getattr(drives, name)
+    sync_operation = getattr(drives_sync, name)
 
     assert inspect.iscoroutinefunction(async_operation) is (name in ASYNC_OPERATIONS)
     assert not inspect.iscoroutinefunction(sync_operation)
@@ -44,14 +44,14 @@ def test_operations_match_apart_from_awaiting(name: str) -> None:
 
 @pytest.mark.parametrize("method", ["fork", "delete", "snapshot"])
 def test_handle_methods_match(method: str) -> None:
-    async_parameters = inspect.signature(getattr(drive.Drive, method)).parameters
-    sync_parameters = inspect.signature(getattr(drive_sync.SyncDrive, method)).parameters
+    async_parameters = inspect.signature(getattr(drives.Drive, method)).parameters
+    sync_parameters = inspect.signature(getattr(drives_sync.SyncDrive, method)).parameters
 
     assert list(async_parameters) == list(sync_parameters)
 
 
 @pytest.mark.parametrize(
-    "name", [n for n in drive.__all__ if n not in {*OPERATIONS, *MODE_SPECIFIC, *ASYNC_ONLY}]
+    "name", [n for n in drives.__all__ if n not in {*OPERATIONS, *MODE_SPECIFIC, *ASYNC_ONLY}]
 )
 def test_shared_symbols_are_the_same_object_in_both_surfaces(name: str) -> None:
-    assert getattr(drive, name) is getattr(drive_sync, name)
+    assert getattr(drives, name) is getattr(drives_sync, name)

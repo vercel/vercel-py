@@ -33,8 +33,8 @@ from vercel._internal.core.http import (
 )
 from vercel._internal.core.region import ResolvedRegion
 from vercel._internal.core.url import format_url_path
-from vercel.drive._internal.errors import DriveApiError, DriveResponseError
-from vercel.drive._internal.models import (
+from vercel.drives._internal.errors import DriveApiError, DriveResponseError
+from vercel.drives._internal.models import (
     DriveQuery,
     DriveQueryByCreatedAt,
     DriveQueryByName,
@@ -42,14 +42,14 @@ from vercel.drive._internal.models import (
     DrivesPageState,
     DriveState,
 )
-from vercel.drive._internal.options import DriveCredentials, DriveCredentialsFactory
-from vercel.drive._internal.retry import AsyncSleep, with_request_retries
+from vercel.drives._internal.options import DriveCredentials, DriveCredentialsFactory
+from vercel.drives._internal.retry import AsyncSleep, with_request_retries
 
 try:
-    VERSION = _pkg_version("vercel-drive")
+    VERSION = _pkg_version("vercel-drives")
 except PackageNotFoundError:  # pragma: no cover - bundled distribution
     try:
-        VERSION = _pkg_version("vercel-drive-bundle")
+        VERSION = _pkg_version("vercel-drives-bundle")
     except PackageNotFoundError:
         VERSION = "development"
 
@@ -69,7 +69,7 @@ def _user_agent() -> str:
         agent_name = detect_agent_name()
     agent_info = f" agent/{agent_name}" if agent_name else ""
     return (
-        f"vercel-drive/{VERSION}{agent_info} "
+        f"vercel-drives/{VERSION}{agent_info} "
         f"(Python/{sys.version}; {PLATFORM.system}/{PLATFORM.machine})"
     )
 

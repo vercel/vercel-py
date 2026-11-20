@@ -1,7 +1,7 @@
 """Drive handle state shared by the sync and async runtimes."""
 
-from vercel.drive._internal.models import DriveMount, DriveState
-from vercel.drive._internal.service import DriveService
+from vercel.drives._internal.models import DriveMount, DriveState
+from vercel.drives._internal.service import DriveService
 
 
 class DriveHandleBase:

@@ -1,6 +1,6 @@
-Run Drive operations on the new `vercel-drive` package and the `/v1/drives` API.
+Run Drive operations on the new `vercel-drives` package and the `/v1/drives` API.
 The Drive functions, handles, and `DriveMount` exported by `vercel.sandbox` are
-the `vercel.drive` ones and keep working as before: they use
+the `vercel.drives` ones and keep working as before: they use
 `SandboxServiceOptions`, and API failures raise `SandboxApiError`, which is now
 also a `DriveApiError`.
 
