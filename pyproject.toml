@@ -92,6 +92,7 @@ explicit_package_bases = true
 mypy_path = [
     "src",
     "src/vercel-blob",
+    "src/vercel-board",
     "src/vercel-cache",
     "src/vercel-connect",
     "src/vercel-headers",
