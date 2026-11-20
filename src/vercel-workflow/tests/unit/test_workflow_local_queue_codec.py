@@ -15,7 +15,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import UTC, datetime
 from typing import Any
+
+import pytest
 
 from tests.payloads import PLAIN_ENCODER
 from vercel.workflow._internal import world as w
@@ -25,6 +28,66 @@ RUN_ID = "wrun_codec"
 WORKFLOW = "add_ten"
 # What the plain encoder produces, and what a TS producer base64s into the envelope.
 INPUT = PLAIN_ENCODER.encode([[1], 123])
+
+
+@pytest.mark.parametrize("is_step", [False, True])
+@pytest.mark.parametrize("with_key", [False, True])
+async def test_only_keyed_step_timestamps_are_normalized(
+    tmp_path, monkeypatch, is_step: bool, with_key: bool
+) -> None:
+    from vercel.queue._internal.embedded import create_embedded_queue_app
+
+    monkeypatch.setenv("WORKFLOW_LOCAL_DATA_DIR", str(tmp_path))
+    app = create_embedded_queue_app()
+    world = local_mod.LocalWorld()
+    world._queue_client = app.get_async_client()
+    timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+    message = w.WorkflowInvokePayload(
+        run_id=RUN_ID,
+        step_id="step_test" if is_step else None,
+        requested_at=timestamp,
+    )
+    try:
+        await world.queue(
+            w.get_queue_name(WORKFLOW),
+            message,
+            idempotency_key="step_test" if with_key else None,
+        )
+        wire = json.loads(app.state.messages[0].payload.read())["payload"]
+        if is_step and with_key:
+            assert "requestedAt" not in wire
+        else:
+            assert wire["requestedAt"] == timestamp.isoformat()
+        assert message.requested_at == timestamp
+    finally:
+        await world.aclose()
+
+
+async def test_keyed_steps_deduplicate_real_local_queue_deliveries(tmp_path, monkeypatch) -> None:
+    from vercel.queue._internal.embedded import create_embedded_queue_app
+
+    monkeypatch.setenv("WORKFLOW_LOCAL_DATA_DIR", str(tmp_path))
+    app = create_embedded_queue_app()
+    world = local_mod.LocalWorld()
+    world._queue_client = app.get_async_client()
+    queue_name = w.get_queue_name(WORKFLOW)
+    try:
+        for second in (0, 1):
+            message = w.WorkflowInvokePayload(
+                run_id=RUN_ID,
+                step_id="step_test",
+                requested_at=datetime(2026, 1, 1, second=second, tzinfo=UTC),
+            )
+            await world.queue(queue_name, message, idempotency_key="step_test")
+
+        deliveries = list(
+            app.iter_push_deliveries(
+                str(w.get_physical_topic(queue_name)), str(w.QUEUE_CONSUMER_GROUP)
+            )
+        )
+        assert len(deliveries) == 1
+    finally:
+        await world.aclose()
 
 
 def _payload() -> w.WorkflowInvokePayload:
@@ -120,7 +183,9 @@ def test_a_payload_without_bytes_is_unchanged() -> None:
     assert wire == {"runId": RUN_ID}
 
 
-async def test_bytes_survive_a_real_local_queue_delivery(tmp_path, monkeypatch) -> None:
+async def test_bytes_survive_a_real_local_queue_delivery(
+    tmp_path, monkeypatch, isolated_subscriptions: None
+) -> None:
     """End to end through the embedded queue, which is where the two halves of
     the codec actually have to meet."""
     monkeypatch.setenv("WORKFLOW_LOCAL_DATA_DIR", str(tmp_path))

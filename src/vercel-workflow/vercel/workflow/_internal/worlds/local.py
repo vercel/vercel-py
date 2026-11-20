@@ -677,6 +677,12 @@ class LocalWorld(w.World):
         delay_seconds: float | None = None,
         **kwargs,
     ) -> str:
+        if idempotency_key and isinstance(message, w.WorkflowInvokePayload) and message.step_id:
+            # Work around the embedded queue including payload bytes in its
+            # deduplication key: a fresh timestamp defeats step recovery dedupe.
+            # Remove this normalization once the queue matches server semantics:
+            # https://github.com/vercel/vercel-py/issues/553
+            message = message.model_copy(update={"requested_at": None})
         payload = {
             # Same JSON dialect the file store uses: the transport is plain
             # JSON, which has nowhere to put `bytes`.
