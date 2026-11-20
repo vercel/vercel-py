@@ -1,5 +1,6 @@
 """Sync mirror for the Vercel Board SDK surface."""
 
+from vercel._internal.core.sentinel import UNSET
 from vercel.board._internal.access import (
     CAN_MAX,
     PERMISSIONS,
@@ -42,18 +43,36 @@ from vercel.board._internal.models import (
     Profile,
     Via,
 )
+from vercel.board._internal.options import (
+    DEFAULT_API_BASE_URL,
+    BoardCredentials,
+    SyncBoardCredentialsFactory as BoardCredentialsFactory,
+    SyncBoardServiceOptions as BoardServiceOptions,
+    sync_static_credentials_factory as static_credentials_factory,
+)
+from vercel.board._internal.sync_runtime import (
+    SyncBoard as Board,
+    SyncBoardClient as BoardClient,
+    sync_board as board,
+)
 from vercel.board.version import __version__
 
 # Only add public symbols to __all__; internal helpers must stay unexported.
 __all__ = [
     "CAN_MAX",
+    "DEFAULT_API_BASE_URL",
     "PERMISSIONS",
+    "UNSET",
     "Actor",
     "ActorKind",
     "Author",
+    "Board",
     "BoardApiError",
+    "BoardClient",
     "BoardConflictError",
+    "BoardCredentials",
     "BoardCredentialsError",
+    "BoardCredentialsFactory",
     "BoardError",
     "BoardLabelConflictError",
     "BoardNewerMessageError",
@@ -62,6 +81,7 @@ __all__ = [
     "BoardRateLimitError",
     "BoardResponseError",
     "BoardRevisionConflictError",
+    "BoardServiceOptions",
     "BoardValidationError",
     "BoardValueModel",
     "Can",
@@ -82,5 +102,7 @@ __all__ = [
     "Profile",
     "Via",
     "__version__",
+    "board",
     "parse_can",
+    "static_credentials_factory",
 ]

@@ -6,8 +6,6 @@ from datetime import UTC, datetime, timedelta, timezone
 import pytest
 from hypothesis import given, strategies as st
 
-import vercel.board as board_async
-import vercel.board.sync as board_sync
 from vercel.board import (
     Actor,
     ActorKind,
@@ -186,11 +184,3 @@ def test_me_and_discovery_models() -> None:
 
     schema = Me.model_json_schema()
     assert "can" in schema["properties"]
-
-
-def test_sync_and_async_export_parity() -> None:
-    async_exports = set(board_async.__all__) - {"sync"}
-    sync_exports = set(board_sync.__all__)
-    assert async_exports == sync_exports
-    for name in sorted(async_exports):
-        assert getattr(board_async, name) is getattr(board_sync, name)

@@ -1,5 +1,6 @@
 """Vercel Board SDK surface."""
 
+from vercel._internal.core.sentinel import UNSET
 from vercel.board._internal.access import (
     CAN_MAX,
     PERMISSIONS,
@@ -9,6 +10,7 @@ from vercel.board._internal.access import (
     Permission,
     parse_can,
 )
+from vercel.board._internal.async_runtime import Board, BoardClient, board
 from vercel.board._internal.base import BoardValueModel
 from vercel.board._internal.errors import (
     BoardApiError,
@@ -42,6 +44,13 @@ from vercel.board._internal.models import (
     Profile,
     Via,
 )
+from vercel.board._internal.options import (
+    DEFAULT_API_BASE_URL,
+    BoardCredentials,
+    BoardCredentialsFactory,
+    BoardServiceOptions,
+    static_credentials_factory,
+)
 from vercel.board.version import __version__
 
 from . import sync
@@ -49,13 +58,19 @@ from . import sync
 # Only add public symbols to __all__; internal helpers must stay unexported.
 __all__ = [
     "CAN_MAX",
+    "DEFAULT_API_BASE_URL",
     "PERMISSIONS",
+    "UNSET",
     "Actor",
     "ActorKind",
     "Author",
+    "Board",
     "BoardApiError",
+    "BoardClient",
     "BoardConflictError",
+    "BoardCredentials",
     "BoardCredentialsError",
+    "BoardCredentialsFactory",
     "BoardError",
     "BoardLabelConflictError",
     "BoardNewerMessageError",
@@ -64,6 +79,7 @@ __all__ = [
     "BoardRateLimitError",
     "BoardResponseError",
     "BoardRevisionConflictError",
+    "BoardServiceOptions",
     "BoardValidationError",
     "BoardValueModel",
     "Can",
@@ -84,6 +100,8 @@ __all__ = [
     "Profile",
     "Via",
     "__version__",
+    "board",
     "parse_can",
+    "static_credentials_factory",
     "sync",
 ]
