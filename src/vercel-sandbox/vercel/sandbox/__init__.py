@@ -7,10 +7,6 @@ from vercel._internal.core.session import get_active_session
 from vercel.drives import (
     DriveHandle,
     DriveMount,
-    DriveQuery,
-    DriveQueryByCreatedAt,
-    DriveQueryByName,
-    DriveQueryByUpdatedAt,
     DriveReference,
 )
 from vercel.drives._internal.async_runtime import (
@@ -78,6 +74,10 @@ from vercel.sandbox._internal.models import (
     CompletedCommand,
     DirectoryEntry,
     DriveMountsInput,
+    DriveQuery,
+    DriveQueryByCreatedAt,
+    DriveQueryByName,
+    DriveQueryByUpdatedAt,
     DurationInput,
     FailoverRegionsInput,
     GitSource,

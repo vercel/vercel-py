@@ -6,7 +6,6 @@ from typing import Self
 from vercel._internal.core.options import collect_service_options
 from vercel._internal.core.region import RegionInput
 from vercel._internal.core.session import HttpxClientFactory, SyncSdkSession
-from vercel.drives import DriveQuery
 from vercel.drives._internal.sync_runtime import (
     SyncDrive,
     delete_drive as _delete_sync_drive,
@@ -17,6 +16,7 @@ from vercel.drives._internal.sync_runtime import (
 )
 from vercel.sandbox._internal.models import (
     DriveMountsInput,
+    DriveQuery,
     DurationInput,
     FailoverRegionsInput,
     JSONValue as _JSONValue,

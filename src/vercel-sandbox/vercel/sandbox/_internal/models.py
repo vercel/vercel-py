@@ -31,6 +31,7 @@ from pydantic import (
     model_validator,
 )
 
+from vercel import drives
 from vercel._internal.core.region import ResolvedRegion
 from vercel._internal.core.time import SECOND, coerce_duration, to_ms_int
 from vercel.drives import DriveMount, DriveMountMode, DriveReference
@@ -1046,6 +1047,24 @@ class ProcessLogStream(StrEnum):
 
     STDOUT = "stdout"
     STDERR = "stderr"
+
+
+# Sandbox 1.0 exposed these with `_InputModel.to_api_dict`. They extend the
+# `vercel.drives` types, which leave serialization to their API client, so that
+# either package's queries work with either package's `query_drives`.
+class DriveQueryByCreatedAt(drives.DriveQueryByCreatedAt, _InputModel):
+    """Drive listing ordered by creation time."""
+
+
+class DriveQueryByUpdatedAt(drives.DriveQueryByUpdatedAt, _InputModel):
+    """Drive listing ordered by update time."""
+
+
+class DriveQueryByName(drives.DriveQueryByName, _InputModel):
+    """Drive listing ordered by name."""
+
+
+DriveQuery: TypeAlias = DriveQueryByCreatedAt | DriveQueryByUpdatedAt | DriveQueryByName
 
 
 class ProcessLog(BaseModel):
