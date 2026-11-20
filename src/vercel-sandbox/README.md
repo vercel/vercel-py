@@ -326,8 +326,8 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-By default, a `Drive` handle or Drive name mounts it read-write. Use
-`drives.snapshot()` or `DriveMount(name, mode="snapshot")` for a point-in-time
+By default, a `Drive` handle or Drive name mounts it read-write. Use a
+handle's `snapshot()` or `DriveMount(name, mode="snapshot")` for a point-in-time
 read-only mount. Drives must be unmounted from any running Sandbox before they
 can be deleted.
 
