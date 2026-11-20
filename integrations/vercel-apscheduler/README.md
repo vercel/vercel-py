@@ -86,6 +86,24 @@ or, rarely, repeat. Jobs must be idempotent. Listeners added with
 `add_listener()` receive each job's executed, error, missed and
 max-instances events. A job that raises fails its firing.
 
+## Pause and resume
+
+`pause()` and `resume()` disable and enable the schedules of every job the
+scheduler declares, and `pause_job()` and `resume_job()` change one job's
+schedule. Call them from any function of the deployment, such as an
+authenticated route:
+
+```python
+@app.post("/jobs/pause")
+def pause_jobs() -> None:
+    scheduler.pause()
+```
+
+A disabled schedule stays disabled when you deploy again, and a firing already
+running finishes. Each call is safe to repeat, so retry one that fails partway
+through. In a preview, a deployment's schedules start disabled, and `resume()`
+enables them.
+
 ## Jobs are fixed at deploy
 
 A deployment's schedules come from the jobs its module declares, so jobs can't

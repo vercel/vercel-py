@@ -37,3 +37,8 @@ vc deploy --prod
 
 The app's `/` route lists the jobs from the same scheduler. It never starts the
 scheduler: the deployment's schedules run the jobs.
+
+Set `APSCHEDULER_ADMIN_SECRET` to use `/jobs/pause` and `/jobs/resume`, which
+call `scheduler.pause()` and `scheduler.resume()`. They disable and enable the
+deployment's schedules, and the state stays when you deploy again. Do not
+expose these routes without authentication.

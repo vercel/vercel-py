@@ -38,7 +38,7 @@ from ._triggers import (
     without_jitter,
 )
 
-__all__ = ["DeclaredJob", "declare", "fire", "in_firing"]
+__all__ = ["DeclaredJob", "declare", "declared_jobs", "fire", "in_firing"]
 
 # The names the Schedules API accepts. A job's id names its schedule.
 _SCHEDULE_NAME = re.compile(r"[0-9A-Za-z][0-9A-Za-z._-]{0,255}")
@@ -74,6 +74,12 @@ _declared_lock = threading.Lock()
 def in_firing() -> bool:
     """Whether the caller runs inside a job that a firing started."""
     return _in_firing.get()
+
+
+def declared_jobs(scheduler: BaseScheduler) -> list[DeclaredJob]:
+    """Return the jobs `scheduler` declares, in the order it declared them."""
+    with _declared_lock:
+        return [declared for declared in _declared.values() if declared.scheduler is scheduler]
 
 
 def declare(scheduler: BaseScheduler, job: Any, *, replace_existing: bool) -> None:
