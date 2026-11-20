@@ -114,7 +114,7 @@ COMMON_DROP_TRANSFORMATIONS = (
 )
 # Bump to force a republish of the shared vendored package when the vendoring
 # recipe changes without any change to the pinned requirements.
-SHARED_VENDOR_RECIPE_REVISION = 5
+SHARED_VENDOR_RECIPE_REVISION = 6
 
 
 @dataclass(frozen=True)
@@ -675,6 +675,7 @@ def _vendoring_transformations(plan: VendoredPlan) -> VendoringTransformations:
             substitutions=(
                 *_shared_h2_substitution_pairs(),
                 (r"import wsproto\.utilities", "from wsproto import utilities"),
+                *_shared_version_substitution_pairs(),
             ),
         )
     return VendoringTransformations(substitutions=())
@@ -691,6 +692,16 @@ def _shared_h2_substitution_pairs() -> tuple[tuple[str, str], ...]:
             )
         )
     return tuple(pairs)
+
+
+def _shared_version_substitution_pairs() -> tuple[tuple[str, str], ...]:
+    # httpx2 and httpcore2 read their version from their distribution's
+    # metadata, which a vendored copy doesn't install, so they fail to import.
+    lock_versions = _lock_versions()
+    return tuple(
+        (rf'version\("{name}"\)', json.dumps(lock_versions[name]))
+        for name in ("httpcore2", "httpx2")
+    )
 
 
 def _format_substitution(match: str, replace: str) -> str:
