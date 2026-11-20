@@ -1647,6 +1647,13 @@ def test_package_hatch_build_loader_uses_shared_hook(package: str) -> None:
     assert module.get_metadata_hook().__name__ == "WorkspaceDependenciesMetadataHook"
 
 
+_PLANTED_HOOK = (
+    "from pathlib import Path\n"
+    "Path(__file__).with_name('executed').touch()\n"
+    "def get_metadata_hook():\n    return 'planted'\n"
+)
+
+
 @pytest.mark.parametrize("ships_hook", [True, False])
 def test_unpacked_source_archive_never_runs_a_hook_from_outside_it(
     tmp_path: Path, ships_hook: bool
@@ -1663,12 +1670,7 @@ def test_unpacked_source_archive_never_runs_a_hook_from_outside_it(
         )
     planted = tmp_path / "scripts" / "hatch_build.py"
     planted.parent.mkdir()
-    planted.write_text(
-        "from pathlib import Path\n"
-        "Path(__file__).with_name('executed').touch()\n"
-        "def get_metadata_hook():\n    return 'planted'\n",
-        encoding="utf-8",
-    )
+    planted.write_text(_PLANTED_HOOK, encoding="utf-8")
     module = _load_package_hatch_build(archive / "hatch_build.py")
 
     if ships_hook:
@@ -1679,44 +1681,38 @@ def test_unpacked_source_archive_never_runs_a_hook_from_outside_it(
     assert not planted.with_name("executed").exists()
 
 
-@pytest.mark.parametrize(
-    ("workspace", "package_dir", "expected"),
-    [
-        ('members = ["src/*"]', "src/vercel-drive", "workspace"),
-        ('members = ["src/*", "integrations/*"]', "integrations/vercel-drive", "workspace"),
-        ('members = ["src/*"]', "other/vercel-drive", None),
-        ('members = ["src/*"]', "src/nested/vercel-drive", None),
-        ('members = ["src/*"]\nexclude = ["src/vercel-drive"]', "src/vercel-drive", None),
-        (None, "src/vercel-drive", None),
-    ],
-)
-def test_checkout_runs_only_the_hook_of_the_uv_workspace_that_lists_it(
-    tmp_path: Path, workspace: str | None, package_dir: str, expected: str | None
+@pytest.mark.parametrize("declares_hook", [True, False])
+def test_checkout_runs_only_the_hook_its_own_pyproject_names(
+    tmp_path: Path, declares_hook: bool
 ) -> None:
-    # The hook sits where the old loader looked: two directories above the package.
-    if workspace is not None:
-        (tmp_path / "pyproject.toml").write_text(
-            f"[tool.uv.workspace]\n{workspace}\n", encoding="utf-8"
-        )
-    hook = tmp_path / "scripts" / "hatch_build.py"
-    hook.parent.mkdir()
-    hook.write_text(
-        "from pathlib import Path\n"
-        "Path(__file__).with_name('executed').touch()\n"
-        "def get_metadata_hook():\n    return 'workspace'\n",
-        encoding="utf-8",
-    )
-    package = tmp_path / package_dir
+    # Another user who can write to the shared `src/` directory, but not to the
+    # package or the repository root, claims the package for their own workspace.
+    repository = tmp_path / "repository"
+    package = repository / "src" / "vercel-drive"
     package.mkdir(parents=True)
     shutil.copy2("src/vercel-drive/hatch_build.py", package / "hatch_build.py")
+    (repository / "scripts").mkdir()
+    (repository / "scripts" / "hatch_build.py").write_text(
+        "def get_metadata_hook():\n    return 'declared'\n", encoding="utf-8"
+    )
+    declared = '"../../scripts/hatch_build.py" = "/_vercel_hatch_build.py"' if declares_hook else ""
+    (package / "pyproject.toml").write_text(
+        f"[tool.hatch.build.targets.sdist]\nforce-include = {{ {declared} }}\n", encoding="utf-8"
+    )
+    (repository / "src" / "pyproject.toml").write_text(
+        '[tool.uv.workspace]\nmembers = ["vercel-drive"]\n', encoding="utf-8"
+    )
+    planted = repository / "src" / "scripts" / "hatch_build.py"
+    planted.parent.mkdir()
+    planted.write_text(_PLANTED_HOOK, encoding="utf-8")
     module = _load_package_hatch_build(package / "hatch_build.py")
 
-    if expected is None:
-        with pytest.raises(RuntimeError, match="uv workspace member"):
-            module.get_metadata_hook()
+    if declares_hook:
+        assert module.get_metadata_hook() == "declared"
     else:
-        assert module.get_metadata_hook() == expected
-    assert hook.with_name("executed").exists() is (expected is not None)
+        with pytest.raises(RuntimeError, match="must force-include exactly one file"):
+            module.get_metadata_hook()
+    assert not planted.with_name("executed").exists()
 
 
 def test_vendored_eligibility_is_derived_from_package_layout(tmp_path: Path) -> None:
