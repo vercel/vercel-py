@@ -24,6 +24,7 @@ from vercel.oidc import VercelOidcTokenError
 from vercel.oidc.aio import get_vercel_oidc_token
 
 from .. import encryption, ulid, world as w
+from . import event_frames
 
 MAX_DELAY_SECONDS = float(
     os.getenv("VERCEL_QUEUE_MAX_DELAY_SECONDS", "82800")
@@ -914,17 +915,88 @@ class VercelWorld(w.World):
         *,
         pagination: w.PaginationOptions | None = None,
     ) -> w.PaginatedResult[w.Event]:
-        search_params = {}
-        if pagination is not None:
-            search_params.update(pagination.model_dump())
-        search_params["remoteRefBehavior"] = "resolve"
-        query_string = urllib.parse.urlencode(search_params)
-        query = f"?{query_string}" if query_string else ""
-        return await self._cbor_request(
-            "GET",
-            f"/v3/runs/{run_id}/events{query}",
-            schema=w.PaginatedResult[w.Event],
-        )
+        pagination = pagination or w.PaginationOptions()
+        cursor = pagination.cursor
+        events: list[w.Event] = []
+        partial_retries = 0
+        headers = await self._auth_headers()
+        headers["Accept"] = event_frames.CONTENT_TYPE
+        headers["X-Request-Time"] = datetime.datetime.now(UTC).isoformat()
+        async with httpx.AsyncClient(base_url=self._base_url, headers=headers) as client:
+            while True:
+                params = pagination.model_dump(exclude={"cursor"})
+                if pagination.limit is None:
+                    params["returnAll"] = "true"
+                if cursor is not None:
+                    params["cursor"] = cursor
+                params["remoteRefBehavior"] = "resolve"
+                endpoint = f"/v4/runs/{_quote(run_id)}/events?{urllib.parse.urlencode(params)}"
+                page: list[w.Event] = []
+                try:
+                    response = await self._send_frame_request(client, "GET", endpoint)
+                    try:
+                        end = await self._consume_event_response(response, page)
+                    finally:
+                        with anyio.CancelScope(shield=True):
+                            await response.aclose()
+                except (event_frames.IncompleteFrameError, httpx.TransportError):
+                    last = page[-1].server_props if page else None
+                    next_cursor = f"eid:{last.event_id}" if last else None
+                    if (
+                        pagination.limit is not None
+                        or next_cursor is None
+                        or next_cursor == cursor
+                        or partial_retries >= 2
+                    ):
+                        raise
+                    events.extend(page)
+                    cursor = next_cursor
+                    partial_retries += 1
+                    continue
+                if end.next == cursor and (page or end.has_more):
+                    raise w.WorkflowWorldError(
+                        "Event listing did not advance cursor", status=0, code="SCHEMA_VALIDATION"
+                    )
+                events.extend(page)
+                return w.PaginatedResult(
+                    data=events, cursor=end.next or cursor, has_more=end.has_more
+                )
+
+    async def _send_frame_request(
+        self, client: httpx.AsyncClient, method: str, endpoint: str, *, content: bytes | None = None
+    ) -> httpx.Response:
+        """Retry sending safe requests; consuming their bodies is a separate operation."""
+        for attempt in range(_REQUEST_ATTEMPTS):
+            try:
+                response = await client.send(
+                    client.build_request(method, endpoint, content=content), stream=True
+                )
+            except httpx.TransportError as error:
+                if attempt + 1 >= _REQUEST_ATTEMPTS or not _is_retryable_transport_error(
+                    method, error
+                ):
+                    raise
+                delay = _REQUEST_RETRY_BASE_SECONDS * 2**attempt
+                await anyio.sleep(delay + random.uniform(0, delay / 2))
+                continue
+            if not response.is_success:
+                try:
+                    await response.aread()
+                    raise self._error_for_response(method, endpoint, response)
+                finally:
+                    await response.aclose()
+            return response
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    @staticmethod
+    async def _consume_event_response(
+        response: httpx.Response, events: list[w.Event]
+    ) -> event_frames.EventStreamEnd:
+        if not response.headers.get("content-type", "").startswith(event_frames.CONTENT_TYPE):
+            raise w.WorkflowWorldError(
+                "Expected v4 event frame response", status=0, code="SCHEMA_VALIDATION"
+            )
+        return await event_frames.consume_event_stream(response.aiter_bytes(), events)
 
     # ── streams ────────────────────────────────────────────────────────────
 

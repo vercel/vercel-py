@@ -26,6 +26,7 @@ from vercel.queue import MessageMetadata
 from vercel.queue._internal.subscribers import infer_subscriber_transport
 from vercel.workflow._internal import ulid, world as w
 from vercel.workflow._internal.worlds import vercel as vercel_mod
+from vercel.workflow._internal.worlds.event_frames import CONTENT_TYPE, encode_frame
 from vercel.workflow._internal.worlds.local import LocalWorld
 
 WRAPPER = {
@@ -269,12 +270,13 @@ async def test_step_start_does_not_retry_an_uncertain_write(
 @respx.mock
 async def test_event_list_retries_after_a_read_timeout() -> None:
     world = vercel_mod.VercelWorld(token="test-token")
-    page: dict[str, object] = {"data": [], "cursor": None, "hasMore": False}
-    route = respx.get(url__startswith=f"{world._base_url}/v3/runs/wrun_test/events").mock(
+    route = respx.get(url__startswith=f"{world._base_url}/v4/runs/wrun_test/events").mock(
         side_effect=[
             httpx.ReadTimeout("read timed out"),
             httpx.Response(
-                200, content=cbor2.dumps(page), headers={"content-type": "application/cbor"}
+                200,
+                content=encode_frame({"_end": 1, "hasMore": False}),
+                headers={"content-type": CONTENT_TYPE},
             ),
         ]
     )
@@ -305,7 +307,7 @@ async def test_transport_retries_are_bounded() -> None:
 @respx.mock
 async def test_http_error_responses_are_not_retried(status: int) -> None:
     world = vercel_mod.VercelWorld(token="test-token")
-    route = respx.get(url__startswith=f"{world._base_url}/v3/runs/wrun_test/events").respond(
+    route = respx.get(url__startswith=f"{world._base_url}/v4/runs/wrun_test/events").respond(
         status, json={"message": "temporarily unavailable"}
     )
 
