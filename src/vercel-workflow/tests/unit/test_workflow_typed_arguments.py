@@ -527,6 +527,80 @@ def test_a_value_that_does_not_match_names_the_callee_and_the_parameter() -> Non
     assert isinstance(ei.value.__cause__, pydantic.ValidationError)
 
 
+@pytest.mark.parametrize("in_list", [False, True])
+def test_validation_hides_input_without_changing_model_config(in_list: bool) -> None:
+    import traceback
+
+    from vercel.workflow._internal.signature_codec import TypeCodec
+
+    class Payload(pydantic.BaseModel):
+        model_config = pydantic.ConfigDict(hide_input_in_errors=False, strict=True)
+        quantity: int
+
+    secret = "private-input-must-not-be-logged"
+    codec = TypeCodec(list[Payload] if in_list else Payload)
+    invalid = [{"quantity": secret}] if in_list else {"quantity": secret}
+    with pytest.raises(TypeValidationError) as raised:
+        codec.validate(invalid, what="argument 'payload'")
+    assert secret not in "".join(traceback.format_exception(raised.value))
+    assert "int_type" in str(raised.value)  # The model's strict configuration is preserved.
+    assert Payload.model_config["hide_input_in_errors"] is False
+    with pytest.raises(pydantic.ValidationError) as original:
+        Payload.model_validate({"quantity": secret})
+    assert secret in str(original.value)
+
+
+def test_core_validation_preserves_custom_field_and_model_validators() -> None:
+    from vercel.workflow._internal.signature_codec import TypeCodec
+
+    calls: list[str] = []
+
+    def increment(value: Any) -> int:
+        calls.append("annotated")
+        return int(value) + 1
+
+    class Child(pydantic.BaseModel):
+        quantity: typing.Annotated[int, pydantic.BeforeValidator(increment)]
+
+        @pydantic.field_validator("quantity")
+        @classmethod
+        def double_positive(cls, value: int) -> int:
+            calls.append("field")
+            if value < 0:
+                raise ValueError("quantity must be positive")
+            return value * 2
+
+    class Payload(pydantic.BaseModel):
+        child: Child
+
+        @pydantic.model_validator(mode="wrap")
+        @classmethod
+        def around(cls, value: Any, handler: pydantic.ModelWrapValidatorHandler[Any]) -> Any:
+            calls.append("wrap-enter")
+            result = handler(value)
+            calls.append("wrap-exit")
+            return result
+
+        @pydantic.model_validator(mode="after")
+        def check_total(self) -> typing.Self:
+            calls.append("model-after")
+            if self.child.quantity > 10:
+                raise ValueError("quantity too large")
+            return self
+
+    codec = TypeCodec(Payload)
+    result = codec.validate({"child": {"quantity": "2"}}, what="payload")
+    assert isinstance(result, Payload)
+    assert result.child.quantity == 6
+    assert calls == ["wrap-enter", "annotated", "field", "wrap-exit", "model-after"]
+    assert codec.dump(result) == {"child": {"quantity": 6}}
+
+    with pytest.raises(TypeValidationError, match="quantity must be positive"):
+        codec.validate({"child": {"quantity": "-3"}}, what="payload")
+    with pytest.raises(TypeValidationError, match="quantity too large"):
+        codec.validate({"child": {"quantity": "8"}}, what="payload")
+
+
 def test_a_mismatch_is_fatal_rather_than_retryable() -> None:
     """The bytes a retry would replay are the ones that did not match.
 
