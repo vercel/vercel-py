@@ -324,6 +324,7 @@ class SandboxService:
         snapshot_retention: SnapshotRetention | None = None,
         region: ResolvedRegion | None = None,
         failover_regions: tuple[str, ...] | None = None,
+        expiry_notification_lead_time: timedelta | None = None,
         private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
     ) -> SandboxState:
         self._ensure_open()
@@ -346,6 +347,7 @@ class SandboxService:
             snapshot_retention=snapshot_retention,
             region=region,
             failover_regions=failover_regions,
+            expiry_notification_lead_time=expiry_notification_lead_time,
             private_parameters=private_parameters,
         )
         return await self._wait_for_ready_sandbox(sandbox, project_id=project_id)
@@ -370,6 +372,7 @@ class SandboxService:
         snapshot_retention: SnapshotRetention | None = None,
         region: ResolvedRegion | None = None,
         failover_regions: tuple[str, ...] | None = None,
+        expiry_notification_lead_time: timedelta | None = None,
         private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
     ) -> SandboxState:
         self._ensure_open()
@@ -391,6 +394,7 @@ class SandboxService:
             snapshot_retention=snapshot_retention,
             region=region,
             failover_regions=failover_regions,
+            expiry_notification_lead_time=expiry_notification_lead_time,
             private_parameters=private_parameters,
         )
         return await self._wait_for_ready_sandbox(sandbox, project_id=project_id)
@@ -436,6 +440,7 @@ class SandboxService:
         snapshot_retention: SnapshotRetention | None = None,
         region: ResolvedRegion | None = None,
         failover_regions: tuple[str, ...] | None = None,
+        expiry_notification_lead_time: timedelta | None = None,
         private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
     ) -> tuple[SandboxState, bool]:
         """Return a named sandbox and whether it had to be created."""
@@ -477,6 +482,7 @@ class SandboxService:
             snapshot_retention=snapshot_retention,
             region=region,
             failover_regions=failover_regions,
+            expiry_notification_lead_time=expiry_notification_lead_time,
             private_parameters=private_parameters,
         )
         if stale_snapshot:
@@ -545,6 +551,7 @@ class SandboxService:
         current_snapshot_id: str | None = None,
         region: ResolvedRegion | None = None,
         failover_regions: tuple[str, ...] | None = None,
+        expiry_notification_lead_time: timedelta | None = None,
     ) -> AsyncGenerator[UpdateSandboxStep, None]:
         """Apply live session changes, then save the sandbox configuration.
 
@@ -604,6 +611,7 @@ class SandboxService:
             current_snapshot_id=current_snapshot_id,
             region=region,
             failover_regions=failover_regions,
+            expiry_notification_lead_time=expiry_notification_lead_time,
         )
 
     async def resume_sandbox(

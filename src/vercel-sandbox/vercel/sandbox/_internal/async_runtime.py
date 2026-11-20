@@ -1913,6 +1913,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         current_snapshot_id: str | None = None,
         region: RegionInput = None,
         failover_regions: FailoverRegionsInput = None,
+        expiry_notification_lead_time: DurationInput = None,
     ) -> Self:
         """Update mutable sandbox configuration.
 
@@ -1956,6 +1957,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
                 current_snapshot_id=current_snapshot_id,
                 region=resolve_region(region),
                 failover_regions=normalize_failover_regions(failover_regions),
+                expiry_notification_lead_time=parse_duration_seconds(expiry_notification_lead_time),
             )
         )
         return self
@@ -2067,6 +2069,7 @@ class _CreateSandboxParams(SandboxValueModel):
     snapshot_retention: SnapshotRetention | None = None
     region: ResolvedRegion | None = Field(default=None, strict=True)
     failover_regions: tuple[str, ...] | None = None
+    expiry_notification_lead_time: timedelta | None = None
     private_parameters: PrivateSandboxParameters = Field(
         default_factory=lambda: NO_PRIVATE_PARAMETERS
     )
@@ -2128,6 +2131,7 @@ class CreateSandboxOperation:
             snapshot_retention=self._params.snapshot_retention,
             region=self._params.region,
             failover_regions=self._params.failover_regions,
+            expiry_notification_lead_time=self._params.expiry_notification_lead_time,
             private_parameters=self._params.private_parameters,
         )
 
@@ -2178,6 +2182,7 @@ class _ForkSandboxParams(SandboxValueModel):
     snapshot_retention: SnapshotRetention | None = None
     region: ResolvedRegion | None = Field(default=None, strict=True)
     failover_regions: tuple[str, ...] | None = None
+    expiry_notification_lead_time: timedelta | None = None
     private_parameters: PrivateSandboxParameters = Field(
         default_factory=lambda: NO_PRIVATE_PARAMETERS
     )
@@ -2237,6 +2242,7 @@ class ForkSandboxOperation:
             snapshot_retention=self._params.snapshot_retention,
             region=self._params.region,
             failover_regions=self._params.failover_regions,
+            expiry_notification_lead_time=self._params.expiry_notification_lead_time,
             private_parameters=self._params.private_parameters,
         )
 
@@ -2395,6 +2401,7 @@ def create_sandbox_operation(
     snapshot_retention: SnapshotRetention | None = None,
     region: RegionInput = None,
     failover_regions: FailoverRegionsInput = None,
+    expiry_notification_lead_time: DurationInput = None,
     destroy: bool = True,
     private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
 ) -> CreateSandboxOperation:
@@ -2419,6 +2426,7 @@ def create_sandbox_operation(
             snapshot_retention=snapshot_retention,
             region=resolve_region(region, fallback=service.options.region),
             failover_regions=normalize_failover_regions(failover_regions),
+            expiry_notification_lead_time=parse_duration_seconds(expiry_notification_lead_time),
             private_parameters=private_parameters,
         ),
         destroy=destroy,
@@ -2445,6 +2453,7 @@ def fork_sandbox_operation(
     snapshot_retention: SnapshotRetention | None = None,
     region: RegionInput = None,
     failover_regions: FailoverRegionsInput = None,
+    expiry_notification_lead_time: DurationInput = None,
     destroy: bool = True,
     private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
 ) -> ForkSandboxOperation:
@@ -2468,6 +2477,7 @@ def fork_sandbox_operation(
             snapshot_retention=snapshot_retention,
             region=resolve_region(region, fallback=service.options.region),
             failover_regions=normalize_failover_regions(failover_regions),
+            expiry_notification_lead_time=parse_duration_seconds(expiry_notification_lead_time),
             private_parameters=private_parameters,
         ),
         destroy=destroy,
@@ -2519,6 +2529,7 @@ async def get_or_create_sandbox(
     snapshot_retention: SnapshotRetention | None = None,
     region: RegionInput = None,
     failover_regions: FailoverRegionsInput = None,
+    expiry_notification_lead_time: DurationInput = None,
     private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
 ) -> tuple[Sandbox, bool]:
     try:
@@ -2543,6 +2554,7 @@ async def get_or_create_sandbox(
             snapshot_retention=snapshot_retention,
             region=resolve_region(region, fallback=service.options.region),
             failover_regions=normalize_failover_regions(failover_regions),
+            expiry_notification_lead_time=parse_duration_seconds(expiry_notification_lead_time),
             private_parameters=private_parameters,
         )
         return (

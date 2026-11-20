@@ -1,0 +1,1 @@
+Support Sandbox lifecycle webhook settings: create, fork, get-or-create, and update accept expiry_notification_lead_time to control when the sandbox.session.expiring webhook fires, sandboxes expose it, and sessions expose stop_reason as an open SessionStopReason enum.
