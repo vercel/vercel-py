@@ -11,7 +11,6 @@ from typing import (
     Any,
     Final,
     Literal,
-    Protocol,
     Self,
     TypeAlias,
     TypeVar,
@@ -28,13 +27,14 @@ from pydantic import (
     StrictBytes,
     ValidationInfo,
     WrapSerializer,
-    field_serializer,
     field_validator,
     model_validator,
 )
 
+from vercel import drives
+from vercel._internal.core.region import ResolvedRegion
 from vercel._internal.core.time import SECOND, coerce_duration, to_ms_int
-from vercel.sandbox._internal.region import ResolvedRegion
+from vercel.drives import DriveMount, DriveMountMode, DriveReference
 from vercel.sandbox._internal.value_model import SandboxValueModel
 
 JSONValue: TypeAlias = PydanticJsonValue
@@ -722,40 +722,6 @@ class DirectoryEntry(SandboxValueModel):
     kind: Literal["file", "directory", "symlink", "other"]
 
 
-class DriveHandle(Protocol):
-    @property
-    def name(self) -> str: ...
-
-    @property
-    def project_id(self) -> str: ...
-
-    @property
-    def region(self) -> str: ...
-
-
-DriveReference: TypeAlias = str | DriveHandle
-
-
-DriveMountMode: TypeAlias = Literal["snapshot", "read-write"]
-
-
-class DriveMount(SandboxValueModel):
-    """Configure how a Drive is mounted in a sandbox."""
-
-    drive: SkipValidation[DriveReference]
-    mode: DriveMountMode = "read-write"
-
-    def __init__(self, drive: DriveReference, mode: DriveMountMode = "read-write") -> None:
-        super().__init__(drive=drive, mode=mode)
-
-    @field_serializer("drive")
-    def _serialize_drive(self, drive: DriveReference) -> str:
-        return drive if isinstance(drive, str) else drive.name
-
-    def to_api_dict(self) -> JSONObject:
-        return self.model_dump()
-
-
 class SandboxMount(SandboxValueModel):
     """Drive mount returned as part of a sandbox's actual configuration."""
 
@@ -1083,23 +1049,19 @@ class ProcessLogStream(StrEnum):
     STDERR = "stderr"
 
 
-class DriveQueryByCreatedAt(_InputModel):
+# Sandbox 1.0 exposed these with `_InputModel.to_api_dict`. They extend the
+# `vercel.drives` types, which leave serialization to their API client, so that
+# either package's queries work with either package's `query_drives`.
+class DriveQueryByCreatedAt(drives.DriveQueryByCreatedAt, _InputModel):
     """Drive listing ordered by creation time."""
 
-    sort_order: Literal["asc", "desc"] = "desc"
 
-
-class DriveQueryByUpdatedAt(_InputModel):
+class DriveQueryByUpdatedAt(drives.DriveQueryByUpdatedAt, _InputModel):
     """Drive listing ordered by update time."""
 
-    sort_order: Literal["asc", "desc"] = "desc"
 
-
-class DriveQueryByName(_InputModel):
+class DriveQueryByName(drives.DriveQueryByName, _InputModel):
     """Drive listing ordered by name."""
-
-    sort_order: Literal["asc", "desc"] = "desc"
-    name_prefix: str | None = None
 
 
 DriveQuery: TypeAlias = DriveQueryByCreatedAt | DriveQueryByUpdatedAt | DriveQueryByName

@@ -289,92 +289,52 @@ with sandbox.fork_sandbox(source_sandbox="production-agent") as forked:
 
 ## Sandbox Drives
 
-Sandbox Drives are named persistent filesystems. A Drive belongs to one project
-and one region. Create or retrieve a Drive, then mount it when you create a
-sandbox:
+Drives are named persistent filesystems. A Drive belongs to one project and one
+region. Manage them with [`vercel-drives`](https://pypi.org/project/vercel-drives/),
+which is installed with this package, then mount them when you create a sandbox:
 
 ```python
+import asyncio
 from pathlib import PurePosixPath
 
-from vercel import sandbox
-from vercel.sandbox import DriveMount
+from vercel import drives, sandbox
 
-cache, _ = await sandbox.get_or_create_drive(
-    name="cache",
-    region="sfo1",
-    max_size_bytes=10 * 1024**3,
-)
-async with sandbox.create_sandbox(
-    region=cache.region,
-    mounts={
-        # Mount a read-write drive
-        "/cache": cache,
-        # You can mount an existing drive by name as a point-in-time read-only snapshot
-        "/readonly": DriveMount("shared-source", mode="snapshot"),
-        # You can also provide a PurePosixPath as the mount point
-        PurePosixPath("/scratch"): "scratch",
-    },
-) as workspace:
-    print(cache.id)
-    print(workspace.mounts)
 
-await cache.delete()
+async def main() -> None:
+    cache, _ = await drives.get_or_create_drive(
+        name="cache",
+        region="sfo1",
+        max_size_bytes=10 * 1024**3,
+    )
+    async with sandbox.create_sandbox(
+        region=cache.region,
+        mounts={
+            # Mount a read-write drive
+            "/cache": cache,
+            # You can mount an existing drive by name as a point-in-time read-only snapshot
+            "/readonly": drives.DriveMount("shared-source", mode="snapshot"),
+            # You can also provide a PurePosixPath as the mount point
+            PurePosixPath("/scratch"): "scratch",
+        },
+    ) as workspace:
+        print(cache.id)
+        print(workspace.mounts)
+
+    await cache.delete()
+
+
+asyncio.run(main())
 ```
 
-Use `await sandbox.get_drive(name_or_id="cache")` to look up an existing Drive
-by project-local name or Drive ID without creating it. A missing Drive raises
-`SandboxApiError` with `status_code == 404`. The async and sync clients and
-`vercel.sandbox.sync.get_drive(...)` expose the same lookup.
-
-Fork a Drive's committed data into an independent Drive with a new name:
-
-```python
-cache = await sandbox.get_drive(name_or_id="cache")
-forked = await cache.fork(name="cache-fork")
-async with sandbox.create_sandbox(region=forked.region, mounts={"/cache": forked}) as box:
-    print(forked.parent_drive_id, forked.root_drive_id)
-await forked.delete()
-```
-
-If you already know the source name, fork it directly without a lookup:
-
-```python
-forked = await sandbox.fork_drive(source="cache", name="cache-fork")
-```
-
-`vercel.sandbox.sync.fork_drive(source=..., name=...)` is the synchronous
-counterpart. Both standalone clients also expose `fork_drive(...)`.
-
-Forks inherit the source Drive's data, region, and maximum size without changing
-its handle. `parent_drive_id` identifies the immediate source and `root_drive_id`
-identifies the original Drive; both are `None` when absent from the API response.
-`SyncDrive.fork(name=...)` provides the same operation synchronously. Async calls
-use Python's normal task cancellation.
-
-`SandboxApiError` preserves the API's status, code, and message:
-`404 not_found` means the source is missing, `409 conflict` means the new name
-already exists, and `409 drive_not_initialized` means the source has no committed
-data. Mount the source read-write and stop its session to commit data before
-forking. See [the Drive fork example](examples/sandbox_10_drive_fork.py).
-
-All Drive operations use the project resolved by the configured Sandbox credentials.
-They do not accept a `project_id` override.
-
-Drives must be unmounted from any running Sandbox before they are able to be
-deleted. You can either call the `delete` method on the Drive handle, or use the
-`delete_drive(name=...)` function to delete a drive by name if
-you do not have a drive handle already.
-
-By default, a `Drive` handle or Drive name mounts it read-write. Use
-`drive.snapshot()` or `DriveMount(name, mode="snapshot")` for a point-in-time
-read-only mount.
+By default, a `Drive` handle or Drive name mounts it read-write. Use a
+handle's `snapshot()` or `DriveMount(name, mode="snapshot")` for a point-in-time
+read-only mount. Drives must be unmounted from any running Sandbox before they
+can be deleted.
 
 Forks cannot inherit the source sandbox's mounts. Pass a non-empty mapping to
 attach Drives explicitly to the fork. A read-write Drive still attached to
 another sandbox causes the API to return `409 drive_attached`.
 
-Use `query_drives(...)` with `DriveQueryByCreatedAt`,
-`DriveQueryByUpdatedAt`, or `DriveQueryByName` to list Drives in a project.
 `get_or_create_sandbox(..., mounts=...)` uses `mounts` only when it creates or
 recreates the sandbox. If the sandbox already exists, the call leaves its mounts
 unchanged. Use `await box.update(mounts=...)` to replace the mount map for the
@@ -386,6 +346,15 @@ characters, target `/`, or exceed 256 characters after canonicalization. Each
 Drive name may appear only once. Mounted sandboxes cannot use failover regions,
 and each Drive must use the sandbox region. The API defaults new Drives to
 `iad1` when no region is requested by the call or service options.
+
+To fork a Drive, mount the source read-write and stop its session to commit
+data first. See [the Drive fork example](examples/sandbox_10_drive_fork.py).
+
+`vercel.sandbox` also exposes `get_drive`, `get_or_create_drive`, `fork_drive`,
+`delete_drive`, and `query_drives`, on both APIs and the standalone clients.
+They return the same `Drive` and `SyncDrive` handles as `vercel.drives`, use the
+project resolved by the configured Sandbox credentials, and raise
+`SandboxApiError`.
 
 ## Interactive PTY sessions
 

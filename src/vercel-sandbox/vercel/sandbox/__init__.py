@@ -2,7 +2,22 @@
 
 from collections.abc import AsyncIterator, Mapping
 
+from vercel._internal.core.region import CURRENT_REGION, CurrentRegion, RegionInput
 from vercel._internal.core.session import get_active_session
+from vercel.drives import (
+    DriveHandle,
+    DriveMount,
+    DriveQuery as _AnyDriveQuery,
+    DriveReference,
+)
+from vercel.drives._internal.async_runtime import (
+    Drive,
+    delete_drive as _delete_drive,
+    fork_drive as _fork_drive,
+    get_drive as _get_drive,
+    get_or_create_drive as _get_or_create_drive,
+    query_drives as _query_drives,
+)
 from vercel.sandbox._internal.async_filesystem_handle import (
     SandboxBinaryReader,
     SandboxBinaryWriter,
@@ -12,7 +27,6 @@ from vercel.sandbox._internal.async_filesystem_handle import (
 from vercel.sandbox._internal.async_runtime import (
     Command,
     CreateSandboxOperation,
-    Drive,
     ForkSandboxOperation,
     InteractiveSession,
     InteractiveSessionOperation,
@@ -25,15 +39,10 @@ from vercel.sandbox._internal.async_runtime import (
     SandboxSessionOperation,
     Snapshot,
     create_sandbox_operation as _create_sandbox_operation,
-    delete_drive as _delete_drive,
-    fork_drive as _fork_drive,
     fork_sandbox_operation as _fork_sandbox_operation,
-    get_drive as _get_drive,
-    get_or_create_drive as _get_or_create_drive,
     get_or_create_sandbox as _get_or_create_sandbox,
     get_sandbox as _get_sandbox,
     get_snapshot as _get_snapshot,
-    query_drives as _query_drives,
     query_sandboxes as _query_sandboxes,
     query_sessions as _query_sessions,
     query_snapshots as _query_snapshots,
@@ -65,14 +74,11 @@ from vercel.sandbox._internal.models import (
     CommandStatus,
     CompletedCommand,
     DirectoryEntry,
-    DriveHandle,
-    DriveMount,
     DriveMountsInput,
     DriveQuery,
     DriveQueryByCreatedAt,
     DriveQueryByName,
     DriveQueryByUpdatedAt,
-    DriveReference,
     DurationInput,
     FailoverRegionsInput,
     GitSource,
@@ -114,7 +120,6 @@ from vercel.sandbox._internal.options import (
     SandboxServiceOptions,
 )
 from vercel.sandbox._internal.process_stdin import CommandStdin
-from vercel.sandbox._internal.region import CURRENT_REGION, CurrentRegion, RegionInput
 from vercel.sandbox._internal.service import SandboxService, get_sandbox_service
 from vercel.sandbox._internal.state import SnapshotRetentionState
 from vercel.sandbox.protocols import (
@@ -465,7 +470,7 @@ async def fork_drive(*, source: str, name: str) -> Drive:
         source: Project-local source Drive name.
         name: Project-local name for the new Drive.
     """
-    return await _fork_drive(_service(), source=source, name=name)
+    return await _fork_drive(_service().drive_service, source=source, name=name)
 
 
 async def get_drive(*, name_or_id: str) -> Drive:
@@ -473,7 +478,7 @@ async def get_drive(*, name_or_id: str) -> Drive:
 
     Raises SandboxApiError with status code 404 if the Drive does not exist.
     """
-    return await _get_drive(_service(), name_or_id=name_or_id)
+    return await _get_drive(_service().drive_service, name_or_id=name_or_id)
 
 
 async def get_or_create_drive(
@@ -497,7 +502,7 @@ async def get_or_create_drive(
         the Drive, and false when it returned an existing Drive.
     """
     return await _get_or_create_drive(
-        _service(),
+        _service().drive_service,
         name=name,
         max_size_bytes=max_size_bytes,
         region=region,
@@ -516,12 +521,12 @@ async def delete_drive(*, name: str) -> Drive:
     Returns:
         The Drive returned by the deletion request.
     """
-    return await _delete_drive(_service(), name=name)
+    return await _delete_drive(_service().drive_service, name=name)
 
 
 def query_drives(
     *,
-    query: DriveQuery | None = None,
+    query: _AnyDriveQuery | None = None,
     page_size: int | None = None,
     cursor: str | None = None,
 ) -> AsyncIterator[Drive]:
@@ -536,7 +541,7 @@ def query_drives(
         An async iterator that transparently follows pagination cursors.
     """
     return _query_drives(
-        _service(),
+        _service().drive_service,
         query=query,
         page_size=page_size,
         cursor=cursor,

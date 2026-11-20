@@ -27,7 +27,6 @@ from vercel.sandbox._internal.models import (
     _WriteFile,
 )
 from vercel.sandbox._internal.state import (
-    DriveState,
     ProcessState,
     RuntimeSessionStopState,
     SandboxRouteState,
@@ -381,67 +380,6 @@ class SnapshotHandleBase:
         if payload.id != self._payload.id:
             raise SandboxResponseError(
                 "Snapshot mutation response returned a different snapshot identity",
-                data=payload,
-            )
-        self._payload = payload
-
-
-class DriveHandleBase:
-    __slots__ = ("_payload",)
-
-    def __init__(self, payload: DriveState) -> None:
-        self._payload = payload
-
-    @property
-    def id(self) -> str:
-        return self._payload.id
-
-    @property
-    def parent_drive_id(self) -> str | None:
-        """The source Drive ID, if this Drive is a fork."""
-        return self._payload.parent_drive_id
-
-    @property
-    def root_drive_id(self) -> str | None:
-        """The original Drive ID at the root of this fork."""
-        return self._payload.root_drive_id
-
-    @property
-    def name(self) -> str:
-        return self._payload.name
-
-    @property
-    def project_id(self) -> str:
-        return self._payload.project_id
-
-    @property
-    def region(self) -> str:
-        return self._payload.region
-
-    @property
-    def max_size_bytes(self) -> int:
-        return self._payload.max_size_bytes
-
-    @property
-    def current_session_id(self) -> str | None:
-        return self._payload.current_session_id
-
-    @property
-    def current_sandbox_name(self) -> str | None:
-        return self._payload.current_sandbox_name
-
-    @property
-    def created_at(self) -> int:
-        return self._payload.created_at
-
-    @property
-    def updated_at(self) -> int:
-        return self._payload.updated_at
-
-    def _apply_payload(self, payload: DriveState) -> None:
-        if payload.name != self.name or payload.project_id != self.project_id:
-            raise SandboxResponseError(
-                "Drive mutation response returned a different name or project",
                 data=payload,
             )
         self._payload = payload

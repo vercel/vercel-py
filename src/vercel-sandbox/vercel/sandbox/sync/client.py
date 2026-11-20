@@ -4,10 +4,19 @@ from collections.abc import Iterator, Mapping
 from typing import Self
 
 from vercel._internal.core.options import collect_service_options
+from vercel._internal.core.region import RegionInput
 from vercel._internal.core.session import HttpxClientFactory, SyncSdkSession
+from vercel.drives import DriveQuery as _AnyDriveQuery
+from vercel.drives._internal.sync_runtime import (
+    SyncDrive,
+    delete_drive as _delete_sync_drive,
+    fork_drive as _fork_sync_drive,
+    get_drive as _get_sync_drive,
+    get_or_create_drive as _get_or_create_sync_drive,
+    query_drives as _query_sync_drives,
+)
 from vercel.sandbox._internal.models import (
     DriveMountsInput,
-    DriveQuery,
     DurationInput,
     FailoverRegionsInput,
     JSONValue as _JSONValue,
@@ -22,24 +31,17 @@ from vercel.sandbox._internal.models import (
     normalize_private_parameters as _normalize_private_parameters,
 )
 from vercel.sandbox._internal.options import SyncSandboxServiceOptions
-from vercel.sandbox._internal.region import RegionInput
 from vercel.sandbox._internal.service import SandboxService, get_sync_sandbox_service
 from vercel.sandbox._internal.sync_runtime import (
-    SyncDrive,
     SyncSandbox,
     SyncSandboxRuntimeSession,
     SyncSnapshot,
     _ManagedSyncSandbox,
     create_sandbox as _create_sync_sandbox,
-    delete_drive as _delete_sync_drive,
-    fork_drive as _fork_sync_drive,
     fork_sandbox as _fork_sync_sandbox,
-    get_drive as _get_sync_drive,
-    get_or_create_drive as _get_or_create_sync_drive,
     get_or_create_sandbox as _get_or_create_sync_sandbox,
     get_sandbox as _get_sync_sandbox,
     get_snapshot as _get_sync_snapshot,
-    query_drives as _query_sync_drives,
     query_sandboxes as _query_sync_sandboxes,
     query_sessions as _query_sync_sessions,
     query_snapshots as _query_sync_snapshots,
@@ -258,14 +260,14 @@ class SyncSandboxClient:
             source: Project-local source Drive name.
             name: Project-local name for the new Drive.
         """
-        return _fork_sync_drive(self._service, source=source, name=name)
+        return _fork_sync_drive(self._service.drive_service, source=source, name=name)
 
     def get_drive(self, *, name_or_id: str) -> SyncDrive:
         """Look up a Drive by name or ID without creating it.
 
         Raises SandboxApiError with status code 404 if the Drive does not exist.
         """
-        return _get_sync_drive(self._service, name_or_id=name_or_id)
+        return _get_sync_drive(self._service.drive_service, name_or_id=name_or_id)
 
     def get_or_create_drive(
         self,
@@ -275,24 +277,24 @@ class SyncSandboxClient:
         region: RegionInput = None,
     ) -> tuple[SyncDrive, bool]:
         return _get_or_create_sync_drive(
-            self._service,
+            self._service.drive_service,
             name=name,
             max_size_bytes=max_size_bytes,
             region=region,
         )
 
     def delete_drive(self, *, name: str) -> SyncDrive:
-        return _delete_sync_drive(self._service, name=name)
+        return _delete_sync_drive(self._service.drive_service, name=name)
 
     def query_drives(
         self,
         *,
-        query: DriveQuery | None = None,
+        query: _AnyDriveQuery | None = None,
         page_size: int | None = None,
         cursor: str | None = None,
     ) -> Iterator[SyncDrive]:
         return _query_sync_drives(
-            self._service,
+            self._service.drive_service,
             query=query,
             page_size=page_size,
             cursor=cursor,

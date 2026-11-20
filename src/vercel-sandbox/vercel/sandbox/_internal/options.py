@@ -5,8 +5,8 @@ from datetime import timedelta
 from typing import Any, Protocol
 
 from vercel._internal.core.options import ServiceOptions
+from vercel._internal.core.region import RegionInput
 from vercel.sandbox._internal.errors import SandboxCredentialsError
-from vercel.sandbox._internal.region import RegionInput
 from vercel.sandbox._internal.value_model import SandboxValueModel
 
 DEFAULT_SANDBOX_API_BASE_URL = "https://vercel.com/api"

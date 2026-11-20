@@ -125,20 +125,6 @@ class SnapshotState(SandboxValueModel):
     parent_id: str | None = None
 
 
-class DriveState(SandboxValueModel):
-    id: str
-    name: str
-    project_id: str
-    region: str
-    max_size_bytes: int
-    current_session_id: str | None
-    current_sandbox_name: str | None
-    created_at: int
-    updated_at: int
-    parent_drive_id: str | None = None
-    root_drive_id: str | None = None
-
-
 class SandboxesPageState(SandboxValueModel):
     sandboxes: tuple[SandboxState, ...]
     next_cursor: str | None
@@ -151,11 +137,6 @@ class RuntimeSessionsPageState(SandboxValueModel):
 
 class SnapshotsPageState(SandboxValueModel):
     snapshots: tuple[SnapshotState, ...]
-    next_cursor: str | None
-
-
-class DrivesPageState(SandboxValueModel):
-    drives: tuple[DriveState, ...]
     next_cursor: str | None
 
 

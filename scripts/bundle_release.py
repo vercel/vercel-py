@@ -62,6 +62,7 @@ SHARED_VENDORED_CONSUMERS = {
     "vercel-connect",
     "vercel-django-tasks",
     "vercel-dramatiq",
+    "vercel-drives",
     "vercel-internal-core",
     "vercel-internal-telemetry",
     "vercel-oidc",
@@ -84,6 +85,7 @@ EXTERNAL_DEPENDENCIES = {
     # extension. Keep the ordinary bounded dependency instead of producing a
     # bundle that contains only Pydantic's Python sources.
     "vercel-blob": {"pydantic"},
+    "vercel-drives": {"pydantic"},
     # cbor2 has no pure-Python fallback for its `_cbor2` extension.
     "vercel-sandbox": {"cbor2", "pydantic"},
     # Same for Pydantic here. `cryptography` needs no entry: it arrives through

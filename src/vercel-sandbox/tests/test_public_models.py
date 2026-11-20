@@ -2,12 +2,11 @@
 
 import json
 from datetime import timedelta
-from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
 
-from vercel import sandbox
+from vercel import drives, sandbox
 
 
 def test_command_types_preserve_process_import_compatibility() -> None:
@@ -83,14 +82,6 @@ def test_network_policy_validates_and_roundtrips_nested_data() -> None:
     assert sandbox.NetworkPolicy.model_validate_json(policy.model_dump_json()) == policy
 
 
-def test_drive_mount_serializes_handle_as_name() -> None:
-    drive = SimpleNamespace(name="data", project_id="project", region="iad1")
-    mount = sandbox.DriveMount(drive)
-    expected = {"drive": "data", "mode": "read-write"}
-    assert mount.model_dump() == expected
-    assert json.loads(mount.model_dump_json()) == expected
-
-
 def test_managed_credentials_require_an_enabled_provider() -> None:
     credentials = sandbox.SandboxManagedCredentials(npm=True)
 
@@ -112,3 +103,26 @@ def test_snapshot_retention_roundtrip_preserves_api_payload() -> None:
         "expiration": 172800000,
         "deleteEvicted": True,
     }
+
+
+@pytest.mark.parametrize(
+    ("query", "api_dict"),
+    [
+        (sandbox.DriveQueryByCreatedAt(), {"sort_order": "desc"}),
+        (sandbox.DriveQueryByUpdatedAt(sort_order="asc"), {"sort_order": "asc"}),
+        (
+            sandbox.DriveQueryByName(name_prefix="cache"),
+            {"sort_order": "desc", "name_prefix": "cache"},
+        ),
+    ],
+)
+def test_drive_queries_keep_their_sandbox_api_and_work_with_vercel_drives(
+    query: sandbox.DriveQuery, api_dict: dict[str, str]
+) -> None:
+    assert query.to_api_dict() == api_dict
+    assert query.to_api_dict(exclude={"sort_order"}) == {
+        k: v for k, v in api_dict.items() if k != "sort_order"
+    }
+    assert isinstance(
+        query, drives.DriveQueryByCreatedAt | drives.DriveQueryByUpdatedAt | drives.DriveQueryByName
+    )

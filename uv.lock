@@ -26,6 +26,7 @@ members = [
     "vercel-connect",
     "vercel-django-tasks",
     "vercel-dramatiq",
+    "vercel-drives",
     "vercel-headers",
     "vercel-internal-core",
     "vercel-internal-telemetry",
@@ -2685,6 +2686,26 @@ requires-dist = [
 ]
 
 [[package]]
+name = "vercel-drives"
+source = { editable = "src/vercel-drives" }
+dependencies = [
+    { name = "anyio" },
+    { name = "httpx2" },
+    { name = "pydantic" },
+    { name = "vercel-internal-core" },
+    { name = "vercel-oidc" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "anyio", specifier = ">=4.11.0,<5" },
+    { name = "httpx2", specifier = ">=2" },
+    { name = "pydantic", specifier = ">=2.7.0,<3" },
+    { name = "vercel-internal-core", editable = "src/vercel-internal-core" },
+    { name = "vercel-oidc", editable = "src/vercel-oidc" },
+]
+
+[[package]]
 name = "vercel-headers"
 source = { editable = "src/vercel-headers" }
 
@@ -2814,6 +2835,7 @@ dependencies = [
     { name = "cbor2" },
     { name = "httpx2", extra = ["ws"] },
     { name = "pydantic" },
+    { name = "vercel-drives" },
     { name = "vercel-internal-core" },
     { name = "vercel-oidc" },
 ]
@@ -2824,6 +2846,7 @@ requires-dist = [
     { name = "cbor2", specifier = ">=6.0,<7" },
     { name = "httpx2", extras = ["ws"], specifier = ">=2" },
     { name = "pydantic", specifier = ">=2.7.0,<3" },
+    { name = "vercel-drives", editable = "src/vercel-drives" },
     { name = "vercel-internal-core", editable = "src/vercel-internal-core" },
     { name = "vercel-oidc", editable = "src/vercel-oidc" },
 ]
