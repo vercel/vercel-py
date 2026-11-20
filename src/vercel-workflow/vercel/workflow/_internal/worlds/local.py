@@ -3,11 +3,13 @@ import base64
 import contextlib
 import errno
 import hashlib
+import hmac
 import json
 import math
 import os
 import pathlib
 import re
+import secrets
 import shutil
 import sys
 import tempfile
@@ -31,6 +33,8 @@ from ..ulid import monotonic_factory
 MAX_DELAY_SECONDS = float(
     os.getenv("VERCEL_QUEUE_MAX_DELAY_SECONDS", "82800")
 )  # 23 hours - leave 1h buffer before 24h retention limit
+QUEUE_AUTH_HEADER = "x-workflow-auth"
+QUEUE_AUTH_KEY_FILE = "queue-auth-key"
 T = TypeVar("T", bound=w.BaseModel)
 
 
@@ -504,6 +508,38 @@ class LocalWorld(w.World):
         # converge on one lock without a separate guard lock.
         return self._run_locks.setdefault(run_id, threading.Lock())
 
+    def _queue_auth_key(self) -> str:
+        """Share a private key with local tools using the TS LocalWorld format."""
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        # Keep credentials and run data out of source control, including when
+        # upgrading a data directory that already contains a key. Never replace
+        # ignore rules supplied by the user or another local tool.
+        try:
+            with (self.data_dir / ".gitignore").open("x") as stream:
+                stream.write("*\n")
+        except FileExistsError:
+            pass
+        path = self.data_dir / QUEUE_AUTH_KEY_FILE
+        try:
+            value = path.read_text().strip()
+        except FileNotFoundError:
+            value = secrets.token_urlsafe(32)
+            fd, temporary = tempfile.mkstemp(dir=self.data_dir, prefix=".queue-auth-key-")
+            try:
+                with os.fdopen(fd, "w") as stream:
+                    stream.write(value + "\n")
+                # Publish a complete owner-only file without replacing a key
+                # another app process may have published concurrently.
+                try:
+                    os.link(temporary, path)
+                except FileExistsError:
+                    value = path.read_text().strip()
+            finally:
+                os.unlink(temporary)
+        if not re.fullmatch(r"[A-Za-z0-9_-]{43}", value):
+            raise ValueError("Invalid local queue authentication key")
+        return value
+
     def _new_id(self, prefix: str) -> str:
         """A monotonic, lexicographically ordered id.
 
@@ -702,6 +738,10 @@ class LocalWorld(w.World):
     def create_queue_handler(
         self, queue_name_prefix: w.QueuePrefix, handler: w.QueueHandler
     ) -> w.HTTPHandler:
+        should_check_auth = os.getenv("WORKFLOW_QUEUE_AUTH", "").strip().lower() != "off"
+        if should_check_auth:
+            self._queue_auth_key()
+
         async def async_handler(message: vqs.Message[Any]) -> None:
             try:
                 body = message.payload
@@ -756,7 +796,15 @@ class LocalWorld(w.World):
         self._queue_callbacks.append(async_handler)
 
         async def http_handler(request: w.HTTPRequest) -> w.HTTPResponse:
-            request_headers = httpx.Headers(request.headers)
+            request_headers = httpx.Headers(request.headers, encoding="utf-8")
+            if should_check_auth:
+                supplied = request_headers.get(QUEUE_AUTH_HEADER, "")
+                if not hmac.compare_digest(supplied.encode(), self._queue_auth_key().encode()):
+                    return w.HTTPResponse(
+                        401,
+                        b'{"error":"Unauthorized queue delivery","code":"QUEUE_AUTH_REFUSED"}',
+                        {"content-type": "application/json", "x-workflow-auth-refused": "1"},
+                    )
             queue_name = request_headers.get("x-vqs-queue-name")
 
             if not queue_name:

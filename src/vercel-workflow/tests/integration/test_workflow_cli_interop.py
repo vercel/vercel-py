@@ -54,7 +54,7 @@ from vercel.workflow._internal.worlds import local as local_mod
 # step with the `@workflow/world-local` release the on-disk format is written
 # against -- an older CLI predates fields the format now carries -- and with the
 # pin in the "Install the workflow CLI" step of .github/workflows/ci.yml.
-WORKFLOW_CLI_VERSION = "5.2.0"
+WORKFLOW_CLI_VERSION = "5.5.0"
 
 _IS_CI = bool(os.getenv("CI"))
 
@@ -629,6 +629,8 @@ async def test_cli_health_check_is_answered_by_python(workflow_cli, tmp_path, mo
     the exchange -- queue topic, response stream, synthetic run -- is derived on
     each side and never sent, so one drifting shows up here and nowhere else.
     """
+    # Exercise the default authentication even if the developer disabled it.
+    monkeypatch.delenv("WORKFLOW_QUEUE_AUTH", raising=False)
     monkeypatch.setenv("WORKFLOW_LOCAL_DATA_DIR", str(tmp_path))
     world = local_mod.LocalWorld()
     w.set_world(world)

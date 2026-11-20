@@ -150,7 +150,7 @@ jobs:
       # the read-only `inspect` path does not use.
       - name: Install the workflow CLI
         run: >-
-          npm install workflow@5.2.0 --no-save --no-audit --no-fund
+          npm install workflow@5.5.0 --no-save --no-audit --no-fund
           --ignore-scripts --prefix "$RUNNER_TEMP/workflow-cli"
 
       - name: Sync dependencies
