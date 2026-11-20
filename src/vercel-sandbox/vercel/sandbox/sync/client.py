@@ -6,6 +6,7 @@ from typing import Self
 from vercel._internal.core.options import collect_service_options
 from vercel._internal.core.region import RegionInput
 from vercel._internal.core.session import HttpxClientFactory, SyncSdkSession
+from vercel.drives import DriveQuery as _AnyDriveQuery
 from vercel.drives._internal.sync_runtime import (
     SyncDrive,
     delete_drive as _delete_sync_drive,
@@ -16,7 +17,6 @@ from vercel.drives._internal.sync_runtime import (
 )
 from vercel.sandbox._internal.models import (
     DriveMountsInput,
-    DriveQuery,
     DurationInput,
     FailoverRegionsInput,
     JSONValue as _JSONValue,
@@ -289,7 +289,7 @@ class SyncSandboxClient:
     def query_drives(
         self,
         *,
-        query: DriveQuery | None = None,
+        query: _AnyDriveQuery | None = None,
         page_size: int | None = None,
         cursor: str | None = None,
     ) -> Iterator[SyncDrive]:

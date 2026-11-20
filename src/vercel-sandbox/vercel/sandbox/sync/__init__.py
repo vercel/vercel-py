@@ -7,6 +7,7 @@ from vercel._internal.core.session import get_active_sync_session
 from vercel.drives import (
     DriveHandle,
     DriveMount,
+    DriveQuery as _AnyDriveQuery,
     DriveReference,
 )
 from vercel.drives._internal.sync_runtime import (
@@ -512,7 +513,7 @@ def delete_drive(*, name: str) -> SyncDrive:
 
 def query_drives(
     *,
-    query: DriveQuery | None = None,
+    query: _AnyDriveQuery | None = None,
     page_size: int | None = None,
     cursor: str | None = None,
 ) -> Iterator[SyncDrive]:

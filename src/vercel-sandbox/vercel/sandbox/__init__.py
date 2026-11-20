@@ -7,6 +7,7 @@ from vercel._internal.core.session import get_active_session
 from vercel.drives import (
     DriveHandle,
     DriveMount,
+    DriveQuery as _AnyDriveQuery,
     DriveReference,
 )
 from vercel.drives._internal.async_runtime import (
@@ -525,7 +526,7 @@ async def delete_drive(*, name: str) -> Drive:
 
 def query_drives(
     *,
-    query: DriveQuery | None = None,
+    query: _AnyDriveQuery | None = None,
     page_size: int | None = None,
     cursor: str | None = None,
 ) -> AsyncIterator[Drive]:
