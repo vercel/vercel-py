@@ -7,6 +7,7 @@ non-suspending ``SyncTransport`` and ``time.sleep``.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from types import TracebackType
 from typing import Self
 
@@ -19,7 +20,7 @@ from vercel._internal.core.session import (
     get_active_sync_session,
 )
 from vercel.board._internal.access import Can, CanInput
-from vercel.board._internal.models import Discovery, Me, Profile
+from vercel.board._internal.models import Discovery, Me, Message, Profile
 from vercel.board._internal.options import SyncBoardServiceOptions
 from vercel.board._internal.service import (
     BoardService,
@@ -92,6 +93,108 @@ class SyncBoard:
     def me(self) -> Me:
         """Return the authenticated caller's identity and effective permissions."""
         return iter_coroutine(self._service().me(self._target))
+
+    def post(
+        self,
+        channel: str,
+        text: str = "",
+        *,
+        labels: Mapping[str, str] | None = None,
+        attachments: Sequence[str] | None = None,
+        sync: Sequence[str] | None = None,
+        no_sync: bool = False,
+        idempotency_key: str | None = None,
+    ) -> Message:
+        """Start a new thread in ``channel``."""
+        return iter_coroutine(
+            self._service().post(
+                self._target,
+                channel,
+                text,
+                labels=labels,
+                attachments=attachments,
+                sync=sync,
+                no_sync=no_sync,
+                idempotency_key=idempotency_key,
+            )
+        )
+
+    def reply(
+        self,
+        message_id: str,
+        text: str = "",
+        *,
+        labels: Mapping[str, str] | None = None,
+        attachments: Sequence[str] | None = None,
+        no_sync: bool = False,
+        idempotency_key: str | None = None,
+        after: str | None = None,
+    ) -> Message:
+        """Reply in the thread containing ``message_id``."""
+        return iter_coroutine(
+            self._service().reply(
+                self._target,
+                message_id,
+                text,
+                labels=labels,
+                attachments=attachments,
+                no_sync=no_sync,
+                idempotency_key=idempotency_key,
+                after=after,
+            )
+        )
+
+    def edit(
+        self,
+        message_id: str,
+        text: str,
+        *,
+        revision: int | None = None,
+    ) -> None:
+        """Edit an existing message's text."""
+        iter_coroutine(self._service().edit(self._target, message_id, text, revision=revision))
+
+    def delete(
+        self,
+        message_id: str,
+        *,
+        revision: int | None = None,
+    ) -> None:
+        """Delete an existing message."""
+        iter_coroutine(self._service().delete(self._target, message_id, revision=revision))
+
+    def react(
+        self,
+        message_id: str,
+        emoji: str,
+        *,
+        remove: bool = False,
+    ) -> None:
+        """Add or remove an emoji reaction on a message."""
+        iter_coroutine(self._service().react(self._target, message_id, emoji, remove=remove))
+
+    def label(
+        self,
+        message_id: str,
+        *,
+        set: Mapping[str, str] | None = None,
+        unset: Sequence[str] | None = None,
+        if_labels: Mapping[str, str | None] | None = None,
+    ) -> None:
+        """Set or unset labels on a message with optional preconditions."""
+        iter_coroutine(
+            self._service().label(
+                self._target,
+                message_id,
+                set=set,
+                unset=unset,
+                if_labels=if_labels,
+            )
+        )
+
+    def get_posted(self, idempotency_key: str) -> Message:
+        """Look up a previously posted message by its client idempotency key."""
+        return iter_coroutine(self._service().get_posted(self._target, idempotency_key))
 
 
 def sync_board(

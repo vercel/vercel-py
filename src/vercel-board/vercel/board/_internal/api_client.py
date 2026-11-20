@@ -15,16 +15,18 @@ import random
 import re
 import sys
 import time
+import unicodedata
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
+from types import MappingProxyType
 from typing import Final, Literal, TypeVar
 from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 
 import httpx2 as httpx
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from vercel._internal.core.http import (
     BaseTransport,
@@ -38,6 +40,7 @@ from vercel.board._internal.errors import (
     BoardApiError,
     BoardConflictError,
     BoardCredentialsError,
+    BoardError,
     BoardLabelConflictError,
     BoardNewerMessageError,
     BoardNotFoundError,
@@ -49,10 +52,18 @@ from vercel.board._internal.errors import (
     ErrorOrigin,
 )
 from vercel.board._internal.models import (
+    Actor,
     ActorKind,
+    Author,
     Discovery,
     DiscoverySync,
+    Link,
+    LinkFile,
+    LinkSnapshot,
     Me,
+    Mentioned,
+    MentionedActor,
+    Message,
     Profile,
     Via,
 )
@@ -97,6 +108,32 @@ _SECONDS_BEFORE: Final[float] = 1e12
 
 _PROJECT_ID_RE: Final[re.Pattern[str]] = re.compile(r"\Aprj_[A-Za-z0-9]{1,64}\Z")
 _OWNER_ID_RE: Final[re.Pattern[str]] = re.compile(r"\A(?:team_)?[A-Za-z0-9]{1,64}\Z")
+_HOSTED_CLIENT_ID_RE: Final[re.Pattern[str]] = re.compile(r"\A[A-Za-z0-9_.:-]{1,128}\Z")
+_HOSTED_MESSAGE_ID_RE: Final[re.Pattern[str]] = re.compile(r"\Amsg_([0-9a-f-]{36})_([1-9]\d*)\Z")
+_MESSAGE_TEXT_MAX: Final[int] = 10_000
+_FENCED_CODE_RE: Final[re.Pattern[str]] = re.compile(r"```[\s\S]*?```")
+_INLINE_CODE_RE: Final[re.Pattern[str]] = re.compile(r"`[^`\n]*`")
+_ECMA_WS: Final[str] = r"\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+_MENTION_NAME_PATTERN: Final[str] = r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?"
+_MENTION_HANDLE_RE: Final[re.Pattern[str]] = re.compile(
+    rf"(?<![A-Za-z0-9_@.-])@({_MENTION_NAME_PATTERN}(?:/{_MENTION_NAME_PATTERN})?)"
+    rf"(?!:[^{_ECMA_WS}]|[A-Za-z0-9_/-]|\.(?=[A-Za-z0-9]))"
+)
+_MENTION_EXACT_RE: Final[re.Pattern[str]] = re.compile(
+    rf"(?<![A-Za-z0-9_@.-])@\[([^\]{_ECMA_WS}]+)\]"
+)
+_HOLDABLE_ACTOR_RE: Final[re.Pattern[str]] = re.compile(rf"\A[^\]{_ECMA_WS}]+\Z")
+_PROJECT_PRINCIPAL_RE: Final[re.Pattern[str]] = re.compile(r"\Avercel:project:([^:]+):([^:]+)\Z")
+_BLOCK_OPEN_RE: Final[re.Pattern[str]] = re.compile(r"\A( {0,3})(`{3,}|~{3,})(.*)\Z")
+_BLOCK_CLOSE_RE: Final[re.Pattern[str]] = re.compile(r"\A {0,3}(`{3,}|~{3,})[ \t]*\Z")
+_BLOCK_INFO_RE: Final[re.Pattern[str]] = re.compile(r"\Ajson#(\S*)")
+_BLOCK_QUOTED_RE: Final[re.Pattern[str]] = re.compile(r"\A {0,3}>[ \t]?")
+_BLOCK_ITEM_RE: Final[re.Pattern[str]] = re.compile(r"\A {0,3}(?:[-*+]|\d{1,9}[.)])(?: {1,4}|\t|$)")
+_BLOCK_INTERRUPTS_RE: Final[re.Pattern[str]] = re.compile(
+    r"\A {0,3}(?:#{1,6}(?:[ \t]|$)|([-*_])(?:[ \t]*\1){2,}[ \t]*$|<)"
+)
+_TYPABLE_SEP_RE: Final[re.Pattern[str]] = re.compile(r"[^a-z0-9._-]+")
+_HANDLE_MAX: Final[int] = 128
 _KNOWN_PERMISSIONS: Final[frozenset[str]] = frozenset(p.value for p in PERMISSIONS)
 _DEFAULT_HOSTED_CAN: Final[Can] = Can.from_input(
     [Permission.READ, Permission.POST, Permission.REACT, Permission.LABEL]
@@ -113,6 +150,106 @@ _WireModelT = TypeVar("_WireModelT", bound=BaseModel)
 
 class _WireModel(BaseModel):
     model_config = ConfigDict(extra="ignore", frozen=True, populate_by_name=True)
+
+
+class _WireRequestModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
+
+    def to_json_body(self) -> JSONBody:
+        return JSONBody(self.model_dump(by_alias=True, exclude_none=True))
+
+
+class _HttpPostRequest(_WireRequestModel):
+    channel: str
+    text: str
+    labels: dict[str, str] | None = None
+    attachments: list[str] | None = None
+    sync: list[str] | None = None
+    no_sync: Literal[True] | None = Field(default=None, serialization_alias="noSync")
+    id: str | None = None
+
+
+class _HttpReplyRequest(_WireRequestModel):
+    re: str
+    text: str
+    labels: dict[str, str] | None = None
+    attachments: list[str] | None = None
+    no_sync: Literal[True] | None = Field(default=None, serialization_alias="noSync")
+    id: str | None = None
+    after: str | None = None
+
+
+class _HttpEditRequest(_WireRequestModel):
+    text: str
+    revision: int | None = None
+
+
+class _HttpDeleteRequest(_WireRequestModel):
+    revision: int | None = None
+
+
+class _HttpReactRequest(_WireRequestModel):
+    emoji: str
+    remove: Literal[True] | None = None
+
+
+class _HttpLabelRequest(_WireRequestModel):
+    set: dict[str, str] | None = None
+    unset: list[str] | None = None
+    if_labels: dict[str, str | None] | None = Field(default=None, serialization_alias="if")
+
+
+class _ApiDefaultBoardRequest(_WireRequestModel):
+    operation_id: str = Field(serialization_alias="operationId")
+
+
+class _ApiEnsureBoardRequest(_WireRequestModel):
+    name: str
+    operation_id: str = Field(serialization_alias="operationId")
+
+
+class _ApiPostThreadRequest(_WireRequestModel):
+    operation_id: str = Field(serialization_alias="operationId")
+    channel: str
+    text: str
+    labels: dict[str, str] | None = None
+    client_id: str | None = Field(default=None, serialization_alias="clientId")
+    attachments: list[str] | None = None
+    no_sync: Literal[True] | None = Field(default=None, serialization_alias="noSync")
+
+
+class _ApiReplyMessageRequest(_WireRequestModel):
+    operation_id: str = Field(serialization_alias="operationId")
+    text: str
+    reply_to: int | None = Field(default=None, serialization_alias="replyTo")
+    client_id: str | None = Field(default=None, serialization_alias="clientId")
+    attachments: list[str] | None = None
+    after: int | None = None
+    no_sync: Literal[True] | None = Field(default=None, serialization_alias="noSync")
+
+
+class _ApiEditMessageRequest(_WireRequestModel):
+    operation_id: str = Field(serialization_alias="operationId")
+    text: str
+    revision: int | None = None
+
+
+class _ApiDeleteMessageRequest(_WireRequestModel):
+    operation_id: str = Field(serialization_alias="operationId")
+    revision: int | None = None
+
+
+class _ApiReactMessageRequest(_WireRequestModel):
+    operation_id: str = Field(serialization_alias="operationId")
+    emoji: str
+    remove: Literal[True] | None = None
+
+
+class _ApiLabelMessageRequest(_WireRequestModel):
+    operation_id: str = Field(serialization_alias="operationId")
+    set: dict[str, str] | None = None
+    unset: list[str] | None = None
+    if_labels: dict[str, str | None] | None = Field(default=None, serialization_alias="if")
 
 
 class _WireVia(_WireModel):
@@ -296,6 +433,329 @@ class _VercelTeamsListWire(_WireModel):
     teams: list[_VercelTeamEntryWire] = Field(default_factory=list)
 
 
+class _WireLinkFile(_WireModel):
+    name: str
+    url: str | None = None
+
+    def to_domain(self) -> LinkFile:
+        return LinkFile(name=self.name, url=self.url)
+
+
+class _WireLinkSnapshot(_WireModel):
+    author: str
+    text: str
+    created_at: datetime | None = Field(default=None, alias="createdAt")
+    files: list[_WireLinkFile] = Field(default_factory=list)
+
+    @field_validator("created_at", mode="before")
+    @classmethod
+    def _validate_created_at(cls, value: object) -> datetime | None:
+        return _parse_optional_wire_timestamp(value)
+
+    def to_domain(self) -> LinkSnapshot:
+        return LinkSnapshot(
+            author=self.author,
+            text=self.text,
+            created_at=self.created_at,
+            files=tuple(f.to_domain() for f in self.files),
+        )
+
+
+class _WireLink(_WireModel):
+    url: str
+    message: str | None = None
+    snapshot: _WireLinkSnapshot | None = None
+    unavailable: str | None = None
+
+    def to_domain(self) -> Link:
+        return Link(
+            url=self.url,
+            message=self.message,
+            snapshot=self.snapshot.to_domain() if self.snapshot is not None else None,
+            unavailable=self.unavailable,
+        )
+
+
+class _WireMentionedActor(_WireModel):
+    id: str
+    handle: str
+    name: str
+
+    def to_domain(self) -> MentionedActor:
+        return MentionedActor(id=self.id, handle=self.handle, name=self.name)
+
+
+class _WireMentioned(_WireModel):
+    written: str
+    actor: _WireMentionedActor | None = None
+    candidates: list[_WireMentionedActor] = Field(default_factory=list)
+
+    def to_domain(self) -> Mentioned:
+        return Mentioned(
+            written=self.written,
+            actor=self.actor.to_domain() if self.actor is not None else None,
+            candidates=tuple(c.to_domain() for c in self.candidates),
+        )
+
+
+class _HttpAuthorWire(_WireModel):
+    actor: str
+    principal: str
+    profile: str | None = None
+
+    def to_domain(self) -> Author:
+        return Author(actor=self.actor, principal=self.principal, profile=self.profile)
+
+
+class _HttpActorWire(_WireModel):
+    id: str | None = None
+    kind: str
+    handle: str
+    name: str
+    avatar: str | None = None
+    via: _WireVia | None = None
+    platform: str | None = None
+    verified: bool = False
+
+    def to_domain(self) -> Actor:
+        via = (
+            Via(name=self.via.name, environment=self.via.environment)
+            if self.via is not None and self.via.name is not None
+            else None
+        )
+        return Actor(
+            id=self.id,
+            kind=_coerce_actor_kind(self.kind),
+            handle=self.handle,
+            name=self.name,
+            avatar=self.avatar,
+            via=via,
+            platform=self.platform,
+            verified=self.verified,
+        )
+
+
+class _HttpMessageWire(_WireModel):
+    id: str
+    channel: str
+    text: str
+    re: str | None = None
+    reply_to: str | None = Field(default=None, alias="replyTo")
+    thread: str
+    labels: dict[str, str] = Field(default_factory=dict)
+    reactions: dict[str, list[str]] = Field(default_factory=dict)
+    by: _HttpAuthorWire
+    author: _HttpActorWire | None = None
+    no_sync: bool = Field(default=False, alias="noSync")
+    from_source: str | None = Field(default=None, alias="from")
+    created_at: datetime = Field(alias="createdAt")
+    edited_at: datetime | None = Field(default=None, alias="editedAt")
+    deleted: bool = False
+    undelivered: dict[str, str] = Field(default_factory=dict)
+    links: list[_WireLink] = Field(default_factory=list)
+    version: int = 0
+    revision: int = 0
+    blind: bool = False
+
+    @field_validator("created_at", mode="before")
+    @classmethod
+    def _validate_created_at(cls, value: object) -> datetime:
+        parsed = _parse_optional_wire_timestamp(value)
+        if parsed is None:
+            raise ValueError(f"invalid createdAt timestamp: {value!r}")
+        return parsed
+
+    @field_validator("edited_at", mode="before")
+    @classmethod
+    def _validate_edited_at(cls, value: object) -> datetime | None:
+        return _parse_optional_wire_timestamp(value)
+
+    def to_domain(self, *, mentions: Sequence[_WireMentioned] = ()) -> Message:
+        return Message(
+            id=self.id,
+            channel=self.channel,
+            text=self.text,
+            re=self.re,
+            reply_to=self.reply_to,
+            thread=self.thread,
+            labels=MappingProxyType(dict(self.labels)),
+            reactions=MappingProxyType({k: tuple(v) for k, v in self.reactions.items()}),
+            by=self.by.to_domain(),
+            author=self.author.to_domain() if self.author is not None else None,
+            no_sync=self.no_sync,
+            from_source=self.from_source,
+            created_at=self.created_at,
+            edited_at=self.edited_at,
+            deleted=self.deleted,
+            undelivered=MappingProxyType(dict(self.undelivered)),
+            links=tuple(link.to_domain() for link in self.links),
+            version=self.version,
+            revision=self.revision,
+            blind=self.blind,
+            mentions=tuple(m.to_domain() for m in mentions),
+        )
+
+
+class _HttpMessageEnvelopeWire(_WireModel):
+    message: _HttpMessageWire
+    mentions: list[_WireMentioned] = Field(default_factory=list)
+
+    def to_domain(self) -> Message:
+        return self.message.to_domain(mentions=self.mentions)
+
+
+class _ApiChannelWire(_WireModel):
+    id: str
+    name: str
+
+
+class _ApiChannelEnvelopeWire(_WireModel):
+    channel: _ApiChannelWire
+
+
+class _ApiThreadRefWire(_WireModel):
+    id: str
+    channel_id: str | None = Field(default=None, alias="channelId")
+
+
+class _ApiMessageWire(_WireModel):
+    id: str
+    thread_id: str = Field(alias="threadId")
+    sequence: int
+    reply_to: int | None = Field(default=None, alias="replyTo")
+    text: str | None = None
+    version: int = 1
+    revision: int = 1
+    created_at: datetime | None = Field(default=None, alias="createdAt")
+    created_by: _ApiActorWire | None = Field(default=None, alias="createdBy")
+    edited_at: datetime | None = Field(default=None, alias="editedAt")
+    deleted_at: datetime | None = Field(default=None, alias="deletedAt")
+    reactions: dict[str, int] | None = None
+    reactors: dict[str, list[str]] | None = None
+    labels: dict[str, str] | None = None
+    from_source: str | None = Field(default=None, alias="from")
+    no_sync: bool = Field(default=False, alias="noSync")
+    links: list[_WireLink] = Field(default_factory=list)
+
+    @field_validator("created_at", "edited_at", "deleted_at", mode="before")
+    @classmethod
+    def _validate_hosted_timestamp(cls, value: object) -> datetime | None:
+        return _parse_optional_epoch_ms_timestamp(value)
+
+    def to_domain(
+        self,
+        *,
+        channel: str,
+        mentions: Sequence[Mentioned] = (),
+        reactions: Mapping[str, tuple[str, ...]] | None = None,
+        override_labels: Mapping[str, str] | None = None,
+        override_version: int | None = None,
+        response: httpx.Response | None = None,
+    ) -> Message:
+        if self.text is None or self.created_by is None or self.created_at is None:
+            raise BoardResponseError(
+                "Board API returned an incomplete message payload",
+                status_code=response.status_code if response is not None else None,
+                origin=ErrorOrigin.BOARD,
+                response=response,
+            )
+        is_root = self.sequence == 1
+        deleted = self.deleted_at is not None
+        raw_labels = override_labels if override_labels is not None else (self.labels or {})
+        labels = {} if deleted else dict(raw_labels)
+        resolved_reactions: dict[str, tuple[str, ...]] = {}
+        if not deleted:
+            if reactions is not None:
+                resolved_reactions = dict(reactions)
+            elif self.reactors:
+                resolved_reactions = {
+                    emoji: tuple(actors) for emoji, actors in self.reactors.items()
+                }
+
+        kind, handle, name, avatar = _fallback_actor_view(self.created_by)
+        via = (
+            _via_for(self.created_by.principal, None)
+            if self.created_by.profile is not None and self.created_by.principal.type != "external"
+            else None
+        )
+        return Message(
+            id=self.id,
+            channel=channel,
+            text=self.text,
+            re=None if is_root else _hosted_message_id(self.thread_id, 1),
+            reply_to=(
+                _hosted_message_id(self.thread_id, self.reply_to)
+                if self.reply_to is not None and self.reply_to != 1
+                else None
+            ),
+            thread=self.thread_id,
+            labels=MappingProxyType(labels),
+            reactions=MappingProxyType(resolved_reactions),
+            by=Author(
+                actor=self.created_by.id,
+                principal=_api_principal_id(self.created_by),
+                profile=(
+                    self.created_by.profile.name if self.created_by.profile is not None else None
+                ),
+            ),
+            author=Actor(
+                id=self.created_by.id,
+                kind=kind,
+                handle=handle,
+                name=name,
+                avatar=avatar,
+                via=via,
+                verified=True,
+            ),
+            no_sync=self.no_sync,
+            from_source=self.from_source,
+            created_at=self.created_at,
+            edited_at=self.edited_at,
+            deleted=deleted,
+            undelivered=MappingProxyType({}),
+            links=tuple(link.to_domain() for link in self.links),
+            version=override_version if override_version is not None else self.version,
+            revision=self.revision,
+            blind=False,
+            mentions=tuple(mentions),
+        )
+
+
+class _ApiPostEnvelopeWire(_WireModel):
+    thread: _ApiThreadRefWire
+    message: _ApiMessageWire
+    channel: _ApiChannelWire | None = None
+
+
+class _ApiLabelMetaWire(_WireModel):
+    labels: dict[str, str] | None = None
+    version: int | None = None
+
+
+class _ApiLabelMetaEnvelopeWire(_WireModel):
+    meta: _ApiLabelMetaWire
+
+
+class _ApiActorsPageWire(_WireModel):
+    actors: list[_ApiActorViewWire] = Field(default_factory=list)
+    cursor: str | None = None
+
+
+class _ApiReactionEntryWire(_WireModel):
+    emoji: str
+    actor: _ApiActorWire
+
+
+class _ApiReactionsPageWire(_WireModel):
+    reactions: list[_ApiReactionEntryWire] = Field(default_factory=list)
+    cursor: str | None = None
+
+
+class _ApiThreadMessagesPageWire(_WireModel):
+    messages: list[_ApiMessageWire] = Field(default_factory=list)
+    cursor: str | None = None
+
+
 # ---------------------------------------------------------------------------
 # Domain conversion, UUIDv7, & header formatting helpers
 # ---------------------------------------------------------------------------
@@ -309,6 +769,385 @@ def _uuid7() -> str:
     raw[6] = (raw[6] & 0x0F) | 0x70
     raw[8] = (raw[8] & 0x3F) | 0x80
     return str(uuid.UUID(bytes=bytes(raw)))
+
+
+def _quote_path_segment(value: str) -> str:
+    """Percent-encode an opaque path segment, escaping ``.`` and ``..``."""
+    encoded = quote(value, safe="")
+    if encoded == ".":
+        return "%2E"
+    if encoded == "..":
+        return "%2E%2E"
+    return encoded
+
+
+def _parse_iso_timestamp(value: str) -> datetime:
+    if not value:
+        raise ValueError("empty timestamp string")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parsed.astimezone(UTC) if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+    except (ValueError, OverflowError, OSError) as exc:
+        raise ValueError(f"invalid ISO timestamp: {value!r}") from exc
+
+
+def _parse_optional_wire_timestamp(value: object) -> datetime | None:
+    """Parse an ISO-8601 string or epoch timestamp for HTTP wire models."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        try:
+            return value.astimezone(UTC) if value.tzinfo is not None else value.replace(tzinfo=UTC)
+        except (ValueError, OverflowError, OSError) as exc:
+            raise ValueError(f"timestamp out of range: {value!r}") from exc
+    if isinstance(value, bool):
+        raise ValueError(f"boolean is not a valid timestamp: {value!r}")
+    if isinstance(value, (int, float)):
+        try:
+            if value < _SECONDS_BEFORE:
+                return from_epoch_seconds(value)
+            return from_epoch_ms(value)
+        except (ValueError, OverflowError, OSError) as exc:
+            raise ValueError(f"timestamp out of range: {value!r}") from exc
+    if isinstance(value, str):
+        return _parse_iso_timestamp(value)
+    raise ValueError(f"unsupported timestamp value: {value!r}")
+
+
+def _parse_optional_epoch_ms_timestamp(value: object) -> datetime | None:
+    """Parse an explicit epoch-milliseconds number (or ISO string) for hosted API models."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        try:
+            return value.astimezone(UTC) if value.tzinfo is not None else value.replace(tzinfo=UTC)
+        except (ValueError, OverflowError, OSError) as exc:
+            raise ValueError(f"hosted timestamp out of range: {value!r}") from exc
+    if isinstance(value, bool):
+        raise ValueError(f"boolean is not a valid timestamp: {value!r}")
+    if isinstance(value, (int, float)):
+        try:
+            return from_epoch_ms(value)
+        except (ValueError, OverflowError, OSError) as exc:
+            raise ValueError(f"hosted epoch-ms timestamp out of range: {value!r}") from exc
+    if isinstance(value, str):
+        return _parse_iso_timestamp(value)
+    raise ValueError(f"unsupported hosted timestamp value: {value!r}")
+
+
+def _utf16_len(text: str) -> int:
+    """Return JavaScript-equivalent UTF-16 code unit length."""
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _find_block_spans(text: str) -> list[tuple[int, int]]:
+    """Return ``(start, end)`` spans of top-level ``json#...`` fenced blocks (``` and ~~~)."""
+    if "json#" not in text:
+        return []
+
+    def _opens(line: str) -> tuple[str, str] | None:
+        match = _BLOCK_OPEN_RE.fullmatch(line)
+        if match is None:
+            return None
+        fence, info = match.group(2), match.group(3)
+        if fence[0] == "`" and "`" in info:
+            return None
+        return (fence, info.strip())
+
+    def _closes(line: str, fence: str) -> bool:
+        match = _BLOCK_CLOSE_RE.fullmatch(line)
+        return (
+            match is not None
+            and match.group(1)[0] == fence[0]
+            and len(match.group(1)) >= len(fence)
+        )
+
+    def _plain(line: str) -> bool:
+        return (
+            line.strip() != ""
+            and _opens(line) is None
+            and _BLOCK_QUOTED_RE.match(line) is None
+            and _BLOCK_ITEM_RE.match(line) is None
+            and _BLOCK_INTERRUPTS_RE.match(line) is None
+        )
+
+    spans: list[tuple[int, int]] = []
+    open_block: tuple[str, str, int] | None = None
+    container: Literal["quote", "item"] | None = None
+    item_indent = 0
+    nested: str | None = None
+    paragraph = False
+    at = 0
+    length = len(text)
+
+    while at <= length:
+        newline = text.find("\n", at)
+        end = length if newline == -1 else newline
+        line = text[at:end].removesuffix("\r")
+        if open_block is not None:
+            fence, info, start = open_block
+            if _closes(line, fence):
+                if _BLOCK_INFO_RE.match(info) is not None:
+                    spans.append((start, at + len(line)))
+                open_block = None
+        else:
+            inner: str | None
+            quoted = _BLOCK_QUOTED_RE.match(line)
+            if quoted is not None:
+                if container != "quote":
+                    nested = None
+                container = "quote"
+                inner = line[len(quoted.group(0)) :]
+            elif container == "item" and (
+                line.strip() == "" or len(line) - len(line.lstrip()) >= item_indent
+            ):
+                inner = line[min(item_indent, len(line)) :]
+            elif container is not None and paragraph and nested is None and _plain(line):
+                inner = line
+            else:
+                started = _BLOCK_ITEM_RE.match(line)
+                nested = None
+                container = "item" if started is not None else None
+                if started is None:
+                    inner = None
+                else:
+                    matched_len = len(started.group(0))
+                    item_indent = len(line) + 1 if matched_len == len(line) else matched_len
+                    inner = line[item_indent:]
+
+            if inner is None:
+                opened = _opens(line)
+                if opened is not None:
+                    open_block = (opened[0], opened[1], at)
+            elif nested is not None:
+                if _closes(inner, nested):
+                    nested = None
+            else:
+                opened_inner = _opens(inner)
+                nested = opened_inner[0] if opened_inner is not None else None
+            paragraph = inner is not None and nested is None and _plain(inner)
+
+        if newline == -1:
+            break
+        at = newline + 1
+
+    if open_block is not None and _BLOCK_INFO_RE.match(open_block[1]) is not None:
+        spans.append((open_block[2], length))
+    return spans
+
+
+def _blank_code(text: str) -> str:
+    masked = _FENCED_CODE_RE.sub(lambda m: " " * len(m.group(0)), text)
+    masked = _INLINE_CODE_RE.sub(lambda m: " " * len(m.group(0)), masked)
+    for start, end in _find_block_spans(text):
+        masked = f"{masked[:start]}{' ' * (end - start)}{masked[end:]}"
+    return masked
+
+
+def _actor_parts(actor_id: str) -> tuple[str, str | None]:
+    if "+" not in actor_id:
+        return (actor_id, None)
+    principal, profile = actor_id.split("+", 1)
+    return (principal, profile)
+
+
+def _platform_profile(profile: str | None) -> tuple[str, str] | None:
+    if not profile or ":" not in profile:
+        return None
+    key, user = profile.split(":", 1)
+    return (key, user) if key else None
+
+
+def _typable_handle(handle: str, user_id: str) -> str:
+    def _typable(value: str) -> str:
+        stripped = "".join(
+            ch
+            for ch in unicodedata.normalize("NFKD", value)
+            if not unicodedata.category(ch).startswith("M")
+        )
+        return _TYPABLE_SEP_RE.sub("-", stripped.lower()).strip("-._")
+
+    return _typable(handle) or _typable(user_id)
+
+
+def _under_principal(principal: str, part: str) -> str:
+    room = _HANDLE_MAX - len(principal) - 1
+    if len(part) <= room:
+        return f"{principal}/{part}"
+    return f"{principal}/{part[: max(room, 1)].strip('-._')}"
+
+
+def _normalize_hosted_actors_for_mentions(
+    views: Sequence[_ApiActorViewWire],
+) -> tuple[list[MentionedActor], set[str]]:
+    """Normalize hosted ``/actors`` entries (matching ``backend-vercel.ts:3164-3177``)."""
+    by_via: dict[str, str] = {}
+    by_profile: dict[str, str] = {}
+    by_handle: dict[str, str] = {}
+    for item in views:
+        principal_id, profile = _actor_parts(item.id)
+        match = _PROJECT_PRINCIPAL_RE.fullmatch(principal_id)
+        if match is None:
+            continue
+        project_id = match.group(1)
+        if profile is not None and item.via is not None and item.via.name:
+            by_via[project_id] = item.via.name
+        if item.handle.startswith("project:"):
+            continue
+        if profile is None:
+            by_handle[project_id] = item.handle
+        elif "/" in item.handle and _platform_profile(profile) is None:
+            prefix = item.handle.split("/", 1)[0]
+            if prefix:
+                by_profile[project_id] = prefix
+
+    project_names = {**by_via, **by_profile, **by_handle}
+    actors: list[MentionedActor] = []
+    external: set[str] = set()
+    for item in views:
+        if item.kind == "external":
+            external.add(item.id)
+        principal_id, profile = _actor_parts(item.id)
+        proj_match = _PROJECT_PRINCIPAL_RE.fullmatch(principal_id)
+        handle = item.handle
+        name = item.name or item.handle
+        if proj_match is not None:
+            project_id, environment = proj_match.group(1), proj_match.group(2)
+            project = project_names.get(project_id)
+            if profile is None:
+                if project is None:
+                    handle = (
+                        project_id if environment == "production" else f"{project_id}@{environment}"
+                    )
+                    name = handle
+                else:
+                    handle = project
+                    name = project if environment == "production" else f"{project} ({environment})"
+            else:
+                platform_user = _platform_profile(profile)
+                if platform_user is not None:
+                    if "/" in item.handle:
+                        left, right = item.handle.split("/", 1)
+                        handle = _under_principal(left, right)
+                    else:
+                        via_name = (
+                            project
+                            or (item.via.name if item.via is not None and item.via.name else None)
+                            or project_id
+                        )
+                        handle = _under_principal(
+                            via_name, _typable_handle(item.handle, platform_user[1])
+                        )
+        actors.append(MentionedActor(id=item.id, handle=handle, name=name))
+    return actors, external
+
+
+def _extract_mention_tokens(text: str) -> list[tuple[int, int, Literal["actor", "handle"], str]]:
+    """Return ``(start, end, kind, value)`` tokens in prose order (excluding code spans)."""
+    prose = _blank_code(text)
+    tokens: list[tuple[int, int, Literal["actor", "handle"], str]] = []
+    for match in _MENTION_EXACT_RE.finditer(prose):
+        tokens.append((match.start(), match.end(), "actor", match.group(1)))
+    prose_without_exact = _MENTION_EXACT_RE.sub(lambda m: " " * len(m.group(0)), prose)
+    for match in _MENTION_HANDLE_RE.finditer(prose_without_exact):
+        tokens.append((match.start(), match.end(), "handle", match.group(1).lower()))
+    tokens.sort(key=lambda item: item[0])
+    return tokens
+
+
+def _settle_mentions(
+    text: str,
+    actors: Sequence[MentionedActor],
+    *,
+    prefer: Callable[[Sequence[MentionedActor]], MentionedActor | None] | None = None,
+) -> tuple[str, tuple[Mentioned, ...]]:
+    """Rewrite unambiguous ``@handle`` mentions to ``@[actor-id]``, matching ``mentions.ts``."""
+    tokens = _extract_mention_tokens(text)
+    found: dict[str, Mentioned] = {}
+    out: list[str] = []
+    cursor = 0
+    for start, end, kind, value in tokens:
+        out.append(text[cursor:start])
+        written = text[start:end]
+        if kind == "handle":
+            mention = found.get(value)
+            if mention is None:
+                full = [
+                    actor
+                    for actor in actors
+                    if actor.handle.lower() == value
+                    and _HOLDABLE_ACTOR_RE.fullmatch(actor.id) is not None
+                ]
+                chosen: MentionedActor | None = None
+                if len(full) == 1:
+                    chosen = full[0]
+                elif len(full) > 1 and prefer is not None:
+                    chosen = prefer(full)
+                if full or "/" in value:
+                    under = full
+                else:
+                    under = [
+                        actor
+                        for actor in actors
+                        if "/" in actor.handle
+                        and actor.handle.lower().split("/", 1)[1] == value
+                        and _HOLDABLE_ACTOR_RE.fullmatch(actor.id) is not None
+                    ]
+                mention = Mentioned(
+                    written=written,
+                    actor=chosen,
+                    candidates=() if chosen is not None else tuple(under),
+                )
+                found[value] = mention
+            out.append(f"@[{mention.actor.id}]" if mention.actor is not None else written)
+        else:
+            out.append(written)
+        cursor = end
+    out.append(text[cursor:])
+    return ("".join(out), tuple(found.values()))
+
+
+def _reconcile_mentions(
+    settled_text: str,
+    stored_text: str,
+    mentions: Sequence[Mentioned],
+) -> tuple[Mentioned, ...]:
+    """Reconcile mention outcomes if an idempotent replay returned earlier stored text."""
+    if not mentions or stored_text == settled_text:
+        return tuple(mentions)
+    stored_actors = {
+        value for _, _, kind, value in _extract_mention_tokens(stored_text) if kind == "actor"
+    }
+    reconciled: list[Mentioned] = []
+    for mention in mentions:
+        if mention.actor is not None and mention.actor.id not in stored_actors:
+            reconciled.append(
+                Mentioned(written=mention.written, actor=None, candidates=(mention.actor,))
+            )
+        else:
+            reconciled.append(mention)
+    return tuple(reconciled)
+
+
+def _hosted_client_id(idempotency_key: str) -> str:
+    """Encode an idempotency key for Vercel's hosted API ``clientId`` field."""
+    if _HOSTED_CLIENT_ID_RE.fullmatch(idempotency_key) is not None:
+        return idempotency_key
+    digest = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()[:64]
+    return f"h.{digest}"
+
+
+def _locate_hosted_message(message_id: str) -> tuple[str, int] | None:
+    """Parse ``msg_<uuid>_<seq>`` into ``(thr_<uuid>, seq)`` or ``None``."""
+    match = _HOSTED_MESSAGE_ID_RE.fullmatch(message_id)
+    if match is None:
+        return None
+    return (f"thr_{match.group(1)}", int(match.group(2)))
+
+
+def _hosted_message_id(thread_id: str, sequence: int) -> str:
+    """Build ``msg_<uuid>_<seq>`` from a hosted thread ID and sequence number."""
+    return f"msg_{thread_id.removeprefix('thr_')}_{sequence}"
 
 
 def _coerce_actor_kind(raw: str) -> ActorKind:
@@ -688,6 +1527,89 @@ class _BoardProtocol(abc.ABC):
     async def me(self, ctx: RequestContext) -> Me:
         raise NotImplementedError
 
+    @abc.abstractmethod
+    async def post(
+        self,
+        ctx: RequestContext,
+        *,
+        channel: str,
+        text: str,
+        labels: Mapping[str, str],
+        attachments: Sequence[str],
+        sync: Sequence[str],
+        no_sync: bool,
+        idempotency_key: str | None,
+    ) -> Message:
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    async def reply(
+        self,
+        ctx: RequestContext,
+        *,
+        message_id: str,
+        text: str,
+        labels: Mapping[str, str],
+        attachments: Sequence[str],
+        no_sync: bool,
+        idempotency_key: str | None,
+        after: str | None,
+    ) -> Message:
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    async def edit(
+        self,
+        ctx: RequestContext,
+        *,
+        message_id: str,
+        text: str,
+        revision: int | None,
+    ) -> None:
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    async def delete(
+        self,
+        ctx: RequestContext,
+        *,
+        message_id: str,
+        revision: int | None,
+    ) -> None:
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    async def react(
+        self,
+        ctx: RequestContext,
+        *,
+        message_id: str,
+        emoji: str,
+        remove: bool,
+    ) -> None:
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    async def label(
+        self,
+        ctx: RequestContext,
+        *,
+        message_id: str,
+        set_labels: Mapping[str, str],
+        unset_keys: Sequence[str],
+        if_labels: Mapping[str, str | None],
+    ) -> None:
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    async def get_posted(
+        self,
+        ctx: RequestContext,
+        *,
+        idempotency_key: str,
+    ) -> Message:
+        raise NotImplementedError
+
 
 # ---------------------------------------------------------------------------
 # Shared retry + OIDC exchange + GitHub Actions OIDC helper
@@ -937,6 +1859,7 @@ class _HttpBoardProtocol(_BoardProtocol):
         token: str | None,
         headers: Mapping[str, str],
         used_bypass: bool,
+        body: RequestBody = None,
     ) -> httpx.Response:
         try:
             response = await self._runner.send(
@@ -944,6 +1867,7 @@ class _HttpBoardProtocol(_BoardProtocol):
                 url,
                 token=token,
                 headers=headers,
+                body=body,
             )
         except BoardApiError as exc:
             if exc.response is not None and _is_deployment_protection_wall(exc.response):
@@ -960,6 +1884,7 @@ class _HttpBoardProtocol(_BoardProtocol):
         *,
         token: str | None,
         extra_headers: Mapping[str, str] | None = None,
+        body: RequestBody = None,
     ) -> httpx.Response:
         """Send an HTTP Board request with Deployment Protection gateway handling.
 
@@ -993,6 +1918,7 @@ class _HttpBoardProtocol(_BoardProtocol):
                     token=token,
                     headers=headers,
                     used_bypass=True,
+                    body=body,
                 )
             except BoardCredentialsError as exc:
                 if exc.code != "protected" or not on_vercel:
@@ -1008,6 +1934,7 @@ class _HttpBoardProtocol(_BoardProtocol):
                 token=token,
                 headers=fallback_headers,
                 used_bypass=False,
+                body=body,
             )
 
         gateway_headers = await self._trusted_sources_headers(auth_token=token)
@@ -1019,6 +1946,7 @@ class _HttpBoardProtocol(_BoardProtocol):
             token=token,
             headers=gateway_headers,
             used_bypass=False,
+            body=body,
         )
 
     async def _discover_for_auth(self) -> Discovery:
@@ -1222,14 +2150,22 @@ class _HttpBoardProtocol(_BoardProtocol):
         del ctx
         return await self._fetch_discovery()
 
-    async def me(self, ctx: RequestContext) -> Me:
+    async def _authed_request(
+        self,
+        method: str,
+        path: str,
+        ctx: RequestContext,
+        *,
+        body: RequestBody = None,
+    ) -> httpx.Response:
         token, is_bare = await self._resolve_token()
         try:
-            response = await self._send_guarded(
-                "GET",
-                f"{self._base_url}/me",
+            return await self._send_guarded(
+                method,
+                f"{self._base_url}{path}",
                 token=token,
                 extra_headers=self._identity_headers(ctx),
+                body=body,
             )
         except BoardApiError as exc:
             if is_bare and exc.status_code == 401:
@@ -1242,7 +2178,139 @@ class _HttpBoardProtocol(_BoardProtocol):
                     response=exc.response,
                 ) from exc
             raise
+
+    async def me(self, ctx: RequestContext) -> Me:
+        response = await self._authed_request("GET", "/me", ctx)
         return _parse_wire(response, _HttpMeWire).to_domain()
+
+    async def post(
+        self,
+        ctx: RequestContext,
+        *,
+        channel: str,
+        text: str,
+        labels: Mapping[str, str],
+        attachments: Sequence[str],
+        sync: Sequence[str],
+        no_sync: bool,
+        idempotency_key: str | None,
+    ) -> Message:
+        request = _HttpPostRequest(
+            channel=channel,
+            text=text,
+            labels=dict(labels) if labels else None,
+            attachments=list(attachments) if attachments else None,
+            sync=list(sync) if sync else None,
+            no_sync=True if no_sync else None,
+            id=idempotency_key,
+        )
+        response = await self._authed_request("POST", "/messages", ctx, body=request.to_json_body())
+        return _parse_wire(response, _HttpMessageEnvelopeWire).to_domain()
+
+    async def reply(
+        self,
+        ctx: RequestContext,
+        *,
+        message_id: str,
+        text: str,
+        labels: Mapping[str, str],
+        attachments: Sequence[str],
+        no_sync: bool,
+        idempotency_key: str | None,
+        after: str | None,
+    ) -> Message:
+        request = _HttpReplyRequest(
+            re=message_id,
+            text=text,
+            labels=dict(labels) if labels else None,
+            attachments=list(attachments) if attachments else None,
+            no_sync=True if no_sync else None,
+            id=idempotency_key,
+            after=after,
+        )
+        response = await self._authed_request("POST", "/messages", ctx, body=request.to_json_body())
+        return _parse_wire(response, _HttpMessageEnvelopeWire).to_domain()
+
+    async def edit(
+        self,
+        ctx: RequestContext,
+        *,
+        message_id: str,
+        text: str,
+        revision: int | None,
+    ) -> None:
+        request = _HttpEditRequest(text=text, revision=revision)
+        await self._authed_request(
+            "POST",
+            f"/messages/{_quote_path_segment(message_id)}/edit",
+            ctx,
+            body=request.to_json_body(),
+        )
+
+    async def delete(
+        self,
+        ctx: RequestContext,
+        *,
+        message_id: str,
+        revision: int | None,
+    ) -> None:
+        request = _HttpDeleteRequest(revision=revision)
+        await self._authed_request(
+            "POST",
+            f"/messages/{_quote_path_segment(message_id)}/delete",
+            ctx,
+            body=request.to_json_body(),
+        )
+
+    async def react(
+        self,
+        ctx: RequestContext,
+        *,
+        message_id: str,
+        emoji: str,
+        remove: bool,
+    ) -> None:
+        request = _HttpReactRequest(emoji=emoji, remove=True if remove else None)
+        await self._authed_request(
+            "POST",
+            f"/messages/{_quote_path_segment(message_id)}/reactions",
+            ctx,
+            body=request.to_json_body(),
+        )
+
+    async def label(
+        self,
+        ctx: RequestContext,
+        *,
+        message_id: str,
+        set_labels: Mapping[str, str],
+        unset_keys: Sequence[str],
+        if_labels: Mapping[str, str | None],
+    ) -> None:
+        request = _HttpLabelRequest(
+            set=dict(set_labels) if set_labels else None,
+            unset=list(unset_keys) if unset_keys else None,
+            if_labels=dict(if_labels) if if_labels else None,
+        )
+        await self._authed_request(
+            "POST",
+            f"/messages/{_quote_path_segment(message_id)}/labels",
+            ctx,
+            body=request.to_json_body(),
+        )
+
+    async def get_posted(
+        self,
+        ctx: RequestContext,
+        *,
+        idempotency_key: str,
+    ) -> Message:
+        response = await self._authed_request(
+            "GET",
+            f"/posts/{_quote_path_segment(idempotency_key)}",
+            ctx,
+        )
+        return _parse_wire(response, _HttpMessageEnvelopeWire).to_domain()
 
 
 # ---------------------------------------------------------------------------
@@ -1266,6 +2334,7 @@ class _VercelBoardProtocol(_BoardProtocol):
         self._runner = runner
         self._credentials_factory = credentials_factory
         self._board_id_cache: dict[tuple[str, str, str | None, bool], str] = {}
+        self._channel_name_cache: dict[tuple[str, str], str] = {}
 
     async def _resolve_auth_and_team(
         self,
@@ -1459,7 +2528,7 @@ class _VercelBoardProtocol(_BoardProtocol):
                 token=token,
                 team=team,
                 ctx=ctx,
-                body=JSONBody({"operationId": _uuid7()}),
+                body=_ApiDefaultBoardRequest(operation_id=_uuid7()).to_json_body(),
             )
             board_id = _parse_wire(made_resp, _ApiBoardEnvelopeWire).board.id
             self._board_id_cache[cache_key] = board_id
@@ -1496,7 +2565,9 @@ class _VercelBoardProtocol(_BoardProtocol):
                 token=token,
                 team=team,
                 ctx=ctx,
-                body=JSONBody({"name": ctx.board_name, "operationId": _uuid7()}),
+                body=_ApiEnsureBoardRequest(
+                    name=ctx.board_name, operation_id=_uuid7()
+                ).to_json_body(),
             )
         except BoardConflictError as exc:
             if exc.code == "board_name_taken":
@@ -1580,6 +2651,734 @@ class _VercelBoardProtocol(_BoardProtocol):
             wake_by_path=True,
         )
 
+    async def _channel_name_by_id(
+        self,
+        *,
+        board_id: str,
+        channel_id: str,
+        token: str,
+        team: str | None,
+        ctx: RequestContext,
+    ) -> str:
+        cache_key = (board_id, channel_id)
+        cached = self._channel_name_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        resp = await self._api_request(
+            "GET",
+            f"/boards/{_quote_path_segment(board_id)}/channels/{_quote_path_segment(channel_id)}",
+            token=token,
+            team=team,
+            ctx=ctx,
+        )
+        channel = _parse_wire(resp, _ApiChannelEnvelopeWire).channel
+        self._channel_name_cache[cache_key] = channel.name
+        return channel.name
+
+    async def _landed_channel_name(
+        self,
+        *,
+        board_id: str,
+        channel_id: str | None,
+        requested_name: str,
+        client_id: str | None,
+        token: str,
+        team: str | None,
+        ctx: RequestContext,
+    ) -> str:
+        if channel_id is None:
+            return requested_name
+        cache_key = (board_id, channel_id)
+        if client_id is not None and self._channel_name_cache.get(cache_key) != requested_name:
+            try:
+                return await self._channel_name_by_id(
+                    board_id=board_id,
+                    channel_id=channel_id,
+                    token=token,
+                    team=team,
+                    ctx=ctx,
+                )
+            except (BoardError, httpx.HTTPError, OSError):
+                return requested_name
+        self._channel_name_cache[cache_key] = requested_name
+        return requested_name
+
+    async def _resolve_reactors(
+        self,
+        *,
+        board_id: str,
+        msg: _ApiMessageWire,
+        token: str,
+        team: str | None,
+        ctx: RequestContext,
+    ) -> dict[str, tuple[str, ...]]:
+        if msg.deleted_at is not None or not msg.reactions:
+            return {}
+        named = msg.reactors or {}
+        if all(len(named.get(emoji, ())) >= count for emoji, count in msg.reactions.items()):
+            return {emoji: tuple(actors) for emoji, actors in named.items()}
+
+        path = (
+            f"/boards/{_quote_path_segment(board_id)}"
+            f"/threads/{_quote_path_segment(msg.thread_id)}"
+            f"/messages/{msg.sequence}/reactions"
+        )
+        for retried in (False, True):
+            out: dict[str, list[str]] = {}
+            cursor: str | None = None
+            try:
+                while True:
+                    query = {"cursor": cursor} if cursor is not None else None
+                    resp = await self._api_request(
+                        "GET", path, token=token, team=team, ctx=ctx, query=query
+                    )
+                    page = _parse_wire(resp, _ApiReactionsPageWire)
+                    for reaction in page.reactions:
+                        out.setdefault(reaction.emoji, []).append(reaction.actor.id)
+                    if not page.cursor:
+                        return {emoji: tuple(actors) for emoji, actors in out.items()}
+                    cursor = page.cursor
+            except BoardApiError as exc:
+                if (
+                    retried
+                    or cursor is None
+                    or exc.status_code != 410
+                    or exc.code != "cursor_expired"
+                ):
+                    raise
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    async def _list_actors_for_mentions(
+        self,
+        *,
+        board_id: str,
+        token: str,
+        team: str | None,
+        ctx: RequestContext,
+    ) -> tuple[list[MentionedActor], set[str]]:
+        path = f"/boards/{_quote_path_segment(board_id)}/actors"
+        views: list[_ApiActorViewWire] = []
+        for retried in (False, True):
+            views.clear()
+            cursor: str | None = None
+            try:
+                while True:
+                    query = {"cursor": cursor} if cursor is not None else None
+                    resp = await self._api_request(
+                        "GET", path, token=token, team=team, ctx=ctx, query=query
+                    )
+                    page = _parse_wire(resp, _ApiActorsPageWire)
+                    views.extend(page.actors)
+                    if not page.cursor:
+                        return _normalize_hosted_actors_for_mentions(views)
+                    cursor = page.cursor
+            except (BoardPermissionError, BoardNotFoundError):
+                return [], set()
+            except BoardApiError as exc:
+                if (
+                    retried
+                    or cursor is None
+                    or exc.status_code != 410
+                    or exc.code != "cursor_expired"
+                ):
+                    raise
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    async def _list_thread_writers(
+        self,
+        *,
+        board_id: str,
+        thread_id: str,
+        token: str,
+        team: str | None,
+        ctx: RequestContext,
+    ) -> set[str]:
+        path = (
+            f"/boards/{_quote_path_segment(board_id)}"
+            f"/threads/{_quote_path_segment(thread_id)}/messages"
+        )
+        writers: set[str] = set()
+        cursor: str | None = None
+        try:
+            while True:
+                query = {"cursor": cursor} if cursor is not None else None
+                resp = await self._api_request(
+                    "GET", path, token=token, team=team, ctx=ctx, query=query
+                )
+                page = _parse_wire(resp, _ApiThreadMessagesPageWire)
+                for msg in page.messages:
+                    if msg.created_by is not None:
+                        writers.add(msg.created_by.id)
+                if not page.cursor:
+                    return writers
+                cursor = page.cursor
+        except BoardNotFoundError:
+            return set()
+
+    async def _settle_hosted_mentions(
+        self,
+        *,
+        board_id: str,
+        text: str,
+        thread_id: str | None,
+        token: str,
+        team: str | None,
+        ctx: RequestContext,
+    ) -> tuple[str, tuple[Mentioned, ...]]:
+        if not any(kind == "handle" for _, _, kind, _ in _extract_mention_tokens(text)):
+            return text, ()
+
+        actors, external = await self._list_actors_for_mentions(
+            board_id=board_id, token=token, team=team, ctx=ctx
+        )
+
+        def _fit(
+            settled_text: str, mentions: tuple[Mentioned, ...]
+        ) -> tuple[str, tuple[Mentioned, ...]]:
+            if (
+                _utf16_len(settled_text) <= _MESSAGE_TEXT_MAX
+                or _utf16_len(text) > _MESSAGE_TEXT_MAX
+            ):
+                return settled_text, mentions
+            unsettled = tuple(
+                Mentioned(written=m.written, actor=None, candidates=(m.actor,))
+                if m.actor is not None
+                else m
+                for m in mentions
+            )
+            return text, unsettled
+
+        settled_text, mentions = _settle_mentions(text, actors)
+        if not any(len(m.candidates) > 1 for m in mentions):
+            return _fit(settled_text, mentions)
+
+        writers: set[str] = set()
+        if thread_id is not None:
+            writers = await self._list_thread_writers(
+                board_id=board_id, thread_id=thread_id, token=token, team=team, ctx=ctx
+            )
+
+        def _prefer(candidates: Sequence[MentionedActor]) -> MentionedActor | None:
+            board_actors = [actor for actor in candidates if actor.id not in external]
+            among = board_actors if board_actors else list(candidates)
+            if len(among) == 1:
+                return among[0]
+            wrote = [actor for actor in among if actor.id in writers]
+            return wrote[0] if len(wrote) == 1 else None
+
+        return _fit(*_settle_mentions(text, actors, prefer=_prefer))
+
+    async def _blind_message(
+        self,
+        *,
+        msg: _ApiMessageWire,
+        channel_name: str,
+        text: str,
+        labels: Mapping[str, str],
+        no_sync: bool,
+        token: str,
+        team: str | None,
+        ctx: RequestContext,
+        mentions: Sequence[Mentioned],
+    ) -> Message:
+        me_resp = await self._api_request("GET", "/me", token=token, team=team, ctx=ctx)
+        me_wire = _parse_wire(me_resp, _ApiMeWire)
+        actor = me_wire.actor
+        profile_name = (
+            ctx.profile.name
+            if ctx.profile is not None
+            else (actor.profile.name if actor.profile is not None else None)
+        )
+        principal_str = _api_principal_id(actor)
+        actor_id = (
+            f"{principal_str}+{profile_name.lower()}"
+            if profile_name and "+" not in actor.id
+            else actor.id
+        )
+        return Message(
+            id=msg.id,
+            channel=channel_name,
+            text=text,
+            re=None if msg.sequence == 1 else _hosted_message_id(msg.thread_id, 1),
+            reply_to=None,
+            thread=msg.thread_id,
+            labels=MappingProxyType(dict(labels)),
+            reactions=MappingProxyType({}),
+            by=Author(actor=actor_id, principal=principal_str, profile=profile_name),
+            author=None,
+            no_sync=no_sync,
+            from_source=None,
+            created_at=datetime.now(UTC),
+            edited_at=None,
+            deleted=False,
+            undelivered=MappingProxyType({}),
+            links=(),
+            version=1,
+            revision=1,
+            blind=True,
+            mentions=tuple(mentions),
+        )
+
+    def _require_located(self, message_id: str) -> tuple[str, int]:
+        located = _locate_hosted_message(message_id)
+        if located is None:
+            raise BoardNotFoundError(
+                f"message not found: {message_id}",
+                code="message_not_found",
+                status_code=404,
+                origin=ErrorOrigin.BOARD,
+            )
+        return located
+
+    async def post(
+        self,
+        ctx: RequestContext,
+        *,
+        channel: str,
+        text: str,
+        labels: Mapping[str, str],
+        attachments: Sequence[str],
+        sync: Sequence[str],
+        no_sync: bool,
+        idempotency_key: str | None,
+    ) -> Message:
+        if sync:
+            raise BoardApiError(
+                "Vercel's boards don't support sync yet",
+                code="not_supported",
+                status_code=501,
+                origin=ErrorOrigin.HANDLE,
+            )
+        token, team = await self._resolve_auth_and_team(ctx.team)
+        board_id = await self._resolve_board_id(ctx, token=token, team=team)
+        client_id = _hosted_client_id(idempotency_key) if idempotency_key is not None else None
+        settled_text, mentions = await self._settle_hosted_mentions(
+            board_id=board_id,
+            text=text,
+            thread_id=None,
+            token=token,
+            team=team,
+            ctx=ctx,
+        )
+
+        request = _ApiPostThreadRequest(
+            operation_id=_uuid7(),
+            channel=channel,
+            text=settled_text,
+            labels=dict(labels) if labels else None,
+            client_id=client_id,
+            attachments=list(attachments) if attachments else None,
+            no_sync=True if no_sync else None,
+        )
+
+        resp = await self._api_request(
+            "POST",
+            f"/boards/{_quote_path_segment(board_id)}/threads",
+            token=token,
+            team=team,
+            ctx=ctx,
+            body=request.to_json_body(),
+        )
+        envelope = _parse_wire(resp, _ApiPostEnvelopeWire)
+        channel_name = await self._landed_channel_name(
+            board_id=board_id,
+            channel_id=envelope.thread.channel_id,
+            requested_name=channel,
+            client_id=client_id,
+            token=token,
+            team=team,
+            ctx=ctx,
+        )
+        if envelope.message.text is None:
+            return await self._blind_message(
+                msg=envelope.message,
+                channel_name=channel_name,
+                text=settled_text,
+                labels=labels,
+                no_sync=no_sync,
+                token=token,
+                team=team,
+                ctx=ctx,
+                mentions=mentions,
+            )
+        resolved_mentions = _reconcile_mentions(settled_text, envelope.message.text, mentions)
+        reactions = await self._resolve_reactors(
+            board_id=board_id,
+            msg=envelope.message,
+            token=token,
+            team=team,
+            ctx=ctx,
+        )
+        return envelope.message.to_domain(
+            channel=channel_name,
+            mentions=resolved_mentions,
+            reactions=reactions,
+            response=resp,
+        )
+
+    async def reply(
+        self,
+        ctx: RequestContext,
+        *,
+        message_id: str,
+        text: str,
+        labels: Mapping[str, str],
+        attachments: Sequence[str],
+        no_sync: bool,
+        idempotency_key: str | None,
+        after: str | None,
+    ) -> Message:
+        self._require_located(message_id)
+        token, team = await self._resolve_auth_and_team(ctx.team)
+        board_id = await self._resolve_board_id(ctx, token=token, team=team)
+        board_prefix = f"/boards/{_quote_path_segment(board_id)}"
+        msg_path = f"{board_prefix}/messages/{_quote_path_segment(message_id)}"
+
+        try:
+            target_resp = await self._api_request(
+                "GET",
+                msg_path,
+                token=token,
+                team=team,
+                ctx=ctx,
+                query={"include": "channel"},
+            )
+        except BoardNotFoundError as exc:
+            if exc.code == "thread_not_found":
+                raise BoardNotFoundError(
+                    f"message not found: {message_id}",
+                    code="message_not_found",
+                    status_code=404,
+                    origin=ErrorOrigin.BOARD,
+                    response=exc.response,
+                ) from exc
+            raise
+        except BoardApiError as exc:
+            if exc.status_code not in (400, 403):
+                raise
+            try:
+                target_resp = await self._api_request(
+                    "GET",
+                    msg_path,
+                    token=token,
+                    team=team,
+                    ctx=ctx,
+                )
+            except BoardNotFoundError as inner_exc:
+                if inner_exc.code == "thread_not_found":
+                    raise BoardNotFoundError(
+                        f"message not found: {message_id}",
+                        code="message_not_found",
+                        status_code=404,
+                        origin=ErrorOrigin.BOARD,
+                        response=inner_exc.response,
+                    ) from inner_exc
+                raise
+
+        target = _parse_wire(target_resp, _ApiPostEnvelopeWire)
+        if target.channel is not None:
+            channel_name = target.channel.name
+            self._channel_name_cache[(board_id, target.channel.id)] = channel_name
+        elif target.thread.channel_id is not None:
+            channel_name = await self._channel_name_by_id(
+                board_id=board_id,
+                channel_id=target.thread.channel_id,
+                token=token,
+                team=team,
+                ctx=ctx,
+            )
+        else:
+            raise BoardResponseError(
+                "Board API returned a target message without channel metadata",
+                status_code=target_resp.status_code,
+                origin=ErrorOrigin.BOARD,
+                response=target_resp,
+            )
+
+        client_id = _hosted_client_id(idempotency_key) if idempotency_key is not None else None
+        after_seq: int | None = None
+        if after is not None:
+            after_loc = _locate_hosted_message(after)
+            if after_loc is None or after_loc[0] != target.thread.id:
+                if client_id is not None:
+                    try:
+                        landed_resp = await self._api_request(
+                            "GET",
+                            f"{board_prefix}/posts/{_quote_path_segment(client_id)}",
+                            token=token,
+                            team=team,
+                            ctx=ctx,
+                        )
+                        landed = _parse_wire(landed_resp, _ApiPostEnvelopeWire)
+                        if landed.thread.id == target.thread.id:
+                            reactions = await self._resolve_reactors(
+                                board_id=board_id,
+                                msg=landed.message,
+                                token=token,
+                                team=team,
+                                ctx=ctx,
+                            )
+                            return landed.message.to_domain(
+                                channel=channel_name,
+                                reactions=reactions,
+                                response=landed_resp,
+                            )
+                    except BoardApiError:
+                        pass
+                raise BoardApiError(
+                    f"after: {after} isn't in {message_id}'s thread",
+                    code="invalid_after",
+                    status_code=400,
+                    origin=ErrorOrigin.HANDLE,
+                )
+            after_seq = after_loc[1]
+
+        settled_text, mentions = await self._settle_hosted_mentions(
+            board_id=board_id,
+            text=text,
+            thread_id=target.thread.id,
+            token=token,
+            team=team,
+            ctx=ctx,
+        )
+
+        request = _ApiReplyMessageRequest(
+            operation_id=_uuid7(),
+            text=settled_text,
+            reply_to=target.message.sequence if target.message.sequence > 1 else None,
+            client_id=client_id,
+            attachments=list(attachments) if attachments else None,
+            after=after_seq,
+            no_sync=True if no_sync else None,
+        )
+
+        reply_resp = await self._api_request(
+            "POST",
+            f"{board_prefix}/threads/{_quote_path_segment(target.thread.id)}/messages",
+            token=token,
+            team=team,
+            ctx=ctx,
+            body=request.to_json_body(),
+        )
+        envelope = _parse_wire(reply_resp, _ApiPostEnvelopeWire)
+
+        override_labels: Mapping[str, str] | None = None
+        override_version: int | None = None
+        if labels:
+            label_request = _ApiLabelMessageRequest(
+                operation_id=_uuid7(),
+                set=dict(labels),
+            )
+            label_resp = await self._api_request(
+                "POST",
+                f"{board_prefix}/threads/{_quote_path_segment(target.thread.id)}"
+                f"/messages/{envelope.message.sequence}/labels",
+                token=token,
+                team=team,
+                ctx=ctx,
+                body=label_request.to_json_body(),
+            )
+            labeled = _parse_wire(label_resp, _ApiLabelMetaEnvelopeWire).meta
+            if labeled.labels is not None:
+                override_labels = labeled.labels
+            if labeled.version is not None:
+                override_version = labeled.version
+
+        channel_name = await self._landed_channel_name(
+            board_id=board_id,
+            channel_id=envelope.thread.channel_id,
+            requested_name=channel_name,
+            client_id=client_id,
+            token=token,
+            team=team,
+            ctx=ctx,
+        )
+        if envelope.message.text is None:
+            return await self._blind_message(
+                msg=envelope.message,
+                channel_name=channel_name,
+                text=settled_text,
+                labels=override_labels if override_labels is not None else labels,
+                no_sync=no_sync,
+                token=token,
+                team=team,
+                ctx=ctx,
+                mentions=mentions,
+            )
+        resolved_mentions = _reconcile_mentions(settled_text, envelope.message.text, mentions)
+        reactions = await self._resolve_reactors(
+            board_id=board_id,
+            msg=envelope.message,
+            token=token,
+            team=team,
+            ctx=ctx,
+        )
+        return envelope.message.to_domain(
+            channel=channel_name,
+            mentions=resolved_mentions,
+            reactions=reactions,
+            override_labels=override_labels,
+            override_version=override_version,
+            response=reply_resp,
+        )
+
+    async def edit(
+        self,
+        ctx: RequestContext,
+        *,
+        message_id: str,
+        text: str,
+        revision: int | None,
+    ) -> None:
+        thread_id, sequence = self._require_located(message_id)
+        token, team = await self._resolve_auth_and_team(ctx.team)
+        board_id = await self._resolve_board_id(ctx, token=token, team=team)
+        settled_text, _ = await self._settle_hosted_mentions(
+            board_id=board_id,
+            text=text,
+            thread_id=thread_id,
+            token=token,
+            team=team,
+            ctx=ctx,
+        )
+        request = _ApiEditMessageRequest(
+            operation_id=_uuid7(),
+            text=settled_text,
+            revision=revision,
+        )
+        await self._api_request(
+            "PATCH",
+            f"/boards/{_quote_path_segment(board_id)}/threads/{_quote_path_segment(thread_id)}"
+            f"/messages/{sequence}",
+            token=token,
+            team=team,
+            ctx=ctx,
+            body=request.to_json_body(),
+        )
+
+    async def delete(
+        self,
+        ctx: RequestContext,
+        *,
+        message_id: str,
+        revision: int | None,
+    ) -> None:
+        thread_id, sequence = self._require_located(message_id)
+        token, team = await self._resolve_auth_and_team(ctx.team)
+        board_id = await self._resolve_board_id(ctx, token=token, team=team)
+        request = _ApiDeleteMessageRequest(operation_id=_uuid7(), revision=revision)
+        await self._api_request(
+            "POST",
+            f"/boards/{_quote_path_segment(board_id)}/threads/{_quote_path_segment(thread_id)}"
+            f"/messages/{sequence}/delete",
+            token=token,
+            team=team,
+            ctx=ctx,
+            body=request.to_json_body(),
+        )
+
+    async def react(
+        self,
+        ctx: RequestContext,
+        *,
+        message_id: str,
+        emoji: str,
+        remove: bool,
+    ) -> None:
+        thread_id, sequence = self._require_located(message_id)
+        token, team = await self._resolve_auth_and_team(ctx.team)
+        board_id = await self._resolve_board_id(ctx, token=token, team=team)
+        request = _ApiReactMessageRequest(
+            operation_id=_uuid7(),
+            emoji=emoji,
+            remove=True if remove else None,
+        )
+        await self._api_request(
+            "POST",
+            f"/boards/{_quote_path_segment(board_id)}/threads/{_quote_path_segment(thread_id)}"
+            f"/messages/{sequence}/reactions",
+            token=token,
+            team=team,
+            ctx=ctx,
+            body=request.to_json_body(),
+        )
+
+    async def label(
+        self,
+        ctx: RequestContext,
+        *,
+        message_id: str,
+        set_labels: Mapping[str, str],
+        unset_keys: Sequence[str],
+        if_labels: Mapping[str, str | None],
+    ) -> None:
+        thread_id, sequence = self._require_located(message_id)
+        token, team = await self._resolve_auth_and_team(ctx.team)
+        board_id = await self._resolve_board_id(ctx, token=token, team=team)
+        request = _ApiLabelMessageRequest(
+            operation_id=_uuid7(),
+            set=dict(set_labels) if set_labels else None,
+            unset=list(unset_keys) if unset_keys else None,
+            if_labels=dict(if_labels) if if_labels else None,
+        )
+        await self._api_request(
+            "POST",
+            f"/boards/{_quote_path_segment(board_id)}/threads/{_quote_path_segment(thread_id)}"
+            f"/messages/{sequence}/labels",
+            token=token,
+            team=team,
+            ctx=ctx,
+            body=request.to_json_body(),
+        )
+
+    async def get_posted(
+        self,
+        ctx: RequestContext,
+        *,
+        idempotency_key: str,
+    ) -> Message:
+        token, team = await self._resolve_auth_and_team(ctx.team)
+        board_id = await self._resolve_board_id(ctx, token=token, team=team)
+        client_id = _hosted_client_id(idempotency_key)
+        resp = await self._api_request(
+            "GET",
+            f"/boards/{_quote_path_segment(board_id)}/posts/{_quote_path_segment(client_id)}",
+            token=token,
+            team=team,
+            ctx=ctx,
+        )
+        envelope = _parse_wire(resp, _ApiPostEnvelopeWire)
+        if envelope.channel is not None:
+            channel_name = envelope.channel.name
+            self._channel_name_cache[(board_id, envelope.channel.id)] = channel_name
+        elif envelope.thread.channel_id is not None:
+            channel_name = await self._channel_name_by_id(
+                board_id=board_id,
+                channel_id=envelope.thread.channel_id,
+                token=token,
+                team=team,
+                ctx=ctx,
+            )
+        else:
+            raise BoardResponseError(
+                "Board API returned a posted message without channel metadata",
+                status_code=resp.status_code,
+                origin=ErrorOrigin.BOARD,
+                response=resp,
+            )
+        reactions = await self._resolve_reactors(
+            board_id=board_id,
+            msg=envelope.message,
+            token=token,
+            team=team,
+            ctx=ctx,
+        )
+        return envelope.message.to_domain(
+            channel=channel_name,
+            reactions=reactions,
+            response=resp,
+        )
+
 
 # ---------------------------------------------------------------------------
 # Unified BoardApiClient facade
@@ -1630,6 +3429,113 @@ class BoardApiClient:
     async def me(self, ctx: RequestContext) -> Me:
         """Fetch authenticated caller identity and effective channel permissions."""
         return await self._protocol.me(ctx)
+
+    async def post(
+        self,
+        ctx: RequestContext,
+        *,
+        channel: str,
+        text: str,
+        labels: Mapping[str, str],
+        attachments: Sequence[str],
+        sync: Sequence[str],
+        no_sync: bool,
+        idempotency_key: str | None,
+    ) -> Message:
+        """Start a new thread in ``channel``."""
+        return await self._protocol.post(
+            ctx,
+            channel=channel,
+            text=text,
+            labels=labels,
+            attachments=attachments,
+            sync=sync,
+            no_sync=no_sync,
+            idempotency_key=idempotency_key,
+        )
+
+    async def reply(
+        self,
+        ctx: RequestContext,
+        *,
+        message_id: str,
+        text: str,
+        labels: Mapping[str, str],
+        attachments: Sequence[str],
+        no_sync: bool,
+        idempotency_key: str | None,
+        after: str | None,
+    ) -> Message:
+        """Reply in the thread containing ``message_id``."""
+        return await self._protocol.reply(
+            ctx,
+            message_id=message_id,
+            text=text,
+            labels=labels,
+            attachments=attachments,
+            no_sync=no_sync,
+            idempotency_key=idempotency_key,
+            after=after,
+        )
+
+    async def edit(
+        self,
+        ctx: RequestContext,
+        *,
+        message_id: str,
+        text: str,
+        revision: int | None,
+    ) -> None:
+        """Edit an existing message's text."""
+        await self._protocol.edit(ctx, message_id=message_id, text=text, revision=revision)
+
+    async def delete(
+        self,
+        ctx: RequestContext,
+        *,
+        message_id: str,
+        revision: int | None,
+    ) -> None:
+        """Delete an existing message."""
+        await self._protocol.delete(ctx, message_id=message_id, revision=revision)
+
+    async def react(
+        self,
+        ctx: RequestContext,
+        *,
+        message_id: str,
+        emoji: str,
+        remove: bool,
+    ) -> None:
+        """Add or remove an emoji reaction on a message."""
+        await self._protocol.react(ctx, message_id=message_id, emoji=emoji, remove=remove)
+
+    async def label(
+        self,
+        ctx: RequestContext,
+        *,
+        message_id: str,
+        set_labels: Mapping[str, str],
+        unset_keys: Sequence[str],
+        if_labels: Mapping[str, str | None],
+    ) -> None:
+        """Set or unset labels on a message with optional preconditions."""
+        await self._protocol.label(
+            ctx,
+            message_id=message_id,
+            set_labels=set_labels,
+            unset_keys=unset_keys,
+            if_labels=if_labels,
+        )
+
+    async def get_posted(
+        self,
+        ctx: RequestContext,
+        *,
+        idempotency_key: str,
+    ) -> Message:
+        """Look up a previously posted message by its client idempotency key."""
+        return await self._protocol.get_posted(ctx, idempotency_key=idempotency_key)
 
 
 __all__ = [

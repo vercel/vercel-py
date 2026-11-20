@@ -49,12 +49,36 @@ def _assert_parameter_parity(async_fn: object, sync_fn: object) -> None:
         assert a_param.default == s_param.default
 
 
+def _public_methods(cls: type) -> set[str]:
+    return {
+        name
+        for name, value in inspect.getmembers(cls)
+        if not name.startswith("_") and callable(value)
+    }
+
+
 def test_board_factory_and_handle_method_parity() -> None:
     _assert_parameter_parity(board_async.board, board_sync.board)
     assert not inspect.iscoroutinefunction(board_async.board)
     assert not inspect.iscoroutinefunction(board_sync.board)
 
-    for method in ("as_profile", "me", "discovery"):
+    async_methods = _public_methods(board_async.Board)
+    sync_methods = _public_methods(board_sync.Board)
+    assert async_methods == sync_methods
+    assert {
+        "as_profile",
+        "me",
+        "discovery",
+        "post",
+        "reply",
+        "edit",
+        "delete",
+        "react",
+        "label",
+        "get_posted",
+    } <= async_methods
+
+    for method in sorted(async_methods):
         async_method = getattr(board_async.Board, method)
         sync_method = getattr(board_sync.Board, method)
         _assert_parameter_parity(async_method, sync_method)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from types import TracebackType
 from typing import Self
 
@@ -9,7 +10,7 @@ from vercel._internal.core.options import collect_service_options
 from vercel._internal.core.sentinel import UNSET, UnsetType
 from vercel._internal.core.session import HttpxClientFactory, SdkSession, get_active_session
 from vercel.board._internal.access import Can, CanInput
-from vercel.board._internal.models import Discovery, Me, Profile
+from vercel.board._internal.models import Discovery, Me, Message, Profile
 from vercel.board._internal.options import BoardServiceOptions
 from vercel.board._internal.service import (
     BoardService,
@@ -82,6 +83,102 @@ class Board:
     async def me(self) -> Me:
         """Return the authenticated caller's identity and effective permissions."""
         return await self._service().me(self._target)
+
+    async def post(
+        self,
+        channel: str,
+        text: str = "",
+        *,
+        labels: Mapping[str, str] | None = None,
+        attachments: Sequence[str] | None = None,
+        sync: Sequence[str] | None = None,
+        no_sync: bool = False,
+        idempotency_key: str | None = None,
+    ) -> Message:
+        """Start a new thread in ``channel``."""
+        return await self._service().post(
+            self._target,
+            channel,
+            text,
+            labels=labels,
+            attachments=attachments,
+            sync=sync,
+            no_sync=no_sync,
+            idempotency_key=idempotency_key,
+        )
+
+    async def reply(
+        self,
+        message_id: str,
+        text: str = "",
+        *,
+        labels: Mapping[str, str] | None = None,
+        attachments: Sequence[str] | None = None,
+        no_sync: bool = False,
+        idempotency_key: str | None = None,
+        after: str | None = None,
+    ) -> Message:
+        """Reply in the thread containing ``message_id``."""
+        return await self._service().reply(
+            self._target,
+            message_id,
+            text,
+            labels=labels,
+            attachments=attachments,
+            no_sync=no_sync,
+            idempotency_key=idempotency_key,
+            after=after,
+        )
+
+    async def edit(
+        self,
+        message_id: str,
+        text: str,
+        *,
+        revision: int | None = None,
+    ) -> None:
+        """Edit an existing message's text."""
+        await self._service().edit(self._target, message_id, text, revision=revision)
+
+    async def delete(
+        self,
+        message_id: str,
+        *,
+        revision: int | None = None,
+    ) -> None:
+        """Delete an existing message."""
+        await self._service().delete(self._target, message_id, revision=revision)
+
+    async def react(
+        self,
+        message_id: str,
+        emoji: str,
+        *,
+        remove: bool = False,
+    ) -> None:
+        """Add or remove an emoji reaction on a message."""
+        await self._service().react(self._target, message_id, emoji, remove=remove)
+
+    async def label(
+        self,
+        message_id: str,
+        *,
+        set: Mapping[str, str] | None = None,
+        unset: Sequence[str] | None = None,
+        if_labels: Mapping[str, str | None] | None = None,
+    ) -> None:
+        """Set or unset labels on a message with optional preconditions."""
+        await self._service().label(
+            self._target,
+            message_id,
+            set=set,
+            unset=unset,
+            if_labels=if_labels,
+        )
+
+    async def get_posted(self, idempotency_key: str) -> Message:
+        """Look up a previously posted message by its client idempotency key."""
+        return await self._service().get_posted(self._target, idempotency_key)
 
 
 def board(
