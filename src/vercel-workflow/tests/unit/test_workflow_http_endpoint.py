@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import subprocess
 from collections.abc import AsyncIterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import AsyncMock
@@ -78,6 +79,42 @@ def test_concurrent_worlds_publish_one_private_complete_queue_key(tmp_path, monk
     if os.name == "posix":
         assert stat.S_IMODE(key_file.stat().st_mode) == 0o600
     assert not list(tmp_path.glob(".queue-auth-key-*"))
+
+
+@pytest.mark.parametrize("existing_key", [False, True])
+def test_queue_auth_key_is_ignored_by_git(tmp_path, monkeypatch, existing_key):
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    data_dir = tmp_path / ".workflow-data"
+    monkeypatch.setenv("WORKFLOW_LOCAL_DATA_DIR", str(data_dir))
+    monkeypatch.delenv("WORKFLOW_QUEUE_AUTH", raising=False)
+    if existing_key:
+        data_dir.mkdir()
+        (data_dir / "queue-auth-key").write_text("a" * 43 + "\n")
+    w.set_world(local_mod.LocalWorld())
+
+    vercel.workflow.Workflows()
+
+    assert (data_dir / "queue-auth-key").is_file()
+    # Verify Git's behavior, including the public API's eager key creation.
+    subprocess.run(
+        ["git", "check-ignore", "-q", ".workflow-data/queue-auth-key"],
+        cwd=tmp_path,
+        check=True,
+    )
+    if existing_key:
+        assert (data_dir / "queue-auth-key").read_text().strip() == "a" * 43
+
+
+def test_queue_auth_key_preserves_existing_gitignore(tmp_path, monkeypatch):
+    monkeypatch.setenv("WORKFLOW_LOCAL_DATA_DIR", str(tmp_path))
+    ignore_file = tmp_path / ".gitignore"
+    contents = b"# Custom rules\r\nqueue-auth-key\r\n"
+    ignore_file.write_bytes(contents)
+    world = local_mod.LocalWorld()
+
+    first = world._queue_auth_key()
+    assert world._queue_auth_key() == first
+    assert ignore_file.read_bytes() == contents
 
 
 @pytest.mark.parametrize("invalid", ["", "truncated", "!" * 43])

@@ -41,6 +41,12 @@ A World is the storage and queueing backend for runs, chosen once per process.
 
 Local HTTP queue deliveries require a shared key before the adapter reads their body or dispatches a callback.
 
+[[src/vercel-workflow/vercel/workflow/_internal/worlds/local.py#LocalWorld#create_queue_handler]] captures the authentication setting when the handler is created, so key initialization and subsequent deliveries use the same policy.
+
+[[src/vercel-workflow/vercel/workflow/_internal/worlds/local.py#LocalWorld#_queue_auth_key]] creates a data-directory `.gitignore` when none exists, excluding the key and run data from Git. This also protects existing keys during upgrades and preserves user-supplied ignore rules.
+
+[[src/vercel-workflow/tests/unit/test_workflow_http_endpoint.py#test_queue_auth_key_is_ignored_by_git]] checks Git exclusion through the public registry for new and existing keys; [[src/vercel-workflow/tests/unit/test_workflow_http_endpoint.py#test_queue_auth_key_preserves_existing_gitignore]] verifies custom ignore rules remain intact.
+
 [[src/vercel-workflow/vercel/workflow/_internal/worlds/local.py#LocalWorld#_queue_auth_key]] atomically publishes a key file per data directory using the TypeScript local tools' format. The file is owner-only on POSIX; Windows uses filesystem ACLs rather than POSIX permission bits. [[src/vercel-workflow/vercel/workflow/_internal/worlds/local.py#LocalWorld#create_queue_handler]] compares the authentication header in constant time and refuses unauthenticated requests. Trusted embedded deliveries dispatch directly. Legacy unsigned tools require the explicit `WORKFLOW_QUEUE_AUTH=off` setting on a trusted transport.
 
 [[src/vercel-workflow/tests/unit/test_workflow_http_endpoint.py#test_unsigned_or_forged_local_deliveries_are_refused]] verifies refusal before body reads or run creation. [[src/vercel-workflow/tests/unit/test_workflow_http_endpoint.py#test_concurrent_worlds_publish_one_private_complete_queue_key]] covers concurrent publication and temporary-file cleanup on every platform, and owner-only permission bits on POSIX; [[src/vercel-workflow/tests/unit/test_workflow_http_endpoint.py#test_invalid_queue_auth_key_does_not_disable_authentication]] verifies invalid stored keys fail closed.

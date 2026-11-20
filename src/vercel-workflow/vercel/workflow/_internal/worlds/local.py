@@ -510,11 +510,19 @@ class LocalWorld(w.World):
 
     def _queue_auth_key(self) -> str:
         """Share a private key with local tools using the TS LocalWorld format."""
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        # Keep credentials and run data out of source control, including when
+        # upgrading a data directory that already contains a key. Never replace
+        # ignore rules supplied by the user or another local tool.
+        try:
+            with (self.data_dir / ".gitignore").open("x") as stream:
+                stream.write("*\n")
+        except FileExistsError:
+            pass
         path = self.data_dir / QUEUE_AUTH_KEY_FILE
         try:
             value = path.read_text().strip()
         except FileNotFoundError:
-            self.data_dir.mkdir(parents=True, exist_ok=True)
             value = secrets.token_urlsafe(32)
             fd, temporary = tempfile.mkstemp(dir=self.data_dir, prefix=".queue-auth-key-")
             try:
@@ -724,7 +732,8 @@ class LocalWorld(w.World):
     def create_queue_handler(
         self, queue_name_prefix: w.QueuePrefix, handler: w.QueueHandler
     ) -> w.HTTPHandler:
-        if os.getenv("WORKFLOW_QUEUE_AUTH", "").strip().lower() != "off":
+        should_check_auth = os.getenv("WORKFLOW_QUEUE_AUTH", "").strip().lower() != "off"
+        if should_check_auth:
             self._queue_auth_key()
 
         async def async_handler(message: vqs.Message[Any]) -> None:
@@ -782,7 +791,7 @@ class LocalWorld(w.World):
 
         async def http_handler(request: w.HTTPRequest) -> w.HTTPResponse:
             request_headers = httpx.Headers(request.headers, encoding="utf-8")
-            if os.getenv("WORKFLOW_QUEUE_AUTH", "").strip().lower() != "off":
+            if should_check_auth:
                 supplied = request_headers.get(QUEUE_AUTH_HEADER, "")
                 if not hmac.compare_digest(supplied.encode(), self._queue_auth_key().encode()):
                     return w.HTTPResponse(
