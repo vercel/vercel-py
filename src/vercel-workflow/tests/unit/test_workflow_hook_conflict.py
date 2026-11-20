@@ -293,15 +293,6 @@ def _invoke_overlapping_lifecycle(
     os.environ["WORKFLOW_LOCAL_DATA_DIR"] = str(data_dir)
 
     class OverlappingWorld(RecordingLocalWorld):
-        initial_read = True
-
-        async def events_list(self, run_id, *, pagination=None):
-            page = await super().events_list(run_id, pagination=pagination)
-            if self.initial_read:
-                self.initial_read = False
-                both_read.wait(timeout=15)
-            return page
-
         async def events_create(self, run_id, data):
             if (
                 name == "second"
@@ -310,6 +301,10 @@ def _invoke_overlapping_lifecycle(
             ):
                 assert first_disposed.wait(timeout=15)
             result = await super().events_create(run_id, data)
+            if isinstance(data, w.RunStartedEvent):
+                # Both invocations hold the same preloaded snapshot before
+                # either starts replaying and writing hook lifecycle events.
+                both_read.wait(timeout=15)
             if (
                 name == "first"
                 and isinstance(data, w.HookDisposedEvent)
@@ -604,7 +599,7 @@ async def test_get_conflict_registers_without_waiting_for_payload(tmp_path, monk
 
     await _invoke(run_id, register_claim.workflow_id)
 
-    assert world.event_list_calls == 2
+    assert world.event_list_calls == 1
     assert (await world.runs_get(run_id)).status == "completed"
     assert [event.event_type for event in (await world.events_list(run_id)).data] == [
         "run_created",
@@ -699,7 +694,7 @@ async def test_get_conflict_continues_while_a_parallel_step_runs(tmp_path, monke
 
     await _invoke(run_id, register_claim_with_step.workflow_id)
 
-    assert world.event_list_calls == 2
+    assert world.event_list_calls == 1
     assert (await world.runs_get(run_id)).status == "running"
     assert len(world.queued) == 1
     queued = world.queued[0][1]
@@ -738,7 +733,7 @@ async def test_successful_hook_creation_does_not_replay(tmp_path, monkeypatch) -
 
     await _invoke(run_id)
 
-    assert world.event_list_calls == 1
+    assert world.event_list_calls == 0
     assert (await world.runs_get(run_id)).status == "running"
 
 
@@ -751,7 +746,7 @@ async def test_step_creation_waits_for_its_result_instead_of_replaying(
 
     await _invoke(run_id, wait_for_step.workflow_id)
 
-    assert world.event_list_calls == 1
+    assert world.event_list_calls == 0
     assert len(world.queued) == 1
     queued = world.queued[0][1]
     assert isinstance(queued, w.WorkflowInvokePayload)

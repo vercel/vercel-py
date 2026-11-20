@@ -602,22 +602,24 @@ async def test_registration_result_waits_for_its_replay_event(conflicted) -> Non
 async def test_disposed_hook_still_rejects_a_changed_token_on_replay(world, monkeypatch) -> None:
     run = await start(unconsumed_hook, "suspend", "dispose")
     await _invoke(run.run_id, unconsumed_hook.workflow_id)
-    list_events = world.events_list
+    create_event = world.events_create
 
-    async def changed_token(run_id, *, pagination=None):
-        page = await list_events(run_id, pagination=pagination)
-        return page.model_copy(
+    async def changed_token(run_id, data):
+        result = await create_event(run_id, data)
+        if result.events is None:
+            return result
+        return result.model_copy(
             update={
-                "data": [
+                "events": [
                     e.model_copy(update={"event_data": w.HookCreatedEventData(token="other")})
                     if isinstance(e, w.HookCreatedEvent)
                     else e
-                    for e in page.data
+                    for e in result.events
                 ]
             }
         )
 
-    monkeypatch.setattr(world, "events_list", changed_token)
+    monkeypatch.setattr(world, "events_create", changed_token)
     await _invoke(run.run_id, unconsumed_hook.workflow_id)
     failed = await world.runs_get(run.run_id)
     assert isinstance(failed, w.FailedWorkflowRun)

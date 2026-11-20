@@ -36,7 +36,7 @@ async def test_event_write_carries_the_ambient_vercel_request_id() -> None:
     route = _event_route(world)
 
     with HeadersContext({"x-vercel-id": " iad1::abc-123 "}).use():
-        await world.events_create(RUN_ID, w.RunStartedEvent())
+        await world.events_create(RUN_ID, w.StepStartedEvent(correlation_id="step_1"))
 
     assert _sent_body(route)["vercelId"] == "iad1::abc-123"
 
@@ -53,6 +53,6 @@ async def test_event_write_omits_an_unavailable_vercel_request_id(
     route = _event_route(world)
 
     with HeadersContext(headers).use():
-        await world.events_create(RUN_ID, w.RunStartedEvent())
+        await world.events_create(RUN_ID, w.StepStartedEvent(correlation_id="step_1"))
 
     assert "vercelId" not in _sent_body(route)

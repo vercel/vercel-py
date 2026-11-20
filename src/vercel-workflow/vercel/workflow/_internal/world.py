@@ -486,6 +486,8 @@ class RunCreatedEventData(BaseModel):
     deployment_id: str = pydantic.Field(alias="deploymentId")
     workflow_name: str = pydantic.Field(alias="workflowName")
     input: bytes
+    # Read the initial attributes of runs created by another SDK as well.
+    attributes: dict[str, str] | None = pydantic.Field(default=None, exclude_if=lambda e: e is None)
     execution_context: dict[str, Any] | None = pydantic.Field(
         default=None, alias="executionContext", exclude_if=lambda e: e is None
     )
@@ -1055,6 +1057,7 @@ class EventResult(BaseModel):
     wait: Any | None = None
     cursor: str | None = None
     has_more: bool | None = pydantic.Field(default=None, alias="hasMore")
+    max_events: int | None = pydantic.Field(default=None, alias="maxEvents", gt=0)
 
 
 class HTTPRequest(Protocol):

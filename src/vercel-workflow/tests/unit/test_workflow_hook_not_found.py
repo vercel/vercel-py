@@ -37,7 +37,7 @@ async def test_hook_disposed_404_maps_to_hook_not_found() -> None:
 @respx.mock
 async def test_non_hook_404_is_not_translated() -> None:
     world = _world()
-    respx.post(f"{world._base_url}/v3/runs/{RUN_ID}/events").mock(
+    respx.post(f"{world._base_url}/v4/runs/{RUN_ID}/events/run_started").mock(
         return_value=httpx.Response(404, json={"message": "run not found"})
     )
 
@@ -49,7 +49,7 @@ async def test_non_hook_404_is_not_translated() -> None:
 @respx.mock
 async def test_410_maps_to_run_expired() -> None:
     world = _world()
-    respx.post(f"{world._base_url}/v3/runs/{RUN_ID}/events").mock(
+    respx.post(f"{world._base_url}/v4/runs/{RUN_ID}/events/run_started").mock(
         return_value=httpx.Response(410, json={"message": "run expired"})
     )
 
@@ -61,7 +61,7 @@ async def test_410_maps_to_run_expired() -> None:
 @respx.mock
 async def test_429_maps_to_throttle_with_retry_after() -> None:
     world = _world()
-    respx.post(f"{world._base_url}/v3/runs/{RUN_ID}/events").mock(
+    respx.post(f"{world._base_url}/v4/runs/{RUN_ID}/events/run_started").mock(
         return_value=httpx.Response(
             429, headers={"retry-after": "12"}, json={"message": "slow down"}
         )
