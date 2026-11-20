@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.2 - 2026-11-20
+
+### Internal
+
+- Move the `CURRENT_REGION` sentinel and region resolution here from
+  `vercel-sandbox`, so that `vercel-drives` shares them. (#557)
+
 ## 0.3.1 - 2026-11-18
 
 ### Internal

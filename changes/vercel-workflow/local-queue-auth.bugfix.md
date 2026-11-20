@@ -1,1 +1,0 @@
-Require a shared key for LocalWorld HTTP queue deliveries before accepting workflow recovery payloads, and create default Git ignore rules to keep local credentials and run data out of source control.

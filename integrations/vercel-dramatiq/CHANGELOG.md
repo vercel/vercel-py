@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.2 - 2026-11-20
+
+- Update dependencies.
+
 ## 0.8.1 - 2026-11-18
 
 - Update dependencies.

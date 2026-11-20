@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.13.2 - 2026-11-20
+
+### Bug Fixes
+
+- Hide input values and types in Pydantic validation error text, including for directly adapted models, without modifying user model configuration. (#558)
+- Require a shared key for LocalWorld HTTP queue deliveries before accepting workflow recovery payloads, and create default Git ignore rules to keep local credentials and run data out of source control. (#556)
+- Prevent duplicate local step deliveries when recovery republishes a step with the same idempotency key and a new request timestamp. (#554)
+- Prevent workflows from getting stuck when a step is created but its execution message fails to reach the queue. (#551)
+
+### Internal
+
+- Move pending step, wait, and attribute event creation into their suspension types while preserving replay and dispatch behavior. (#550)
+
 ## 0.13.1 - 2026-11-18
 
 ### Internal
