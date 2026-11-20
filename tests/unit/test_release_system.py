@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import importlib.util
+import re
 import shutil
 import subprocess
 import tempfile
@@ -2410,6 +2411,19 @@ include = [
     assert '"vercel-queue-bundle>=0.7.1"' in pyproject
     assert '"vercel-cache>=0.6.0"' not in pyproject
     assert '"vercel-queue>=0.6.0"' not in pyproject
+
+
+def test_shared_vendoring_pins_versions_read_from_package_metadata() -> None:
+    plan = bundle_release._shared_vendored_plan()  # noqa: SLF001
+    substitutions = bundle_release._vendoring_transformations(plan).substitutions  # noqa: SLF001
+    versions = bundle_release._lock_versions()  # noqa: SLF001
+
+    # A vendored copy has no distribution metadata to read its version from.
+    for name in ("httpcore2", "httpx2"):
+        source = f'__version__ = version("{name}")'
+        for match, replace in substitutions:
+            source = re.sub(match, replace, source)
+        assert source == f'__version__ = "{versions[name]}"'
 
 
 def test_generated_vendoring_substitutions_escape_newlines() -> None:
