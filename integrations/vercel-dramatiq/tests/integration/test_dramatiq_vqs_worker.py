@@ -88,7 +88,8 @@ def test_broker_refreshes_mounted_token_without_recreation(
     monkeypatch.setattr(oidc, "time", SimpleNamespace(time=lambda: now, monotonic=lambda: now))
 
     def rotate() -> str:
-        payload = base64.urlsafe_b64encode(json.dumps({"exp": now + 120}).encode()).decode()
+        # Keep rotation tokens outside the 15-minute local CLI refresh buffer.
+        payload = base64.urlsafe_b64encode(json.dumps({"exp": now + 1200}).encode()).decode()
         token = f"header.{payload}.signature"
         replacement = tmp_path / "replacement"
         replacement.write_text(token, encoding="utf-8")
