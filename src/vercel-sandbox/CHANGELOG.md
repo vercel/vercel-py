@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.1.0 - 2026-11-20
+
+### Features
+
+- Run Drive operations on the new `vercel-drives` package and the `/v1/drives` API.
+  The Drive functions, handles, and `DriveMount` exported by `vercel.sandbox` are
+  the `vercel.drives` ones and keep working as before: they use
+  `SandboxServiceOptions`, and API failures raise `SandboxApiError`, which is now
+  also a `DriveApiError`. Its Drive query types extend the `vercel.drives` ones,
+  so queries from either package work with both. (#557)
+
+  A Vercel app token scoped only to Sandbox needs the matching `read:drive` or
+  `read-write:drive` scope for Drive operations.
+
+### Bug Fixes
+
+- Deliver command output exactly as the command wrote it, including bytes that are not valid UTF-8, by requesting command output from the Sandbox API as a CBOR Sequence instead of NDJSON. `fs.listdir()` returns non-UTF-8 names decoded with `surrogateescape`, like `os.listdir`. (#526)
+
 ## 1.0.1 - 2026-11-18
 
 - Update dependencies.
