@@ -201,8 +201,8 @@ class BinaryReaderCore(_HandleInfo):
         if not self.closed:
             self._buffer.clear()
             self._eof = True
-            await self._close_response()
             self._mark_closed()
+            await self._close_response()
 
 
 class TextReaderCore(_HandleInfo):
