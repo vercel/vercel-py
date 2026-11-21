@@ -161,13 +161,28 @@ class FutureSuspension(BaseSuspension, Generic[T]):
 class Suspension(FutureSuspension[T], Generic[T]):
     step: core.Step[Any, T]
     input: bytes
+    has_started_event: bool = False
+
+    def create_event(self, tg: anyio.abc.TaskGroup, context: _EventCreationContext) -> bool:
+        # A recorded creation does not guarantee the step was enqueued: the previous invoker may
+        # have crashed between those operations, e.g. network failed while reading the response of
+        # the request to create the event (which actually succeeded on the server). Dispatch again
+        # until a start is recorded by the step.
+        if self.has_started_event:
+            return False
+        tg.start_soon(self._create_event, context)
+        # Report only new events; redispatching an existing step adds no event.
+        return not self.has_created_event
 
     async def _create_event(self, context: _EventCreationContext) -> None:
-        data = w.StepCreatedEventData(step_name=self.step.name, input=self.input)
-        try:
-            await context.world.events_create(context.run_id, data.into_event(self.correlation_id))
-        except w.EntityConflictError:
-            logger.debug("Workflow step %r has already been created", self.correlation_id)
+        if not self.has_created_event:
+            data = w.StepCreatedEventData(step_name=self.step.name, input=self.input)
+            try:
+                await context.world.events_create(
+                    context.run_id, data.into_event(self.correlation_id)
+                )
+            except w.EntityConflictError:
+                logger.debug("Workflow step %r has already been created", self.correlation_id)
         # We enqueue the invoke whether or not the events_create had an EntityConflictError, since a
         # previous invoker may have crashed between creating the event and enqueueing.
         #
@@ -1341,6 +1356,11 @@ class WorkflowOrchestratorContext:
                     )
                     return
                 sus.has_created_event = True
+
+            case w.StepStartedEvent():
+                sus = self.suspensions[event.correlation_id]
+                assert isinstance(sus, Suspension)
+                sus.has_started_event = True
 
             case w.HookCreatedEvent():
                 hook = self.hooks.get(event.correlation_id)
