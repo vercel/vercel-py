@@ -527,6 +527,290 @@ def test_a_value_that_does_not_match_names_the_callee_and_the_parameter() -> Non
     assert isinstance(ei.value.__cause__, pydantic.ValidationError)
 
 
+@pytest.mark.parametrize("in_list", [False, True])
+def test_validation_hides_input_without_changing_model_config(in_list: bool) -> None:
+    import traceback
+
+    from vercel.workflow._internal.signature_codec import TypeCodec
+
+    class Payload(pydantic.BaseModel):
+        model_config = pydantic.ConfigDict(hide_input_in_errors=False, strict=True)
+        quantity: int
+
+    secret = "private-input-must-not-be-logged"
+    codec = TypeCodec(list[Payload] if in_list else Payload)
+    invalid = [{"quantity": secret}] if in_list else {"quantity": secret}
+    with pytest.raises(TypeValidationError) as raised:
+        codec.validate(invalid, what="argument 'payload'")
+    assert secret not in "".join(traceback.format_exception(raised.value))
+    assert "int_type" in str(raised.value)  # The model's strict configuration is preserved.
+    assert Payload.model_config["hide_input_in_errors"] is False
+    with pytest.raises(pydantic.ValidationError) as original:
+        Payload.model_validate({"quantity": secret})
+    assert secret in str(original.value)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "int",
+        "list",
+        "model_on",
+        "model_off",
+        "annotated",
+        "annotated_metadata",
+        "inherited",
+        "stale_config",
+    ],
+)
+def test_validation_reuses_only_adapters_that_already_hide_inputs(case: str) -> None:
+    import traceback
+
+    from vercel.workflow._internal.signature_codec import TypeCodec
+
+    class Hidden(pydantic.BaseModel):
+        model_config = pydantic.ConfigDict(hide_input_in_errors=True)
+        value: int
+
+    class Inherited(Hidden):
+        pass
+
+    class Visible(pydantic.BaseModel):
+        value: int
+
+    class Stale(pydantic.BaseModel):
+        value: int
+
+    Stale.model_config["hide_input_in_errors"] = True
+    secret = "private-input-must-not-be-logged"
+    cases: dict[str, tuple[Any, Any, bool]] = {
+        "int": (int, secret, True),
+        "list": (list[Visible], [{"value": secret}], True),
+        "model_on": (Hidden, {"value": secret}, True),
+        "model_off": (Visible, {"value": secret}, False),
+        "annotated": (
+            typing.Annotated[Hidden, pydantic.BeforeValidator(lambda value: value)],
+            {"value": secret},
+            False,
+        ),
+        "inherited": (Inherited, {"value": secret}, True),
+        "annotated_metadata": (
+            typing.Annotated[Hidden, pydantic.Field(title="Payload")],
+            {"value": secret},
+            False,
+        ),
+        "stale_config": (Stale, {"value": secret}, False),
+    }
+    annotation, invalid, reused = cases[case]
+    codec = TypeCodec(annotation)
+    assert codec._adapter is not None
+    assert (codec._validation_adapter is codec._adapter) is reused
+    with pytest.raises(TypeValidationError) as raised:
+        codec.validate(invalid, what="payload")
+    assert secret not in "".join(traceback.format_exception(raised.value))
+
+
+def test_prebuilt_custom_validator_does_not_bypass_input_hiding() -> None:
+    from vercel.workflow._internal.signature_codec import TypeCodec
+
+    class Cached:
+        __pydantic_core_schema__: typing.ClassVar[Any]
+        __pydantic_validator__: typing.ClassVar[Any]
+        __pydantic_serializer__: typing.ClassVar[Any]
+
+        @classmethod
+        def __get_pydantic_core_schema__(
+            cls, source: Any, handler: pydantic.GetCoreSchemaHandler
+        ) -> Any:
+            return handler(int)
+
+    original = pydantic.TypeAdapter(Cached)
+    Cached.__pydantic_core_schema__ = original.core_schema
+    Cached.__pydantic_validator__ = original.validator
+    Cached.__pydantic_serializer__ = original.serializer
+    codec = TypeCodec(Cached)
+    assert codec._adapter is not None
+    assert codec._adapter.validator is original.validator
+    assert codec._validation_adapter is not codec._adapter
+    assert codec.validate("2", what="payload") == 2
+    secret = "private-input-must-not-be-logged"
+    with pytest.raises(TypeValidationError) as raised:
+        codec.validate(secret, what="payload")
+    assert secret not in str(raised.value)
+
+
+def test_reused_adapter_generates_custom_schema_only_once() -> None:
+    from vercel.workflow._internal.signature_codec import TypeCodec
+
+    calls: list[Any] = []
+
+    def schema(source: Any, handler: pydantic.GetCoreSchemaHandler) -> Any:
+        calls.append(source)
+        return handler(source)
+
+    codec = TypeCodec(typing.Annotated[int, pydantic.GetPydanticSchema(schema)])
+    assert codec.validate("2", what="payload") == 2
+    assert codec.dump(2) == 2
+    assert calls == [int]
+
+
+@pytest.mark.parametrize("case", ["recursive", "recursive_list", "pair", "tuple"])
+def test_validation_resolves_recursive_and_shared_model_references(case: str) -> None:
+    import traceback
+
+    from vercel.workflow._internal.signature_codec import TypeCodec
+
+    class Node(pydantic.BaseModel):
+        model_config = pydantic.ConfigDict(hide_input_in_errors=False)
+        value: int
+        children: list[Node] = pydantic.Field(default_factory=list)
+
+    class Item(pydantic.BaseModel):
+        model_config = pydantic.ConfigDict(hide_input_in_errors=False)
+        value: int
+
+    class Pair(pydantic.BaseModel):
+        left: Item
+        right: Item
+
+    secret = "private-input-must-not-be-logged"
+    tree = {"value": "1", "children": [{"value": "2"}]}
+    invalid_tree = {"value": 1, "children": [{"value": secret}]}
+    cases: dict[str, tuple[Any, Any, Any]] = {
+        "recursive": (Node, tree, invalid_tree),
+        "recursive_list": (list[Node], [tree], [invalid_tree]),
+        "pair": (
+            Pair,
+            {"left": {"value": "1"}, "right": {"value": "2"}},
+            {"left": {"value": 1}, "right": {"value": secret}},
+        ),
+        "tuple": (
+            tuple[Item, Item],
+            ({"value": "1"}, {"value": "2"}),
+            ({"value": 1}, {"value": secret}),
+        ),
+    }
+    annotation, valid, invalid = cases[case]
+    adapter = pydantic.TypeAdapter(annotation)
+    expected = adapter.validate_python(valid)
+    codec = TypeCodec(annotation)
+    result = codec.validate(valid, what="payload")
+    assert result == expected
+    assert codec.dump(result) == adapter.dump_python(expected)
+
+    with pytest.raises(TypeValidationError) as raised:
+        codec.validate(invalid, what="payload")
+    assert "int_parsing" in str(raised.value)
+    assert secret not in "".join(traceback.format_exception(raised.value))
+
+
+def test_validation_preserves_custom_field_and_model_validators() -> None:
+    from vercel.workflow._internal.signature_codec import TypeCodec
+
+    calls: list[str] = []
+
+    def increment(value: Any) -> int:
+        calls.append("annotated")
+        return int(value) + 1
+
+    class Child(pydantic.BaseModel):
+        quantity: typing.Annotated[int, pydantic.BeforeValidator(increment)]
+
+        @pydantic.field_validator("quantity")
+        @classmethod
+        def double_positive(cls, value: int) -> int:
+            calls.append("field")
+            if value < 0:
+                raise ValueError("quantity must be positive")
+            return value * 2
+
+    class Payload(pydantic.BaseModel):
+        child: Child
+
+        @pydantic.model_validator(mode="wrap")
+        @classmethod
+        def around(cls, value: Any, handler: pydantic.ModelWrapValidatorHandler[Any]) -> Any:
+            calls.append("wrap-enter")
+            result = handler(value)
+            calls.append("wrap-exit")
+            return result
+
+        @pydantic.model_validator(mode="after")
+        def check_total(self) -> typing.Self:
+            calls.append("model-after")
+            if self.child.quantity > 10:
+                raise ValueError("quantity too large")
+            return self
+
+    codec = TypeCodec(Payload)
+    result = codec.validate({"child": {"quantity": "2"}}, what="payload")
+    assert isinstance(result, Payload)
+    assert result.child.quantity == 6
+    assert calls == ["wrap-enter", "annotated", "field", "wrap-exit", "model-after"]
+    assert codec.dump(result) == {"child": {"quantity": 6}}
+
+    with pytest.raises(TypeValidationError, match="quantity must be positive"):
+        codec.validate({"child": {"quantity": "-3"}}, what="payload")
+    with pytest.raises(TypeValidationError, match="quantity too large"):
+        codec.validate({"child": {"quantity": "8"}}, what="payload")
+
+
+@pytest.mark.parametrize("hide_inputs", [False, True])
+def test_validation_adapter_preserves_plugin_event_hooks(
+    monkeypatch: pytest.MonkeyPatch, hide_inputs: bool
+) -> None:
+    from pydantic.plugin import _loader
+
+    from vercel.workflow._internal.signature_codec import TypeCodec
+
+    events: list[str] = []
+    observed_errors: list[str] = []
+    created: list[tuple[Any, Any]] = []
+
+    class Handler:
+        def on_enter(self, *args: Any, **kwargs: Any) -> None:
+            events.append("enter")
+
+        def on_success(self, result: Any) -> None:
+            events.append("success")
+
+        def on_error(self, error: pydantic.ValidationError) -> None:
+            events.append("error")
+            observed_errors.append(str(error))
+
+        def on_exception(self, error: Exception) -> None:
+            events.append("exception")
+
+    class Plugin:
+        def new_schema_validator(self, *args: Any) -> tuple[Handler, None, None]:
+            created.append((args[1], args[5]))
+            return Handler(), None, None
+
+    # Simulate an installed plugin without modifying process-wide package metadata.
+    monkeypatch.setattr(_loader, "_plugins", {"test": Plugin()})
+
+    class Payload(pydantic.BaseModel):
+        model_config = pydantic.ConfigDict(
+            hide_input_in_errors=hide_inputs, plugin_settings={"probe": True}
+        )
+        quantity: int
+
+    codec = TypeCodec(Payload)
+    if hide_inputs:
+        assert codec._validation_adapter is codec._adapter
+        assert created == [(Payload, {"probe": True})]
+    assert isinstance(codec.validate({"quantity": 2}, what="payload"), Payload)
+    assert events == ["enter", "success"]
+
+    events.clear()
+    secret = "private-input-must-not-be-logged"
+    with pytest.raises(TypeValidationError):
+        codec.validate({"quantity": secret}, what="payload")
+    assert events == ["enter", "error"]
+    assert len(observed_errors) == 1
+    assert secret not in observed_errors[0]
+
+
 def test_a_mismatch_is_fatal_rather_than_retryable() -> None:
     """The bytes a retry would replay are the ones that did not match.
 

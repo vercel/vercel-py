@@ -79,6 +79,12 @@ Values are encoded with a port of devalue ([[src/vercel-workflow/vercel/workflow
 
 Payloads may be compressed ([[src/vercel-workflow/vercel/workflow/_internal/compression.py]]) and encrypted with a per-run key derived from the deployment key ([[src/vercel-workflow/vercel/workflow/_internal/encryption.py#derive_run_key]]). Run attributes are deliberately plaintext and size-limited ([[src/vercel-workflow/vercel/workflow/_internal/attributes.py]]).
 
+[[src/vercel-workflow/vercel/workflow/_internal/signature_codec.py#_build_adapters]] returns serialization and validation adapters, reusing one object when a newly configured validator was created or the adapter reuses a model's cached validator whose root schema confirms input hiding. Reusing a prebuilt custom-type validator alone does not establish that configuration applied, and changing model configuration without rebuilding cannot enable reuse. [[src/vercel-workflow/tests/unit/test_workflow_typed_arguments.py#test_validation_reuses_only_adapters_that_already_hide_inputs]] checks reuse, configured containers, wrapped annotations, and stale configuration.
+
+When separate validation is needed, the builder uses Pydantic's schema handler to register recursive and shared model references with a new adapter. [[src/vercel-workflow/vercel/workflow/_internal/signature_codec.py#TypeCodec#__init__]] stores the returned pair. Wrapped validation retains plugin event callbacks, but plugins see the carrier annotation as the outer adapter type and model-specific plugin settings are not forwarded. Reusing a direct model adapter preserves its original plugin identity and settings. Schema-defined field and model validators remain active and user model configuration is unchanged. Raw validation messages and exception causes are retained; this does not sanitize dynamic keys or custom validator messages.
+
+[[src/vercel-workflow/tests/unit/test_workflow_typed_arguments.py#test_validation_resolves_recursive_and_shared_model_references]] checks recursive models, lists of recursive models, repeated model fields, and tuples sharing a model type. Valid values preserve Pydantic's conversion and serialization behavior, while invalid nested values raise input-hidden validation errors.
+
 CI checks these encodings against the real JavaScript implementations: the devalue interop tests run the published package, and local-world tests run the `workflow` CLI against files written by Python.
 
 ## Hooks and streams

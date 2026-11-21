@@ -39,9 +39,9 @@ from .errors import FatalError
 
 logger = logging.getLogger("vercel.workflow")
 
-# We set arbitrary_types_allowed so that types that pydantic doesn't
-# recognize (maybe ones using @serializable) aren't rejected.
-_ARBITRARY = pydantic.ConfigDict(arbitrary_types_allowed=True)
+# Allow custom types (such as @serializable classes) and hide input values
+# when rendering validation errors.
+_ADAPTER_CONFIG = pydantic.ConfigDict(arbitrary_types_allowed=True, hide_input_in_errors=True)
 
 
 class TypeValidationError(FatalError):
@@ -51,16 +51,31 @@ class TypeValidationError(FatalError):
     """
 
 
-def _build_adapter(annotation: Any) -> pydantic.TypeAdapter[Any] | None:
-    """An adapter for *annotation*, or `None` to pass values through."""
+def _build_adapters(
+    annotation: Any,
+) -> tuple[pydantic.TypeAdapter[Any] | None, pydantic.TypeAdapter[Any] | None]:
+    """Build serialization and validation adapters, or `(None, None)` to pass through.
+
+    Reuse one adapter when it already hides inputs in validation errors.
+    Otherwise, keep the original adapter for serialization and build a separate
+    validation adapter that hides inputs without changing the user's model config.
+    """
     if (
         annotation is Any
         or annotation is inspect.Parameter.empty
         or typeutils.annotation_needs_resolution(annotation)
     ):
-        return None
+        return None, None
+
     try:
-        adapter = pydantic.TypeAdapter(annotation, config=_ARBITRARY)
+        adapter = pydantic.TypeAdapter(annotation, config=_ADAPTER_CONFIG)
+        # A complete, newly built validator uses our input-hiding config, so
+        # the same adapter can serialize and validate. A validator supplied by
+        # the type may ignore that config and needs the separate checks below.
+        if adapter.pydantic_complete and adapter.validator is not getattr(
+            annotation, "__pydantic_validator__", None
+        ):
+            return adapter, adapter
     except pydantic.PydanticUserError:
         # Either the annotation already has a config or no schema can
         # be built for it at all. Try with no config in case that
@@ -68,10 +83,30 @@ def _build_adapter(annotation: Any) -> pydantic.TypeAdapter[Any] | None:
         try:
             adapter = pydantic.TypeAdapter(annotation)
         except Exception:
-            return None
+            return None, None
     except Exception:
-        return None
-    return adapter if adapter.pydantic_complete else None
+        return None, None
+    if not adapter.pydantic_complete:
+        return None, None
+
+    # Reuse the model's validator if it was built with input hiding enabled.
+    schema = adapter.core_schema
+    model_hides_inputs = (
+        schema.get("type") == "model"
+        and (schema.get("config") or {}).get("hide_input_in_errors") is True
+        and adapter.validator is getattr(schema.get("cls"), "__pydantic_validator__", None)
+    )
+    if model_hides_inputs:
+        return adapter, adapter
+
+    # Use Any here so TypeAdapter accepts our config, while generating
+    # the schema from the original annotation to preserve its validation rules.
+    validation_annotation: Any = typing.Annotated[
+        Any,
+        pydantic.GetPydanticSchema(lambda _source, handler: handler.generate_schema(annotation)),
+    ]
+    validation_adapter = pydantic.TypeAdapter(validation_annotation, config=_ADAPTER_CONFIG)
+    return adapter, validation_adapter
 
 
 class TypeCodec:
@@ -84,7 +119,7 @@ class TypeCodec:
 
     def __init__(self, annotation: Any) -> None:
         self.annotation = annotation
-        self._adapter = _build_adapter(annotation)
+        self._adapter, self._validation_adapter = _build_adapters(annotation)
 
     def dump(self, value: Any) -> Any:
         """*value*, as the annotation puts it on the wire."""
@@ -99,10 +134,10 @@ class TypeCodec:
 
     def validate(self, value: Any, *, what: str) -> Any:
         """*value* as the annotation reads it, or `TypeValidationError` naming *what*."""
-        if self._adapter is None:
+        if self._validation_adapter is None:
             return value
         try:
-            return self._adapter.validate_python(value)
+            return self._validation_adapter.validate_python(value)
         except pydantic.ValidationError as error:
             raise TypeValidationError(f"{what} does not match: {error}") from error
 
