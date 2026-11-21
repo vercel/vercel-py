@@ -164,9 +164,14 @@ class Suspension(FutureSuspension[T], Generic[T]):
     has_started_event: bool = False
 
     def create_event(self, tg: anyio.abc.TaskGroup, context: _EventCreationContext) -> bool:
+        # A recorded creation does not guarantee the step was enqueued: the previous invoker may
+        # have crashed between those operations, e.g. network failed while reading the response of
+        # the request to create the event (which actually succeeded on the server). Dispatch again
+        # until a start is recorded by the step.
         if self.has_started_event:
             return False
         tg.start_soon(self._create_event, context)
+        # Report only new events; redispatching an existing step adds no event.
         return not self.has_created_event
 
     async def _create_event(self, context: _EventCreationContext) -> None:
