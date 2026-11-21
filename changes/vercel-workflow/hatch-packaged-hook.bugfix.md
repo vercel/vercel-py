@@ -1,0 +1,1 @@
+Building from a source archive runs only the metadata hook the archive ships, so a file in a directory above an unpacked archive, such as a shared temporary directory, can no longer run during the build.

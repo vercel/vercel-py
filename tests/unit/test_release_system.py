@@ -1640,9 +1640,16 @@ def _load_package_hatch_build(path: Path) -> ModuleType:
     return module
 
 
-@pytest.mark.parametrize("package", ["vercel-headers", "vercel-drives"])
-def test_package_hatch_build_loader_uses_shared_hook(package: str) -> None:
-    module = _load_package_hatch_build(Path("src") / package / "hatch_build.py")
+HATCH_LOADERS = sorted(
+    str(path)
+    for pattern in ("src/*/hatch_build.py", "integrations/*/hatch_build.py")
+    for path in Path().glob(pattern)
+)
+
+
+@pytest.mark.parametrize("loader", HATCH_LOADERS)
+def test_package_hatch_build_loader_uses_shared_hook(loader: str) -> None:
+    module = _load_package_hatch_build(Path(loader))
 
     assert module.get_metadata_hook().__name__ == "WorkspaceDependenciesMetadataHook"
 
@@ -1654,16 +1661,17 @@ _PLANTED_HOOK = (
 )
 
 
+@pytest.mark.parametrize("loader", HATCH_LOADERS)
 @pytest.mark.parametrize("ships_hook", [True, False])
 def test_unpacked_source_archive_never_runs_a_hook_from_outside_it(
-    tmp_path: Path, ships_hook: bool
+    tmp_path: Path, loader: str, ships_hook: bool
 ) -> None:
     # pip unpacks a source archive two levels below a temporary directory that
     # other local users may be able to write to.
-    archive = tmp_path / "build" / "vercel_drives-1.0.0"
+    archive = tmp_path / "build" / "package-1.0.0"
     archive.mkdir(parents=True)
     (archive / "PKG-INFO").write_text("Metadata-Version: 2.4\n", encoding="utf-8")
-    shutil.copy2("src/vercel-drives/hatch_build.py", archive / "hatch_build.py")
+    shutil.copy2(loader, archive / "hatch_build.py")
     if ships_hook:
         (archive / "_vercel_hatch_build.py").write_text(
             "def get_metadata_hook():\n    return 'packaged'\n", encoding="utf-8"
@@ -1681,16 +1689,17 @@ def test_unpacked_source_archive_never_runs_a_hook_from_outside_it(
     assert not planted.with_name("executed").exists()
 
 
+@pytest.mark.parametrize("loader", HATCH_LOADERS)
 @pytest.mark.parametrize("declares_hook", [True, False])
 def test_checkout_runs_only_the_hook_its_own_pyproject_names(
-    tmp_path: Path, declares_hook: bool
+    tmp_path: Path, loader: str, declares_hook: bool
 ) -> None:
     # Another user who can write to the shared `src/` directory, but not to the
     # package or the repository root, claims the package for their own workspace.
     repository = tmp_path / "repository"
     package = repository / "src" / "vercel-drives"
     package.mkdir(parents=True)
-    shutil.copy2("src/vercel-drives/hatch_build.py", package / "hatch_build.py")
+    shutil.copy2(loader, package / "hatch_build.py")
     (repository / "scripts").mkdir()
     (repository / "scripts" / "hatch_build.py").write_text(
         "def get_metadata_hook():\n    return 'declared'\n", encoding="utf-8"

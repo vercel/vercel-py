@@ -148,7 +148,9 @@ There is a tiny `hatch_build.py` loader in each package root because Hatch's
 custom metadata hook path is resolved relative to the package both during local
 builds and during wheel builds from sdists. The shared implementation lives in
 `scripts/hatch_build.py`, and sdists include it as `_vercel_hatch_build.py` so
-sdist rebuilds are self-contained.
+sdist rebuilds are self-contained. An unpacked sdist runs only that bundled
+copy, and a checkout runs only the file its sdist `force-include` names, so no
+directory above the package can supply the hook.
 
 ## Publishing
 
