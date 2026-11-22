@@ -58,6 +58,7 @@ from vercel.sandbox._internal.errors import (
     SandboxFilesystemError,
     SandboxFilesystemTransferError,
     SandboxFilesystemWriteError,
+    SandboxGroupAlreadyExistsError,
     SandboxInteractiveError,
     SandboxInvalidHandleError,
     SandboxPathNotFoundError,
@@ -122,6 +123,7 @@ from vercel.sandbox._internal.options import (
 from vercel.sandbox._internal.process_stdin import CommandStdin
 from vercel.sandbox._internal.service import SandboxService, get_sandbox_service
 from vercel.sandbox._internal.state import SnapshotRetentionState
+from vercel.sandbox.group import SandboxGroup
 from vercel.sandbox.protocols import (
     SandboxExecution,
     SandboxFilesystemOperations,
@@ -656,6 +658,7 @@ __all__ = [
     "CurrentRegion",
     "RegionInput",
     "SandboxUser",
+    "SandboxGroup",
     "SandboxExecution",
     "SandboxFilesystemOperations",
     "SyncSandboxExecution",
@@ -706,6 +709,7 @@ __all__ = [
     "SandboxPathNotFoundError",
     "SandboxUploadSizeMismatchError",
     "SandboxUserAlreadyExistsError",
+    "SandboxGroupAlreadyExistsError",
     "NetworkPolicy",
     "NetworkPolicyForwardRuleSummary",
     "NetworkPolicyInjectionRuleSummary",

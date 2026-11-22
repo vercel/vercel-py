@@ -4,7 +4,7 @@ import subprocess
 import warnings
 from collections.abc import Mapping, Sequence
 from datetime import timedelta
-from typing import BinaryIO
+from typing import TYPE_CHECKING, BinaryIO
 
 from vercel._internal.core.iter_coroutine import iter_coroutine
 from vercel._internal.core.time import parse_duration_seconds
@@ -20,6 +20,9 @@ from vercel.sandbox._internal.process_stdin import (
 )
 from vercel.sandbox._internal.sync_runtime import SyncCommand, SyncSandboxFilesystem
 from vercel.sandbox._internal.user_core import UserContext
+
+if TYPE_CHECKING:
+    from vercel.sandbox.sync.group import SyncSandboxGroup
 
 
 class SyncSandboxUser:
@@ -49,6 +52,25 @@ class SyncSandboxUser:
     @property
     def fs(self) -> SyncSandboxFilesystem:
         return self._fs
+
+    def add_to_group(self, group: "str | SyncSandboxGroup") -> None:
+        """Add this account to an existing group, by handle or group name.
+
+        Commands started afterwards run with the new membership.
+        """
+        iter_coroutine(
+            self._context.set_group_membership(
+                group if isinstance(group, str) else group.groupname, member=True
+            )
+        )
+
+    def remove_from_group(self, group: "str | SyncSandboxGroup") -> None:
+        """Remove this account from a group; non-members raise ``SandboxError``."""
+        iter_coroutine(
+            self._context.set_group_membership(
+                group if isinstance(group, str) else group.groupname, member=False
+            )
+        )
 
     def run_command(
         self,

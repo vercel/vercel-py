@@ -28,6 +28,7 @@ from vercel.sandbox._internal.errors import (
     SandboxFilesystemError,
     SandboxFilesystemTransferError,
     SandboxFilesystemWriteError,
+    SandboxGroupAlreadyExistsError,
     SandboxInteractiveError,
     SandboxInvalidHandleError,
     SandboxPathNotFoundError,
@@ -120,6 +121,7 @@ from vercel.sandbox._internal.sync_runtime import (
     resume_sandbox as _resume_sandbox,
 )
 from vercel.sandbox.protocols import SyncSandboxExecution, SyncSandboxFilesystemOperations
+from vercel.sandbox.sync.group import SyncSandboxGroup
 from vercel.sandbox.sync.user import SyncSandboxUser
 
 from .client import SyncSandboxClient
@@ -643,6 +645,7 @@ __all__ = [
     "CurrentRegion",
     "RegionInput",
     "SyncSandboxUser",
+    "SyncSandboxGroup",
     "SyncSandboxExecution",
     "SyncSandboxFilesystemOperations",
     "DriveHandle",
@@ -673,6 +676,7 @@ __all__ = [
     "SandboxPathNotFoundError",
     "SandboxUploadSizeMismatchError",
     "SandboxUserAlreadyExistsError",
+    "SandboxGroupAlreadyExistsError",
     "NetworkPolicy",
     "NetworkPolicyForwardRuleSummary",
     "NetworkPolicyInjectionRuleSummary",
