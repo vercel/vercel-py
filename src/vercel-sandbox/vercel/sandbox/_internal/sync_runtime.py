@@ -66,6 +66,7 @@ from vercel.sandbox._internal.models import (
     _RemotePathT,
     _WriteFile,
     normalize_failover_regions,
+    validate_architecture,
 )
 from vercel.sandbox._internal.pagination import (
     QueryDrivesPage,
@@ -2228,7 +2229,7 @@ def create_sandbox(
                 project_id=project_id,
                 name=name,
                 image=image,
-                architecture=architecture,
+                architecture=validate_architecture(architecture, source),
                 source=source,
                 ports=ports,
                 execution_time_limit=parse_duration_seconds(execution_time_limit),
@@ -2369,7 +2370,7 @@ def get_or_create_sandbox(
                 resume=resume,
                 include_system_routes=include_system_routes,
                 image=image,
-                architecture=architecture,
+                architecture=validate_architecture(architecture, source),
                 source=source,
                 ports=ports,
                 execution_time_limit=parse_duration_seconds(execution_time_limit),

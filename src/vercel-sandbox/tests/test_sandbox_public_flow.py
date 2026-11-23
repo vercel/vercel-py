@@ -1984,6 +1984,42 @@ async def test_public_snapshot_expiration_validation_happens_before_requests(
 
 
 @respx.mock
+async def test_public_create_rejects_architecture_with_snapshot_source(
+    mock_env_clear: None,
+) -> None:
+    create_route = respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    source = SnapshotSource(snapshot_id="snap_123")
+    arm64 = sandbox.SandboxArchitecture.ARM64
+
+    async with session(service_options=_session_options()):
+        with pytest.raises(ValueError, match="snapshot source"):
+            sandbox.create_sandbox(source=source, architecture=arm64)
+        with pytest.raises(ValueError, match="snapshot source"):
+            await sandbox.get_or_create_sandbox(name="preview", source=source, architecture=arm64)
+
+    assert not create_route.called
+
+
+@respx.mock
+def test_sync_create_rejects_architecture_with_snapshot_source(mock_env_clear: None) -> None:
+    create_route = respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    source = SnapshotSource(snapshot_id="snap_123")
+    arm64 = sandbox_sync.SandboxArchitecture.ARM64
+
+    with session(service_options=_session_options()):
+        with pytest.raises(ValueError, match="snapshot source"):
+            sandbox_sync.create_sandbox(source=source, architecture=arm64)
+        with pytest.raises(ValueError, match="snapshot source"):
+            sandbox_sync.get_or_create_sandbox(name="preview", source=source, architecture=arm64)
+
+    assert not create_route.called
+
+
+@respx.mock
 async def test_public_create_rejects_terminal_initial_state(mock_env_clear: None) -> None:
     respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(

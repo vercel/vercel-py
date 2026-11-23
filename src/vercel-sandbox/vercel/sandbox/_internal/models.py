@@ -992,6 +992,15 @@ class SandboxArchitecture(StrEnum):
     ARM64 = "arm64"
 
 
+def validate_architecture(
+    architecture: SandboxArchitecture | None, source: SandboxSource | None
+) -> SandboxArchitecture | None:
+    """Reject an architecture for a snapshot source, which already has one."""
+    if architecture is not None and isinstance(source, SnapshotSource):
+        raise ValueError("architecture cannot be combined with a snapshot source")
+    return architecture
+
+
 class SandboxManagedCredentials(_InputModel):
     """Configure Vercel-managed credential providers for a sandbox."""
 
