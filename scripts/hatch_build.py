@@ -18,7 +18,7 @@ class WorkspaceDependenciesMetadataHook(MetadataHookInterface):
     def update(self, metadata: dict[str, Any]) -> None:
         """Populate dynamic dependencies for Hatchling metadata generation."""
         pyproject = _load_pyproject(Path(self.root))
-        release = pyproject.get("tool", {}).get("vercel", {}).get("release", {})
+        release = pyproject.get("tool", {}).get("vercel-sdk", {}).get("release", {})
         dependency_table = release.get("dependencies", {})
         workspace_sources = pyproject.get("tool", {}).get("uv", {}).get("sources", {})
         workspace_names = {
@@ -100,7 +100,7 @@ def _reject_unsatisfiable(
         f"{package} declares {declared!r}, but {dependency} is at {version} in "
         f"the workspace, so publishing would pin {dependency}{specifier_text} — "
         f"which excludes {version} itself, the version being released. "
-        f"Raise the upper bound in [tool.vercel.release.dependencies] of {package}."
+        f"Raise the upper bound in [tool.vercel-sdk.release.dependencies] of {package}."
     )
 
 

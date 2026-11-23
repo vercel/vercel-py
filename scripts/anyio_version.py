@@ -16,7 +16,7 @@ PYPROJECT = PROJECT_ROOT / "src/vercel-queue/pyproject.toml"
 
 def anyio_requirement(pyproject: Path = PYPROJECT) -> str:
     data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
-    for dependency in data["tool"]["vercel"]["release"]["dependencies"]["dependencies"]:
+    for dependency in data["tool"]["vercel-sdk"]["release"]["dependencies"]["dependencies"]:
         requirement = Requirement(dependency)
         if requirement.name.lower() == "anyio":
             return str(requirement)

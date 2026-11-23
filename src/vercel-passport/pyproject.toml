@@ -14,7 +14,7 @@ license-files = ["LICENSE", "LICENSE.*"]
 [tool.hatch.metadata.hooks.custom]
 path = "hatch_build.py"
 
-[tool.vercel.release.dependencies]
+[tool.vercel-sdk.release.dependencies]
 dependencies = [
     # Request tokens are always verified, so the `verify` extra is required
     # rather than optional. The lower bound is regenerated from the workspace

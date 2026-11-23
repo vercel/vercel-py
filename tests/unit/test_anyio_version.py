@@ -15,7 +15,8 @@ from scripts import anyio_version
 def test_boundary_uses_declared_range(tmp_path: Path, boundary: str, resolution: str) -> None:
     pyproject = tmp_path / "pyproject.toml"
     pyproject.write_text(
-        '[tool.vercel.release.dependencies]\ndependencies = ["httpx2>=2", "anyio>=4.12,<4.14"]\n',
+        "[tool.vercel-sdk.release.dependencies]\n"
+        'dependencies = ["httpx2>=2", "anyio>=4.12,<4.14"]\n',
         encoding="utf-8",
     )
     with patch.object(anyio_version.subprocess, "run") as run:
@@ -91,7 +92,7 @@ def test_boundary_respects_project_config(
 ) -> None:
     pyproject = tmp_path / "pyproject.toml"
     pyproject.write_text(
-        '[tool.vercel.release.dependencies]\ndependencies = ["anyio>=4.12,<4.14"]\n'
+        '[tool.vercel-sdk.release.dependencies]\ndependencies = ["anyio>=4.12,<4.14"]\n'
         f"[tool.uv]\n{settings}\n"
         f'[[tool.uv.index]]\nurl = "{package_index}"\ndefault = true\n',
         encoding="utf-8",
@@ -112,7 +113,7 @@ def test_boundary_respects_project_config(
 def test_missing_anyio_dependency_fails(tmp_path: Path) -> None:
     pyproject = tmp_path / "pyproject.toml"
     pyproject.write_text(
-        '[tool.vercel.release.dependencies]\ndependencies = ["httpx2>=2"]\n', encoding="utf-8"
+        '[tool.vercel-sdk.release.dependencies]\ndependencies = ["httpx2>=2"]\n', encoding="utf-8"
     )
     with pytest.raises(ValueError, match="No AnyIO dependency"):
         anyio_version.anyio_requirement(pyproject)
