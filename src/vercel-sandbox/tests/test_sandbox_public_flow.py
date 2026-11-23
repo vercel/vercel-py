@@ -509,6 +509,7 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
         assert json.loads(request.content) == {
             "projectId": "prj_other",
             "name": "preview",
+            "architecture": "arm64",
             "source": {
                 "type": "git",
                 "url": "https://github.com/vercel/vercel-py",
@@ -532,6 +533,7 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
         payload = response["sandbox"]
         assert isinstance(payload, dict)
         payload["tags"] = {"env": "test"}
+        payload["architecture"] = "arm64"
         return httpx.Response(200, json=response)
 
     route = respx.post("https://sandbox.test/v3/sandboxes").mock(side_effect=handler)
@@ -576,6 +578,7 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
     async with session(service_options=_session_options(project_id="prj_other")):
         handle = await sandbox.create_sandbox(
             name="preview",
+            architecture=sandbox.SandboxArchitecture.ARM64,
             source=GitSource(
                 url="https://github.com/vercel/vercel-py",
                 revision="main",
@@ -595,6 +598,7 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
             failover_regions=("sfo1", "cle1"),
         )
         assert handle.image == "vercel/sandbox/universal:latest"
+        assert handle.architecture == "arm64"
         assert handle.region == "iad1"
         assert handle.network_id == "network_123"
         assert handle.failover_regions == ("sfo1", "cle1")
@@ -1915,12 +1919,18 @@ def test_sync_create_sandbox_serializes_image_without_runtime(mock_env_clear: No
     )
 
     with session(service_options=_session_options()):
-        handle = sandbox_sync.create_sandbox(name="preview", image=image, network_id="network_123")
+        handle = sandbox_sync.create_sandbox(
+            name="preview",
+            image=image,
+            architecture=sandbox_sync.SandboxArchitecture.ARM64,
+            network_id="network_123",
+        )
 
     assert json.loads(route.calls.last.request.content) == {
         "projectId": "prj_123",
         "name": "preview",
         "image": image,
+        "architecture": "arm64",
         "networkId": "network_123",
     }
     assert handle.image == "my-repository@sha256:resolved"
@@ -1970,6 +1980,42 @@ async def test_public_snapshot_expiration_validation_happens_before_requests(
     assert not create_route.called
     assert not update_route.called
     assert not snapshot_route.called
+
+
+@respx.mock
+async def test_public_create_rejects_architecture_with_snapshot_source(
+    mock_env_clear: None,
+) -> None:
+    create_route = respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    source = SnapshotSource(snapshot_id="snap_123")
+    arm64 = sandbox.SandboxArchitecture.ARM64
+
+    async with session(service_options=_session_options()):
+        with pytest.raises(ValueError, match="snapshot source"):
+            sandbox.create_sandbox(source=source, architecture=arm64)
+        with pytest.raises(ValueError, match="snapshot source"):
+            await sandbox.get_or_create_sandbox(name="preview", source=source, architecture=arm64)
+
+    assert not create_route.called
+
+
+@respx.mock
+def test_sync_create_rejects_architecture_with_snapshot_source(mock_env_clear: None) -> None:
+    create_route = respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    source = SnapshotSource(snapshot_id="snap_123")
+    arm64 = sandbox_sync.SandboxArchitecture.ARM64
+
+    with session(service_options=_session_options()):
+        with pytest.raises(ValueError, match="snapshot source"):
+            sandbox_sync.create_sandbox(source=source, architecture=arm64)
+        with pytest.raises(ValueError, match="snapshot source"):
+            sandbox_sync.get_or_create_sandbox(name="preview", source=source, architecture=arm64)
+
+    assert not create_route.called
 
 
 @respx.mock
@@ -2507,6 +2553,7 @@ async def test_async_get_or_create_returns_existing_or_created_sandbox(
         assert body == {
             "projectId": "prj_other",
             "name": "missing",
+            "architecture": "arm64",
             "persistent": True,
             "credentials": {"npm": True},
             "tags": {"purpose": "test"},
@@ -2525,6 +2572,7 @@ async def test_async_get_or_create_returns_existing_or_created_sandbox(
         )
         created, was_created = await sandbox.get_or_create_sandbox(
             name="missing",
+            architecture=sandbox.SandboxArchitecture.ARM64,
             persistent=True,
             credentials=sandbox.SandboxManagedCredentials(npm=True),
             tags={"purpose": "test"},
@@ -2713,6 +2761,7 @@ def test_sync_get_or_create_defaults_to_resume_and_returns_created_flag(
             "projectId": "prj_123",
             "name": "missing",
             "image": "missing-repository:latest",
+            "architecture": "arm64",
             "credentials": {"npm": True},
         }
         return httpx.Response(
@@ -2729,6 +2778,7 @@ def test_sync_get_or_create_defaults_to_resume_and_returns_created_flag(
         created, was_created = sandbox_sync.get_or_create_sandbox(
             name="missing",
             image="missing-repository:latest",
+            architecture=sandbox_sync.SandboxArchitecture.ARM64,
             credentials=sandbox_sync.SandboxManagedCredentials(npm=True),
         )
 

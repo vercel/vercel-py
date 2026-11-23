@@ -540,6 +540,10 @@ class SandboxHandleBase(Generic[RuntimeSessionHandleT]):
         return self._payload.image
 
     @property
+    def architecture(self) -> str | None:
+        return self._payload.architecture
+
+    @property
     def status(self) -> SandboxStatus | None:
         return self._payload.status
 
