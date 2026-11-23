@@ -105,6 +105,7 @@ from vercel.sandbox._internal.models import (
     SandboxResources,
     SandboxSource,
     SandboxStatus,
+    SessionStopReason,
     SnapshotExpiration,
     SnapshotExpirationInput,
     SnapshotRetention,
@@ -157,6 +158,7 @@ def create_sandbox(
     snapshot_retention: SnapshotRetention | None = None,
     region: RegionInput = None,
     failover_regions: FailoverRegionsInput = None,
+    expiry_notification_lead_time: DurationInput = None,
     destroy: bool = True,
     **private_parameters: _JSONValue,
 ) -> CreateSandboxOperation:
@@ -191,6 +193,8 @@ def create_sandbox(
         region: Preferred region for the sandbox. Uses the service option when omitted.
             Pass ``CURRENT_REGION`` to use the current function's region if available.
         failover_regions: Regions available if creation in ``region`` fails.
+        expiry_notification_lead_time: How long before the session timeout to send the
+            ``sandbox.session.expiring`` webhook, in seconds or as a duration.
         destroy: Whether context-manager exit destroys the sandbox and its
             orphaned snapshots after stopping it. Awaiting the operation never
             triggers cleanup.
@@ -221,6 +225,7 @@ def create_sandbox(
         snapshot_retention=snapshot_retention,
         region=region,
         failover_regions=failover_regions,
+        expiry_notification_lead_time=expiry_notification_lead_time,
         destroy=destroy,
         private_parameters=_normalize_private_parameters("create_sandbox", private_parameters),
     )
@@ -244,6 +249,7 @@ def fork_sandbox(
     snapshot_retention: SnapshotRetention | None = None,
     region: RegionInput = None,
     failover_regions: FailoverRegionsInput = None,
+    expiry_notification_lead_time: DurationInput = None,
     destroy: bool = True,
     **private_parameters: _JSONValue,
 ) -> ForkSandboxOperation:
@@ -280,6 +286,7 @@ def fork_sandbox(
         region: Preferred region override. Uses the service option when omitted.
             Pass ``CURRENT_REGION`` to use the current function's region if available.
         failover_regions: Failover region override.
+        expiry_notification_lead_time: Expiry webhook lead time override.
         destroy: Whether context-manager exit destroys the fork after stopping
             it. Awaiting the operation never triggers cleanup.
 
@@ -307,6 +314,7 @@ def fork_sandbox(
         snapshot_retention=snapshot_retention,
         region=region,
         failover_regions=failover_regions,
+        expiry_notification_lead_time=expiry_notification_lead_time,
         destroy=destroy,
         private_parameters=_normalize_private_parameters("fork_sandbox", private_parameters),
     )
@@ -333,6 +341,7 @@ async def get_or_create_sandbox(
     snapshot_retention: SnapshotRetention | None = None,
     region: RegionInput = None,
     failover_regions: FailoverRegionsInput = None,
+    expiry_notification_lead_time: DurationInput = None,
     **private_parameters: _JSONValue,
 ) -> tuple[Sandbox, bool]:
     """Get a named sandbox or create it when it does not exist.
@@ -367,6 +376,8 @@ async def get_or_create_sandbox(
         region: Preferred region for a newly created sandbox. Uses the service option when omitted.
             Pass ``CURRENT_REGION`` to use the current function's region if available.
         failover_regions: Failover regions for a newly created sandbox.
+        expiry_notification_lead_time: Expiry webhook lead time for a newly created
+            sandbox.
 
     Returns:
         A ``(sandbox, created)`` tuple. ``created`` is true when this call
@@ -394,6 +405,7 @@ async def get_or_create_sandbox(
         snapshot_retention=snapshot_retention,
         region=region,
         failover_regions=failover_regions,
+        expiry_notification_lead_time=expiry_notification_lead_time,
         private_parameters=_normalize_private_parameters(
             "get_or_create_sandbox", private_parameters
         ),
@@ -735,6 +747,7 @@ __all__ = [
     "SandboxServiceOptions",
     "SandboxSource",
     "SandboxStatus",
+    "SessionStopReason",
     "SandboxTerminalStateError",
     "DirectoryEntry",
     "GitSource",

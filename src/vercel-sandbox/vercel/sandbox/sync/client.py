@@ -102,6 +102,7 @@ class SyncSandboxClient:
         snapshot_retention: SnapshotRetention | None = None,
         region: RegionInput = None,
         failover_regions: FailoverRegionsInput = None,
+        expiry_notification_lead_time: DurationInput = None,
         destroy: bool = True,
         **private_parameters: _JSONValue,
     ) -> _ManagedSyncSandbox:
@@ -124,6 +125,7 @@ class SyncSandboxClient:
             snapshot_retention=snapshot_retention,
             region=region,
             failover_regions=failover_regions,
+            expiry_notification_lead_time=expiry_notification_lead_time,
             destroy=destroy,
             private_parameters=_normalize_private_parameters("create_sandbox", private_parameters),
         )
@@ -147,6 +149,7 @@ class SyncSandboxClient:
         snapshot_retention: SnapshotRetention | None = None,
         region: RegionInput = None,
         failover_regions: FailoverRegionsInput = None,
+        expiry_notification_lead_time: DurationInput = None,
         destroy: bool = True,
         **private_parameters: _JSONValue,
     ) -> _ManagedSyncSandbox:
@@ -168,6 +171,7 @@ class SyncSandboxClient:
             snapshot_retention=snapshot_retention,
             region=region,
             failover_regions=failover_regions,
+            expiry_notification_lead_time=expiry_notification_lead_time,
             destroy=destroy,
             private_parameters=_normalize_private_parameters("fork_sandbox", private_parameters),
         )
@@ -194,6 +198,7 @@ class SyncSandboxClient:
         snapshot_retention: SnapshotRetention | None = None,
         region: RegionInput = None,
         failover_regions: FailoverRegionsInput = None,
+        expiry_notification_lead_time: DurationInput = None,
         **private_parameters: _JSONValue,
     ) -> tuple[SyncSandbox, bool]:
         return _get_or_create_sync_sandbox(
@@ -217,6 +222,7 @@ class SyncSandboxClient:
             snapshot_retention=snapshot_retention,
             region=region,
             failover_regions=failover_regions,
+            expiry_notification_lead_time=expiry_notification_lead_time,
             private_parameters=_normalize_private_parameters(
                 "get_or_create_sandbox", private_parameters
             ),
