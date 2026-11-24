@@ -87,6 +87,17 @@ distributions. Run `uv run python scripts/bundle_release.py validate` to check
 these constraints before building. Aggregate builds and publish planning run
 this validation too.
 
+The same bundle table accepts `external-dependencies`, a list of third-party
+package names to keep as ordinary dependencies instead of copying their code.
+For example, the Celery integration declares `external-dependencies = ["celery"]`.
+The original dependency declarations supply the bounds, extras, and markers;
+this list does not add missing dependencies. Only the `external-dependencies`
+spelling is accepted; there is no separate peer-dependency configuration.
+
+AnyIO, Pydantic, and cbor2 are always external. AnyIO must share state with the
+application; Pydantic and cbor2 require compiled extensions this vendoring recipe
+cannot carry. Packages do not need to repeat those names in their bundle tables.
+
 Run:
 
 ```sh

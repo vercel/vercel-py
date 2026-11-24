@@ -18,6 +18,7 @@ dependencies = [
 
 [tool.vercel-sdk.release.bundle]
 enabled = true
+external-dependencies = ["dramatiq"]
 
 [tool.uv.sources]
 vercel-cache = { workspace = true }
