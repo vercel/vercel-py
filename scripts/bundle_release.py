@@ -354,8 +354,7 @@ def _external_dependencies(
 
 
 def _uses_shared_vendored_deps(package_name: str, data: dict[str, Any]) -> bool:
-    bundle = _bundle_metadata(data)
-    if bundle.get("shared-runtime") or bundle.get("shared_runtime"):
+    if _bundle_metadata(data).get("use-shared-vendored-deps", False) is True:
         return True
     for dependency in _release_dependencies(data):
         parsed = Requirement(dependency)

@@ -26,7 +26,7 @@ dependencies = [
 ]
 
 [tool.vercel-sdk.release.bundle]
-shared-runtime = true
+use-shared-vendored-deps = true
 
 [tool.uv.sources]
 vercel-internal-core = { workspace = true }

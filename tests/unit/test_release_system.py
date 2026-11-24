@@ -1840,7 +1840,7 @@ def test_vendored_external_dependencies_keep_peers_and_side_by_side_vendored_dep
                 "release": {
                     "bundle": {
                         "external-dependencies": ["celery"],
-                        "shared-runtime": True,
+                        "use-shared-vendored-deps": True,
                     },
                     "dependencies": [
                         "httpx2>=2",
@@ -1893,7 +1893,7 @@ def test_dramatiq_bundle_keeps_dramatiq_peer_dependency(
                 "release": {
                     "bundle": {
                         "external-dependencies": ["dramatiq"],
-                        "shared-runtime": True,
+                        "use-shared-vendored-deps": True,
                     }
                 }
             }
@@ -1947,7 +1947,7 @@ def test_django_tasks_bundle_keeps_django_peer_dependency(
                 "release": {
                     "bundle": {
                         "external-dependencies": ["django"],
-                        "shared-runtime": True,
+                        "use-shared-vendored-deps": True,
                     }
                 }
             }
@@ -2002,7 +2002,7 @@ def test_apscheduler_bundle_keeps_apscheduler_peer_dependency(
                 "release": {
                     "bundle": {
                         "external-dependencies": ["apscheduler"],
-                        "shared-runtime": True,
+                        "use-shared-vendored-deps": True,
                     }
                 }
             }
@@ -2149,7 +2149,7 @@ def test_vendored_requirements_are_derived_from_release_deps_and_lock(
                 "release": {
                     "bundle": {
                         "external-dependencies": ["celery"],
-                        "shared-runtime": True,
+                        "use-shared-vendored-deps": True,
                     },
                     "dependencies": [
                         "celery>=5.3,<6",
@@ -2757,3 +2757,41 @@ def test_external_policy_does_not_add_undeclared_dependencies(
     data = {"tool": {"vercel-sdk": {"release": {"bundle": {"external-dependencies": ["celery"]}}}}}
     monkeypatch.setattr(workspace, "packages", lambda: {})
     assert bundle_release._external_dependencies("vercel-example", data, ()) == ()  # noqa: SLF001
+
+
+@pytest.mark.parametrize("explicit", [None, False, True])
+def test_shared_vendored_dependencies_still_follow_direct_library_requirements(
+    monkeypatch: pytest.MonkeyPatch, explicit: bool | None
+) -> None:
+    bundle = {} if explicit is None else {"use-shared-vendored-deps": explicit}
+    data = {
+        "project": {"dependencies": ["httpx2[http2]>=2"]},
+        "tool": {"vercel-sdk": {"release": {"bundle": bundle}}},
+    }
+    monkeypatch.setattr(workspace, "packages", lambda: {})
+    monkeypatch.setattr(bundle_release, "shared_vendored_version", lambda: "0.7.1")
+    requirements = bundle_release._derive_vendor_requirements("vercel-example", data)  # noqa: SLF001
+    assert requirements == ()
+    assert bundle_release._external_dependencies("vercel-example", data, requirements) == (  # noqa: SLF001
+        "vercel-internal-shared-vendored-deps>=0.7.1",
+    )
+
+
+def test_explicit_shared_dependency_does_not_require_a_direct_shared_library(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data = {
+        "tool": {"vercel-sdk": {"release": {"bundle": {"use-shared-vendored-deps": True}}}},
+    }
+    monkeypatch.setattr(workspace, "packages", lambda: {})
+    monkeypatch.setattr(bundle_release, "shared_vendored_version", lambda: "0.7.1")
+    assert bundle_release._external_dependencies("vercel-example", data, ()) == (  # noqa: SLF001
+        "vercel-internal-shared-vendored-deps>=0.7.1",
+    )
+
+
+def test_shared_dependency_is_not_inferred_from_the_package_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(workspace, "packages", lambda: {})
+    assert bundle_release._external_dependencies("vercel-django-tasks", {}, ()) == ()  # noqa: SLF001

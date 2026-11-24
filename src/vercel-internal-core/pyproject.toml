@@ -23,7 +23,7 @@ dependencies = [
 
 [tool.vercel-sdk.release.bundle]
 enabled = true
-shared-runtime = true
+use-shared-vendored-deps = true
 
 [tool.hatch.version]
 path = "vercel/_internal/core/version.py"
