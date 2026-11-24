@@ -25,9 +25,6 @@ dependencies = [
     "pydantic>=2.7.0,<3",
 ]
 
-[tool.vercel-sdk.release.bundle]
-enabled = true
-
 [tool.uv.sources]
 vercel-internal-core = { workspace = true }
 vercel-oidc = { workspace = true }

@@ -132,23 +132,55 @@ class VendoringTransformations:
     drops: tuple[str, ...] = COMMON_DROP_TRANSFORMATIONS
 
 
+class BundleConfigurationError(ValueError):
+    """An enabled bundle cannot be built with the declared package configuration."""
+
+
 def _bundle_metadata(data: dict[str, Any]) -> dict[str, Any]:
-    release = data.get("tool", {}).get("vercel-sdk", {}).get("release", {})
-    bundle = release.get("bundle", {})
+    bundle = data.get("tool", {}).get("vercel-sdk", {}).get("release", {}).get("bundle", {})
     if not isinstance(bundle, dict):
-        return {}
+        raise BundleConfigurationError("[tool.vercel-sdk.release.bundle] must be a table")
     return bundle
 
 
 def is_vendored_eligible(package: workspace.Package) -> bool:
-    pyproject_file = package.path / "pyproject.toml"
-    if not pyproject_file.exists():
-        return True
-    data = _load_pyproject(package.path)
-    bundle = _bundle_metadata(data)
-    if not bundle.get("enabled", False):
+    if not (package.path / "pyproject.toml").exists():
         return False
-    return _vendoring_config_for_package(package, data) is not None
+    data = _load_pyproject(package.path)
+    enabled = _bundle_metadata(data).get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise BundleConfigurationError(f"{package.name}: bundle.enabled must be a boolean")
+    if not enabled:
+        return False
+    if _vendoring_config_for_package(package, data) is None:
+        raise BundleConfigurationError(
+            f"{package.name}: bundle.enabled is true, but its package layout is not supported"
+        )
+    return True
+
+
+def _validate_bundle_dependencies(
+    package: workspace.Package,
+    data: dict[str, Any],
+    packages: dict[str, workspace.Package],
+) -> None:
+    for dependency in _release_dependencies(data):
+        name = _normalize_name(Requirement(dependency).name)
+        sibling = packages.get(name)
+        if sibling is not None and not is_vendored_eligible(sibling):
+            raise BundleConfigurationError(
+                f"{variant_name(package.name)} requires {variant_name(name)}, "
+                f"but {name} has not enabled bundle releases"
+            )
+
+
+def validate_bundle_packages(packages: dict[str, workspace.Package] | None = None) -> None:
+    """Reject invalid enabled bundles before building or planning a release."""
+    if packages is None:
+        packages = workspace.packages()
+    for package in packages.values():
+        if is_vendored_eligible(package):
+            _validate_bundle_dependencies(package, _load_pyproject(package.path), packages)
 
 
 def load_plan(package_name: str) -> VendoredPlan:
@@ -167,6 +199,7 @@ def load_plan(package_name: str) -> VendoredPlan:
     config = _vendoring_config_for_package(package, data)
     if config is None:
         raise SystemExit(f"package is not vendored-eligible: {package_name}")
+    _validate_bundle_dependencies(package, data, packages)
     requirements = _derive_vendor_requirements(package.name, data)
     return VendoredPlan(
         package=package,
@@ -1153,7 +1186,12 @@ def main(argv: list[str] | None = None) -> int:
 
     subparsers.add_parser("shared-github-release-body")
 
+    subparsers.add_parser("validate")
+
     args = parser.parse_args(argv)
+    if args.command == "validate":
+        validate_bundle_packages()
+        return 0
     if args.command == "plan":
         print_plan(load_plan(args.package))
         return 0
@@ -1186,4 +1224,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except BundleConfigurationError as error:
+        sys.exit(str(error))

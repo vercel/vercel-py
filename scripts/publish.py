@@ -127,6 +127,7 @@ def write_plan(plan: ReleasePlan, path: Path) -> None:
 
 
 def dependency_graph(packages: dict[str, workspace.Package]) -> dict[str, set[str]]:
+    bundle_release.validate_bundle_packages(packages)
     graph = {name: set(package.dependencies) for name, package in packages.items()}
     graph[SHARED] = set()
     for name, package in packages.items():

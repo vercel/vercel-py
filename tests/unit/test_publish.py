@@ -356,3 +356,12 @@ def test_shared_dependency_edges_match_release_runtime_dependencies() -> None:
     assert "vercel-oidc" in dependencies["vercel-connect"]
     assert "vercel-queue" not in dependencies["vercel-connect"]
     assert "vercel-queue" in dependencies["vercel-workflow"]
+
+
+def test_publish_graph_rejects_enabled_bundle_with_unsupported_layout(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.vercel-sdk.release.bundle]\nenabled = true\n", encoding="utf-8"
+    )
+    package = workspace.Package("vercel-invalid", tmp_path, tmp_path / "version.py", ())
+    with pytest.raises(bundle_release.BundleConfigurationError, match="layout is not supported"):
+        publish.dependency_graph({package.name: package})
