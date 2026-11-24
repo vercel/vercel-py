@@ -24,6 +24,9 @@ dependencies = [
     "vercel-oidc>=0.6.0",
 ]
 
+[tool.vercel-sdk.release.bundle]
+enabled = true
+
 [project.optional-dependencies]
 devserver = ["uvicorn"]
 typed = ["pydantic>=2.7.0"]

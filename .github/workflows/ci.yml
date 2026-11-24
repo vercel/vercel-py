@@ -208,7 +208,7 @@ jobs:
         run: |
           VERCEL_TEST_ANYIO=$(uv run --no-sync python scripts/anyio_version.py "$ANYIO_VERSION")
           export VERCEL_TEST_ANYIO
-          for package in vercel-internal-core vercel-queue vercel-sandbox; do
+          for package in vercel-internal-core vercel-queue; do
             uv run python scripts/bundle_release.py test-wheel --package "$package" --dist-dir dist
           done
 

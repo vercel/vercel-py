@@ -21,6 +21,9 @@ dependencies = [
     "typing-extensions>=4.6.0,<5 ; python_version < '3.12'",
 ]
 
+[tool.vercel-sdk.release.bundle]
+enabled = true
+
 [tool.hatch.version]
 path = "vercel/_internal/core/version.py"
 

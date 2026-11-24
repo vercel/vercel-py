@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+uv run python scripts/bundle_release.py validate
+
 dist_dir="dist"
 mkdir -p "$dist_dir"
 

@@ -28,6 +28,9 @@ dependencies = [
     "anyio>=4.11.0,<5",
 ]
 
+[tool.vercel-sdk.release.bundle]
+enabled = true
+
 [tool.uv.sources]
 vercel-internal-core = { workspace = true }
 vercel-oidc = { workspace = true }

@@ -56,7 +56,9 @@ Merged release PRs are published by GitHub Actions through PyPI trusted publishi
 
 [[scripts/publish.py]] has `detect`, `build`, and `publish` stages that communicate through a JSON plan. Every package builds and passes installed-wheel checks before any upload. Release PRs carry the `release` label, which makes CI run the same stages with `--dry-run`.
 
-Most packages also publish a `-bundle` variant with their third-party dependencies vendored, assembled by [[scripts/bundle_release.py#build_bundle_package]]. The common HTTP stack is vendored once into a shared `vercel-internal-shared-vendored-deps` distribution so bundles do not each carry a copy. AnyIO and the integrated frameworks stay ordinary peer dependencies because they share state with application code.
+Packages opt in to `-bundle` variants with `[tool.vercel-sdk.release.bundle] enabled = true`. [[scripts/bundle_release.py#is_vendored_eligible]] rejects unsupported enabled layouts, and [[scripts/bundle_release.py#build_bundle_package]] assembles the variants. The common HTTP stack is vendored once into a shared `vercel-internal-shared-vendored-deps` distribution so bundles do not each carry a copy. AnyIO and the integrated frameworks stay ordinary peer dependencies because they share state with application code.
+
+[[scripts/bundle_release.py#validate_bundle_packages]] requires every workspace dependency of an enabled bundle to provide its own bundle. [[scripts/build.sh]] and [[scripts/publish.py#dependency_graph]] validate this before building or planning releases. Integrations and their selected SDK dependencies enable eleven variants; Blob, Connect, Drives, Passport, and Sandbox no longer publish bundles.
 
 Libraries with required compiled extensions cannot be vendored, because bundling drops `*.so` files: Pydantic needs `pydantic-core`, and cbor2 needs its `_cbor2` module. Every package that depends on one must list it in [[scripts/bundle_release.py#EXTERNAL_DEPENDENCIES]], or its bundle fails to build or import.
 

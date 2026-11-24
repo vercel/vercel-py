@@ -72,6 +72,21 @@ version file has moved past `0.0.0`.
 
 ## Release Prep
 
+Bundle releases require an explicit opt-in in each package's `pyproject.toml`:
+
+```toml
+[tool.vercel-sdk.release.bundle]
+enabled = true
+```
+
+Omitting the table or setting `enabled = false` disables that package's bundle.
+An enabled package must have a supported layout, and every workspace dependency
+must also enable a supported bundle. Invalid layouts and missing sibling bundles
+are configuration errors; bundle builds never fall back to ordinary sibling
+distributions. Run `uv run python scripts/bundle_release.py validate` to check
+these constraints before building. Aggregate builds and publish planning run
+this validation too.
+
 Run:
 
 ```sh

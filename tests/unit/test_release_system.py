@@ -1715,7 +1715,7 @@ def test_checkout_runs_only_the_hook_its_own_pyproject_names(
     assert not planted.with_name("executed").exists()
 
 
-def test_vendored_eligibility_is_derived_from_package_layout(tmp_path: Path) -> None:
+def test_vendored_eligibility_requires_opt_in_and_supported_layout(tmp_path: Path) -> None:
     queue = workspace.Package(
         "vercel-queue",
         tmp_path / "src/vercel-queue",
@@ -1763,6 +1763,9 @@ def test_vendored_eligibility_is_derived_from_package_layout(tmp_path: Path) -> 
 [project]
 name = "{package.name}"
 
+[tool.vercel-sdk.release.bundle]
+enabled = true
+
 [tool.hatch.build.targets.wheel]
 only-include = ["{include}"]
 """.lstrip(),
@@ -1773,6 +1776,9 @@ only-include = ["{include}"]
         """
 [project]
 name = "vercel"
+
+[tool.vercel-sdk.release.bundle]
+enabled = true
 
 [tool.hatch.build.targets.wheel]
 only-include = ["/_internal", "/blob"]
@@ -1785,7 +1791,8 @@ only-include = ["/_internal", "/blob"]
     assert bundle_release.is_vendored_eligible(apscheduler)
     assert bundle_release.is_vendored_eligible(dramatiq)
     assert bundle_release.is_vendored_eligible(headers)
-    assert not bundle_release.is_vendored_eligible(umbrella)
+    with pytest.raises(bundle_release.BundleConfigurationError, match="layout is not supported"):
+        bundle_release.is_vendored_eligible(umbrella)
 
     fallback_path = tmp_path / "src/vercel-fallback"
     fallback = workspace.Package(
@@ -1799,41 +1806,13 @@ only-include = ["/_internal", "/blob"]
         """
 [project]
 name = "vercel-fallback"
+
+[tool.vercel-sdk.release.bundle]
+enabled = true
 """.lstrip(),
         encoding="utf-8",
     )
     assert bundle_release.is_vendored_eligible(fallback)
-
-
-def test_unbundled_packages_are_excluded_despite_looking_eligible(tmp_path: Path) -> None:
-    # An opt-out has to be pinned, because the failure is silent: eligibility is
-    # structural, so a package with a single `vercel/...` wheel root qualifies
-    # by accident of layout. Drop the exclusion and nothing goes red -- the
-    # bundle just builds, and another distribution name appears on PyPI.
-    package_path = tmp_path / "src/vercel-workflow"
-    package = workspace.Package(
-        "vercel-workflow",
-        package_path,
-        package_path / "vercel/workflow/version.py",
-        (),
-    )
-    package.path.mkdir(parents=True)
-    (package.path / "pyproject.toml").write_text(
-        """
-[project]
-name = "vercel-workflow"
-
-[tool.hatch.build.targets.wheel]
-only-include = ["/vercel/workflow"]
-""".lstrip(),
-        encoding="utf-8",
-    )
-
-    assert package.name in bundle_release.UNBUNDLED_PACKAGES
-    assert not bundle_release.is_vendored_eligible(package)
-    # Both probes would otherwise say yes, so the exclusion is what decides it.
-    data = bundle_release._load_pyproject(package.path)  # noqa: SLF001
-    assert bundle_release._vendoring_config_for_package(package, data) is not None  # noqa: SLF001
 
 
 def test_vendored_external_dependencies_keep_peers_and_side_by_side_vendored_deps(
@@ -2593,3 +2572,89 @@ def test_connect_depends_on_oidc_in_the_workspace_graph() -> None:
 
     order = workspace.topological_names(resolved)
     assert order.index("vercel-oidc") < order.index("vercel-connect")
+
+
+def _bundle_test_package(
+    directory: Path, name: str, *, enabled: bool | None = True, dependencies: tuple[str, ...] = ()
+) -> workspace.Package:
+    directory.mkdir(parents=True)
+    config = (
+        ""
+        if enabled is None
+        else (f"[tool.vercel-sdk.release.bundle]\nenabled = {str(enabled).lower()}\n")
+    )
+    declared = ", ".join(repr(dependency) for dependency in dependencies)
+    (directory / "pyproject.toml").write_text(
+        f'[project]\nname = "{name}"\ndependencies = [{declared}]\n' + config,
+        encoding="utf-8",
+    )
+    version = directory / "vercel/example/version.py"
+    version.parent.mkdir(parents=True)
+    version.write_text('__version__ = "1.0.0"\n', encoding="utf-8")
+    return workspace.Package(name, directory, version, ())
+
+
+@pytest.mark.parametrize("enabled,expected", [(None, False), (False, False), (True, True)])
+def test_bundle_enablement_is_explicit(
+    tmp_path: Path, enabled: bool | None, expected: bool
+) -> None:
+    package = _bundle_test_package(tmp_path / "package", "vercel-example", enabled=enabled)
+    assert bundle_release.is_vendored_eligible(package) is expected
+
+
+def test_bundle_plan_rejects_a_disabled_workspace_dependency(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    consumer = _bundle_test_package(
+        tmp_path / "consumer", "vercel-consumer", dependencies=("vercel-sibling[extra]>=0.1,<2",)
+    )
+    sibling = _bundle_test_package(tmp_path / "sibling", "vercel-sibling", enabled=False)
+    monkeypatch.setattr(workspace, "packages", lambda: {p.name: p for p in (consumer, sibling)})
+    with pytest.raises(
+        bundle_release.BundleConfigurationError,
+        match="vercel-consumer-bundle requires vercel-sibling-bundle",
+    ):
+        bundle_release.load_plan(consumer.name)
+
+
+def test_bundle_validation_checks_transitive_workspace_dependencies(tmp_path: Path) -> None:
+    consumer = _bundle_test_package(
+        tmp_path / "consumer", "vercel-consumer", dependencies=("vercel-sibling>=0.1",)
+    )
+    sibling = _bundle_test_package(
+        tmp_path / "sibling", "vercel-sibling", dependencies=("vercel-leaf>=0.1",)
+    )
+    leaf = _bundle_test_package(tmp_path / "leaf", "vercel-leaf", enabled=False)
+    with pytest.raises(
+        bundle_release.BundleConfigurationError,
+        match="vercel-sibling-bundle requires vercel-leaf-bundle",
+    ):
+        bundle_release.validate_bundle_packages({p.name: p for p in (consumer, sibling, leaf)})
+
+
+def test_bundle_validation_keeps_sibling_extras_markers_and_bounds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    consumer = _bundle_test_package(
+        tmp_path / "consumer",
+        "vercel-consumer",
+        dependencies=("vercel-sibling[extra]>=0.1,<2; python_version >= '3.11'",),
+    )
+    sibling = _bundle_test_package(tmp_path / "sibling", "vercel-sibling")
+    packages = {p.name: p for p in (consumer, sibling)}
+    monkeypatch.setattr(workspace, "packages", lambda: packages)
+    bundle_release.validate_bundle_packages(packages)
+    result = bundle_release.load_plan(consumer.name)
+    assert result.external_dependencies == (
+        'vercel-sibling-bundle[extra]>=1.0.0,<2 ; python_version >= "3.11"',
+    )
+
+
+def test_bundle_validate_command_rejects_unsupported_enabled_layout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    package = _bundle_test_package(tmp_path / "unsupported", "vercel-unsupported")
+    package = workspace.Package(package.name, package.path, package.path / "version.py", ())
+    monkeypatch.setattr(workspace, "packages", lambda: {package.name: package})
+    with pytest.raises(bundle_release.BundleConfigurationError, match="layout is not supported"):
+        bundle_release.main(["validate"])
