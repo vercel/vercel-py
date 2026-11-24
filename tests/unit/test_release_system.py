@@ -2663,3 +2663,64 @@ def test_bundle_validate_command_rejects_unsupported_enabled_layout(
     monkeypatch.setattr(workspace, "packages", lambda: {package.name: package})
     with pytest.raises(bundle_release.BundleConfigurationError, match="layout is not supported"):
         bundle_release.main(["validate"])
+
+
+@pytest.mark.parametrize("name", ["anyio", "pydantic", "cbor2"])
+def test_global_external_dependencies_preserve_declared_requirements(
+    monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    declared = f"{name}[extra]>=1,<99; python_version >= '3.11'"
+    data = {"project": {"dependencies": [declared]}}
+    monkeypatch.setattr(bundle_release, "_lock_versions", lambda: {})
+    monkeypatch.setattr(workspace, "packages", lambda: {})
+    requirements = bundle_release._derive_vendor_requirements("vercel-example", data)  # noqa: SLF001
+    assert requirements == ()
+    assert bundle_release._external_dependencies("vercel-example", data, requirements) == (
+        declared,
+    )  # noqa: SLF001
+
+
+def test_package_external_dependencies_are_normalized_and_preserve_bounds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    declared = "celery[redis]>=5.3,<6; python_version >= '3.11'"
+    data = {
+        "project": {"dependencies": [declared]},
+        "tool": {"vercel-sdk": {"release": {"bundle": {"external-dependencies": ["Celery"]}}}},
+    }
+    monkeypatch.setattr(bundle_release, "_lock_versions", lambda: {})
+    monkeypatch.setattr(workspace, "packages", lambda: {})
+    requirements = bundle_release._derive_vendor_requirements("vercel-example", data)  # noqa: SLF001
+    assert requirements == ()
+    assert bundle_release._external_dependencies("vercel-example", data, requirements) == (
+        declared,
+    )  # noqa: SLF001
+
+
+@pytest.mark.parametrize(
+    "alias", ["peer-dependencies", "peer_dependencies", "external_dependencies"]
+)
+def test_external_dependency_aliases_are_rejected(alias: str) -> None:
+    data = {"tool": {"vercel-sdk": {"release": {"bundle": {alias: ["celery"]}}}}}
+    with pytest.raises(
+        bundle_release.BundleConfigurationError, match="Use bundle.external-dependencies"
+    ):
+        bundle_release._derive_vendor_requirements("vercel-example", data)  # noqa: SLF001
+
+
+def test_bundle_validation_rejects_obsolete_external_keys(tmp_path: Path) -> None:
+    package = _bundle_test_package(tmp_path / "example", "vercel-example")
+    pyproject = package.path / "pyproject.toml"
+    pyproject.write_text(pyproject.read_text() + 'peer-dependencies = ["celery"]\n')
+    with pytest.raises(
+        bundle_release.BundleConfigurationError, match="Use bundle.external-dependencies"
+    ):
+        bundle_release.validate_bundle_packages({package.name: package})
+
+
+def test_external_policy_does_not_add_undeclared_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data = {"tool": {"vercel-sdk": {"release": {"bundle": {"external-dependencies": ["celery"]}}}}}
+    monkeypatch.setattr(workspace, "packages", lambda: {})
+    assert bundle_release._external_dependencies("vercel-example", data, ()) == ()  # noqa: SLF001

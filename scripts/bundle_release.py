@@ -72,8 +72,10 @@ SHARED_VENDORED_CONSUMERS = {
 }
 # Queue lease renewal uses EventLoopToken and from_thread token support (4.11).
 ANYIO_REQUIREMENT = "anyio>=4.11.0,<5"
-# AnyIO manages task-local state shared with application callbacks.
-GLOBAL_PEER_DEPENDENCIES = {"anyio"}
+# AnyIO must share task-local state and exception types with application callbacks.
+# Pydantic requires pydantic-core, and cbor2 requires _cbor2; this vendoring recipe
+# cannot carry those compiled extensions. Keep all three ordinary dependencies.
+GLOBAL_EXTERNAL_DEPENDENCIES = {"anyio", "pydantic", "cbor2"}
 COMMON_DROP_TRANSFORMATIONS = (
     "*.so",
     "*/tests/",
@@ -118,10 +120,17 @@ def _bundle_metadata(data: dict[str, Any]) -> dict[str, Any]:
     return bundle
 
 
-def _external_and_peer_dependencies(bundle: dict[str, Any]) -> set[str]:
-    external = bundle.get("external-dependencies") or bundle.get("external_dependencies") or []
-    peers = bundle.get("peer-dependencies") or bundle.get("peer_dependencies") or []
-    return {_normalize_name(dep) for dep in (*external, *peers) if isinstance(dep, str)}
+def _external_dependency_names(data: dict[str, Any]) -> set[str]:
+    bundle = _bundle_metadata(data)
+    for alias in ("peer-dependencies", "peer_dependencies", "external_dependencies"):
+        if alias in bundle:
+            raise BundleConfigurationError(
+                f"Use bundle.external-dependencies instead of bundle.{alias}"
+            )
+    names = bundle.get("external-dependencies", [])
+    if not isinstance(names, list) or not all(isinstance(name, str) and name for name in names):
+        raise BundleConfigurationError("bundle.external-dependencies must be a list of names")
+    return {_normalize_name(name) for name in names}
 
 
 def is_vendored_eligible(package: workspace.Package) -> bool:
@@ -161,7 +170,9 @@ def validate_bundle_packages(packages: dict[str, workspace.Package] | None = Non
         packages = workspace.packages()
     for package in packages.values():
         if is_vendored_eligible(package):
-            _validate_bundle_dependencies(package, _load_pyproject(package.path), packages)
+            data = _load_pyproject(package.path)
+            _external_dependency_names(data)
+            _validate_bundle_dependencies(package, data, packages)
 
 
 def load_plan(package_name: str) -> VendoredPlan:
@@ -283,8 +294,7 @@ def _derive_vendor_requirements(package_name: str, data: dict[str, Any]) -> tupl
         return _pin_requirements(SHARED_VENDORED_REQUIREMENTS, lock_versions)
 
     vendored_names = []
-    bundle = _bundle_metadata(data)
-    external_and_peers = GLOBAL_PEER_DEPENDENCIES | _external_and_peer_dependencies(bundle)
+    external_names = GLOBAL_EXTERNAL_DEPENDENCIES | _external_dependency_names(data)
     for dependency in _release_dependencies(data):
         parsed = Requirement(dependency)
         normalized = _normalize_name(parsed.name)
@@ -292,7 +302,7 @@ def _derive_vendor_requirements(package_name: str, data: dict[str, Any]) -> tupl
             continue
         if normalized.startswith("vercel-"):
             continue
-        if normalized in external_and_peers:
+        if normalized in external_names:
             continue
         vendored_names.append(normalized)
     return _pin_requirements(tuple(vendored_names), lock_versions)
@@ -343,8 +353,7 @@ def _external_dependencies(
 ) -> tuple[str, ...]:
     packages = workspace.packages()
     vendored_names = {_requirement_name(requirement) for requirement in vendored_requirements}
-    bundle = _bundle_metadata(data)
-    external_and_peers = GLOBAL_PEER_DEPENDENCIES | _external_and_peer_dependencies(bundle)
+    external_names = GLOBAL_EXTERNAL_DEPENDENCIES | _external_dependency_names(data)
     external = []
     for dependency in _release_dependencies(data):
         parsed = Requirement(dependency)
@@ -353,7 +362,7 @@ def _external_dependencies(
             continue
         if normalized.startswith("vercel-") and normalized in packages:
             external.append(_vendored_dependency(parsed))
-        elif normalized in external_and_peers or normalized not in vendored_names:
+        elif normalized in external_names or normalized not in vendored_names:
             external.append(dependency)
     if package_name != SHARED_VENDORED_PACKAGE and _uses_shared_vendored_deps(package_name, data):
         external.append(_vendored_dependency(Requirement(SHARED_VENDORED_PACKAGE)))
