@@ -61,7 +61,7 @@ starts at `0.0.0`, and declares the last of those releases in its
 `pyproject.toml`:
 
 ```toml
-[tool.vercel.release]
+[tool.vercel-sdk.release]
 previous-version = "0.4.2"
 ```
 
@@ -131,7 +131,7 @@ wins over the dependency-only patch bump.
 Package `pyproject.toml` files keep publishable dependency declarations in:
 
 ```toml
-[tool.vercel.release.dependencies]
+[tool.vercel-sdk.release.dependencies]
 dependencies = [
     "vercel-headers>=0.6.0",
 ]

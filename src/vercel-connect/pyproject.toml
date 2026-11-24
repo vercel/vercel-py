@@ -14,7 +14,7 @@ license-files = ["LICENSE", "LICENSE.*"]
 [tool.hatch.metadata.hooks.custom]
 path = "hatch_build.py"
 
-[tool.vercel.release.dependencies]
+[tool.vercel-sdk.release.dependencies]
 dependencies = [
     "vercel-internal-core>=0.2.0,<0.4.0",
     "vercel-oidc[verify]>=0.8.0",

@@ -208,7 +208,7 @@ def _shared_vendored_plan() -> VendoredPlan:
 
 
 def _shared_pyproject_data() -> dict[str, Any]:
-    return {"tool": {"vercel": {"release": {"dependencies": [ANYIO_REQUIREMENT]}}}}
+    return {"tool": {"vercel-sdk": {"release": {"dependencies": [ANYIO_REQUIREMENT]}}}}
 
 
 def _load_pyproject(path: Path) -> dict[str, Any]:
@@ -306,7 +306,7 @@ def _lock_versions() -> dict[str, str]:
 
 
 def _release_dependencies(data: dict[str, Any]) -> list[str]:
-    release = data.get("tool", {}).get("vercel", {}).get("release", {})
+    release = data.get("tool", {}).get("vercel-sdk", {}).get("release", {})
     if "dependencies" in release:
         dependency_table = release.get("dependencies", {})
         if isinstance(dependency_table, list):
@@ -587,7 +587,7 @@ dependencies = ["{ANYIO_REQUIREMENT}"]
 license = "MIT"
 license-files = ["LICENSE", "LICENSE.*"]
 
-[tool.vercel.release.dependencies]
+[tool.vercel-sdk.release.dependencies]
 dependencies = ["{ANYIO_REQUIREMENT}"]
 
 [tool.hatch.version]
@@ -775,10 +775,14 @@ def _rewrite_pyproject(plan: VendoredPlan, generated: Path) -> None:
         count=1,
     )
     deps = _format_toml_string_array(plan.external_dependencies)
-    if "[tool.vercel.release.dependencies]" in text:
+    # Keep the dependencies array inside [tool.vercel-sdk.release.dependencies].
+    # This regex replaces that header and the array directly below it for bundles.
+    # Nesting the array keeps other release settings (e.g. previous-version) outside
+    # the replacement, preserving surrounding TOML text without reserializing it.
+    if "[tool.vercel-sdk.release.dependencies]" in text:
         text = re.sub(
-            r"(?ms)^\[tool\.vercel\.release\.dependencies\]\ndependencies = \[.*?\]\n",
-            f"[tool.vercel.release.dependencies]\ndependencies = {deps}\n",
+            r"(?ms)^\[tool\.vercel-sdk\.release\.dependencies\]\ndependencies = \[.*?\]\n",
+            f"[tool.vercel-sdk.release.dependencies]\ndependencies = {deps}\n",
             text,
             count=1,
         )

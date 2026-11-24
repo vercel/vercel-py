@@ -18,7 +18,7 @@ sandbox = "vercel.sandbox.__main__:main"
 [tool.hatch.metadata.hooks.custom]
 path = "hatch_build.py"
 
-[tool.vercel.release.dependencies]
+[tool.vercel-sdk.release.dependencies]
 dependencies = [
     "vercel-internal-core>=0.2.0,<0.4.0",
     # Sandbox runs Drive operations on vercel-drives internals, so the bound

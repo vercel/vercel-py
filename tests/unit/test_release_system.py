@@ -124,7 +124,7 @@ def _release_single_package(
     version_file.write_text(f'__version__ = "{version}"\n', encoding="utf-8")
     if previous is not None:
         (package_path / "pyproject.toml").write_text(
-            f'[tool.vercel.release]\nprevious-version = "{previous}"\n', encoding="utf-8"
+            f'[tool.vercel-sdk.release]\nprevious-version = "{previous}"\n', encoding="utf-8"
         )
     packages = {"pkg": workspace.Package("pkg", package_path, version_file, ())}
     monkeypatch.setattr(release, "CHANGES", root / "changes")
@@ -287,7 +287,7 @@ name = "vercel-sandbox"
 [tool.uv.sources]
 vercel-internal-core = { workspace = true }
 
-[tool.vercel.release.dependencies]
+[tool.vercel-sdk.release.dependencies]
 dependencies = ["vercel-internal-core>=0.1.0,<0.2.0"]
 """.strip(),
         encoding="utf-8",
@@ -321,7 +321,7 @@ name = "vercel-sandbox"
 [tool.uv.sources]
 vercel-internal-core = {{ workspace = true }}
 
-[tool.vercel.release.dependencies]
+[tool.vercel-sdk.release.dependencies]
 dependencies = ["{declared}"]
 """.strip(),
         encoding="utf-8",
@@ -358,7 +358,7 @@ def test_metadata_hook_rejection_says_which_bound_to_raise(tmp_path: Path) -> No
     message = str(error.value)
     assert "vercel-sandbox declares" in message
     assert "is at 0.2.0 in the workspace" in message
-    assert "[tool.vercel.release.dependencies]" in message
+    assert "[tool.vercel-sdk.release.dependencies]" in message
 
 
 def test_metadata_hook_accepts_a_prerelease_sibling(tmp_path: Path) -> None:
@@ -487,7 +487,7 @@ name = "app"
 [tool.uv.sources]
 lib = { workspace = true }
 
-[tool.vercel.release.dependencies]
+[tool.vercel-sdk.release.dependencies]
 dependencies = ["lib>=0.1.0,<2 ; python_version >= '3.10'", "httpx>=0.27,<1"]
 """.strip(),
         encoding="utf-8",
@@ -1857,7 +1857,7 @@ def test_vendored_external_dependencies_keep_peers_and_side_by_side_vendored_dep
     monkeypatch.setattr(workspace, "packages", lambda: packages)
     data = {
         "tool": {
-            "vercel": {
+            "vercel-sdk": {
                 "release": {
                     "dependencies": [
                         "httpx2>=2",
@@ -2116,7 +2116,7 @@ def test_vendored_requirements_are_derived_from_release_deps_and_lock(
 
     queue_data = {
         "tool": {
-            "vercel": {
+            "vercel-sdk": {
                 "release": {
                     "dependencies": [
                         "anyio>=4.11.0",
@@ -2132,7 +2132,7 @@ def test_vendored_requirements_are_derived_from_release_deps_and_lock(
     }
     celery_data = {
         "tool": {
-            "vercel": {
+            "vercel-sdk": {
                 "release": {
                     "dependencies": [
                         "celery>=5.3,<6",
@@ -2323,7 +2323,7 @@ name = "vercel-queue"
 license = "MIT"
 license-files = ["LICENSE", "LICENSE.*"]
 
-[tool.vercel.release.dependencies]
+[tool.vercel-sdk.release.dependencies]
 dependencies = []
 
 [tool.hatch.build.targets.sdist]

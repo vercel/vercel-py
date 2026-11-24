@@ -141,7 +141,7 @@ def previous_version(package: workspace.Package) -> str | None:
     release history, so the first release from this workspace has to continue
     after it instead of starting at `0.1.0` and colliding with versions that
     already exist. Packages declare that history as
-    `[tool.vercel.release] previous-version`. It only matters while the package
+    `[tool.vercel-sdk.release] previous-version`. It only matters while the package
     is still at the unpublished sentinel; after the first release the version
     file carries on from there.
     """
@@ -150,7 +150,7 @@ def previous_version(package: workspace.Package) -> str | None:
         return None
     with path.open("rb") as fp:
         data = tomllib.load(fp)
-    value = data.get("tool", {}).get("vercel", {}).get("release", {}).get("previous-version")
+    value = data.get("tool", {}).get("vercel-sdk", {}).get("release", {}).get("previous-version")
     if value is None:
         return None
     if (
