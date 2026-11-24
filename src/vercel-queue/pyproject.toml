@@ -26,6 +26,7 @@ dependencies = [
 
 [tool.vercel-sdk.release.bundle]
 enabled = true
+use-shared-vendored-deps = true
 
 [project.optional-dependencies]
 devserver = ["uvicorn"]

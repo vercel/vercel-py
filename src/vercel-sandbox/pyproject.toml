@@ -31,6 +31,9 @@ dependencies = [
     "pydantic>=2.7.0,<3",
 ]
 
+[tool.vercel-sdk.release.bundle]
+use-shared-vendored-deps = true
+
 [tool.uv.sources]
 vercel-drives = { workspace = true }
 vercel-internal-core = { workspace = true }

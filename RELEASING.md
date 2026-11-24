@@ -98,6 +98,14 @@ AnyIO, Pydantic, and cbor2 are always external. AnyIO must share state with the
 application; Pydantic and cbor2 require compiled extensions this vendoring recipe
 cannot carry. Packages do not need to repeat those names in their bundle tables.
 
+`use-shared-vendored-deps = true` in the bundle table requests a direct dependency
+on `vercel-internal-shared-vendored-deps`, even when the package has no direct
+requirement on a shared library. Direct requirements on shared libraries such as
+HTTPX still enable that dependency automatically. Omitting the setting or using
+`false` leaves this automatic detection in place; it does not request a private
+copy of the HTTP stack. Shared-package selection and import rewriting retain
+their existing behavior.
+
 Run:
 
 ```sh

@@ -54,22 +54,6 @@ SHARED_VENDORED_LIBS = {
     "wsproto": "wsproto",
 }
 SHARED_VENDORED_REQUIREMENTS = tuple(SHARED_VENDORED_LIBS.values())
-SHARED_VENDORED_CONSUMERS = {
-    "vercel-apscheduler",
-    "vercel-blob",
-    "vercel-cache",
-    "vercel-celery",
-    "vercel-connect",
-    "vercel-django-tasks",
-    "vercel-dramatiq",
-    "vercel-drives",
-    "vercel-internal-core",
-    "vercel-internal-telemetry",
-    "vercel-oidc",
-    "vercel-queue",
-    "vercel-sandbox",
-    "vercel-schedules",
-}
 # Queue lease renewal uses EventLoopToken and from_thread token support (4.11).
 ANYIO_REQUIREMENT = "anyio>=4.11.0,<5"
 # AnyIO must share task-local state and exception types with application callbacks.
@@ -370,7 +354,7 @@ def _external_dependencies(
 
 
 def _uses_shared_vendored_deps(package_name: str, data: dict[str, Any]) -> bool:
-    if package_name in SHARED_VENDORED_CONSUMERS:
+    if _bundle_metadata(data).get("use-shared-vendored-deps", False) is True:
         return True
     for dependency in _release_dependencies(data):
         parsed = Requirement(dependency)
