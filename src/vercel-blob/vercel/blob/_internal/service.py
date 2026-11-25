@@ -3,27 +3,46 @@
 from __future__ import annotations
 
 import inspect
+import time
 from collections.abc import Callable, Sequence
+from datetime import timedelta
 
 from vercel._internal.core.http import StreamingResponse
 from vercel._internal.core.session import SdkSession, SyncSdkSession
+from vercel._internal.core.time import parse_duration_seconds, to_ms_int
 from vercel.blob.errors import BlobContentLengthError, BlobCredentialsError, BlobError
 from vercel.blob.models import (
     Access,
     BlobCredentials,
     BlobCredentialsFactory,
     BlobPrefix,
+    BlobSignedToken,
     CopyResult,
     DownloadMetadata,
     HeadResult,
     ListBlob,
+    PresignOperation,
     PutResult,
 )
 
-from .api_client import BlobApiClient, _CopyRequest, _FoldedListRequest, _ListRequest, _PutRequest
+from .api_client import (
+    BlobApiClient,
+    _CopyRequest,
+    _FoldedListRequest,
+    _ListRequest,
+    _PutRequest,
+    _SignedTokenRequest,
+)
 from .credentials import adapt_sync_credentials_factory, normalize_credentials
 from .options import BlobServiceOptions, SyncBlobServiceOptions
 from .pagination import QueryPage
+from .presign import (
+    PresignOptions,
+    presign_url,
+    validate_content_types,
+    validate_maximum_size,
+    validate_operations,
+)
 from .upload import (
     AnyPutBody,
     AsyncUploadRuntime,
@@ -40,6 +59,19 @@ from .validation import (
     validate_pathname,
     validate_url_or_pathname,
 )
+
+
+def _now_ms() -> int:
+    return time.time_ns() // 1_000_000
+
+
+def _expires_at_ms(expires_in: timedelta | float | None, now_ms: int) -> int | None:
+    duration = parse_duration_seconds(expires_in)
+    if duration is None:
+        return None
+    if duration <= timedelta(0):
+        raise BlobError("expires_in must be positive")
+    return now_ms + to_ms_int(duration)
 
 
 class BlobService:
@@ -184,6 +216,49 @@ class BlobService:
             raise BlobError("if_match can only be used when deleting a single object")
         credentials = await self._get_credentials()
         await self._api_client.delete(targets, credentials=credentials, if_match=condition)
+
+    async def issue_signed_token(
+        self,
+        *,
+        pathname: str | None = None,
+        operations: Sequence[PresignOperation] | None = None,
+        expires_in: timedelta | float | None = None,
+        maximum_size_in_bytes: int | None = None,
+        allowed_content_types: Sequence[str] | None = None,
+    ) -> BlobSignedToken:
+        self.check_open()
+        request = _SignedTokenRequest(
+            pathname=validate_pathname(pathname) if pathname not in (None, "*") else pathname,
+            operations=validate_operations(operations),
+            valid_until=_expires_at_ms(expires_in, _now_ms()),
+            maximum_size_in_bytes=validate_maximum_size(maximum_size_in_bytes),
+            allowed_content_types=validate_content_types(allowed_content_types),
+        )
+        credentials = await self._get_credentials()
+        return await self._api_client.issue_signed_token(request, credentials=credentials)
+
+    def presign_url(
+        self,
+        signed_token: BlobSignedToken,
+        pathname: str,
+        *,
+        operation: PresignOperation,
+        access: Access | None,
+        expires_in: timedelta | float | None,
+        options: PresignOptions,
+    ) -> str:
+        self.check_open()
+        now_ms = _now_ms()
+        return presign_url(
+            signed_token,
+            pathname,
+            operation=operation,
+            access=access,
+            expires_at_ms=_expires_at_ms(expires_in, now_ms),
+            options=options,
+            api_url=self._api_client.base_url,
+            now_ms=now_ms,
+        )
 
     async def open_download(
         self, url_or_pathname: str, *, access: Access

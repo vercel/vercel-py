@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
 from contextlib import AbstractContextManager
+from datetime import timedelta
 from typing import Literal, overload
 
 from vercel._internal.core.iter_coroutine import iter_coroutine
@@ -17,6 +18,7 @@ from .._internal.pagination import (
     query_blob_entries_sync as _query_blob_entries,
     query_blobs_sync as _query_blobs,
 )
+from .._internal.presign import PresignOptions
 from .._internal.service import get_sync_blob_service
 from ..errors import (
     BlobAccessError,
@@ -40,12 +42,14 @@ from ..models import (
     BlobCredentials,
     BlobCredentialsFactory,
     BlobPrefix,
+    BlobSignedToken,
     CopyResult,
     CredentialKind,
     DownloadMetadata,
     GetResult,
     HeadResult,
     ListBlob,
+    PresignOperation,
     PutResult,
     SyncBlobCredentialsFactory,
     SyncByteReader,
@@ -243,6 +247,84 @@ def delete_blob(
     iter_coroutine(service.delete(url_or_pathname, if_match=if_match))
 
 
+def issue_blob_signed_token(
+    *,
+    pathname: str | None = None,
+    operations: Sequence[PresignOperation] | None = None,
+    expires_in: timedelta | float | None = None,
+    maximum_size_in_bytes: int | None = None,
+    allowed_content_types: Sequence[str] | None = None,
+) -> BlobSignedToken:
+    """Issue a scoped delegation for presigning Blob URLs synchronously.
+
+    Args:
+        pathname: Limit the token to one pathname; omit or pass ``"*"`` for any.
+        operations: Operations the token allows; the API defaults apply when omitted.
+        expires_in: Token lifetime as a timedelta or seconds; the API default
+            applies when omitted.
+        maximum_size_in_bytes: Upper bound for uploads through the token.
+        allowed_content_types: Upload content types, such as ``"image/*"``.
+    """
+    service = get_sync_blob_service(get_active_sync_session())
+    return iter_coroutine(
+        service.issue_signed_token(
+            pathname=pathname,
+            operations=operations,
+            expires_in=expires_in,
+            maximum_size_in_bytes=maximum_size_in_bytes,
+            allowed_content_types=allowed_content_types,
+        )
+    )
+
+
+def presign_blob_url(
+    signed_token: BlobSignedToken,
+    pathname: str,
+    *,
+    operation: PresignOperation,
+    access: Literal["public", "private"] | None = None,
+    expires_in: timedelta | float | None = None,
+    use_cache: bool = True,
+    allowed_content_types: Sequence[str] | None = None,
+    maximum_size_in_bytes: int | None = None,
+    add_random_suffix: bool | None = None,
+    allow_overwrite: bool | None = None,
+    cache_control_max_age: int | None = None,
+    if_match: str | None = None,
+    ttl_days: int | None = None,
+    callback_url: str | None = None,
+    callback_token_payload: str | None = None,
+) -> str:
+    """Sign a URL that performs one operation without credentials.
+
+    Signing is local and sends no request. ``get`` and ``head`` URLs point at
+    the delivery host and require ``access``; ``put`` and ``delete`` URLs point
+    at the Blob API. The URL expires at the token's expiry unless
+    ``expires_in`` is shorter. Upload options apply only to ``put``, and
+    ``if_match`` applies to ``put`` and ``delete``.
+    """
+    service = get_sync_blob_service(get_active_sync_session())
+    return service.presign_url(
+        signed_token,
+        pathname,
+        operation=operation,
+        access=access,
+        expires_in=expires_in,
+        options=PresignOptions(
+            use_cache=use_cache,
+            allowed_content_types=allowed_content_types,
+            maximum_size_in_bytes=maximum_size_in_bytes,
+            add_random_suffix=add_random_suffix,
+            allow_overwrite=allow_overwrite,
+            cache_control_max_age=cache_control_max_age,
+            if_match=if_match,
+            ttl_days=ttl_days,
+            callback_url=callback_url,
+            callback_token_payload=callback_token_payload,
+        ),
+    )
+
+
 __all__ = [
     "Access",
     "BlobAccessError",
@@ -257,6 +339,7 @@ __all__ = [
     "BlobPathnameMismatchError",
     "BlobPreconditionFailedError",
     "BlobPrefix",
+    "BlobSignedToken",
     "BlobServiceNotAvailable",
     "BlobServiceRateLimited",
     "BlobStoreNotFoundError",
@@ -269,6 +352,7 @@ __all__ = [
     "GetResult",
     "HeadResult",
     "ListBlob",
+    "PresignOperation",
     "PutResult",
     "SyncBlobCredentialsFactory",
     "SyncBlobServiceOptions",
@@ -279,7 +363,9 @@ __all__ = [
     "delete_blob",
     "get_blob",
     "head_blob",
+    "issue_blob_signed_token",
     "multipart_upload_blob",
+    "presign_blob_url",
     "put_blob",
     "query_blobs",
     "query_blob_entries",
