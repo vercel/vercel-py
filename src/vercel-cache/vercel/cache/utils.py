@@ -1,14 +1,27 @@
+import hashlib
+import re
 from collections.abc import Callable
 
 _DEFAULT_NAMESPACE_SEPARATOR = "$"
 
 
+# Python strings can hold lone surrogates, which are not encodable as UTF-8.
+# JS ``TextEncoder`` replaces them with U+FFFD, so do the same to keep keys
+# identical across runtimes.
+_LONE_SURROGATE_RE = re.compile("[\ud800-\udfff]")
+
+
 def default_key_hash_function(key: str) -> str:
-    # Mirror TS defaultKeyHashFunction: djb2 xor variant, 32-bit unsigned hex
-    h = 5381
-    for ch in key:
-        h = ((h * 33) ^ ord(ch)) & 0xFFFFFFFF
-    return format(h, "x")
+    """Hash a cache key with SHA-256 and return the lowercase hex digest.
+
+    Mirrors the TypeScript ``defaultKeyHashFunction`` in ``@vercel/functions``
+    (``sha256(utf8(key))`` hex) so Python and JavaScript produce the same keys.
+    """
+    try:
+        data = key.encode("utf-8")
+    except UnicodeEncodeError:
+        data = _LONE_SURROGATE_RE.sub("\ufffd", key).encode("utf-8")
+    return hashlib.sha256(data).hexdigest()
 
 
 def create_key_transformer(
