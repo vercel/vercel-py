@@ -21,7 +21,7 @@ Every operation resolves its backend lazily, so one cache object behaves correct
 
 Keys are hashed and optionally namespaced before they reach any backend, using the same scheme as the TypeScript SDK.
 
-[[src/vercel-cache/vercel/cache/runtime_cache.py#get_cache]] accepts a custom `key_hash_function`, a `namespace`, and a `namespace_separator`. The default hash in [[src/vercel-cache/vercel/cache/utils.py#default_key_hash_function]] mirrors the TypeScript djb2 variant, and namespaced keys take the form `namespace$hash`.
+[[src/vercel-cache/vercel/cache/runtime_cache.py#get_cache]] accepts a custom `key_hash_function`, a `namespace`, and a `namespace_separator`. The default hash in [[src/vercel-cache/vercel/cache/utils.py#default_key_hash_function]] is SHA-256 over the UTF-8 key (hex), matching the TypeScript `@vercel/functions` default, and namespaced keys take the form `namespace$hash`.
 
 ## Tag invalidation
 
